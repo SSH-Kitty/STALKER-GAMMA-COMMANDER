@@ -36,6 +36,28 @@ See the `LICENSE` file in this repository for full details.
 
 ## 🚀 How to Run
 
+### Option 1 — AppImage (recommended)
+
+Download the `.AppImage` from [Releases](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases), make it executable and run it. Python, Qt and the `stalker-gamma` CLI are all bundled — nothing else to install.
+
+```bash
+chmod +x STALKER-GAMMA-COMMANDER-*-x86_64.AppImage
+./STALKER-GAMMA-COMMANDER-*-x86_64.AppImage
+```
+
+**Requirements:** x86_64, **glibc 2.34 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 35+, RHEL 9+, any current Arch/openSUSE) and a desktop session.
+
+One system package cannot be bundled without breaking that glibc floor, and some distros do not install it by default. If the app reports it is missing:
+
+```bash
+sudo apt install libxcb-cursor0        # Debian / Ubuntu
+sudo dnf install xcb-util-cursor       # Fedora / RHEL
+sudo pacman -S xcb-util-cursor         # Arch
+sudo zypper install libxcb-cursor0     # openSUSE
+```
+
+### Option 2 — From source
+
 Execute the main launcher script from your terminal:
 
 ```bash
@@ -43,6 +65,14 @@ Execute the main launcher script from your terminal:
 ```
 
 *Note: On your very first run, the script will automatically create a local Python virtual environment (`venv`) and install `PySide6`.*
+
+### Building the AppImage yourself
+
+```bash
+./build-appimage.sh [output-dir]
+```
+
+The script downloads a [python-appimage](https://github.com/niess/python-appimage) **manylinux_2_28** Python rather than using your system interpreter — building against a rolling-release host would pin the result to that host's glibc and it would refuse to start almost everywhere. It then installs `PySide6-Essentials`, strips every Qt module unreachable from a QtWidgets-only app (~150 MB), and packages the result with `appimagetool`. Any library copied from the build host is gated on the glibc floor and skipped (with a warning) if it would raise it.
 
 ### Using a Custom CLI Binary
 If you wish to point the GUI toward a different or manually updated CLI binary, specify it using the `STALKER_GAMMA_CLI` environment variable:
