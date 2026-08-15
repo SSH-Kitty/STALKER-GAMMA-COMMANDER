@@ -1,0 +1,527 @@
+"""Utilities page: integrity checks, cache pruning, maintenance tasks."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..cli_runner import cli_command
+from ..config import logs_dir
+from ..parsers import (
+    parse_anomaly_check,
+    parse_prune_archive,
+    strip_ansi,
+)
+from .common import (
+    CommandRunner,
+    OutputPane,
+    StreamTask,
+    anomaly_installed,
+    gamma_installed,
+    info_label,
+    make_card,
+    open_in_file_manager,
+    section_label,
+)
+
+#: Directories that must never be handed to rmtree, whatever a profile says.
+_PROTECTED_ROOTS = (
+    "/", "/home", "/root", "/usr", "/etc", "/var", "/opt", "/boot",
+    "/bin", "/sbin", "/lib", "/lib64", "/srv", "/mnt", "/media", "/tmp",
+)
+
+
+def _resolved_wipe_target(path: str) -> Path | None:
+    """Resolve ``path`` to the directory that would actually be deleted.
+
+    Returns ``None`` when the path is not a real directory. Resolution and
+    deletion must agree on one path, so callers use this result for both.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def _safe_wipe_path(resolved: Path) -> bool:
+    """Refuse paths too broad to be a GAMMA install folder.
+
+    A real install folder is nested at least two levels below the filesystem
+    root, is never a system directory, any user's home, or the GUI's own
+    location, and is never a symlink (deleting through one would take out an
+    unrelated tree).
+    """
+    if resolved.is_symlink() or resolved.parent == resolved:
+        return False
+    if str(resolved) in _PROTECTED_ROOTS:
+        return False
+    home = Path.home()
+    # Our home, its parent, and any sibling of it (/home/<someone-else>).
+    if resolved in (home, home.parent) or resolved.parent == home.parent:
+        return False
+    try:
+        if resolved == Path(__file__).resolve().parents[2]:
+            return False
+    except IndexError:
+        pass
+    return len(resolved.parts) >= 3
+
+
+def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
+    """Delete the given ``(label, path)`` install folders completely.
+
+    Raises ``ValueError`` if any present path fails :func:`_safe_wipe_path`.
+    Returns the list of paths that were actually deleted.
+    """
+    wiped: list[str] = []
+    for label, path in paths:
+        resolved = _resolved_wipe_target(path)
+        if resolved is None:
+            report(f"{label}: folder not present, skipping ({path})")
+            continue
+        if not _safe_wipe_path(resolved):
+            raise ValueError(f"Refusing to wipe unsafe path: {resolved}")
+        report(f"Deleting {label} folder: {resolved} ...")
+        shutil.rmtree(resolved, ignore_errors=True)
+        if resolved.exists():
+            raise ValueError(f"{label} folder could not be fully deleted: {resolved}")
+        wiped.append(str(resolved))
+        report(f"{label} folder deleted.")
+    return wiped
+
+
+class UtilitiesPage(QWidget):
+    def __init__(self, window) -> None:
+        super().__init__()
+        self.window = window
+        self._runner: CommandRunner | None = None
+        self._wipe_task: StreamTask | None = None
+        self._wipe_targets: tuple[str, str] = ("", "")
+        self._full_uninstall_targets: tuple[str, str, str] = ("", "", "")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
+
+        root.addWidget(section_label("Utilities", level=1))
+        root.addWidget(
+            info_label(
+                "Maintenance tools for your GAMMA install: verify Anomaly "
+                "integrity, prune the addon cache and manage the install folders."
+            )
+        )
+
+        # ----- maintenance buttons -----
+        card, layout = make_card()
+        root.addWidget(card)
+        layout.addWidget(section_label("Maintenance"))
+
+        self.buttons: list[QPushButton] = []
+        actions: list[tuple[str, object]] = [
+            ("Anomaly integrity check", self._anomaly_check),
+            ("Purge shader cache", self._purge_shader_cache),
+            ("Delete ReShade", self._delete_reshade),
+            ("Cache prune check", self._prune_check),
+            ("Cache prune apply", self._prune_apply),
+            ("GOG fix-install", self._gog_fix),
+            ("Open logs folder", self._open_logs),
+            ("Hash install (debug)", self._hash_install),
+        ]
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        for i, (text, slot) in enumerate(actions):
+            btn = QPushButton(text)
+            btn.clicked.connect(slot)
+            self.buttons.append(btn)
+            grid.addWidget(btn, i // 3, i % 3)
+        layout.addLayout(grid)
+
+        # ----- reinstall / uninstall -----
+        danger, d_layout = make_card()
+        root.addWidget(danger)
+        d_layout.addWidget(section_label("Reinstall / Uninstall"))
+        d_layout.addWidget(
+            info_label(
+                "Fresh Reset wipes and reinstalls both "
+                "anomaly and gamma install folders (including all saves, MO2 settings, MCM "
+                "settings and additional mods) and then re-installs them from "
+                "scratch into the same locations. Full Uninstall removes both install "
+                "folders and the cache without deleting the configured Wine/Proton prefix."
+            )
+        )
+
+        self.fresh_reset_button = QPushButton("Fresh Reset")
+        self.fresh_reset_button.setObjectName("danger")
+        self.fresh_reset_button.clicked.connect(self._start_fresh_reset)
+        d_layout.addWidget(self.fresh_reset_button)
+
+        self.full_uninstall_button = QPushButton("Full Uninstall")
+        self.full_uninstall_button.setObjectName("danger")
+        self.full_uninstall_button.clicked.connect(self._start_full_uninstall)
+        d_layout.addWidget(self.full_uninstall_button)
+
+        self.fresh_reset_hint = info_label(
+            "Requires Anomaly and GAMMA to be installed."
+        )
+        d_layout.addWidget(self.fresh_reset_hint)
+
+        # ----- console -----
+        console, c_layout = make_card()
+        root.addWidget(console)
+        c_layout.addWidget(section_label("Console"))
+        self.summary = QLabel("")
+        self.summary.setObjectName("accent")
+        c_layout.addWidget(self.summary)
+        self.output = OutputPane()
+        c_layout.addWidget(self.output, 1)
+
+        root.addStretch(1)
+
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.window.refresh_settings()
+        self._update_fresh_reset_enabled()
+
+    def _update_fresh_reset_enabled(self) -> None:
+        profile = self.window.settings.active_profile
+        installed = (
+            profile is not None
+            and anomaly_installed(profile.anomaly)
+            and gamma_installed(profile.gamma)
+        )
+        fresh_reset_enabled = installed and not self.window.install_busy
+        full_uninstall_enabled = (
+            profile is not None
+            and gamma_installed(profile.gamma)
+            and not self.window.install_busy
+        )
+        self.fresh_reset_button.setEnabled(fresh_reset_enabled)
+        self.full_uninstall_button.setEnabled(full_uninstall_enabled)
+        self.fresh_reset_hint.setVisible(not (fresh_reset_enabled or full_uninstall_enabled))
+
+    def _require_profile(self) -> bool:
+        if self.window.settings.active_profile is None:
+            QMessageBox.warning(
+                self, "No Profile", "Create or activate a profile first (Profiles page)."
+            )
+            return False
+        return True
+
+    def _confirm(self, text: str) -> bool:
+        answer = QMessageBox.question(
+            self, "Confirm", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _run(self, args: list[str], *, handler=None, confirm: str | None = None,
+             on_finished=None) -> None:
+        if self._runner is not None and self._runner.is_running():
+            QMessageBox.information(self, "Busy", "A task is already running.")
+            return
+        if confirm is not None and not self._confirm(confirm):
+            return
+        self.summary.setText("")
+        self.output.clear()
+        self._prune_mb = 0
+        self._set_buttons_enabled(False)
+        runner = CommandRunner(cli_command(args), parent=self)
+        self._runner = runner
+        runner.line.connect(handler if handler is not None else self.output.append_line)
+        runner.finished.connect(lambda rc, out: self._on_finished(rc, out, on_finished))
+        runner.cancelled.connect(lambda: self.output.append_line("[cancelled]"))
+        runner.start()
+
+    def on_busy_changed(self, busy: bool) -> None:
+        """Global install lock changed; re-evaluate this page's controls."""
+        self._set_buttons_enabled(not busy)
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        for btn in self.buttons:
+            btn.setEnabled(enabled and not self.window.install_busy)
+        self._update_fresh_reset_enabled()
+
+    def _on_finished(self, rc: int, _output: str, on_finished) -> None:
+        self._set_buttons_enabled(True)
+        if on_finished:
+            on_finished(rc, _output)
+        elif rc != 0:
+            self.output.append_line(f"[command exited with code {rc}]")
+
+    # ----- fresh reset -----
+    def _start_fresh_reset(self) -> None:
+        if self._runner is not None and self._runner.is_running():
+            QMessageBox.information(self, "Busy", "A task is already running.")
+            return
+        if self._wipe_task is not None:
+            QMessageBox.information(self, "Busy", "A fresh reset is already in progress.")
+            return
+        if self.window.install_busy:
+            QMessageBox.information(self, "Busy", "An install is already running.")
+            return
+        if not self._require_profile():
+            return
+        profile = self.window.settings.active_profile
+        self._wipe_targets = (profile.anomaly, profile.gamma)
+        answer = QMessageBox.question(
+            self,
+            "Fresh Reset",
+        "<html><body>"
+        "<div style='font-weight: bold; font-size: 13px;'>WARNING</div><br>"
+        "<div style='color: #ff3333; text-align: center; font-weight: bold; font-size: 14px;'>"
+        "FRESH RESET WILL COMPLETELY WIPE & RE-INSTALL STALKER ANOMALY & GAMMA FOLDERS"
+        "</div><br><br>"
+        "This will permanently delete the following folders:<br>"
+        f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.anomaly}<br>"
+        f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.gamma}<br><br>"
+        "<strong>THIS DELETES:</strong><br>"
+        "&nbsp;&nbsp;• ALL SAVES<br>"
+        "&nbsp;&nbsp;• MO2 SETTINGS<br>"
+        "&nbsp;&nbsp;• MCM SETTINGS<br>"
+        "&nbsp;&nbsp;• ANY ADDITIONAL MODS YOU ADDED<br><br>"
+        "Please back up anything you want to keep before continuing.<br><br>"
+        "Are you sure you want to run a Fresh Reset?</body></html>",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.window.set_install_busy(True)
+        self.summary.setText("Wiping Anomaly and GAMMA folders...")
+        self.output.clear()
+        self._set_buttons_enabled(False)
+        task = StreamTask(
+            lambda report: _wipe_folders(
+                [
+                    ("Anomaly", self._wipe_targets[0]),
+                    ("GAMMA", self._wipe_targets[1]),
+                ],
+                report,
+            ),
+            parent=self,
+        )
+        self._wipe_task = task
+        task.line.connect(self.output.append_line)
+        task.result.connect(self._on_wipe_done)
+        task.error.connect(self._on_wipe_error)
+        task.start()
+
+    def _on_wipe_done(self, _wiped: object) -> None:
+        self._wipe_task = None
+        self._set_buttons_enabled(True)
+        profile = self.window.settings.active_profile
+        if profile is None:
+            self.window.set_install_busy(False)
+            QMessageBox.warning(
+                self, "Fresh Reset", "No active profile. Reinstall aborted."
+            )
+            return
+        if (
+            profile.anomaly != self._wipe_targets[0]
+            or profile.gamma != self._wipe_targets[1]
+        ):
+            self.window.set_install_busy(False)
+            QMessageBox.warning(
+                self,
+                "Fresh Reset",
+                "The active profile's install folders changed during the wipe. "
+                "Re-install aborted so nothing is installed to the wrong location.",
+            )
+            return
+        self.summary.setText("Folders wiped. Reinstalling Anomaly and GAMMA...")
+        install_page = self.window._pages["install"]
+        self.window.set_page("install")
+        if not install_page.start_auto_install():
+            self.window.set_install_busy(False)
+            QMessageBox.warning(
+                self,
+                "Fresh Reset",
+                "Fresh Reset could not be started (another task is running or "
+                "no profile is active).",
+            )
+
+    def _on_wipe_error(self, message: str) -> None:
+        self._wipe_task = None
+        self.window.set_install_busy(False)
+        self._set_buttons_enabled(True)
+        self.summary.setText("")
+        QMessageBox.warning(self, "Fresh Reset", f"Wipe failed: {message}")
+
+    def _start_full_uninstall(self) -> None:
+        if self._runner is not None and self._runner.is_running():
+            QMessageBox.information(self, "Busy", "A task is already running.")
+            return
+        if self._wipe_task is not None:
+            QMessageBox.information(self, "Busy", "A removal task is already in progress.")
+            return
+        if self.window.install_busy:
+            QMessageBox.information(self, "Busy", "An install is already running.")
+            return
+        if not self._require_profile():
+            return
+        profile = self.window.settings.active_profile
+        if not gamma_installed(profile.gamma):
+            self._update_fresh_reset_enabled()
+            return
+
+        self._full_uninstall_targets = (profile.anomaly, profile.gamma, profile.cache)
+        answer = QMessageBox.question(
+            self,
+            "Full Uninstall",
+            "<html><body>"
+            "<div style='font-weight: bold; font-size: 13px;'>WARNING</div><br>"
+            "<div style='color: #ff3333; text-align: center; font-weight: bold; font-size: 14px;'>"
+            "FULL UNINSTALL WILL COMPLETELY REMOVE STALKER ANOMALY & GAMMA"
+            "</div><br><br>"
+            "This will permanently delete the following folders:<br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.anomaly}<br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.gamma}<br><br>"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.cache}<br><br>"
+            "<strong>THIS DELETES:</strong><br>"
+            "&nbsp;&nbsp;• ALL SAVES<br>"
+            "&nbsp;&nbsp;• MO2 SETTINGS<br>"
+            "&nbsp;&nbsp;• MCM SETTINGS<br>"
+            "&nbsp;&nbsp;• ANY ADDITIONAL MODS YOU ADDED<br><br>"
+            "&nbsp;&nbsp;• DOWNLOAD CACHE<br><br>"
+            "The configured Wine/Proton prefix and its Winetricks configuration "
+            "will not be deleted.<br><br>"
+            "Please back up anything you want to keep before continuing.<br><br>"
+            "Are you sure you want to completely uninstall STALKER GAMMA?</body></html>",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.window.set_install_busy(True)
+        self.summary.setText("Removing Anomaly, GAMMA, and cache folders...")
+        self.output.clear()
+        self._set_buttons_enabled(False)
+        task = StreamTask(
+            lambda report: _wipe_folders(
+                [
+                    ("Anomaly", self._full_uninstall_targets[0]),
+                    ("GAMMA", self._full_uninstall_targets[1]),
+                    ("Cache", self._full_uninstall_targets[2]),
+                ],
+                report,
+            ),
+            parent=self,
+        )
+        self._wipe_task = task
+        task.line.connect(self.output.append_line)
+        task.result.connect(self._on_full_uninstall_done)
+        task.error.connect(self._on_full_uninstall_error)
+        task.start()
+
+    def _on_full_uninstall_done(self, _wiped: object) -> None:
+        self._wipe_task = None
+        self.window.set_install_busy(False)
+        self._set_buttons_enabled(True)
+        self.summary.setText("STALKER GAMMA completely uninstalled")
+        self.refresh()
+
+    def _on_full_uninstall_error(self, message: str) -> None:
+        self._wipe_task = None
+        self.window.set_install_busy(False)
+        self._set_buttons_enabled(True)
+        self.summary.setText("")
+        QMessageBox.warning(self, "Full Uninstall", f"Uninstall failed: {message}")
+
+    # ----- tasks -----
+    def _anomaly_check(self) -> None:
+        if not self._require_profile():
+            return
+
+        def handler(line: str) -> None:
+            clean = strip_ansi(line)
+            self.output.append_line(clean)
+            result = parse_anomaly_check(clean)
+            if result is not None:
+                if result.status == "OK":
+                    self._counts["OK"] = self._counts.get("OK", 0) + 1
+                elif result.status == "CORRUPT":
+                    self._counts["CORRUPT"] = self._counts.get("CORRUPT", 0) + 1
+                elif result.status == "NOT FOUND":
+                    self._counts["NOT FOUND"] = self._counts.get("NOT FOUND", 0) + 1
+                self.summary.setText(
+                    f"OK: {self._counts.get('OK', 0)}   "
+                    f"CORRUPT: {self._counts.get('CORRUPT', 0)}   "
+                    f"NOT FOUND: {self._counts.get('NOT FOUND', 0)}"
+                )
+
+        self._counts = {}
+        self._run(["anomaly", "check"], handler=handler)
+
+    def _purge_shader_cache(self) -> None:
+        if self._require_profile():
+            self._run(
+                ["anomaly", "purge-shader-cache"],
+                confirm="Delete the shader cache for the active Anomaly profile?",
+            )
+
+    def _delete_reshade(self) -> None:
+        if self._require_profile():
+            self._run(
+                ["anomaly", "delete-reshade"],
+                confirm="Delete all ReShade-related files from the Anomaly bin directory?",
+            )
+
+    def _prune_check(self) -> None:
+        if self._require_profile():
+            self._run(["cache", "prune", "check"], handler=self._prune_handler)
+
+    def _prune_apply(self) -> None:
+        if self._require_profile():
+            self._run(
+                ["cache", "prune", "apply"],
+                handler=self._prune_handler,
+                confirm="Permanently delete out-of-date addon archives from the cache?",
+            )
+
+    def _prune_handler(self, line: str) -> None:
+        clean = strip_ansi(line)
+        self.output.append_line(clean)
+        archive = parse_prune_archive(clean)
+        if archive is not None:
+            self._prune_mb = self._prune_mb + archive.mb
+            self.summary.setText(f"Total size to reclaim: {self._prune_mb} MB")
+        elif clean.startswith("Total size to reclaim:"):
+            self.summary.setText(clean.strip())
+
+    def _gog_fix(self) -> None:
+        if self._require_profile():
+            self._run(
+                ["gog", "fix-install"],
+                confirm="Fix the ModOrganizer.ini paths for a GOG-provided install?",
+            )
+
+    def _open_logs(self) -> None:
+        opened = open_in_file_manager(logs_dir())
+        if not opened:
+            QMessageBox.warning(
+                self,
+                "No File Manager",
+                "No file manager (dolphin, nautilus, nemo, thunar) or xdg-open "
+                f"was found to open:\n{logs_dir()}",
+            )
+
+    def _hash_install(self) -> None:
+        if self._require_profile():
+            self._run(
+                ["debug", "hash-install"],
+                confirm=(
+                    "Hash all installation files and create a compressed archive "
+                    "in the current working directory? This can take a while."
+                ),
+            )
