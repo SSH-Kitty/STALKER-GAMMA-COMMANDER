@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Build artifacts / release bundles - do not commit (hundreds of MB)
+*.tar.gz
+*.zip
+
+# Atomic-write scratch files
+*.tmp
+
+# Machine-local editor/tool overrides
+.claude/settings.local.json
