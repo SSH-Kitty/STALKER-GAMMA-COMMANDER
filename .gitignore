@@ -6,6 +6,8 @@ __pycache__/
 # Build artifacts / release bundles - do not commit (hundreds of MB)
 *.tar.gz
 *.zip
+*.AppImage
+.appimage-build/
 
 # Atomic-write scratch files
 *.tmp
