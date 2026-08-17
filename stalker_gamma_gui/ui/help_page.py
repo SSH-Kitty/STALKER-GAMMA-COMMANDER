@@ -62,7 +62,7 @@ class HelpPage(QWidget):
         root.setSpacing(14)
         scroll.setWidget(content)
 
-        root.addWidget(section_label("COMMANDER Help", level=1))
+        root.addWidget(section_label("GAMMA HELP", level=1))
         root.addWidget(
             info_label(
                 "Everything in this guide maps to a page or setting in this "

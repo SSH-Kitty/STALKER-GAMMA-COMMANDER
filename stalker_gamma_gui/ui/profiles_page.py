@@ -51,7 +51,7 @@ class ProfilesPage(QWidget):
         root.addLayout(top)
 
         # ----- profile list -----
-        list_layout.addWidget(section_label("Profiles"))
+        list_layout.addWidget(section_label("GAMMA PROFILES"))
         list_layout.addWidget(
             info_label(
                 "Each profile keeps its own Anomaly, GAMMA and cache folders "

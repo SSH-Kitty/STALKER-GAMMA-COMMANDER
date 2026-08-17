@@ -194,6 +194,25 @@ QWidget {
 QLabel {
     background: transparent;
 }
+QCheckBox {
+    background: transparent;
+    color: $text;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid $border_strong;
+    border-radius: 4px;
+    background-color: $input;
+}
+QCheckBox::indicator:checked {
+    background-color: $primary;
+    border-color: $accent_strong;
+}
+QCheckBox::indicator:hover {
+    border-color: $accent_strong;
+}
 QPushButton {
     background-color: $btn;
     border: 1px solid $border_strong;
