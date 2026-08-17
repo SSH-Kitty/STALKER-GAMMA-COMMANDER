@@ -75,7 +75,7 @@ class ModManagerPage(QWidget):
 
         card, layout = make_card()
         root.addWidget(card, 1)
-        layout.addWidget(section_label("Mod Manager"))
+        layout.addWidget(section_label("GAMMA MOD MANAGER"))
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("MO2 profile:"))

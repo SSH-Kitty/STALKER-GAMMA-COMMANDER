@@ -47,7 +47,7 @@ class DashboardPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
 
-        title = section_label("STALKER GAMMA COMMANDER", level=1)
+        title = section_label("COMMANDER DASHBOARD", level=1)
         subtitle = info_label(
             "A graphical front-end for STALKER GAMMA on Linux. "
             "Install, update and manage your GAMMA modpack."

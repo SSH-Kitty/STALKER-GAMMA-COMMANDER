@@ -69,7 +69,7 @@ class UpdatePage(QWidget):
         # ---------- status card ----------
         card, layout = make_card()
         root.addWidget(card)
-        layout.addWidget(section_label("GAMMA Update Status"))
+        layout.addWidget(section_label("GAMMA UPDATE STATUS"))
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)

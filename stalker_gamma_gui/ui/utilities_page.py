@@ -126,7 +126,7 @@ class UtilitiesPage(QWidget):
         outer.setContentsMargins(24, 24, 24, 20)
         outer.setSpacing(12)
 
-        outer.addWidget(section_label("Utilities", level=1))
+        outer.addWidget(section_label("GAMMA UTILITIES", level=1))
         outer.addWidget(
             info_label(
                 "Maintenance tools for your GAMMA install: verify Anomaly "

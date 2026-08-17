@@ -16,7 +16,7 @@ set -euo pipefail
 
 # ----------------------------------------------------------------- settings
 PY_SERIES=3.12
-PY_FULL=3.12.13
+PY_FULL=3.12.14
 PY_ABI=cp312
 PY_PLATFORM=manylinux_2_28_x86_64
 QT_PACKAGE="PySide6-Essentials>=6.6"   # app only needs QtCore/QtGui/QtWidgets
