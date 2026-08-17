@@ -54,21 +54,15 @@ class ModPackRecord:
         return names
 
 
-def fetch_modpack_records(url: str, timeout: float = 20) -> dict[str, ModPackRecord]:
-    """Download the modpack maker list and map folder names to records.
+def parse_modpack_records(text: str) -> dict[str, ModPackRecord]:
+    """Parse the tab-separated modpack maker list into records by folder name.
 
     The list is a tab-separated file whose per-line fields are
     ``DlLink, Instructions, Patch, AddonName, ModDbUrl, ZipName, Md5ModDb``.
     Folder names are ``{line}- {AddonName} {Patch}`` (same convention the
-    installer uses). Returns an empty dict if the list cannot be fetched.
+    installer uses). Lines without an addon name (category headers) are skipped.
     """
     records: dict[str, ModPackRecord] = {}
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8", errors="replace")
-    except OSError:
-        return records
     for counter, line in enumerate(text.splitlines(), start=1):
         parts = line.split("\t")
         addon = parts[3].strip() if len(parts) > 3 else ""
@@ -86,6 +80,23 @@ def fetch_modpack_records(url: str, timeout: float = 20) -> dict[str, ModPackRec
         )
         records[record.folder_name] = record
     return records
+
+
+def fetch_modpack_records(url: str, timeout: float = 20) -> dict[str, ModPackRecord]:
+    """Download the modpack maker list and map folder names to records.
+
+    The list is a tab-separated file whose per-line fields are
+    ``DlLink, Instructions, Patch, AddonName, ModDbUrl, ZipName, Md5ModDb``.
+    Folder names are ``{line}- {AddonName} {Patch}`` (same convention the
+    installer uses). Returns an empty dict if the list cannot be fetched.
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {}
+    return parse_modpack_records(text)
 
 
 @dataclass

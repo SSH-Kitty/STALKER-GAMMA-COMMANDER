@@ -38,6 +38,30 @@ GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
 GAMMA_PROFILE = "G.A.M.M.A"
 
 
+def mo2_running() -> bool:
+    """True when a Mod Organizer process (and so typically the game) is running.
+
+    Mod Organizer stays alive while it runs the game through ``run -e``, so this
+    is the reliable proxy for "the Wine prefix is in use".
+    """
+    exe = shutil.which("pgrep")
+    if not exe:
+        return False
+    try:
+        proc = subprocess.run(
+            # Match the executable, not the bare word: '-f ModOrganizer'
+            # also hits this GUI when its own path contains that string.
+            [exe, "-f", r"ModOrganizer\.exe"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
 def anomaly_installed(path: str) -> bool:
     """True when the Anomaly game engine appears to be installed at ``path``."""
     base = Path(path)
@@ -63,9 +87,11 @@ class InstallStatusRow(QWidget):
         name: str,
         detail: str = "",
         ok: bool | None = None,
+        pending_text: str = "Unknown",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._pending_text = pending_text
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
@@ -82,12 +108,11 @@ class InstallStatusRow(QWidget):
             name_lbl.setObjectName("dim")
             row.addSpacing(6)
             row.addWidget(name_lbl)
+        row.addWidget(self._detail)
         row.addStretch(1)
-        if detail:
-            row.addWidget(self._detail)
         self.set_state(ok, detail)
 
-    def set_state(self, ok: bool | None, detail: str = "") -> None:
+    def set_state(self, ok: bool | None, detail: str = "", pending_text: str | None = None) -> None:
         self._detail.setText(detail)
         self._detail.setVisible(bool(detail))
         if ok is True:
@@ -98,7 +123,7 @@ class InstallStatusRow(QWidget):
             text = "Not installed"
         else:
             color = STATUS_GREY.name()
-            text = "Unknown"
+            text = pending_text if pending_text is not None else self._pending_text
         self._status.setText(text)
         self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
         self._status.setStyleSheet(f"color: {color};")
@@ -280,10 +305,14 @@ class OutputPane(QFrame):
         self.edit.clear()
 
 
-def make_card(parent: QWidget | None = None) -> tuple[QFrame, QVBoxLayout]:
+def make_card(parent: QWidget | None = None, *, expand: bool = False) -> tuple[QFrame, QVBoxLayout]:
     """Create a titled card container. Returns (frame, inner layout)."""
+    from PySide6.QtWidgets import QSizePolicy
+
     frame = QFrame(parent)
     frame.setObjectName("card")
+    if expand:
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(16, 16, 16, 16)
     layout.setSpacing(10)

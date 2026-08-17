@@ -44,6 +44,7 @@ class CliWorker(QObject):
         self._command: list[str] = []
         self._cwd = ""
         self._env: dict[str, str] | None = None
+        self._cancel_pending = False
 
     def setup(self, command: list[str], cwd: str = "", env: dict[str, str] | None = None) -> None:
         self._command = command
@@ -83,6 +84,9 @@ class CliWorker(QObject):
             self.line_ready.emit(message)
             self.finished.emit(SPAWN_FAILED_RC, message)
             return
+        if self._cancel_pending:
+            # Cancel arrived before the process spawned; apply it now.
+            self.cancel()
         try:
             assert self._process.stdout is not None
             for raw in self._process.stdout:
@@ -107,6 +111,9 @@ class CliWorker(QObject):
     def cancel(self) -> None:
         proc = self._process
         if proc is None or proc.poll() is not None:
+            # The process has not been spawned yet (or already exited); run()
+            # checks this flag right after Popen and cancels immediately.
+            self._cancel_pending = True
             return
         try:
             if os.name == "nt":

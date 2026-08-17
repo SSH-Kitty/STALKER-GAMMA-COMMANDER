@@ -1,7 +1,8 @@
 """Play page: the app's front page - launch the game through Mod Organizer.
 
-A modern hero-style layout: big launch buttons, a runner-availability chip
-row, a two-column target/runner config grid and a copyable command preview.
+A hero-style layout: a two-column grid lets the player pick the game target
+("Launch Game") and the runner ("Select Runner") as equally important steps,
+with the launch actions and a copyable command preview below.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from ..launcher import (
 from .common import info_label, make_card, section_label
 
 RUNNER_LABELS = {
-    "auto": "Auto (Steam/UMU first, then Wine)",
+    "auto": "Auto-detect (Steam/UMU first, then Wine)",
     "umu": "Steam / UMU Proton (umu-run)",
     "wine": "Plain Wine (WINEPREFIX)",
 }
@@ -64,51 +65,39 @@ class PlayPage(QWidget):
         self._proton_labels: list[str] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(32, 32, 32, 24)
+        root.setSpacing(16)
 
         # -- hero header ---------------------------------------------------
         hero = section_label("PLAY STALKER GAMMA", level=1)
         hero.setWordWrap(True)
+        hero.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(hero)
-        root.addWidget(
-            info_label(
-                "Launch STALKER GAMMA or access Mod Organizer 2."
-                " Use the options below to pick your target game executable and choose a compatible runner for your system."
-            )
+        subtitle = info_label(
+            "Play STALKER GAMMA, open Mod Organizer 2 to manage your mods, or "
+            "launch the Anomaly engine directly. Select what to run and which "
+            "runner to use, then press Launch Game."
         )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(subtitle)
 
-        # -- launch buttons -------------------------------------------------
-        self.launch_button = QPushButton("Launch Game")
-        self.launch_button.setObjectName("hero")
-        self.launch_button.clicked.connect(self._launch_via_mo2)
-
-        self.open_mo2_button = QPushButton("Open Mod Organizer 2")
-        self.open_mo2_button.setObjectName("secondary")
-        self.open_mo2_button.clicked.connect(self._open_mo2)
-
-        hero_row = QHBoxLayout()
-        hero_row.addWidget(self.launch_button, 2)
-        hero_row.addWidget(self.open_mo2_button, 1)
-        root.addLayout(hero_row)
-
-        # -- status chip row -------------------------------------------------
-        self.chips_row = QHBoxLayout()
-        self.chips_row.setSpacing(8)
-        self.chips_row.addStretch(1)
-        root.addLayout(self.chips_row)
-
-        # -- config grid (target | runner) ----------------------------------
+        # -- config grid (launch game | select runner) ------------------------
         grid = QHBoxLayout()
         grid.setSpacing(16)
 
         target_card, target_layout = make_card()
-        target_layout.addWidget(section_label("Launch target", level=2))
+        target_layout.setSpacing(12)
+        target_layout.addWidget(section_label("Launch Game", level=2))
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Target:"))
         self.target_combo = QComboBox()
+        self.target_combo.setMinimumHeight(34)
         self.target_combo.currentIndexChanged.connect(self._on_change)
-        target_layout.addWidget(self.target_combo)
+        target_row.addWidget(self.target_combo, 1)
+        target_layout.addLayout(target_row)
         self.target_path = QLabel("")
         self.target_path.setObjectName("dim")
+        self.target_path.setWordWrap(True)
         self.target_path.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -116,7 +105,8 @@ class PlayPage(QWidget):
         grid.addWidget(target_card, 1)
 
         runner_card, runner_layout = make_card()
-        runner_layout.addWidget(section_label("Runner", level=2))
+        runner_layout.setSpacing(12)
+        runner_layout.addWidget(section_label("Select Runner", level=2))
         runner_row = QHBoxLayout()
         runner_row.addWidget(QLabel("Runner:"))
         self.runner_combo = QComboBox()
@@ -125,16 +115,16 @@ class PlayPage(QWidget):
         runner_layout.addLayout(runner_row)
 
         prefix_row = QHBoxLayout()
-        prefix_row.addWidget(QLabel("Prefix:"))
+        prefix_row.addWidget(QLabel("Prefix path:"))
         self.prefix_edit = QLineEdit()
-        self.prefix_edit.setPlaceholderText(
-            "WINEPREFIX (Wine) or STEAM_COMPAT_DATA_PATH (Proton)"
-        )
+        self.prefix_edit.setPlaceholderText("Leave empty for the default prefix location")
         self.prefix_edit.editingFinished.connect(self._on_change)
         prefix_row.addWidget(self.prefix_edit, 1)
         runner_layout.addLayout(prefix_row)
+
         self.runner_path = QLabel("")
         self.runner_path.setObjectName("dim")
+        self.runner_path.setWordWrap(True)
         self.runner_path.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -143,33 +133,59 @@ class PlayPage(QWidget):
 
         root.addLayout(grid)
 
+        # -- status chip row -------------------------------------------------
+        self.chips_row = QHBoxLayout()
+        self.chips_row.setSpacing(8)
+        root.addLayout(self.chips_row)
+
+        # -- launch actions ---------------------------------------------------
+        self.launch_button = QPushButton("Launch Game")
+        self.launch_button.setObjectName("hero")
+        self.launch_button.setToolTip(
+            "Launch the selected target through Mod Organizer 2, with your mods loaded."
+        )
+        self.launch_button.clicked.connect(self._launch_via_mo2)
+        root.addWidget(self.launch_button)
+
+        secondary_row = QHBoxLayout()
+        secondary_row.setSpacing(12)
+        self.open_mo2_button = QPushButton("Open Mod Organizer 2")
+        self.open_mo2_button.setObjectName("secondary")
+        self.open_mo2_button.setToolTip(
+            "Open the Mod Organizer 2 interface to manage mods and run executables."
+        )
+        self.open_mo2_button.clicked.connect(self._open_mo2)
+        secondary_row.addWidget(self.open_mo2_button, 1)
+        self.direct_button = QPushButton("Launch STALKER ANOMALY")
+        self.direct_button.setObjectName("secondary")
+        self.direct_button.setToolTip(
+            "Run the selected game executable directly, without Mod Organizer or mods."
+        )
+        self.direct_button.clicked.connect(self._launch_direct)
+        secondary_row.addWidget(self.direct_button, 1)
+        root.addLayout(secondary_row)
+
         # -- command preview --------------------------------------------------
         preview_card, preview_layout = make_card()
-        preview_layout.addWidget(section_label("Command", level=2))
         preview_row = QHBoxLayout()
         self.preview_label = QLabel("")
+        self.preview_label.setWordWrap(True)
         self.preview_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.preview_label.setObjectName("mono")
         preview_row.addWidget(self.preview_label, 1)
-        self.copy_button = QPushButton("Copy")
-        self.copy_button.setObjectName("tertiary")
+        self.copy_button = QPushButton("Copy command")
         self.copy_button.clicked.connect(self._copy_command)
         preview_row.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignTop)
         preview_layout.addLayout(preview_row)
+        root.addWidget(preview_card)
 
         root.addStretch(1)
 
-        root.addWidget(preview_card)
-
-        self.direct_button = QPushButton("Launch STALKER ANOMALY")
-        self.direct_button.setObjectName("tertiary")
-        self.direct_button.clicked.connect(self._launch_direct)
-        root.addWidget(self.direct_button, 0, Qt.AlignmentFlag.AlignHCenter)
-
         self.runner_status = info_label("")
         self.runner_status.setObjectName("dim")
+        self.runner_status.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(self.runner_status)
 
         self._load_state()
@@ -264,7 +280,12 @@ class PlayPage(QWidget):
         # Expand for every runner, not just plain Wine: '~' is equally invalid
         # as a Proton/umu prefix path.
         prefix = os.path.expanduser(self.prefix_edit.text().strip())
-        return resolve_runner(kind, prefix)
+        runner = resolve_runner(kind, prefix)
+        if gui_settings.load_gui_settings().get("always_gamemoderun"):
+            gamemoderun = available_commands().get("gamemoderun")
+            if gamemoderun and (not runner.wrapper or runner.wrapper[0] != gamemoderun):
+                runner.wrapper.insert(0, gamemoderun)
+        return runner
 
     def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None):
         profile = self.window.settings.active_profile
@@ -313,7 +334,7 @@ class PlayPage(QWidget):
         exe = next(
             (e for e in self.executables if e.title == target), Mo2Executable()
         )
-        self.target_path.setText(exe.binary or "No executable configured")
+        self.target_path.setText(exe.binary or "No executable set for this target")
         prefix = (
             runner.env.get("STEAM_COMPAT_DATA_PATH")
             or runner.env.get("WINEPREFIX")
@@ -339,6 +360,7 @@ class PlayPage(QWidget):
         chips.append(("Proton: " + ", ".join(protons) if protons else "Proton: none", bool(protons)))
         if runner is not None:
             chips.append((f"{runner.label} [{runner.kind}]", ok))
+        self.chips_row.addStretch(1)
         for text, state in chips:
             chip = QLabel(text)
             chip.setObjectName("chip")
@@ -387,35 +409,26 @@ class PlayPage(QWidget):
             QMessageBox.warning(
                 self,
                 "No target selected",
-                "Please select a game target from the Launch target dropdown "
-                "before clicking Launch Game.\n\n"
-                "Make sure you have an active profile with GAMMA installed "
-                "and the ModOrganizer.ini is properly configured.",
+                "Choose which game to run from the Target list before clicking "
+                "Launch Game.\n\n"
+                "If the list is empty, make sure your active profile points to "
+                "a GAMMA install and its ModOrganizer.ini is configured.",
             )
             self._set_launch_button_state(False)
             return
-        self._launching = True
-        self.launch_button.setEnabled(False)
-        self.open_mo2_button.setEnabled(False)
-        self.direct_button.setEnabled(False)
+        self._set_launch_button_state(True)
         self._run(open_mo2=False, direct=False)
 
     def _open_mo2(self) -> None:
         if self._launching:
             return
-        self._launching = True
-        self.launch_button.setEnabled(False)
-        self.open_mo2_button.setEnabled(False)
-        self.direct_button.setEnabled(False)
+        self._set_launch_button_state(True)
         self._run(open_mo2=True, direct=False)
 
     def _launch_direct(self) -> None:
         if self._launching:
             return
-        self._launching = True
-        self.launch_button.setEnabled(False)
-        self.open_mo2_button.setEnabled(False)
-        self.direct_button.setEnabled(False)
+        self._set_launch_button_state(True)
         self._run(open_mo2=False, direct=True)
 
     def _run(self, *, open_mo2: bool, direct: bool) -> None:
@@ -425,7 +438,11 @@ class PlayPage(QWidget):
         # escapes, _launching stays True and every launch button stays dead.
         try:
             command, env, cwd = self._resolve_command(open_mo2=open_mo2, direct=direct)
-            verb = "Directly running" if direct else ("Opened" if open_mo2 else "Launched")
+            label = (
+                "STALKER ANOMALY"
+                if direct
+                else ("Mod Organizer 2" if open_mo2 else "STALKER GAMMA")
+            )
             self._proc = launch_detached(command, env, cwd, log_path=log_path)
         except LaunchError as exc:
             self._set_result(f"Could not launch: {exc}", error=True)
@@ -437,13 +454,13 @@ class PlayPage(QWidget):
         self._launch_timer = QTimer(self)
         self._launch_timer.setInterval(1000)
         self._launch_timer.timeout.connect(
-            lambda: self._on_launch_check(verb, command, log_path)
+            lambda: self._on_launch_check(label, command, log_path)
         )
         self._launch_timer.start()
-        self._set_result(f"{verb} {command[0]}")
+        self._set_result(f"Launching {label}...")
 
     def _on_launch_check(
-        self, verb: str, command: list[str], log_path: Path
+        self, label: str, command: list[str], log_path: Path
     ) -> None:
         """Called every second -- if the process has exited, re-enable buttons."""
         timer = getattr(self, "_launch_timer", None)
@@ -459,10 +476,10 @@ class PlayPage(QWidget):
             self._set_launch_button_state(False)
             code = self._proc.returncode
             if code == 0:
-                self._set_result(f"{verb} {command[0]} (ended code 0)")
+                self._set_result(f"{label} closed normally.")
             else:
                 detail = self._log_tail(log_path)
-                msg = f"Launch failed -- exited with code {code}"
+                msg = f"{label} exited with an error (code {code})"
 
                 msg += f"\n\nCommand: {shlex.join(command)}"
                 if detail:
