@@ -5,11 +5,14 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -43,9 +46,12 @@ _PROTECTED_ROOTS = (
 def _resolved_wipe_target(path: str) -> Path | None:
     """Resolve ``path`` to the directory that would actually be deleted.
 
-    Returns ``None`` when the path is not a real directory. Resolution and
-    deletion must agree on one path, so callers use this result for both.
+    Returns ``None`` when the path is blank or not a real directory.
+    Resolution and deletion must agree on one path, so callers use this
+    result for both.
     """
+    if not path or not path.strip():
+        return None
     try:
         resolved = Path(path).expanduser().resolve()
     except (OSError, RuntimeError):
@@ -53,15 +59,15 @@ def _resolved_wipe_target(path: str) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
-def _safe_wipe_path(resolved: Path) -> bool:
+def _safe_wipe_path(raw: str, resolved: Path) -> bool:
     """Refuse paths too broad to be a GAMMA install folder.
 
     A real install folder is nested at least two levels below the filesystem
-    root, is never a system directory, any user's home, or the GUI's own
-    location, and is never a symlink (deleting through one would take out an
-    unrelated tree).
+    root, is never a system directory, any user's home, the GUI's own
+    location, the current working directory, or a symlink (deleting through
+    one would take out an unrelated tree).
     """
-    if resolved.is_symlink() or resolved.parent == resolved:
+    if resolved.parent == resolved:
         return False
     if str(resolved) in _PROTECTED_ROOTS:
         return False
@@ -74,6 +80,12 @@ def _safe_wipe_path(resolved: Path) -> bool:
             return False
     except IndexError:
         pass
+    if resolved == Path.cwd().resolve():
+        return False
+    # Deleting through a symlink would take out an unrelated tree; resolve()
+    # already followed it, so inspect the pre-resolution path itself.
+    if Path(raw).expanduser().is_symlink():
+        return False
     return len(resolved.parts) >= 3
 
 
@@ -89,7 +101,7 @@ def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
         if resolved is None:
             report(f"{label}: folder not present, skipping ({path})")
             continue
-        if not _safe_wipe_path(resolved):
+        if not _safe_wipe_path(path, resolved):
             raise ValueError(f"Refusing to wipe unsafe path: {resolved}")
         report(f"Deleting {label} folder: {resolved} ...")
         shutil.rmtree(resolved, ignore_errors=True)
@@ -108,86 +120,211 @@ class UtilitiesPage(QWidget):
         self._wipe_task: StreamTask | None = None
         self._wipe_targets: tuple[str, str] = ("", "")
         self._full_uninstall_targets: tuple[str, str, str] = ("", "", "")
+        self.buttons: list[QPushButton] = []
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(16)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 20)
+        outer.setSpacing(12)
 
-        root.addWidget(section_label("Utilities", level=1))
-        root.addWidget(
+        outer.addWidget(section_label("Utilities", level=1))
+        outer.addWidget(
             info_label(
                 "Maintenance tools for your GAMMA install: verify Anomaly "
-                "integrity, prune the addon cache and manage the install folders."
+                "integrity, prune the addon cache, manage ReShade and shader "
+                "caches, and — guarded by explicit warnings — reset or remove "
+                "the install folders."
             )
         )
 
-        # ----- maintenance buttons -----
-        card, layout = make_card()
-        root.addWidget(card)
-        layout.addWidget(section_label("Maintenance"))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll, 1)
 
-        self.buttons: list[QPushButton] = []
-        actions: list[tuple[str, object]] = [
-            ("Anomaly integrity check", self._anomaly_check),
-            ("Purge shader cache", self._purge_shader_cache),
-            ("Delete ReShade", self._delete_reshade),
-            ("Cache prune check", self._prune_check),
-            ("Cache prune apply", self._prune_apply),
-            ("GOG fix-install", self._gog_fix),
-            ("Open logs folder", self._open_logs),
-            ("Hash install (debug)", self._hash_install),
-        ]
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        for i, (text, slot) in enumerate(actions):
-            btn = QPushButton(text)
-            btn.clicked.connect(slot)
-            self.buttons.append(btn)
-            grid.addWidget(btn, i // 3, i % 3)
-        layout.addLayout(grid)
+        content = QWidget()
+        root = QVBoxLayout(content)
+        root.setContentsMargins(0, 0, 8, 0)
+        root.setSpacing(14)
+        scroll.setWidget(content)
 
-        # ----- reinstall / uninstall -----
-        danger, d_layout = make_card()
-        root.addWidget(danger)
-        d_layout.addWidget(section_label("Reinstall / Uninstall"))
-        d_layout.addWidget(
-            info_label(
-                "Fresh Reset wipes and reinstalls both "
-                "anomaly and gamma install folders (including all saves, MO2 settings, MCM "
-                "settings and additional mods) and then re-installs them from "
-                "scratch into the same locations. Full Uninstall removes both install "
-                "folders and the cache without deleting the configured Wine/Proton prefix."
-            )
-        )
+        root.addWidget(self._tools_card())
+        root.addWidget(self._destructive_card())
+        root.addStretch(1)
 
-        self.fresh_reset_button = QPushButton("Fresh Reset")
-        self.fresh_reset_button.setObjectName("danger")
-        self.fresh_reset_button.clicked.connect(self._start_fresh_reset)
-        d_layout.addWidget(self.fresh_reset_button)
-
-        self.full_uninstall_button = QPushButton("Full Uninstall")
-        self.full_uninstall_button.setObjectName("danger")
-        self.full_uninstall_button.clicked.connect(self._start_full_uninstall)
-        d_layout.addWidget(self.full_uninstall_button)
-
-        self.fresh_reset_hint = info_label(
-            "Requires Anomaly and GAMMA to be installed."
-        )
-        d_layout.addWidget(self.fresh_reset_hint)
-
-        # ----- console -----
         console, c_layout = make_card()
-        root.addWidget(console)
-        c_layout.addWidget(section_label("Console"))
+        outer.addWidget(console)
+        c_layout.addWidget(section_label("Console", level=2))
         self.summary = QLabel("")
         self.summary.setObjectName("accent")
         c_layout.addWidget(self.summary)
         self.output = OutputPane()
-        c_layout.addWidget(self.output, 1)
-
-        root.addStretch(1)
+        self.output.setMaximumHeight(180)
+        c_layout.addWidget(self.output)
 
         self.refresh()
+
+    def _tools_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label("Tools", level=2))
+        layout.addWidget(
+            info_label(
+                "Each tool runs against the active profile's folders and streams "
+                "its output to the console below."
+            )
+        )
+        grid = QGridLayout()
+        grid.setSpacing(14)
+        tools = [
+            (
+                "Anomaly integrity check",
+                "Verify the base game files against the official checksums.",
+                self._anomaly_check,
+            ),
+            (
+                "Cache prune check",
+                (
+                    "List out-of-date addon archives in the cache with the total "
+                    "size that can be reclaimed."
+                ),
+                self._prune_check,
+            ),
+            (
+                "Cache prune apply",
+                "Permanently delete out-of-date addon archives from the cache.",
+                self._prune_apply,
+            ),
+            (
+                "Purge shader cache",
+                "Delete the shader cache for the active Anomaly profile.",
+                self._purge_shader_cache,
+            ),
+            (
+                "Delete ReShade",
+                "Remove all ReShade-related files from the Anomaly bin directory.",
+                self._delete_reshade,
+            ),
+            (
+                "GOG fix-install",
+                "Fix the ModOrganizer.ini paths for a GOG-provided install.",
+                self._gog_fix,
+            ),
+            (
+                "Open logs folder",
+                "Open the CLI and launcher log directory in your file manager.",
+                self._open_logs,
+            ),
+            (
+                "Hash install (debug)",
+                (
+                    "Hash all installation files and create a compressed archive "
+                    "in the current working directory."
+                ),
+                self._hash_install,
+            ),
+        ]
+        for i, (title, description, slot) in enumerate(tools):
+            grid.addWidget(self._tool_row(title, description, slot), i // 2, i % 2)
+        layout.addLayout(grid)
+        return card
+
+    def _tool_row(self, title: str, description: str, slot) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        body = QVBoxLayout()
+        body.setSpacing(2)
+        name = QLabel(title)
+        name.setObjectName("section2")
+        body.addWidget(name)
+        body.addWidget(info_label(description))
+        row.addLayout(body, 1)
+        button = QPushButton("Run")
+        button.clicked.connect(slot)
+        self.buttons.append(button)
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        return container
+
+    def _destructive_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label("Reinstall / Uninstall", level=2))
+        layout.addWidget(
+            info_label(
+                "Two guarded destructive actions. Both show an explicit warning "
+                "listing the exact folders that will be deleted before anything "
+                "happens."
+            )
+        )
+        panels = QHBoxLayout()
+        panels.setSpacing(14)
+
+        fresh_panel, self.fresh_reset_button = self._destructive_panel(
+            "Fresh Reset",
+            "Wipes the Anomaly and G.A.M.M.A. folders and reinstalls both from "
+            "scratch into the same locations.",
+            [
+                "Deletes ALL saves, MO2 settings, MCM settings and any mods you added",
+                "Requires Anomaly and GAMMA to be installed",
+            ],
+            "Fresh Reset",
+            self._start_fresh_reset,
+        )
+        panels.addWidget(fresh_panel, 1)
+
+        full_panel, self.full_uninstall_button = self._destructive_panel(
+            "Full Uninstall",
+            "Removes the Anomaly, G.A.M.M.A. and cache folders, leaving your "
+            "Wine/Proton prefix intact.",
+            [
+                (
+                    "Deletes ALL saves, MO2 settings, MCM settings, added mods "
+                    "and the download cache"
+                ),
+                (
+                    "The configured Wine/Proton prefix and its Winetricks "
+                    "configuration are kept"
+                ),
+            ],
+            "Full Uninstall",
+            self._start_full_uninstall,
+        )
+        panels.addWidget(full_panel, 1)
+        layout.addLayout(panels)
+
+        caution = info_label(
+            "Both actions refuse to operate on system paths, home directories or "
+            "symlinks, and re-check that the profile still points where it did "
+            "before deleting anything."
+        )
+        caution.setObjectName("warn")
+        layout.addWidget(caution)
+
+        self.fresh_reset_hint = info_label("Requires Anomaly and GAMMA to be installed.")
+        layout.addWidget(self.fresh_reset_hint)
+        return card
+
+    def _destructive_panel(
+        self,
+        title: str,
+        description: str,
+        bullets: list[str],
+        button_text: str,
+        slot,
+    ) -> tuple[QWidget, QPushButton]:
+        panel = QWidget()
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        v.addWidget(section_label(title, level=2))
+        v.addWidget(info_label(description))
+        for bullet in bullets:
+            v.addWidget(info_label(f"• {bullet}"))
+        button = QPushButton(button_text)
+        button.setObjectName("danger")
+        button.clicked.connect(slot)
+        v.addStretch(1)
+        v.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+        return panel, button
 
     def refresh(self) -> None:
         self.window.refresh_settings()

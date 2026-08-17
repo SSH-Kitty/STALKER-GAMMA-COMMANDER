@@ -13,12 +13,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..gui_settings import configured_wine_prefix
-from ..parsers import strip_ansi
 from ..settings import CliSettings
-from ..winetricks import check_winetricks_status
+from ..updates import UpdateStatus, check_updates, format_version, status_summary
+from ..winetricks import WINETRICKS_VERBS, check_winetricks_status
 from .common import (
     BackgroundTask,
-    CommandRunner,
     InstallStatusRow,
     anomaly_installed,
     clear_layout,
@@ -27,6 +26,7 @@ from .common import (
     human_size,
     info_label,
     make_card,
+    mo2_running,
     open_in_file_manager,
     section_label,
     winetricks_tooltip,
@@ -39,7 +39,8 @@ class DashboardPage(QWidget):
         self.window = window
         self.settings: CliSettings = window.settings
         self._sizes: dict[str, int] = {}
-        self._update_checker: CommandRunner | None = None
+        self._update_checker: BackgroundTask | None = None
+        self._update_checking = False
         self._winetricks_task: BackgroundTask | None = None
 
         root = QVBoxLayout(self)
@@ -101,12 +102,29 @@ class DashboardPage(QWidget):
             InstallStatusRow("Stalker GAMMA", profile.gamma, ok=gamma_installed(profile.gamma))
         )
         self.winetricks_status = InstallStatusRow(
-            "Winetricks", "Checking...", ok=None
+            "Winetricks", "Checking...", ok=None, pending_text="Checking"
         )
         layout.addWidget(self.winetricks_status)
         self._start_winetricks_status()
 
+    def _paused_winetricks_status(self) -> None:
+        """Hold the status as Installed while the game is running.
+
+        The game cannot run without the runtimes, and winetricks queries against
+        a running prefix are unreliable, so the live check is paused until the
+        game closes.
+        """
+        paused = {verb: True for verb in WINETRICKS_VERBS}
+        total = len(paused)
+        self.winetricks_status.set_state(
+            True, f"{total}/{total} runtimes installed (paused - game running)"
+        )
+        self.winetricks_status.set_status_tooltip(winetricks_tooltip(paused))
+
     def _start_winetricks_status(self) -> None:
+        if mo2_running():
+            self._paused_winetricks_status()
+            return
         task = BackgroundTask(
             check_winetricks_status,
             configured_wine_prefix(),
@@ -118,6 +136,9 @@ class DashboardPage(QWidget):
         task.start()
 
     def _render_winetricks_status(self, status: dict[str, bool]) -> None:
+        if mo2_running():
+            self._paused_winetricks_status()
+            return
         installed = sum(status.values())
         total = len(status)
         self.winetricks_status.set_state(
@@ -127,7 +148,10 @@ class DashboardPage(QWidget):
         self.winetricks_status.set_status_tooltip(winetricks_tooltip(status))
 
     def _on_winetricks_error(self, message: str) -> None:
-        self.winetricks_status.set_state(None, "status unavailable")
+        if mo2_running():
+            self._paused_winetricks_status()
+            return
+        self.winetricks_status.set_state(None, "status unavailable", pending_text="Unknown")
         self.winetricks_status.set_status_tooltip(
             f"Could not query winetricks: {message}"
         )
@@ -201,39 +225,92 @@ class DashboardPage(QWidget):
 
     # ----- updates card -----
     def _start_update_check(self) -> None:
-        if self.settings.active_profile is None:
+        profile = self.settings.active_profile
+        if profile is None:
+            self._render_update_card(
+                None, "No active profile - create one on the Profiles page.", "warn"
+            )
             return
-        # Never spawn a second CLI process against a tree an install is writing.
+        # Never spawn a second check against a tree an install is writing.
         if self.window.install_busy:
-            self._set_update_status("Install running - update check paused")
+            self._render_update_card(
+                None, "Install running - update check paused.", "warn"
+            )
             return
-        if self._update_checker is not None and self._update_checker.is_running():
+        if self._update_checking:
             return
-        from ..cli_runner import cli_command
-
-        runner = CommandRunner(
-            cli_command(["update", "check"]),
+        self._update_checking = True
+        self._render_update_card(None, "Checking for updates...", "dim")
+        task = BackgroundTask(
+            check_updates,
+            profile,
             parent=self,
         )
-        self._update_checker = runner
-        runner.line.connect(self._on_update_line)
-        runner.start()
+        self._update_checker = task
+        task.result.connect(self._on_update_check_done)
+        task.error.connect(self._on_update_check_error)
+        task.start()
 
-    def _on_update_line(self, line: str) -> None:
-        clean = strip_ansi(line)
-        if clean.startswith("Updates available:"):
-            self._set_update_status(f"{clean.strip()} - click Update above")
-        elif clean == "No updates found":
-            self._set_update_status("GAMMA is up to date")
+    def _on_update_check_done(self, status: UpdateStatus) -> None:
+        self._update_checker = None
+        self._update_checking = False
+        text, kind = status_summary(status)
+        self._render_update_card(status, text, kind)
 
-    def _set_update_status(self, text: str) -> None:
+    def _on_update_check_error(self, message: str) -> None:
+        self._update_checker = None
+        self._update_checking = False
+        self._render_update_card(None, f"Update check failed: {message}", "warn")
+
+    def _render_update_card(
+        self,
+        status: UpdateStatus | None,
+        status_text: str,
+        status_kind: str,
+    ) -> None:
         layout = self.updates_card.layout()
         clear_layout(layout)
         layout.addWidget(section_label("Updates"))
-        label = info_label(text)
-        if text.startswith("Updates available"):
-            label.setObjectName("accent")
-        layout.addWidget(label)
+
+        if status is not None and status.installed is not None:
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(16)
+            grid.setVerticalSpacing(6)
+            grid.addWidget(info_label("Installed version:"), 0, 0)
+            installed_value = QLabel(
+                format_version(status.installed, status.installed_human)
+            )
+            grid.addWidget(installed_value, 0, 1)
+            grid.addWidget(info_label("Latest version:"), 1, 0)
+            latest_value = QLabel(
+                format_version(status.latest, status.latest_human, missing="-")
+            )
+            grid.addWidget(latest_value, 1, 1)
+            grid.setColumnStretch(2, 1)
+            layout.addLayout(grid)
+
+        status_label = info_label(status_text)
+        status_label.setObjectName(status_kind)
+        status_label.style().unpolish(status_label)
+        status_label.style().polish(status_label)
+        layout.addWidget(status_label)
+
+        row = QHBoxLayout()
+        check_button = QPushButton("Check for Updates")
+        check_button.setObjectName("primary")
+        check_button.setEnabled(
+            not self._update_checking
+            and not self.window.install_busy
+            and self.settings.active_profile is not None
+        )
+        check_button.clicked.connect(self._start_update_check)
+        row.addWidget(check_button)
+        if status is not None and status.update_available:
+            goto_button = QPushButton("Go to Update Page")
+            goto_button.clicked.connect(lambda: self.window.set_page("update"))
+            row.addWidget(goto_button)
+        row.addStretch(1)
+        layout.addLayout(row)
 
     # ----- actions card -----
     def _build_actions(self) -> None:

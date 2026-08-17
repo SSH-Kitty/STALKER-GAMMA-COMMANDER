@@ -172,3 +172,21 @@ def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, s
     except OSError as exc:
         return 126, "", f"Failed to start {binary!r}: {exc}"
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def cli_ok(
+    rc: int,
+    out: str,
+    err: str,
+    markers: tuple[str, ...] = ("not found", "already exists", "exception", "unhandled"),
+) -> bool:
+    """Whether a CLI invocation succeeded.
+
+    The bundled CLI exits 0 even on failures ("profile not found", unhandled
+    exceptions), so the exit code alone is not reliable. A non-zero rc or any
+    failure marker in the combined output counts as a failure.
+    """
+    if rc != 0:
+        return False
+    text = f"{out}\n{err}".lower()
+    return not any(marker in text for marker in markers)
