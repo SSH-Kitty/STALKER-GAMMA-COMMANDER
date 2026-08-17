@@ -75,6 +75,9 @@ def check_winetricks_status(
     env = dict(os.environ)
     if prefix:
         env["WINEPREFIX"] = prefix
+    # WINEDEBUG=-all keeps the probe from flashing a Wine window; only its
+    # output (winetricks.log contents) is used.
+    env["WINEDEBUG"] = "-all"
     try:
         proc = subprocess.run(
             [binary, "list-installed"],

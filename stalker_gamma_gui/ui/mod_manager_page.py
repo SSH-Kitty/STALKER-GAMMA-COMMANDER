@@ -9,7 +9,6 @@ complex is handed over to Mod Organizer itself.
 from __future__ import annotations
 
 import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,7 +40,7 @@ from ..modlist import (
     save_lines,
     set_status_at,
 )
-from .common import BackgroundTask, make_card, section_label
+from .common import BackgroundTask, make_card, mo2_running, section_label
 
 BACKUP_SUFFIX = ".gammagui.bak"
 #: Short timeout: these are metadata lookups, not installs.
@@ -176,22 +175,7 @@ class ModManagerPage(QWidget):
 
     # ----- MO2 running guard -----
     def _mo2_running(self) -> bool:
-        exe = shutil.which("pgrep")
-        if not exe:
-            return False
-        try:
-            proc = subprocess.run(
-                # Match the executable, not the bare word: '-f ModOrganizer'
-                # also hits this GUI when its own path contains that string.
-                [exe, "-f", r"ModOrganizer\.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return proc.returncode == 0
+        return mo2_running()
 
     def _update_guard(self) -> None:
         running = self._mo2_running()
@@ -238,6 +222,9 @@ class ModManagerPage(QWidget):
         self.profile_combo.clear()
         if names:
             self.profile_combo.addItems(names)
+            active = self.window.settings.active_profile
+            if active is not None and active.mo2_profile in names:
+                self.profile_combo.setCurrentText(active.mo2_profile)
         self.profile_combo.blockSignals(False)
         self.selected_label.setText(f"Selected profile: {selected or '-'}")
         if not names:

@@ -15,6 +15,10 @@ _DEFAULTS = {
     "wine_prefix": "",  # WINEPREFIX (Wine) or STEAM_COMPAT_DATA_PATH (Proton)
     "prefixes": {},  # per-runner prefix, keyed by the runner data value
     "target": "",  # last selected launch target title
+    "theme": "gamma",  # key into themes.THEMES
+    "start_page": "dashboard",  # nav page shown on launch (key into main_window.NAV_ITEMS)
+    "font_size": 13,  # base UI font size in px; scales every QSS font
+    "always_gamemoderun": False,  # wrap every launch command in gamemoderun
 }
 
 

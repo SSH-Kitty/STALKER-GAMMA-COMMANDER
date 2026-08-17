@@ -14,7 +14,7 @@ def read_lines(path: str | Path) -> list[str]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"File {path} doesn't exist")
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
 
 
 def entries(lines: list[str]) -> list[tuple[str, str]]:

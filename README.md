@@ -255,7 +255,7 @@ Edit the settings block at the top of the script:
 
 ```bash
 # Highest glibc symbol any bundled binary needs — this is your real floor
-./STALKER-GAMMA-COMMANDER-1.0.0-x86_64.AppImage --appimage-extract >/dev/null
+./STALKER-GAMMA-COMMANDER-1.1.0-x86_64.AppImage --appimage-extract >/dev/null
 find squashfs-root -type f \( -name '*.so*' -o -perm -u+x \) \
   -exec sh -c 'objdump -T "$1" 2>/dev/null | grep -oE "GLIBC_[0-9]+\.[0-9]+"' _ {} \; \
   | sort -uV | tail -1
