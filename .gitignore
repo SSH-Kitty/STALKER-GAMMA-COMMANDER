@@ -12,3 +12,6 @@ __pycache__/
 # Atomic-write scratch files
 *.tmp
 
+# Temporarily excluded
+README.md
+
