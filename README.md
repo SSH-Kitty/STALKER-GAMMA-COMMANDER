@@ -14,6 +14,8 @@
 
 ---
 
+<img width="1078" height="642" alt="image" src="https://github.com/user-attachments/assets/4b594b4c-8cae-4b62-a121-8f9a0496ca09" />
+
 ## What this is
 
 G.A.M.M.A. is a large S.T.A.L.K.E.R. Anomaly mod pack that is normally installed through a Windows launcher and run through Mod Organizer 2. On Linux the community solution is [**FaithBeam/stalker-gamma-cli**](https://github.com/FaithBeam/stalker-gamma-cli) — an excellent but entirely terminal-driven installer.
@@ -25,6 +27,8 @@ On top of the CLI it adds things the CLI does not do: launching the game through
 > **Scope:** Linux desktop, x86_64. The underlying CLI also supports Windows, but this GUI's launcher, prefix handling and runner detection are Linux-specific.
 
 ---
+
+<img width="1065" height="1108" alt="image" src="https://github.com/user-attachments/assets/dc16ce34-cd99-4ecb-bb26-2f0631784cf6" />
 
 ## Features
 
