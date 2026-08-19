@@ -852,6 +852,9 @@ class InstallPage(QWidget):
         self._wt_installed = True
         self.wt_status.set_state(True, f"{total}/{total} runtimes installed (paused - game running)")
         self.wt_status.set_status_tooltip(winetricks_tooltip(paused))
+        self.wt_progress.set_installed_state(
+            True, f"{total}/{total} runtimes installed (paused - game running)"
+        )
         self._update_button_states()
 
     def _refresh_winetricks_status(self):
@@ -882,6 +885,9 @@ class InstallPage(QWidget):
         self._wt_installed = installed == total
         self.wt_status.set_state(installed == total, f"{installed}/{total} runtimes installed")
         self.wt_status.set_status_tooltip(winetricks_tooltip(status))
+        self.wt_progress.set_installed_state(
+            installed == total, f"{installed}/{total} runtimes installed"
+        )
         self._update_button_states()
 
     def _on_winetricks_status_error(self, message):
@@ -893,6 +899,7 @@ class InstallPage(QWidget):
         self._wt_installed = None
         self.wt_status.set_state(None, 'status unavailable', pending_text='Unknown')
         self.wt_status.set_status_tooltip(f"Could not query winetricks: {message}")
+        self.wt_progress.set_installed_state(None, "Status unavailable")
         self._update_button_states()
 
     def _start_winetricks(self):
