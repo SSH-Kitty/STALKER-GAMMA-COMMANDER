@@ -1,6 +1,6 @@
 """Update page: check for and apply GAMMA updates.
 
-The check is performed GUI-side (see ``stalker_gamma_gui.updates``) against the
+The check is performed GUI-side (see ``commander_gui.updates``) against the
 official modpack maker list and the raw GAMMA version marker, so it never hits
 the rate-limited GitHub API the bundled CLI depends on. Applying still shells
 out to ``update apply``, whose output is surfaced in the progress log.

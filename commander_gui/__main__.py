@@ -1,4 +1,4 @@
-"""Allow running as a module: python -m stalker_gamma_gui."""
+"""Allow running as a module: python -m commander_gui."""
 
 from __future__ import annotations
 

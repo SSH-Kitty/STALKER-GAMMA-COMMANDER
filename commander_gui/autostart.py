@@ -4,7 +4,7 @@ Creates or removes a ``.desktop`` file in the user's XDG autostart directory
 so the application starts automatically at login.
 
 When running inside an AppImage the ``APPIMAGE`` environment variable provides
-the absolute path; otherwise ``sys.executable -m stalker_gamma_gui`` is used.
+the absolute path; otherwise ``sys.executable -m commander_gui`` is used.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _exec_command() -> str | None:
     # Source / venv install: invoke the package via the current interpreter.
     python = sys.executable
     if python and Path(python).is_file():
-        return f"{python} -m stalker_gamma_gui"
+        return f"{python} -m commander_gui"
     return None
 
 
