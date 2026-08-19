@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -32,6 +31,9 @@ WARN = QColor("#d9a04c")
 OK_GREEN = QColor("#7dc963")
 STATUS_RED = QColor("#e0554f")
 STATUS_GREY = QColor("#7f8f78")
+ITEM_GREEN = QColor("#e2ead8")
+TEAL = QColor("#5db7a8")
+LIGHT_GREY = QColor("#cfd9c6")
 
 ANOMALY_MARKERS = ("AnomalyLauncher.exe", "fsgame.ltx")
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
@@ -198,6 +200,16 @@ class CommandRunner(QObject):
             self._worker.cancel()
             self.cancelled.emit()
 
+    def pause(self) -> None:
+        """SIGSTOP the child process to freeze it in place."""
+        if self._worker is not None:
+            self._worker.pause()
+
+    def resume(self) -> None:
+        """SIGCONT the child process to resume from where it was stopped."""
+        if self._worker is not None:
+            self._worker.resume()
+
     def shutdown(self, timeout_ms: int = 5000) -> None:
         """Cancel a running command and wait for its thread to finish."""
         if not self.is_running():
@@ -236,6 +248,25 @@ class CommandRunner(QObject):
         self._thread = None
 
 
+class _Worker(QObject):
+    """Generic worker that runs ``fn`` and emits result/error signals."""
+
+    result = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, fn, *args, **kwargs) -> None:
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+
+    def run(self) -> None:
+        try:
+            self.result.emit(self._fn(*self._args, **self._kwargs))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+
+
 class BackgroundTask(QObject):
     """Run a plain Python callable on a worker thread, emit its result."""
 
@@ -249,11 +280,30 @@ class BackgroundTask(QObject):
         self._kwargs = kwargs
 
     def start(self) -> None:
-        threading.Thread(target=self._work, daemon=True).start()
+        self._thread = QThread(self)
+        self._worker = _Worker(self._fn, *self._args, **self._kwargs)
+        self._worker.moveToThread(self._thread)
+        self._worker.result.connect(self.result)
+        self._worker.error.connect(self.error)
+        self._thread.started.connect(self._worker.run)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.start()
 
-    def _work(self) -> None:
+
+class _StreamWorker(QObject):
+    """Worker that runs ``fn(report)`` and emits line/result/error signals."""
+
+    line = Signal(str)
+    result = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self._fn = fn
+
+    def run(self) -> None:
         try:
-            self.result.emit(self._fn(*self._args, **self._kwargs))
+            self.result.emit(self._fn(self.line.emit))
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
 
@@ -275,13 +325,15 @@ class StreamTask(QObject):
         self._fn = fn
 
     def start(self) -> None:
-        threading.Thread(target=self._work, daemon=True).start()
-
-    def _work(self) -> None:
-        try:
-            self.result.emit(self._fn(self.line.emit))
-        except Exception as exc:  # noqa: BLE001
-            self.error.emit(str(exc))
+        self._thread = QThread(self)
+        self._worker = _StreamWorker(self._fn)
+        self._worker.moveToThread(self._thread)
+        self._worker.line.connect(self.line)
+        self._worker.result.connect(self.result)
+        self._worker.error.connect(self.error)
+        self._thread.started.connect(self._worker.run)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.start()
 
 
 class OutputPane(QFrame):
@@ -359,9 +411,9 @@ def winetricks_tooltip(status: dict[str, bool]) -> str:
     rows = []
     for verb in WINETRICKS_VERBS:
         ok = status.get(verb, False)
-        color = "#7dc963" if ok else "#e0554f"
+        color = OK_GREEN.name() if ok else STATUS_RED.name()
         state = "installed" if ok else "missing"
-        rows.append(f"<span style='color:{color}'>&#9679;</span> {verb} - {state}")
+        rows.append(f"<span style='color:{color}'>&#9679;</span> <span style='color:{color}'>{verb} - {state}</span>")
     return "<br>".join(rows)
 
 
@@ -450,18 +502,21 @@ class ProgressTable(QTableWidget):
             self.setItem(row, 1, QTableWidgetItem(event.operation))
             self.setItem(row, 2, QTableWidgetItem(f"{event.percent:.1%}"))
         else:
-            self.item(row, 1).setText(event.operation)
-            self.item(row, 2).setText(f"{event.percent:.1%}")
+            op = self.item(row, 1)
+            pct = self.item(row, 2)
+            if op is None or pct is None:
+                return
+            op.setText(event.operation)
+            pct.setText(f"{event.percent:.1%}")
 
         if event.percent >= 1.0:
-            self.item(row, 1).setForeground(QColor("#7dc963"))
-            self.item(row, 2).setForeground(QColor("#7dc963"))
+            self.item(row, 1).setForeground(QColor(OK_GREEN.name()))
+            self.item(row, 2).setForeground(QColor(OK_GREEN.name()))
         elif event.operation == "Check MD5":
-            self.item(row, 1).setForeground(QColor("#5db7a8"))
+            self.item(row, 1).setForeground(QColor(TEAL.name()))
         else:
-            self.item(row, 1).setForeground(QColor("#cfd9c6"))
-            self.item(row, 2).setForeground(QColor("#cfd9c6"))
-        self.scrollToItem(self.item(row, 0))
+            self.item(row, 1).setForeground(QColor(LIGHT_GREY.name()))
+            self.item(row, 2).setForeground(QColor(LIGHT_GREY.name()))
 
     def finish_all(self) -> None:
         """Mark every remaining row as 100% complete (used when a run ends)."""
@@ -472,8 +527,8 @@ class ProgressTable(QTableWidget):
                 continue
             op.setText("Complete")
             pct.setText("100.0%")
-            op.setForeground(QColor("#7dc963"))
-            pct.setForeground(QColor("#7dc963"))
+            op.setForeground(QColor(OK_GREEN.name()))
+            pct.setForeground(QColor(OK_GREEN.name()))
 
 
 class ProgressArea(QWidget):
@@ -485,6 +540,10 @@ class ProgressArea(QWidget):
     ``show_log=False`` the console pane is omitted entirely and the status label
     sits directly under the bar, so the panel stays compact.
     """
+
+    _PROGRESS_LINE_RE = __import__("re").compile(
+        r"^\[\d{2}:\d{2}:\d{2}\]\s+.+?\s*\|.+\|\s*\d+(?:[.,]\d+)?\s*%\s*\|\s*\[\d+/\d+\]$"
+    )
 
     def __init__(
         self,
@@ -498,7 +557,12 @@ class ProgressArea(QWidget):
         self.show_log = show_log
         self._bar_idle_format = "Idle"
         self._bar_percent_format = "%p%"
-        self._status_idle = "" if show_table else "Idle"
+        self._status_idle = ""
+        self._seen: set[str] = set()
+        self._completed: set[str] = set()
+        self._max_bar_value: int = 0
+        self._runner: CommandRunner | None = None
+        self._paused = False
         self.bar = QProgressBar(self)
         self.bar.setTextVisible(True)
         self.bar.setFormat(self._bar_idle_format)
@@ -510,12 +574,22 @@ class ProgressArea(QWidget):
 
         self.log = OutputPane(self) if show_log else None
 
+        self.pause_button = QPushButton("Pause", self)
+        self.pause_button.setObjectName("secondary")
+        self.pause_button.setFixedSize(100, 32)
+        self.pause_button.setStyleSheet("padding: 0px;")
+        self.pause_button.clicked.connect(self._toggle_pause)
+        self.pause_button.hide()
+
         self.cancel_button = QPushButton("Cancel", self)
         self.cancel_button.setObjectName("danger")
+        self.cancel_button.setFixedSize(100, 32)
+        self.cancel_button.setStyleSheet("padding: 0px;")
         self.cancel_button.hide()
 
         status_row = QHBoxLayout()
         status_row.addWidget(self.bar, 1)
+        status_row.addWidget(self.pause_button)
         status_row.addWidget(self.cancel_button)
 
         layout = QVBoxLayout(self)
@@ -538,12 +612,43 @@ class ProgressArea(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(self._bar_idle_format)
+        self._seen.clear()
+        self._completed.clear()
+        self._max_bar_value = 0
+        self._paused = False
         if self.table is not None:
             self.table.reset()
         self.status_label.setText(self._status_idle)
         if self.log is not None:
             self.log.clear()
+        self.pause_button.hide()
+        self.pause_button.setText("Pause")
         self.cancel_button.hide()
+
+    def set_runner(self, runner: CommandRunner | None) -> None:
+        """Bind a CommandRunner so the pause button can control it."""
+        self._runner = runner
+        self._paused = False
+        self.pause_button.setText("Pause")
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def _toggle_pause(self) -> None:
+        if self._runner is None:
+            return
+        if self._paused:
+            self._runner.resume()
+            self._paused = False
+            self.pause_button.setText("Pause")
+            self.bar.setFormat(self._bar_percent_format)
+            self.status_label.setText("")
+        else:
+            self._runner.pause()
+            self._paused = True
+            self.pause_button.setText("Resume")
+            self.bar.setFormat("Paused")
 
     def on_line(self, line: str) -> None:
         clean = strip_ansi(line)
@@ -556,14 +661,19 @@ class ProgressArea(QWidget):
             )
             if self.table is not None:
                 self.table.upsert(event)
-            if self.table is not None and event.total > 1:
-                self.bar.setRange(0, event.total)
-                self.bar.setValue(event.complete)
-                name = event.name.replace("%", "%%")
-                self.bar.setFormat(f"%p%  {event.operation}: {name}")
+            self._seen.add(event.name)
+            if event.percent >= 1.0:
+                self._completed.add(event.name)
+            total = event.total
+            if total > 0:
+                value = round(len(self._completed) / total * 100)
+                self._max_bar_value = max(self._max_bar_value, value)
+                self.bar.setRange(0, 100)
+                self.bar.setValue(self._max_bar_value)
+                self.bar.setFormat(self._bar_percent_format)
             else:
                 self.bar.setRange(0, 100)
-                self.bar.setValue(round(event.percent * 100))
+                self.bar.setValue(0)
                 self.bar.setFormat(self._bar_percent_format)
 
     def status_message(self, text: str) -> None:
@@ -572,12 +682,18 @@ class ProgressArea(QWidget):
     def on_started(self) -> None:
         self.cancel_button.show()
         self.cancel_button.setEnabled(True)
+        self.pause_button.show()
+        self.pause_button.setEnabled(True)
+        self.pause_button.setText("Pause")
+        self._paused = False
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat("Starting...")
 
     def on_finished(self, rc: int, _output: str) -> None:
         self.cancel_button.hide()
+        self.pause_button.hide()
+        self._paused = False
         if rc == 0:
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
@@ -589,3 +705,5 @@ class ProgressArea(QWidget):
             self.bar.setFormat("Failed")
             self.bar.setValue(0)
             self.status_label.setText("Failed")
+        self._seen.clear()
+        self._completed.clear()

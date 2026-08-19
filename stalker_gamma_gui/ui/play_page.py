@@ -43,7 +43,7 @@ from ..launcher import (
     resolve_runner,
     runner_prefix_error,
 )
-from .common import info_label, make_card, section_label
+from .common import ACCENT, WARN, info_label, make_card, section_label
 
 RUNNER_LABELS = {
     "auto": "Auto-detect (Steam/UMU first, then Wine)",
@@ -60,6 +60,8 @@ class PlayPage(QWidget):
         self.window = window
         self.executables: list[Mo2Executable] = []
         self._launching = False
+        self._proc = None
+        self._launch_timer = None
         #: Steam Proton labels, refreshed with the runner combo so the chip row
         #: does not re-scan Steam libraries on every keystroke.
         self._proton_labels: list[str] = []
@@ -69,7 +71,7 @@ class PlayPage(QWidget):
         root.setSpacing(16)
 
         # -- hero header ---------------------------------------------------
-        hero = section_label("PLAY STALKER GAMMA", level=1)
+        hero = section_label("PLAY S.T.A.L.K.E.R. G.A.M.M.A.", level=1)
         hero.setWordWrap(True)
         hero.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(hero)
@@ -165,6 +167,18 @@ class PlayPage(QWidget):
         secondary_row.addWidget(self.direct_button, 1)
         root.addLayout(secondary_row)
 
+        # -- custom launch options -------------------------------------------
+        options_card, options_layout = make_card()
+        options_layout.addWidget(section_label("Custom Launch Options", level=2))
+        self.custom_options_edit = QLineEdit()
+        self.custom_options_edit.setPlaceholderText(
+            "e.g. gamemoderun mangohud"
+        )
+        self.custom_options_edit.setMinimumHeight(34)
+        self.custom_options_edit.textChanged.connect(self._on_change)
+        options_layout.addWidget(self.custom_options_edit)
+        root.addWidget(options_card)
+
         # -- command preview --------------------------------------------------
         preview_card, preview_layout = make_card()
         preview_row = QHBoxLayout()
@@ -200,6 +214,7 @@ class PlayPage(QWidget):
         if not prefixes and state.get("wine_prefix"):
             prefixes[state.get("runner", "auto")] = state["wine_prefix"]
             gui_settings.save_gui_settings(prefixes=prefixes)
+        self.custom_options_edit.setText(state.get("custom_launch_options", ""))
 
     def _reload_runners(self) -> None:
         current = self.runner_combo.currentData()
@@ -243,6 +258,17 @@ class PlayPage(QWidget):
         self.executables = (
             parse_mo2_executables(profile.gamma) if profile is not None else []
         )
+        if not self.executables and profile is not None:
+            anomaly_path = Path(profile.anomaly)
+            launcher = anomaly_path / "AnomalyLauncher.exe"
+            if launcher.is_file():
+                self.executables.append(
+                    Mo2Executable(
+                        title="Anomaly",
+                        binary=str(launcher),
+                        working_directory=str(anomaly_path),
+                    )
+                )
         titles = [exe.title for exe in self.executables]
         self.target_combo.blockSignals(True)
         self.target_combo.clear()
@@ -288,6 +314,8 @@ class PlayPage(QWidget):
         return runner
 
     def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None):
+        import re
+
         profile = self.window.settings.active_profile
         if profile is None:
             raise LaunchError("No active profile. Configure a profile first.")
@@ -298,11 +326,32 @@ class PlayPage(QWidget):
             exe = next(
                 (e for e in self.executables if e.title == target), Mo2Executable()
             )
-            return build_direct_command(exe, runner)
-        target = None if open_mo2 else self._selected_target()
-        return build_command(
-            profile.gamma, runner, target=target, profile=self._active_profile_name()
-        )
+            command, env, cwd = build_direct_command(exe, runner)
+        else:
+            target = None if open_mo2 else self._selected_target()
+            command, env, cwd = build_command(
+                profile.gamma,
+                runner,
+                target=target,
+                profile=self._active_profile_name(),
+            )
+        options_str = self.custom_options_edit.text().strip()
+        if options_str:
+            try:
+                tokens = shlex.split(options_str)
+            except ValueError:
+                tokens = options_str.split()
+            tokens = [t for t in tokens if t != "%command%"]
+            env_var_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+            prefix: list[str] = []
+            for token in tokens:
+                if env_var_re.match(token):
+                    key, _, value = token.partition("=")
+                    env[key] = value
+                else:
+                    prefix.append(token)
+            command = [*prefix, *command]
+        return command, env, cwd
 
     def _refresh_preview(self) -> None:
         # Resolve the runner once: each resolution probes the filesystem for
@@ -314,7 +363,7 @@ class PlayPage(QWidget):
             )
         except LaunchError as exc:
             self.preview_label.setText(f"<i>{exc}</i>")
-            self.preview_label.setStyleSheet("color: #d9a04c;")
+            self.preview_label.setStyleSheet(f"color: {WARN.name()};")
             self.target_path.setText("")
             self.runner_path.setText("")
             self.launch_button.setEnabled(False)
@@ -385,6 +434,7 @@ class PlayPage(QWidget):
             wine_prefix=prefix,
             prefixes=prefixes,
             target=self.target_combo.currentText(),
+            custom_launch_options=self.custom_options_edit.text().strip(),
         )
 
     def _on_runner_changed(self, *_args) -> None:
@@ -519,7 +569,7 @@ class PlayPage(QWidget):
         return "\n".join(lines[-limit:])
 
     def _set_result(self, text: str, *, error: bool = False) -> None:
-        color = "#d9a04c" if error else "#9fe96f"
+        color = WARN.name() if error else ACCENT.name()
         self.runner_status.setStyleSheet(f"color: {color};")
         self.runner_status.setText(text)
 

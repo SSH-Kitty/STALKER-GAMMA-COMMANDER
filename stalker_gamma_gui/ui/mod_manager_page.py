@@ -40,7 +40,15 @@ from ..modlist import (
     save_lines,
     set_status_at,
 )
-from .common import BackgroundTask, make_card, mo2_running, section_label
+from .common import (
+    ACCENT,
+    ITEM_GREEN,
+    STATUS_GREY,
+    BackgroundTask,
+    make_card,
+    mo2_running,
+    section_label,
+)
 
 BACKUP_SUFFIX = ".gammagui.bak"
 #: Short timeout: these are metadata lookups, not installs.
@@ -275,7 +283,7 @@ class ModManagerPage(QWidget):
         for category, mods in grouped(self._lines):
             header = QTreeWidgetItem([category])
             header.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            header.setForeground(0, QColor("#9fe96f"))
+            header.setForeground(0, QColor(ACCENT.name()))
             font = header.font(0)
             font.setBold(True)
             header.setFont(0, font)
@@ -296,7 +304,7 @@ class ModManagerPage(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, line_index)
                 item.setForeground(
                     0,
-                    QColor("#7f8f78") if status != "Enabled" else QColor("#e2ead8"),
+                    QColor(STATUS_GREY.name()) if status != "Enabled" else QColor(ITEM_GREEN.name()),
                 )
                 header.addChild(item)
         self.tree.expandAll()
@@ -366,12 +374,14 @@ class ModManagerPage(QWidget):
         if self._populating or item.parent() is None:
             return
         line_index = item.data(0, Qt.ItemDataRole.UserRole)
+        if line_index is None or line_index >= len(self._lines):
+            return
         enabled = item.checkState(0) == Qt.CheckState.Checked
         new_lines = set_status_at(self._lines, line_index, enabled)
         if self._write_lines(new_lines):
             item.setForeground(
                 0,
-                QColor("#e2ead8") if enabled else QColor("#7f8f78"),
+                QColor(ITEM_GREEN.name()) if enabled else QColor(STATUS_GREY.name()),
             )
             self._update_count()
             return
@@ -447,14 +457,27 @@ class ModManagerPage(QWidget):
         profile = self.profile_combo.currentText()
         if not profile:
             return
-        rc, out = run_sync(
+        self.set_selected_button.setEnabled(False)
+        task = BackgroundTask(
+            run_sync,
             ["mo2", "config", "set", "selected-profile", profile],
             timeout=_QUERY_TIMEOUT,
+            parent=self,
         )
+        task.result.connect(lambda res: self._on_set_selected_done(profile, *res))
+        task.error.connect(lambda msg: self._on_set_selected_error(msg))
+        task.start()
+
+    def _on_set_selected_done(self, profile: str, rc: int, out: str) -> None:
+        self.set_selected_button.setEnabled(True)
         if rc == 0:
             self.selected_label.setText(f"Selected profile: {profile}")
         else:
             QMessageBox.warning(self, "Failed", out.strip() or "Could not set selected profile")
+
+    def _on_set_selected_error(self, msg: str) -> None:
+        self.set_selected_button.setEnabled(True)
+        QMessageBox.warning(self, "Error", msg)
 
     def _open_mo2(self) -> None:
         mo2_profile = self.profile_combo.currentText()

@@ -25,6 +25,7 @@ from ..parsers import (
     strip_ansi,
 )
 from .common import (
+    STATUS_RED,
     CommandRunner,
     OutputPane,
     StreamTask,
@@ -117,6 +118,7 @@ class UtilitiesPage(QWidget):
         super().__init__()
         self.window = window
         self._runner: CommandRunner | None = None
+        self._prune_mb = 0
         self._wipe_task: StreamTask | None = None
         self._wipe_targets: tuple[str, str] = ("", "")
         self._full_uninstall_targets: tuple[str, str, str] = ("", "", "")
@@ -416,7 +418,7 @@ class UtilitiesPage(QWidget):
             "Fresh Reset",
         "<html><body>"
         "<div style='font-weight: bold; font-size: 13px;'>WARNING</div><br>"
-        "<div style='color: #ff3333; text-align: center; font-weight: bold; font-size: 14px;'>"
+        f"<div style='color: {STATUS_RED.name()}; text-align: center; font-weight: bold; font-size: 14px;'>"
         "FRESH RESET WILL COMPLETELY WIPE & RE-INSTALL STALKER ANOMALY & GAMMA FOLDERS"
         "</div><br><br>"
         "This will permanently delete the following folders:<br>"
@@ -509,6 +511,7 @@ class UtilitiesPage(QWidget):
             return
         profile = self.window.settings.active_profile
         if not gamma_installed(profile.gamma):
+            QMessageBox.information(self, "Not Installed", "GAMMA is not installed.")
             self._update_fresh_reset_enabled()
             return
 
@@ -518,7 +521,7 @@ class UtilitiesPage(QWidget):
             "Full Uninstall",
             "<html><body>"
             "<div style='font-weight: bold; font-size: 13px;'>WARNING</div><br>"
-            "<div style='color: #ff3333; text-align: center; font-weight: bold; font-size: 14px;'>"
+            f"<div style='color: {STATUS_RED.name()}; text-align: center; font-weight: bold; font-size: 14px;'>"
             "FULL UNINSTALL WILL COMPLETELY REMOVE STALKER ANOMALY & GAMMA"
             "</div><br><br>"
             "This will permanently delete the following folders:<br>"

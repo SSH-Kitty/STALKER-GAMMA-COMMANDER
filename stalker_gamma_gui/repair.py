@@ -169,7 +169,10 @@ def delete_mod_and_archive(
     if not _is_direct_child(mods_root, mod_path):
         raise ValueError(f"Refusing to delete mod folder outside mods/: {folder!r}")
     if mod_path.is_dir():
-        shutil.rmtree(mod_path, ignore_errors=True)
+        try:
+            shutil.rmtree(mod_path)
+        except OSError:
+            pass
         removed.append(mod_path)
     if record is not None:
         downloads = base / "downloads"

@@ -29,6 +29,10 @@ from ..parsers import UpdateDiff
 from ..settings import cli_ok
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
 from .common import (
+    ACCENT,
+    LIGHT_GREY,
+    OK_GREEN,
+    WARN,
     BackgroundTask,
     CommandRunner,
     ProgressArea,
@@ -38,9 +42,9 @@ from .common import (
 )
 
 _STATUS_COLORS = {
-    "Added": "#7dc963",
-    "Modified": "#9fe96f",
-    "Removed": "#d9a04c",
+    "Added": OK_GREEN.name(),
+    "Modified": ACCENT.name(),
+    "Removed": WARN.name(),
 }
 
 
@@ -69,7 +73,7 @@ class UpdatePage(QWidget):
         # ---------- status card ----------
         card, layout = make_card()
         root.addWidget(card)
-        layout.addWidget(section_label("GAMMA UPDATE STATUS"))
+        layout.addWidget(section_label("Updates"))
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
@@ -128,7 +132,15 @@ class UpdatePage(QWidget):
         apply_layout.addWidget(section_label("Apply Updates"))
         self.minimal_cb = QCheckBox("Minimal (delete archives after extract)")
         self.preserve_user_cb = QCheckBox("Preserve user.ltx settings")
+        self.preserve_user_cb.setToolTip(
+            "Keep your existing user.ltx (game options) across the update. "
+            "If unchecked, controls, keybindings and mod-specific settings will be reset."
+        )
         self.preserve_mcm_cb = QCheckBox("Preserve MCM settings")
+        self.preserve_mcm_cb.setToolTip(
+            "Keep your Mod Configuration Menu (MCM) settings across the update. "
+            "If unchecked, all mod configurations (axr_options.ltx) will be lost."
+        )
         for cb in (self.minimal_cb, self.preserve_user_cb, self.preserve_mcm_cb):
             apply_layout.addWidget(cb)
 
@@ -198,7 +210,7 @@ class UpdatePage(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         status_item = QTableWidgetItem(diff.status)
-        status_item.setForeground(QColor(_STATUS_COLORS.get(diff.status, "#cfd9c6")))
+        status_item.setForeground(QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY.name())))
         parts = diff.text.split(" -> ")
         name = parts[0].strip()
         change = " -> ".join(p.strip() for p in parts[1:]) if len(parts) > 1 else ""

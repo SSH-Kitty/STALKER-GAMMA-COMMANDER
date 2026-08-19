@@ -257,7 +257,7 @@ def check_updates(profile) -> UpdateStatus:
     gamma_dir = getattr(profile, "gamma", None) or ""
     mo2_profile = getattr(profile, "mo2_profile", "") or "G.A.M.M.A"
 
-    if not Path(gamma_dir).is_dir():
+    if not gamma_dir or not Path(gamma_dir).is_dir():
         status.error = "GAMMA is not installed yet. Run a full install first."
         return status
 

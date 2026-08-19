@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -42,35 +43,48 @@ class DashboardPage(QWidget):
         self._update_checker: BackgroundTask | None = None
         self._update_checking = False
         self._winetricks_task: BackgroundTask | None = None
+        self._size_task: BackgroundTask | None = None
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget()
+        root = QVBoxLayout(content)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
+        scroll.setWidget(content)
 
         title = section_label("COMMANDER DASHBOARD", level=1)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         subtitle = info_label(
             "A graphical front-end for STALKER GAMMA on Linux. "
             "Install, update and manage your GAMMA modpack."
         )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
         root.addWidget(subtitle)
 
         self.profile_card, _ = make_card()
         root.addWidget(self.profile_card)
 
-        self.install_status_card, _ = make_card()
-        root.addWidget(self.install_status_card)
-
-        self.updates_card, _ = make_card()
-        root.addWidget(self.updates_card)
-
-        self.sizes_card, _ = make_card()
-        root.addWidget(self.sizes_card)
-
         self.actions_card, _ = make_card()
         root.addWidget(self.actions_card)
 
-        root.addStretch(1)
+        self.install_status_card, _ = make_card()
+        root.addWidget(self.install_status_card)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(16)
+        root.addLayout(bottom)
+        self.updates_card, _ = make_card()
+        bottom.addWidget(self.updates_card, 1)
+        self.sizes_card, _ = make_card()
+        bottom.addWidget(self.sizes_card, 1)
+
         self.refresh()
 
     # ----- profile card -----
@@ -125,6 +139,8 @@ class DashboardPage(QWidget):
         if mo2_running():
             self._paused_winetricks_status()
             return
+        if self._winetricks_task is not None:
+            return
         task = BackgroundTask(
             check_winetricks_status,
             configured_wine_prefix(),
@@ -136,6 +152,7 @@ class DashboardPage(QWidget):
         task.start()
 
     def _render_winetricks_status(self, status: dict[str, bool]) -> None:
+        self._winetricks_task = None
         if mo2_running():
             self._paused_winetricks_status()
             return
@@ -148,6 +165,7 @@ class DashboardPage(QWidget):
         self.winetricks_status.set_status_tooltip(winetricks_tooltip(status))
 
     def _on_winetricks_error(self, message: str) -> None:
+        self._winetricks_task = None
         if mo2_running():
             self._paused_winetricks_status()
             return
@@ -179,7 +197,6 @@ class DashboardPage(QWidget):
             ("GAMMA", profile.gamma),
             ("Cache", profile.cache),
             ("MO2 Profile", profile.mo2_profile),
-            ("Download Threads", str(profile.download_threads)),
         ]:
             row = QHBoxLayout()
             key = QLabel(label)
@@ -196,6 +213,8 @@ class DashboardPage(QWidget):
         profile = self.settings.active_profile
         if profile is None:
             return
+        if self._size_task is not None:
+            return
         paths = {
             "Anomaly": profile.anomaly,
             "GAMMA": profile.gamma,
@@ -211,6 +230,7 @@ class DashboardPage(QWidget):
         task.start()
 
     def _render_sizes(self, sizes: dict[str, int]) -> None:
+        self._size_task = None
         self._sizes = sizes
         layout = self.sizes_card.layout()
         clear_layout(layout)

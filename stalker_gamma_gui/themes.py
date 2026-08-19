@@ -98,7 +98,7 @@ def build_palette(name: str) -> QPalette:
 
 
 _TEMPLATE = string.Template("""* {
-    font-family: "DejaVu Sans", "Noto Sans", sans-serif;
+    font-family: "Exo 2", "DejaVu Sans", "Noto Sans", sans-serif;
     font-size: %FONT_SIZE%;
 }
 QMainWindow {
@@ -403,6 +403,9 @@ QPushButton#githubLink:hover {
 }
 QMessageBox, QFileDialog {
     background-color: $card;
+}
+QToolTip {
+    color: $text_info;
 }
 QRadioButton {
     background: transparent;

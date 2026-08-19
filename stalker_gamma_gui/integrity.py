@@ -42,7 +42,6 @@ def format_size(num_bytes: int) -> str:
         if size < 1024 or unit == "TB":
             return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
-    return f"{size:.1f} TB"
 
 
 @dataclass
@@ -417,7 +416,10 @@ def scan_mods_md5(
     if result.cancelled:
         return result
     if rebaseline:
-        _write_manifest(manifest_path, current)
+        try:
+            _write_manifest(manifest_path, current)
+        except OSError as exc:
+            result.errors.append(f"Failed to write manifest: {exc}")
         return result
     if manifest_path.is_file():
         baseline = _read_manifest(manifest_path)
@@ -432,6 +434,9 @@ def scan_mods_md5(
         result.added.sort()
     else:
         result.created = True
-        _write_manifest(manifest_path, current)
+        try:
+            _write_manifest(manifest_path, current)
+        except OSError as exc:
+            result.errors.append(f"Failed to write manifest: {exc}")
 
     return result
