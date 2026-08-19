@@ -707,3 +707,33 @@ class ProgressArea(QWidget):
             self.status_label.setText("Failed")
         self._seen.clear()
         self._completed.clear()
+
+    def set_installed_state(self, installed: bool | None, detail: str = "") -> None:
+        """Set the bar to a persistent Installed / Not installed / Unknown state."""
+        from ..themes import active_theme_tokens
+
+        self.cancel_button.hide()
+        self.pause_button.hide()
+        self.bar.setRange(0, 1)
+        tokens = active_theme_tokens()
+        if installed is True:
+            self.bar.setValue(1)
+            self.bar.setFormat("Installed")
+            gradient = (
+                f"qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                f"stop:0 {tokens['hero1']},stop:1 {tokens['accent_strong']})"
+            )
+        elif installed is False:
+            self.bar.setValue(0)
+            self.bar.setFormat("Not installed")
+            gradient = STATUS_RED.name()
+        else:
+            self.bar.setValue(0)
+            self.bar.setFormat("Unknown")
+            gradient = STATUS_GREY.name()
+        self.bar.setStyleSheet(
+            f"QProgressBar::chunk {{ background: {gradient}; border-radius: 4px; }}"
+        )
+        self.status_label.setText(detail)
+        self._seen.clear()
+        self._completed.clear()

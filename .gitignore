@@ -8,6 +8,7 @@ __pycache__/
 *.zip
 *.AppImage
 .appimage-build/
+build-appimage.sh
 
 # Atomic-write scratch files
 *.tmp
