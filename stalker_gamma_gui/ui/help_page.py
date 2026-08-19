@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..config import logs_dir
 from ..gui_settings import load_gui_settings
-from .common import info_label, make_card, section_label
+from .common import clear_layout, info_label, make_card, section_label
 
 
 def _kv_row(label: str, value: str) -> QHBoxLayout:
@@ -54,6 +54,7 @@ class HelpPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.viewport().setStyleSheet("background: transparent;")
         outer.addWidget(scroll)
 
         content = QWidget()
@@ -281,7 +282,7 @@ class HelpPage(QWidget):
                 "install",
             ),
             (
-                "Update",
+                "Updates",
                 (
                     "Check for addon changes, review the parsed diff (Added / "
                     "Modified / Removed, including archive-name changes), then "
@@ -422,12 +423,7 @@ class HelpPage(QWidget):
     def refresh(self) -> None:
         self.window.refresh_settings()
         self.settings = self.window.settings
-        while self.snapshot_values.count():
-            item = self.snapshot_values.takeAt(0)
-            if item.layout() is not None:
-                child = item.layout()
-                while child.count():
-                    child.takeAt(0).widget()
+        clear_layout(self.snapshot_values)
 
         profile = self.settings.active_profile
         if profile is None:

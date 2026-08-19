@@ -132,7 +132,11 @@ class CliSettings:
 def load_settings(path: Path | None = None) -> CliSettings:
     path = path or settings_path()
     if not path.exists():
-        return CliSettings()
+        settings = CliSettings()
+        default = CliProfile(active=True)
+        settings.profiles = [default]
+        settings.save(path)
+        return settings
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -146,6 +150,10 @@ def load_settings(path: Path | None = None) -> CliSettings:
         if isinstance(p, dict)
     ]
     settings.extra = {k: v for k, v in data.items() if k != "Profiles"}
+    if not settings.profiles:
+        default = CliProfile(active=True)
+        settings.profiles = [default]
+        settings.save(path)
     return settings
 
 

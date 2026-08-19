@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QTabBar,
@@ -46,7 +47,7 @@ NAV_ITEMS = [
     ("dashboard", "Dashboard"),
     ("play", "Play"),
     ("install", "Install"),
-    ("update", "Update"),
+    ("update", "Updates"),
     ("modmanager", "Mod Manager"),
     ("profiles", "Profiles"),
     ("utilities", "Utilities"),
@@ -104,7 +105,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("S.T.A.L.K.E.R. G.A.M.M.A. COMMANDER")
-        self.resize(1080, 720)
+        self.resize(1080, 950)
         self.settings = load_settings()
         self.install_busy = False
         self._settings_open = False
@@ -247,6 +248,8 @@ class MainWindow(QMainWindow):
         if key == "settings":
             self.open_settings()
             return
+        if key not in self._page_index:
+            return
         self.tabs.setCurrentIndex(self._page_index[key])
 
     def open_settings(self) -> None:
@@ -305,6 +308,20 @@ class MainWindow(QMainWindow):
             notify = getattr(page, "on_busy_changed", None)
             if callable(notify):
                 notify(busy)
+
+    def closeEvent(self, event) -> None:
+        if self.install_busy:
+            answer = QMessageBox.question(
+                self,
+                "Install Running",
+                "An install is currently running. Are you sure you want to close?\n\n"
+                "This will terminate the running process.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        event.accept()
 
     def refresh_settings(self) -> None:
         self.settings = load_settings()

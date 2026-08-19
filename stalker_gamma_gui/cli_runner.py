@@ -88,7 +88,8 @@ class CliWorker(QObject):
             # Cancel arrived before the process spawned; apply it now.
             self.cancel()
         try:
-            assert self._process.stdout is not None
+            if self._process.stdout is None:
+                raise RuntimeError(f"No stdout pipe for {command[0]!r}")
             for raw in self._process.stdout:
                 line = raw.rstrip("\r\n")
                 collected.append(line)
@@ -125,6 +126,26 @@ class CliWorker(QObject):
                 proc.kill()
             except OSError:
                 pass
+
+    def pause(self) -> None:
+        """SIGSTOP the child process to freeze it in place."""
+        proc = self._process
+        if proc is None or proc.poll() is not None or os.name == "nt":
+            return
+        try:
+            os.kill(proc.pid, signal.SIGSTOP)
+        except OSError:
+            pass
+
+    def resume(self) -> None:
+        """SIGCONT the child process to resume from where it was stopped."""
+        proc = self._process
+        if proc is None or proc.poll() is not None or os.name == "nt":
+            return
+        try:
+            os.kill(proc.pid, signal.SIGCONT)
+        except OSError:
+            pass
 
     @Slot()
     def kill(self) -> None:

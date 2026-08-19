@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..settings import CliProfile, cli_ok, run_config_command
-from .common import info_label, make_card, section_label
+from .common import BackgroundTask, info_label, make_card, section_label
 
 
 class ProfilesPage(QWidget):
@@ -29,6 +29,7 @@ class ProfilesPage(QWidget):
         super().__init__()
         self.window = window
         self.settings = window.settings
+        self._task: BackgroundTask | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -47,6 +48,7 @@ class ProfilesPage(QWidget):
         list_card, list_layout = make_card()
         top.addWidget(list_card, 1)
         form_card, form_layout = make_card()
+        form_layout.setContentsMargins(16, 2, 16, 16)
         top.addWidget(form_card, 2)
         root.addLayout(top)
 
@@ -163,6 +165,10 @@ class ProfilesPage(QWidget):
             self.threads_spin,
         )
         form_layout.addLayout(self.form)
+        form_layout.addWidget(info_label(
+            "Tip: 4 threads = safe on slow connections, "
+            "6 = balanced, 8 = fast on good connections (may timeout on slow networks)."
+        ))
 
         self.save_button = QPushButton("Create Profile")
         self.save_button.setObjectName("primary")
@@ -297,7 +303,7 @@ class ProfilesPage(QWidget):
 
     def _form_values(self) -> CliProfile:
         profile = CliProfile()
-        profile.profile_name = self.name_edit.text().strip() or "gamma"
+        profile.profile_name = self.name_edit.text().strip()
         profile.anomaly = self.anomaly_edit.text().strip()
         profile.gamma = self.gamma_edit.text().strip()
         profile.cache = self.cache_edit.text().strip()
@@ -366,8 +372,13 @@ class ProfilesPage(QWidget):
 
     def _create_profile(self) -> None:
         profile = self._form_values()
+        if not profile.profile_name:
+            QMessageBox.warning(self, "Missing Name", "A profile name is required.")
+            return
         if not (profile.anomaly and profile.gamma and profile.cache):
             QMessageBox.warning(self, "Missing Paths", "Anomaly, GAMMA and Cache paths are required.")
+            return
+        if self._task is not None:
             return
         args = [
             "create",
@@ -389,7 +400,17 @@ class ProfilesPage(QWidget):
             "--teivaz-anomaly-gunslinger-repo-branch",
             profile.teivaz_anomaly_gunslinger_repo_branch,
         ]
-        rc, out, err = run_config_command(args, timeout=300)
+        self._set_buttons_enabled(False)
+        self._task = BackgroundTask(run_config_command, args, timeout=300, parent=self)
+        self._task.result.connect(
+            lambda res: self._on_create_done(profile, *res)
+        )
+        self._task.error.connect(self._on_task_error)
+        self._task.start()
+
+    def _on_create_done(self, profile: CliProfile, rc: int, out: str, err: str) -> None:
+        self._task = None
+        self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
                 self, "Create Failed", (out + "\n" + err).strip() or "config create failed"
@@ -404,6 +425,9 @@ class ProfilesPage(QWidget):
 
     def _save_profile(self) -> None:
         profile = self._form_values()
+        if not profile.profile_name:
+            QMessageBox.warning(self, "Missing Name", "A profile name is required.")
+            return
         if not (profile.anomaly and profile.gamma and profile.cache):
             QMessageBox.warning(
                 self, "Missing Paths", "Anomaly, GAMMA and Cache paths are required."
@@ -436,6 +460,17 @@ class ProfilesPage(QWidget):
         self.refresh()
         QMessageBox.information(self, "Saved", f"Profile '{profile.profile_name}' saved.")
 
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        self.new_button.setEnabled(enabled)
+        self.active_button.setEnabled(enabled)
+        self.delete_button.setEnabled(enabled)
+        self.save_button.setEnabled(enabled)
+
+    def _on_task_error(self, msg: str) -> None:
+        self._task = None
+        self._set_buttons_enabled(True)
+        QMessageBox.warning(self, "Error", msg)
+
     def _selected_profile_name(self) -> str | None:
         """Name of the highlighted profile, or None when the list is empty."""
         item = self.profile_list.currentItem()
@@ -450,7 +485,17 @@ class ProfilesPage(QWidget):
         name = self._selected_profile_name()
         if name is None:
             return
-        rc, out, err = run_config_command(["use", name], timeout=300)
+        if self._task is not None:
+            return
+        self._set_buttons_enabled(False)
+        self._task = BackgroundTask(run_config_command, ["use", name], timeout=300, parent=self)
+        self._task.result.connect(lambda res: self._on_set_active_done(name, *res))
+        self._task.error.connect(self._on_task_error)
+        self._task.start()
+
+    def _on_set_active_done(self, name: str, rc: int, out: str, err: str) -> None:
+        self._task = None
+        self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(self, "Failed", (out + "\n" + err).strip() or "config use failed")
             return
@@ -474,7 +519,17 @@ class ProfilesPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        rc, out, err = run_config_command(["delete", name], timeout=300)
+        if self._task is not None:
+            return
+        self._set_buttons_enabled(False)
+        self._task = BackgroundTask(run_config_command, ["delete", name], timeout=300, parent=self)
+        self._task.result.connect(lambda res: self._on_delete_done(name, *res))
+        self._task.error.connect(self._on_task_error)
+        self._task.start()
+
+    def _on_delete_done(self, name: str, rc: int, out: str, err: str) -> None:
+        self._task = None
+        self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(self, "Failed", (out + "\n" + err).strip() or "config delete failed")
             return

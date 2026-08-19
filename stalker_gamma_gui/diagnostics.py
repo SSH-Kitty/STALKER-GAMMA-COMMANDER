@@ -43,7 +43,7 @@ def _system_info() -> str:
             screen = app.primaryScreen()
             if screen is not None:
                 lines.append(f"Screen: {screen.name()} {screen.size().width()}x{screen.size().height()}")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     return "\n".join(lines)
 
@@ -58,10 +58,11 @@ def _cli_version() -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         output = (result.stdout + result.stderr).strip()
         return output if output else f"(no output, exit code {result.returncode})"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return f"Failed to run CLI: {exc}"
 
 

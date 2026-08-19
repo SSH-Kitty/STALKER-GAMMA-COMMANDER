@@ -108,11 +108,19 @@ class SettingsPage(QWidget):
         layout.addLayout(
             _option_row("Start page on launch:", self._start_page_combo)
         )
+
+        self._autostart_check = QCheckBox("Launch on startup")
+        self._autostart_check.setToolTip(
+            "Add COMMANDER to your desktop's autostart list so it starts "
+            "automatically when you log in."
+        )
+        self._autostart_check.toggled.connect(self._on_autostart_toggled)
+        layout.addWidget(self._autostart_check)
         return card
 
     def _launcher_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Launcher", level=2))
+        layout.addWidget(section_label("Default Runner", level=2))
         layout.addWidget(
             info_label(
                 "The default runner is used by the Play page. It can still be "
@@ -212,6 +220,15 @@ class SettingsPage(QWidget):
         if key:
             gui_settings.save_gui_settings(start_page=key)
 
+    def _on_autostart_toggled(self, checked: bool) -> None:
+        from ..autostart import disable_autostart, enable_autostart
+
+        if checked:
+            ok = enable_autostart()
+        else:
+            ok = disable_autostart()
+        gui_settings.save_gui_settings(autostart=bool(checked) and ok)
+
     def _on_runner_changed(self, *_args) -> None:
         runner = self._runner_combo.currentData()
         if runner:
@@ -226,13 +243,14 @@ class SettingsPage(QWidget):
     def _on_toggled(self, button: QRadioButton, checked: bool) -> None:
         if not checked:
             return
-        key = next(k for k, radio in self._radios.items() if radio is button)
-        if key != active_theme():
+        key = next((k for k, radio in self._radios.items() if radio is button), None)
+        if key is None or key == active_theme():
             self.window.apply_theme(key)
 
     def _on_export_log(self) -> None:
-        from ..diagnostics import export_diagnostics
         from PySide6.QtWidgets import QMessageBox
+
+        from ..diagnostics import export_diagnostics
 
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -249,7 +267,7 @@ class SettingsPage(QWidget):
                 "Export Complete",
                 f"Diagnostics exported to:\n{path}",
             )
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             QMessageBox.critical(
                 self,
                 "Export Failed",
@@ -298,6 +316,13 @@ class SettingsPage(QWidget):
         self._gamemode_check.blockSignals(True)
         self._gamemode_check.setChecked(bool(state.get("always_gamemoderun")))
         self._gamemode_check.blockSignals(False)
+
+        from ..autostart import is_autostart_enabled
+
+        autostart_on = bool(state.get("autostart")) and is_autostart_enabled()
+        self._autostart_check.blockSignals(True)
+        self._autostart_check.setChecked(autostart_on)
+        self._autostart_check.blockSignals(False)
 
         current = state.get("theme") or "gamma"
         for key, radio in self._radios.items():

@@ -1,5 +1,6 @@
 """
-Install page: Anomaly install (left) + Full GAMMA install (right).
+Install page: Anomaly + GAMMA install (top), cache folder (middle),
+winetricks and verify (bottom).
 """
 
 from __future__ import annotations
@@ -24,6 +25,19 @@ from PySide6.QtWidgets import (
 
 from ..cli_runner import cli_command
 from ..gui_settings import configured_wine_prefix
+
+
+def _kv_row(label: str, value: str) -> QHBoxLayout:
+    row = QHBoxLayout()
+    key = QLabel(label)
+    key.setObjectName("dim")
+    key.setAlignment(Qt.AlignmentFlag.AlignTop)
+    val = QLabel(value)
+    val.setWordWrap(True)
+    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
+    row.addWidget(val, 1)
+    return row
 from ..integrity import (
     anomaly_status,
     fetch_official_mod_names,
@@ -45,6 +59,8 @@ from ..winetricks import (
     winetricks_install_command,
 )
 from .common import (
+    OK_GREEN,
+    STATUS_RED,
     BackgroundTask,
     CommandRunner,
     InstallStatusRow,
@@ -59,7 +75,7 @@ from .common import (
     winetricks_tooltip,
 )
 
-_CHECKBOXES = [*(('minimal', 'Minimal (~100GB)', 'Delete addon archives after extraction to save ~50GB of disk space.'), ('preserve_user', 'Preserve user.ltx settings', 'Keep your existing user.ltx (game options) across the install.'), ('preserve_mcm', 'Preserve MCM settings', 'Keep your Mod Configuration Menu (MCM) settings across the install.'))]
+_CHECKBOXES = [*(('minimal', 'Minimal (~100GB)', 'Delete addon archives after extraction to save ~50GB of disk space.'),             ('preserve_user', 'Preserve user.ltx settings', 'Keep your existing user.ltx (game options) across the install. If unchecked, controls, keybindings and mod-specific settings will be reset.'), ('preserve_mcm', 'Preserve MCM settings', 'Keep your Mod Configuration Menu (MCM) settings across the install. If unchecked, all mod configurations (axr_options.ltx) will be lost.'))]
 
 class InstallPage(QWidget):
     def __init__(self, window):
@@ -101,12 +117,22 @@ class InstallPage(QWidget):
         split = QHBoxLayout()
         split.setSpacing(16)
         root.addLayout(split, 1)
+        # -- Stalker Anomaly card (left) --
         self.anomaly_card, a_layout = make_card()
         split.addWidget(self.anomaly_card, 1)
         self.anomaly_status = InstallStatusRow('')
         a_layout.addWidget(self.anomaly_status)
-        a_layout.addWidget(section_label('Stalker Anomaly', level=2))
+        a_layout.addWidget(section_label('STALKER ANOMALY', level=2))
         a_layout.addWidget(info_label('Installs the base Stalker Anomaly 1.5.3 engine. Downloads the official archive, verifies its checksum and extracts it.'))
+        details_group = QGroupBox('Details')
+        details_layout = QVBoxLayout()
+        details_layout.setSpacing(6)
+        details_layout.addLayout(_kv_row('Version', '1.5.3'))
+        details_layout.addLayout(_kv_row('Download size', '~9 GB'))
+        details_layout.addLayout(_kv_row('Installed size', '~16 GB'))
+        details_layout.addLayout(_kv_row('Note', 'Base engine required by GAMMA'))
+        details_group.setLayout(details_layout)
+        a_layout.addWidget(details_group)
         self.anomaly_edit, self.anomaly_browse, self.anomaly_folder_row = self._make_folder_row('Anomaly install folder:', self._browse_anomaly)
         a_layout.addLayout(self.anomaly_folder_row)
         self.anomaly_button = QPushButton('Install Anomaly')
@@ -116,12 +142,13 @@ class InstallPage(QWidget):
         a_layout.addWidget(self.anomaly_button)
         self.anomaly_progress = ProgressArea(show_table=False, show_log=False)
         self.anomaly_progress.cancel_button.clicked.connect(self._cancel_anomaly_install)
-        a_layout.addWidget(self.anomaly_progress, 1)
+        a_layout.addWidget(self.anomaly_progress)
+        # -- Stalker GAMMA card (right) --
         self.gamma_card, g_layout = make_card()
         split.addWidget(self.gamma_card, 1)
         self.gamma_status = InstallStatusRow('')
         g_layout.addWidget(self.gamma_status)
-        g_layout.addWidget(section_label('Stalker GAMMA', level=2))
+        g_layout.addWidget(section_label('STALKER GAMMA', level=2))
         g_layout.addWidget(info_label('Full install or update of the GAMMA modpack on top of Anomaly (~150GB). Downloads every addon, verifies checksums and extracts them in order.'))
         self.gamma_edit, self.gamma_browse, self.gamma_folder_row = self._make_folder_row('GAMMA install folder:', self._browse_gamma)
         g_layout.addLayout(self.gamma_folder_row)
@@ -142,9 +169,15 @@ class InstallPage(QWidget):
             opts_layout.addLayout(row)
         opts_group.setLayout(opts_layout)
         g_layout.addWidget(opts_group)
-        self.install_button = QPushButton('Start Full Install')
+        g_layout.addWidget(section_label('Cache Folder', level=3))
+        self.cache_edit, self.cache_browse, self.cache_folder_row = self._make_folder_row('Cache folder:', self._browse_cache)
+        g_layout.addLayout(self.cache_folder_row)
+        self.cache_info_label = info_label('')
+        self.cache_info_label.setObjectName('dim')
+        g_layout.addWidget(self.cache_info_label)
+        self.install_button = QPushButton('Install GAMMA')
         self.install_button.setObjectName('primary')
-        self.install_button.setToolTip('Installs the GAMMA modpack.')
+        self.install_button.setToolTip('Install or update GAMMA (includes Anomaly if needed).')
         # Wrapped: clicked() passes a bool that would land in skip_confirm.
         self.install_button.clicked.connect(lambda: self._start_full_install())
         g_layout.addWidget(self.install_button)
@@ -197,6 +230,18 @@ class InstallPage(QWidget):
         if profile is not None:
             self.anomaly_edit.setText(profile.anomaly)
             self.gamma_edit.setText(profile.gamma)
+            self.cache_edit.setText(profile.cache)
+            self._update_cache_info(profile.cache)
+            if anomaly_installed(profile.anomaly):
+                self.anomaly_progress.bar.setRange(0, 1)
+                self.anomaly_progress.bar.setValue(1)
+                self.anomaly_progress.bar.setFormat("Installed")
+            if gamma_installed(profile.gamma):
+                self.full_progress.bar.setRange(0, 1)
+                self.full_progress.bar.setValue(1)
+                self.full_progress.bar.setFormat("Installed")
+        else:
+            self._update_cache_info('')
         self._update_install_status()
         self.wt_prefix_label.setText(f"Prefix: {self._wt_prefix()}")
         self._refresh_winetricks_status()
@@ -216,8 +261,10 @@ class InstallPage(QWidget):
             self.winetricks_button.setEnabled(False)
             self.anomaly_browse.setEnabled(False)
             self.gamma_browse.setEnabled(False)
+            self.cache_browse.setEnabled(False)
             self.anomaly_edit.setReadOnly(True)
             self.gamma_edit.setReadOnly(True)
+            self.cache_edit.setReadOnly(True)
             for cb in self.checkboxes.values():
                 cb.setEnabled(False)
             return
@@ -230,8 +277,10 @@ class InstallPage(QWidget):
         )
         self.anomaly_browse.setEnabled(True)
         self.gamma_browse.setEnabled(True)
+        self.cache_browse.setEnabled(True)
         self.anomaly_edit.setReadOnly(False)
         self.gamma_edit.setReadOnly(False)
+        self.cache_edit.setReadOnly(False)
         for cb in self.checkboxes.values():
             cb.setEnabled(True)
 
@@ -243,6 +292,23 @@ class InstallPage(QWidget):
             return
         self.anomaly_status.set_state(anomaly_installed(profile.anomaly))
         self.gamma_status.set_state(gamma_installed(profile.gamma))
+
+    def _update_cache_info(self, cache_path: str) -> None:
+        if not cache_path:
+            self.cache_info_label.setText('')
+            return
+        cache_dir = Path(cache_path)
+        if not cache_dir.is_dir():
+            self.cache_info_label.setText('No archives cached')
+            self.cache_info_label.setStyleSheet(f'color: {STATUS_RED.name()};')
+            return
+        count = sum(1 for _ in cache_dir.glob('*.zip'))
+        if count == 0:
+            self.cache_info_label.setText('No archives cached')
+            self.cache_info_label.setStyleSheet(f'color: {STATUS_RED.name()};')
+        else:
+            self.cache_info_label.setText(f'{count} archive{"s" if count != 1 else ""} cached')
+            self.cache_info_label.setStyleSheet(f'color: {OK_GREEN.name()};')
 
     def _make_folder_row(self, label_text, on_browse):
         edit = QLineEdit()
@@ -272,6 +338,15 @@ class InstallPage(QWidget):
             self._persist_dirs()
             return
 
+    def _browse_cache(self):
+        start = str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, 'Select cache folder', start)
+        if folder:
+            self.cache_edit.setText(folder)
+            self._update_cache_info(folder)
+            self._persist_dirs()
+            return
+
     def _persist_dirs(self):
         # editingFinished fires on focus-out, and the message boxes below steal
         # focus - without this guard the handler re-enters itself.
@@ -292,14 +367,20 @@ class InstallPage(QWidget):
             return
         anomaly = self.anomaly_edit.text().strip()
         gamma = self.gamma_edit.text().strip()
+        cache = self.cache_edit.text().strip()
         if not anomaly or not gamma:
             QMessageBox.warning(self, 'Invalid Folder', 'Both install folders must be set. Reverting to the saved paths.')
             self.refresh()
             return
-        if anomaly == profile.anomaly and gamma == profile.gamma:
+        if not cache:
+            QMessageBox.warning(self, 'Invalid Folder', 'Cache folder must be set. Reverting to the saved path.')
+            self.refresh()
+            return
+        if anomaly == profile.anomaly and gamma == profile.gamma and cache == profile.cache:
             return
         profile.anomaly = anomaly
         profile.gamma = gamma
+        profile.cache = cache
         try:
             self.window.settings.save()
         except OSError as exc:
@@ -308,7 +389,7 @@ class InstallPage(QWidget):
             return
         self.window.refresh_settings()
         self._update_install_status()
-        self.window.statusBar().showMessage(f"Install folders updated: {anomaly} | {gamma}", 6000)
+        self.window.statusBar().showMessage(f"Install folders updated: {anomaly} | {gamma} | {cache}", 6000)
         return
 
     def _build_full_command(self):
@@ -333,7 +414,22 @@ class InstallPage(QWidget):
         minimal = self.checkboxes['minimal'].isChecked()
         size_hint = '~100GB' if minimal else '~150GB'
         if not skip_confirm:
-            answer = QMessageBox.question(self, 'Confirm Full Install', f"This will download and install/update Anomaly and all GAMMA addons ({size_hint}). Continue?", (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No))
+            answer = QMessageBox.question(
+                self,
+                'Confirm Install GAMMA',
+                "<html><body>"
+                "This will install/update Anomaly (if not already installed) and all "
+                f"GAMMA addons ({size_hint}). Existing installations are preserved."
+                "<br><br>"
+                "<span style='color: #ff3333; font-weight: bold;'>"
+                "WARNING: Your user.ltx (keybindings, controls) and MCM settings will "
+                "be overwritten unless you checked the preserve options above."
+                "</span>"
+                "<br><br>"
+                "Continue?"
+                "</body></html>",
+                (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+            )
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.window.set_install_busy(True)
@@ -345,21 +441,27 @@ class InstallPage(QWidget):
         self._runner.line.connect(self.full_progress.on_line)
         self._runner.finished.connect(self._on_full_finished)
         self._runner.cancelled.connect(lambda: self.full_progress.status_message('Cancelled'))
+        self.full_progress.set_runner(self._runner)
         self.full_progress.on_started()
         self._runner.start()
 
     def _on_full_finished(self, rc, output):
         cancelled = self._runner is not None and self._runner.was_cancelled
         self.full_progress.on_finished(rc, output)
+        self.full_progress.set_runner(None)
         if cancelled:
+            self.full_progress.bar.setFormat("Cancelled")
             self.full_progress.status_message('Cancelled')
         elif rc != 0:
             self.full_progress.status_message(f"Failed (exit code {rc})")
+            self._show_error_popup("Install Failed", rc, output)
         self._update_install_status()
         self.window.set_install_busy(False)
 
     def _cancel_full_install(self):
         if self._runner is not None:
+            if self.full_progress.is_paused:
+                self._runner.resume()
             self._runner.cancel()
             return
 
@@ -414,6 +516,7 @@ class InstallPage(QWidget):
             self.anomaly_progress.status_message('Cancelled')
         elif rc != 0:
             self.anomaly_progress.status_message(f"Failed (exit code {rc})")
+            self._show_error_popup("Anomaly Install Failed", rc, output)
         self._update_install_status()
         chain = self._auto_chain
         # The chain is single-shot: clear it on every outcome so a failed
@@ -428,6 +531,20 @@ class InstallPage(QWidget):
         if self._anomaly_runner is not None:
             self._anomaly_runner.cancel()
             return
+
+    def _show_error_popup(self, title: str, rc: int, output: str) -> None:
+        """Show the last meaningful lines of CLI output in a popup."""
+        import re
+        progress_re = re.compile(
+            r"^\[\d{2}:\d{2}:\d{2}\]\s+.+?\s*\|.+\|\s*\d+(?:[.,]\d+)?\s*%\s*\|\s*\[\d+/\d+\]$"
+        )
+        lines = [l for l in (output or "").splitlines() if l.strip() and not progress_re.match(l)]
+        tail = "\n".join(lines[-20:]) if lines else "(no details available)"
+        QMessageBox.warning(
+            self,
+            title,
+            f"Exit code: {rc}\n\n{tail}",
+        )
 
     def _start_verify(self):
         if self._verify_runner is not None and self._verify_runner.is_running():

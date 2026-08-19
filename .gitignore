@@ -15,3 +15,5 @@ __pycache__/
 # Temporarily excluded
 README.md
 
+.README.md.kate-swp
+*.kate-swp

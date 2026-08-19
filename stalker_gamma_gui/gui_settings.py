@@ -19,6 +19,8 @@ _DEFAULTS = {
     "start_page": "dashboard",  # nav page shown on launch (key into main_window.NAV_ITEMS)
     "font_size": 13,  # base UI font size in px; scales every QSS font
     "always_gamemoderun": False,  # wrap every launch command in gamemoderun
+    "autostart": False,  # add to XDG autostart so the app starts at login
+    "custom_launch_options": "",  # extra tokens prepended to the launch command
 }
 
 
@@ -46,6 +48,7 @@ def save_gui_settings(**changes) -> None:
         tmp.replace(path)
     except OSError:
         tmp.unlink(missing_ok=True)
+        raise
 
 
 def configured_wine_prefix() -> str:

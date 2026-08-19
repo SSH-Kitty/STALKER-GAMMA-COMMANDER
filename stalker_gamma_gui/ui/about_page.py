@@ -6,7 +6,7 @@ mirrors the project README so the About page and the docs never drift apart.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -235,8 +235,10 @@ class AboutPage(QWidget):
             "Bundled — Python 3.12, Qt 6 (PySide6), the stalker-gamma CLI",
             "May need — libxcb-cursor0 / xcb-util-cursor when the xcb plugin cannot load",
             "From source — Python 3.10+, PySide6 >= 6.6",
-            "To play — umu-run (recommended), Steam with any Proton, or system Wine; "
-            "optionally gamemoderun",
+            (
+                "To play — umu-run (recommended), Steam with any Proton, or system Wine; "
+                "optionally gamemoderun"
+            ),
         ):
             layout.addWidget(info_label(f"• {line}"))
         layout.addStretch(1)
