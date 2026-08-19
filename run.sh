@@ -11,4 +11,4 @@ if [ ! -d "$VENV_DIR" ]; then
     "$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
 fi
 
-exec "$VENV_DIR/bin/python" -m stalker_gamma_gui "$@"
+exec "$VENV_DIR/bin/python" -m commander_gui "$@"
