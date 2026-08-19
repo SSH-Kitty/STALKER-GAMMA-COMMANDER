@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#option-2--run-from-source)
 [![Qt](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt%206-41cd52)](https://doc.qt.io/qtforpython-6/)
 [![Release](https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?include_prereleases&label=release)](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases)
-[![Linux](https://img.shields.io/badge/Linux-%23FCC624.svg?style=Flat&logo=linux&logoColor=black)](https://www.youtube.com/watch?v=dQw4w9WgXcQ)
+[![Linux](https://img.shields.io/badge/Linux-%23FCC624.svg?style=Flat&logo=linux&logoColor=black)](https://github.com/torvalds)
 
 </div>
 
