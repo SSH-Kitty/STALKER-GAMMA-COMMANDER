@@ -1,0 +1,31 @@
+.venv/
+.venv-setup.lock
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+*.log
+*.bak
+*.swp
+*.swo
+.coverage
+htmlcov/
+
+# Build artifacts / release bundles - do not commit (hundreds of MB)
+*.tar.gz
+*.zip
+*.AppImage
+.appimage-build/
+
+# Python build outputs
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Atomic-write scratch files
+*.tmp
+
+*.kate-swp

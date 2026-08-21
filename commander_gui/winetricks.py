@@ -12,6 +12,8 @@ import os
 import shutil
 import subprocess
 
+from .dependencies import _externally_managed, configured_tool
+
 #: Verbs installed by the "Install / Update Runtimes" action, in order.
 WINETRICKS_VERBS = (
     "d3dcompiler_43",
@@ -19,6 +21,8 @@ WINETRICKS_VERBS = (
     "d3dx10",
     "d3dx11_43",
     "d3dx9",
+    "quartz",
+    "dx8vb",
     "vcrun2022",
 )
 
@@ -33,12 +37,12 @@ _NOISE_PREFIXES = (
 
 def winetricks_binary() -> str:
     """Path to winetricks, or '' when it is not on PATH."""
-    return shutil.which("winetricks") or ""
+    return configured_tool("winetricks") or shutil.which("winetricks") or ""
 
 
 def protontricks_binary() -> str:
     """Path to protontricks, or '' when it is not on PATH."""
-    return shutil.which("protontricks") or ""
+    return configured_tool("protontricks") or shutil.which("protontricks") or ""
 
 
 def winetricks_install_command(verbs: tuple[str, ...] = WINETRICKS_VERBS) -> list[str]:
@@ -50,9 +54,15 @@ def winetricks_install_command(verbs: tuple[str, ...] = WINETRICKS_VERBS) -> lis
 
 
 def protontricks_install_command() -> list[str]:
-    """User-level install for protontricks (pipx first, then pip --user)."""
+    """User-level install for protontricks (pipx first, then pip --user).
+
+    Returns an empty list when neither pipx nor a usable pip is available
+    (e.g. on systems with PEP 668 externally-managed Python).
+    """
     if shutil.which("pipx"):
         return ["pipx", "install", "protontricks"]
+    if _externally_managed():
+        return []
     return ["python3", "-m", "pip", "install", "--user", "protontricks"]
 
 
@@ -100,3 +110,19 @@ def check_winetricks_status(
     for verb in verbs:
         result[verb] = verb in tokens
     return result
+
+
+def check_winetricks_full_status(
+    prefix: str,
+    verbs: tuple[str, ...] = WINETRICKS_VERBS,
+    timeout: int = 30,
+) -> dict[str, bool]:
+    """Return {name: installed} for verbs *and* tool availability (wine, protontricks).
+
+    Combines the slow ``winetricks list-installed`` query with instant
+    ``shutil.which()`` checks for wine and protontricks.
+    """
+    status = check_winetricks_status(prefix, verbs, timeout)
+    status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
+    status["protontricks"] = bool(protontricks_binary())
+    return status

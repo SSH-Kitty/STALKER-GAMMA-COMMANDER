@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .atomic import write_text
+
 
 def read_lines(path: str | Path) -> list[str]:
     path = Path(path)
@@ -27,8 +29,12 @@ def _line_info(line: str) -> tuple[str, str] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return None
-    enabled = not stripped.startswith("-")
-    name = stripped[1:].strip() if len(stripped) > 1 else stripped
+    if stripped[0] not in "+-":
+        return None
+    enabled = stripped[0] == "+"
+    name = stripped[1:].strip()
+    if not name:
+        return None
     return ("Enabled" if enabled else "Disabled", name)
 
 
@@ -94,6 +100,8 @@ def move(lines: list[str], line_index: int, delta: int) -> list[str]:
 
 def set_status_at(lines: list[str], line_index: int, enabled: bool) -> list[str]:
     """Flip the enabled/disabled prefix of the mod line at ``line_index``."""
+    if not 0 <= line_index < len(lines):
+        return list(lines)
     out = list(lines)
     info = _line_info(out[line_index])
     if info is None:
@@ -116,10 +124,4 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
     is written alongside the target so ``replace`` stays on one filesystem.
     """
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+    write_text(path, "\n".join(lines) + "\n")

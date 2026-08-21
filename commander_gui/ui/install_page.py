@@ -5,6 +5,7 @@ winetricks and verify (bottom).
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 
@@ -24,20 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..cli_runner import cli_command
+from ..dependencies import check_all_dependencies
 from ..gui_settings import configured_wine_prefix
-
-
-def _kv_row(label: str, value: str) -> QHBoxLayout:
-    row = QHBoxLayout()
-    key = QLabel(label)
-    key.setObjectName("dim")
-    key.setAlignment(Qt.AlignmentFlag.AlignTop)
-    val = QLabel(value)
-    val.setWordWrap(True)
-    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
-    row.addWidget(val, 1)
-    return row
 from ..integrity import (
     anomaly_status,
     fetch_official_mod_names,
@@ -52,10 +41,9 @@ from ..repair import (
 from ..settings import cli_ok
 from ..winetricks import (
     WINETRICKS_VERBS,
-    check_winetricks_status,
+    check_winetricks_full_status,
     protontricks_binary,
     protontricks_install_command,
-    winetricks_binary,
     winetricks_install_command,
 )
 from .common import (
@@ -66,6 +54,7 @@ from .common import (
     InstallStatusRow,
     ProgressArea,
     StreamTask,
+    _kv_row,
     anomaly_installed,
     gamma_installed,
     info_label,
@@ -75,7 +64,43 @@ from .common import (
     winetricks_tooltip,
 )
 
-_CHECKBOXES = [*(('minimal', 'Minimal (~100GB)', 'Delete addon archives after extraction to save ~50GB of disk space.'),             ('preserve_user', 'Preserve user.ltx settings', 'Keep your existing user.ltx (game options) across the install. If unchecked, controls, keybindings and mod-specific settings will be reset.'), ('preserve_mcm', 'Preserve MCM settings', 'Keep your Mod Configuration Menu (MCM) settings across the install. If unchecked, all mod configurations (axr_options.ltx) will be lost.'))]
+_CHECKBOXES = [
+    *(
+        (
+            "minimal",
+            "Minimal (~100GB)",
+            "Delete addon archives after extraction to save ~50GB of disk space.",
+        ),
+        (
+            "preserve_user",
+            "Preserve user.ltx settings",
+            "Keep your existing user.ltx (game options) across the install. If unchecked, controls, keybindings and mod-specific settings will be reset.",
+        ),
+        (
+            "preserve_mcm",
+            "Preserve MCM settings",
+            "Keep your Mod Configuration Menu (MCM) settings across the install. If unchecked, all mod configurations (axr_options.ltx) will be lost.",
+        ),
+    )
+]
+
+_WT_PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})\s*%")
+
+
+def _winetricks_progress(line: str, stage: str, completed: set[str]) -> int | None:
+    """Extract a Winetricks percentage or approximate verb-stage progress."""
+    clean = line.strip()
+    match = _WT_PERCENT_RE.search(clean)
+    if match:
+        return min(100, int(match.group(1)))
+    if stage != "verbs":
+        return None
+    for index, verb in enumerate(WINETRICKS_VERBS, start=1):
+        if verb in clean and verb not in completed:
+            completed.add(verb)
+            return round(index / len(WINETRICKS_VERBS) * 100)
+    return None
+
 
 class InstallPage(QWidget):
     def __init__(self, window):
@@ -87,7 +112,7 @@ class InstallPage(QWidget):
         self._auto_cancelled = False
         self._verify_runner = None
         self._verify_task = None
-        self._verify_counts = {'OK': 0, 'CORRUPT': 0, 'NOT FOUND': 0}
+        self._verify_counts = {"OK": 0, "CORRUPT": 0, "NOT FOUND": 0}
         self._verify_anomaly_ok = False
         self._scan_cancel = None
         self._presence = None
@@ -98,7 +123,8 @@ class InstallPage(QWidget):
         self._wt_task = None
         self._wt_checking = False
         self._wt_installed: bool | None = None
-        self._wt_stage = 'verbs'
+        self._wt_stage = "verbs"
+        self._wt_completed_verbs: set[str] = set()
         self._winetricks_status_enabled = False
         self._persisting = False
         outer = QVBoxLayout(self)
@@ -108,76 +134,96 @@ class InstallPage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         outer.addWidget(scroll)
         content = QWidget()
+        content.setObjectName("pageContent")
         root = QVBoxLayout(content)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
-        root.addWidget(section_label('STALKER GAMMA INSTALLATION', level=1))
-        root.addWidget(info_label('Install or update Stalker Anomaly and the GAMMA modpack. Each panel shows live progress, the current activity and the per-addon table for a full GAMMA install.'))
+        title = section_label("INSTALL ANOMALY + GAMMA", level=1)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(title)
+        root.addWidget(
+            info_label(
+                "Install the STALKER Anomaly base game and the GAMMA Modpack. Progress, current activity, and full-install addon details appear below."
+            )
+        )
         split = QHBoxLayout()
         split.setSpacing(16)
         root.addLayout(split, 1)
-        # -- Stalker Anomaly card (left) --
+        # -- Anomaly card (left) --
         self.anomaly_card, a_layout = make_card()
         split.addWidget(self.anomaly_card, 1)
-        self.anomaly_status = InstallStatusRow('')
+        self.anomaly_status = InstallStatusRow("")
         a_layout.addWidget(self.anomaly_status)
-        a_layout.addWidget(section_label('STALKER ANOMALY', level=2))
-        a_layout.addWidget(info_label('Installs the base Stalker Anomaly 1.5.3 engine. Downloads the official archive, verifies its checksum and extracts it.'))
-        details_group = QGroupBox('Details')
+        a_layout.addWidget(section_label("STALKER Anomaly", level=2))
+        a_layout.addWidget(
+            info_label(
+                "<span style='color:#00ff00;'>Step 1.</span> Installs the core Anomaly 1.5.3 game files. Click to download, verify, and extract the official archive."
+            )
+        )
+        details_group = QGroupBox("Installation details")
         details_layout = QVBoxLayout()
         details_layout.setSpacing(6)
-        details_layout.addLayout(_kv_row('Version', '1.5.3'))
-        details_layout.addLayout(_kv_row('Download size', '~9 GB'))
-        details_layout.addLayout(_kv_row('Installed size', '~16 GB'))
-        details_layout.addLayout(_kv_row('Note', 'Base engine required by GAMMA'))
+        details_layout.addLayout(_kv_row("Version", "1.5.3"))
+        details_layout.addLayout(_kv_row("Download size", "~9 GB"))
+        details_layout.addLayout(_kv_row("Installed size", "~16 GB"))
+        details_layout.addLayout(_kv_row("Required for", "GAMMA Modpack"))
         details_group.setLayout(details_layout)
         a_layout.addWidget(details_group)
-        self.anomaly_edit, self.anomaly_browse, self.anomaly_folder_row = self._make_folder_row('Anomaly install folder:', self._browse_anomaly)
+        self.anomaly_edit, self.anomaly_browse, self.anomaly_folder_row = (
+            self._make_folder_row("Anomaly folder:", self._browse_anomaly)
+        )
         a_layout.addLayout(self.anomaly_folder_row)
-        self.anomaly_button = QPushButton('Install Anomaly')
-        self.anomaly_button.setObjectName('primary')
+        self.anomaly_button = QPushButton("Install Anomaly")
+        self.anomaly_button.setObjectName("primary")
         # Wrapped: clicked() passes a bool that would land in skip_confirm.
         self.anomaly_button.clicked.connect(lambda: self._start_anomaly_install())
         a_layout.addWidget(self.anomaly_button)
         self.anomaly_progress = ProgressArea(show_table=False, show_log=False)
-        self.anomaly_progress.cancel_button.clicked.connect(self._cancel_anomaly_install)
+        self.anomaly_progress.cancel_button.clicked.connect(
+            self._cancel_anomaly_install
+        )
         a_layout.addWidget(self.anomaly_progress)
-        # -- Stalker GAMMA card (right) --
+        # -- GAMMA card (right) --
         self.gamma_card, g_layout = make_card()
         split.addWidget(self.gamma_card, 1)
-        self.gamma_status = InstallStatusRow('')
+        self.gamma_status = InstallStatusRow("")
         g_layout.addWidget(self.gamma_status)
-        g_layout.addWidget(section_label('STALKER GAMMA', level=2))
-        g_layout.addWidget(info_label('Full install or update of the GAMMA modpack on top of Anomaly (~150GB). Downloads every addon, verifies checksums and extracts them in order.'))
-        self.gamma_edit, self.gamma_browse, self.gamma_folder_row = self._make_folder_row('GAMMA install folder:', self._browse_gamma)
+        g_layout.addWidget(section_label("GAMMA Modpack", level=2))
+        g_layout.addWidget(
+            info_label(
+                "<span style='color:#00ff00;'>Step 2.</span> Installs the GAMMA modpack on top of your Anomaly installation (~150 GB). Click to download and all mods in sequence."
+            )
+        )
+        self.gamma_edit, self.gamma_browse, self.gamma_folder_row = (
+            self._make_folder_row("GAMMA folder:", self._browse_gamma)
+        )
         g_layout.addLayout(self.gamma_folder_row)
-        opts_group = QGroupBox('Install options')
+        opts_group = QGroupBox("Install options")
         opts_layout = QVBoxLayout()
         opts_layout.setSpacing(6)
         self.checkboxes = {}
-        for i, (key, label, tooltip) in enumerate(_CHECKBOXES):
-            row = QHBoxLayout()
-            cb = QCheckBox()
+        for key, label, tooltip in _CHECKBOXES:
+            cb = QCheckBox(label)
             cb.setToolTip(tooltip)
-            label_widget = QLabel(label)
-            label_widget.setWordWrap(True)
-            label_widget.setToolTip(tooltip)
             self.checkboxes[key] = cb
-            row.addWidget(cb, 0, Qt.AlignmentFlag.AlignTop)
-            row.addWidget(label_widget, 1)
-            opts_layout.addLayout(row)
+            opts_layout.addWidget(cb)
         opts_group.setLayout(opts_layout)
         g_layout.addWidget(opts_group)
-        g_layout.addWidget(section_label('Cache Folder', level=3))
-        self.cache_edit, self.cache_browse, self.cache_folder_row = self._make_folder_row('Cache folder:', self._browse_cache)
+        g_layout.addWidget(section_label("Download cache", level=3))
+        self.cache_edit, self.cache_browse, self.cache_folder_row = (
+            self._make_folder_row("Cache folder:", self._browse_cache)
+        )
         g_layout.addLayout(self.cache_folder_row)
-        self.cache_info_label = info_label('')
-        self.cache_info_label.setObjectName('dim')
+        self.cache_info_label = info_label("")
+        self.cache_info_label.setObjectName("dim")
         g_layout.addWidget(self.cache_info_label)
-        self.install_button = QPushButton('Install GAMMA')
-        self.install_button.setObjectName('primary')
-        self.install_button.setToolTip('Install or update GAMMA (includes Anomaly if needed).')
+        self.install_button = QPushButton("Install GAMMA")
+        self.install_button.setObjectName("primary")
+        self.install_button.setToolTip(
+            "Install or update GAMMA. Anomaly is installed first if it is missing."
+        )
         # Wrapped: clicked() passes a bool that would land in skip_confirm.
         self.install_button.clicked.connect(lambda: self._start_full_install())
         g_layout.addWidget(self.install_button)
@@ -185,18 +231,26 @@ class InstallPage(QWidget):
         self.full_progress.cancel_button.clicked.connect(self._cancel_full_install)
         g_layout.addWidget(self.full_progress, 1)
         self.wt_card, wt_layout = make_card()
-        wt_layout.addWidget(section_label('Winetricks Configuration', level=2))
-        wt_layout.addWidget(info_label('Install the native Microsoft Visual C++ and DirectX runtimes needed by Mod Organizer and the game into the configured Wine prefix. Without them Mod Organizer aborts at startup.'))
-        self.wt_status = InstallStatusRow('Winetricks runtimes', ok=None, pending_text='Checking')
+        wt_layout.addWidget(section_label("Winetricks Configuration", level=2))
+        wt_layout.addWidget(
+            info_label(
+                "<span style='color:#00ff00;'>Step 3.</span> Configure your Wine prefix. This installs the essential Microsoft Visual C++ and DirectX runtimes needed to run MO2 and Anomaly."
+            )
+        )
+        self.wt_status = InstallStatusRow(
+            "Winetricks runtimes", ok=None, pending_text="Checking"
+        )
         wt_layout.addWidget(self.wt_status)
-        self.wt_prefix_label = info_label('', wrap=False)
-        self.wt_prefix_label.setObjectName('dim')
+        self.wt_prefix_label = info_label("", wrap=False)
+        self.wt_prefix_label.setObjectName("dim")
         wt_layout.addWidget(self.wt_prefix_label)
-        self.winetricks_button = QPushButton('Install / Update Runtimes')
-        self.winetricks_button.setObjectName('primary')
+        self.winetricks_button = QPushButton("Install / Update Runtimes")
+        self.winetricks_button.setObjectName("primary")
         self.winetricks_button.setToolTip(
-            'Installs the native Microsoft Visual C++ and DirectX runtimes into '
-            'the Wine prefix. Enabled only while the runtimes are not installed.'
+            "Installs the native Microsoft Visual C++ and DirectX runtimes into "
+            "the Wine prefix. Checks d3dcompiler_43, d3dcompiler_47, d3dx10, "
+            "d3dx11_43, d3dx9, quartz, dx8vb, and vcrun2022. Enabled only while "
+            "the runtimes are not installed."
         )
         self.winetricks_button.clicked.connect(self._start_winetricks)
         wt_layout.addWidget(self.winetricks_button)
@@ -209,10 +263,14 @@ class InstallPage(QWidget):
         bottom.addWidget(self.wt_card, 1)
         self.verify_card, v_layout = make_card()
         bottom.addWidget(self.verify_card, 1)
-        v_layout.addWidget(section_label('Verify Integrity', level=2))
-        v_layout.addWidget(info_label("Check that Anomaly and all installed GAMMA mods are complete. Anomaly files are verified against the official checksums; every enabled mod from the profile's modlist is checked to be present and fully extracted."))
-        self.verify_button = QPushButton('Verify Integrity')
-        self.verify_button.setObjectName('primary')
+        v_layout.addWidget(section_label("Verify Integrity", level=2))
+        v_layout.addWidget(
+            info_label(
+                "<span style='color:#00ff00;'>Step 4.</span> Verify your game files. Run an MD5 check across Anomaly and GAMMA files. If any files or MO2 mods are missing/corrupted, the tool will automatically redownload and repair them."
+            )
+        )
+        self.verify_button = QPushButton("Verify Integrity")
+        self.verify_button.setObjectName("primary")
         self.verify_button.clicked.connect(self._start_verify)
         v_layout.addWidget(self.verify_button)
         self.verify_progress = ProgressArea(show_table=False, show_log=True)
@@ -232,16 +290,17 @@ class InstallPage(QWidget):
             self.gamma_edit.setText(profile.gamma)
             self.cache_edit.setText(profile.cache)
             self._update_cache_info(profile.cache)
-            if anomaly_installed(profile.anomaly):
-                self.anomaly_progress.bar.setRange(0, 1)
-                self.anomaly_progress.bar.setValue(1)
-                self.anomaly_progress.bar.setFormat("Installed")
-            if gamma_installed(profile.gamma):
-                self.full_progress.bar.setRange(0, 1)
-                self.full_progress.bar.setValue(1)
-                self.full_progress.bar.setFormat("Installed")
+            if not self.window.install_busy:
+                if anomaly_installed(profile.anomaly):
+                    self.anomaly_progress.bar.setRange(0, 1)
+                    self.anomaly_progress.bar.setValue(1)
+                    self.anomaly_progress.bar.setFormat("Installed")
+                if gamma_installed(profile.gamma):
+                    self.full_progress.bar.setRange(0, 1)
+                    self.full_progress.bar.setValue(1)
+                    self.full_progress.bar.setFormat("Installed")
         else:
-            self._update_cache_info('')
+            self._update_cache_info("")
         self._update_install_status()
         self.wt_prefix_label.setText(f"Prefix: {self._wt_prefix()}")
         self._refresh_winetricks_status()
@@ -295,26 +354,28 @@ class InstallPage(QWidget):
 
     def _update_cache_info(self, cache_path: str) -> None:
         if not cache_path:
-            self.cache_info_label.setText('')
+            self.cache_info_label.setText("")
             return
         cache_dir = Path(cache_path)
         if not cache_dir.is_dir():
-            self.cache_info_label.setText('No archives cached')
-            self.cache_info_label.setStyleSheet(f'color: {STATUS_RED.name()};')
+            self.cache_info_label.setText("No archives cached")
+            self.cache_info_label.setStyleSheet(f"color: {STATUS_RED.name()};")
             return
-        count = sum(1 for _ in cache_dir.glob('*.zip'))
+        count = sum(1 for _ in cache_dir.glob("*.zip"))
         if count == 0:
-            self.cache_info_label.setText('No archives cached')
-            self.cache_info_label.setStyleSheet(f'color: {STATUS_RED.name()};')
+            self.cache_info_label.setText("No archives cached")
+            self.cache_info_label.setStyleSheet(f"color: {STATUS_RED.name()};")
         else:
-            self.cache_info_label.setText(f'{count} archive{"s" if count != 1 else ""} cached')
-            self.cache_info_label.setStyleSheet(f'color: {OK_GREEN.name()};')
+            self.cache_info_label.setText(
+                f"{count} archive{'s' if count != 1 else ''} cached"
+            )
+            self.cache_info_label.setStyleSheet(f"color: {OK_GREEN.name()};")
 
     def _make_folder_row(self, label_text, on_browse):
         edit = QLineEdit()
-        edit.setPlaceholderText('Select the install folder...')
+        edit.setPlaceholderText("Enter or browse to a folder...")
         edit.editingFinished.connect(self._persist_dirs)
-        browse = QPushButton('Browse...')
+        browse = QPushButton("Browse...")
         browse.clicked.connect(on_browse)
         row = QHBoxLayout()
         row.addWidget(QLabel(label_text))
@@ -324,7 +385,9 @@ class InstallPage(QWidget):
 
     def _browse_anomaly(self):
         start = str(Path.home())
-        folder = QFileDialog.getExistingDirectory(self, 'Select Anomaly install folder', start)
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Anomaly install folder", start
+        )
         if folder:
             self.anomaly_edit.setText(folder)
             self._persist_dirs()
@@ -332,7 +395,9 @@ class InstallPage(QWidget):
 
     def _browse_gamma(self):
         start = str(Path.home())
-        folder = QFileDialog.getExistingDirectory(self, 'Select GAMMA install folder', start)
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select GAMMA install folder", start
+        )
         if folder:
             self.gamma_edit.setText(folder)
             self._persist_dirs()
@@ -340,7 +405,7 @@ class InstallPage(QWidget):
 
     def _browse_cache(self):
         start = str(Path.home())
-        folder = QFileDialog.getExistingDirectory(self, 'Select cache folder', start)
+        folder = QFileDialog.getExistingDirectory(self, "Select cache folder", start)
         if folder:
             self.cache_edit.setText(folder)
             self._update_cache_info(folder)
@@ -362,21 +427,37 @@ class InstallPage(QWidget):
         self.window.refresh_settings()
         profile = self.window.settings.active_profile
         if profile is None:
-            QMessageBox.warning(self, 'No Profile', 'Create or activate a profile first (Profiles page).')
+            QMessageBox.warning(
+                self,
+                "No Profile",
+                "Create or activate a profile first (Profiles page).",
+            )
             self.refresh()
             return
         anomaly = self.anomaly_edit.text().strip()
         gamma = self.gamma_edit.text().strip()
         cache = self.cache_edit.text().strip()
         if not anomaly or not gamma:
-            QMessageBox.warning(self, 'Invalid Folder', 'Both install folders must be set. Reverting to the saved paths.')
+            QMessageBox.warning(
+                self,
+                "Invalid Folder",
+                "Both install folders must be set. Reverting to the saved paths.",
+            )
             self.refresh()
             return
         if not cache:
-            QMessageBox.warning(self, 'Invalid Folder', 'Cache folder must be set. Reverting to the saved path.')
+            QMessageBox.warning(
+                self,
+                "Invalid Folder",
+                "Cache folder must be set. Reverting to the saved path.",
+            )
             self.refresh()
             return
-        if anomaly == profile.anomaly and gamma == profile.gamma and cache == profile.cache:
+        if (
+            anomaly == profile.anomaly
+            and gamma == profile.gamma
+            and cache == profile.cache
+        ):
             return
         profile.anomaly = anomaly
         profile.gamma = gamma
@@ -384,39 +465,47 @@ class InstallPage(QWidget):
         try:
             self.window.settings.save()
         except OSError as exc:
-            QMessageBox.warning(self, 'Save Failed', f"Could not write settings.json:\n{exc}")
+            QMessageBox.warning(
+                self, "Save Failed", f"Could not write settings.json:\n{exc}"
+            )
             self.refresh()
             return
         self.window.refresh_settings()
         self._update_install_status()
-        self.window.statusBar().showMessage(f"Install folders updated: {anomaly} | {gamma} | {cache}", 6000)
+        self.window.statusBar().showMessage(
+            f"Install folders updated: {anomaly} | {gamma} | {cache}", 6000
+        )
         return
 
     def _build_full_command(self):
-        args = ['full-install']
-        if self.checkboxes['minimal'].isChecked():
-            args.append('--minimal')
-        if self.checkboxes['preserve_user'].isChecked():
-            args.append('--preserve-user-settings')
-        if self.checkboxes['preserve_mcm'].isChecked():
-            args.append('--preserve-mcm-settings')
+        args = ["full-install"]
+        if self.checkboxes["minimal"].isChecked():
+            args.append("--minimal")
+        if self.checkboxes["preserve_user"].isChecked():
+            args.append("--preserve-user-settings")
+        if self.checkboxes["preserve_mcm"].isChecked():
+            args.append("--preserve-mcm-settings")
         return args
 
     def _start_full_install(self, skip_confirm=False):
         if self._runner is not None and self._runner.is_running():
             return
         if self.window.install_busy and not skip_confirm:
-            QMessageBox.information(self, 'Busy', 'An install is already running.')
+            QMessageBox.information(self, "Busy", "An install is already running.")
             return
         if self.window.settings.active_profile is None:
-            QMessageBox.warning(self, 'No Profile', 'Create or activate a profile first (Profiles page).')
+            QMessageBox.warning(
+                self,
+                "No Profile",
+                "Create or activate a profile first (Profiles page).",
+            )
             return
-        minimal = self.checkboxes['minimal'].isChecked()
-        size_hint = '~100GB' if minimal else '~150GB'
+        minimal = self.checkboxes["minimal"].isChecked()
+        size_hint = "~100GB" if minimal else "~150GB"
         if not skip_confirm:
             answer = QMessageBox.question(
                 self,
-                'Confirm Install GAMMA',
+                "Confirm Install GAMMA",
                 "<html><body>"
                 "This will install/update Anomaly (if not already installed) and all "
                 f"GAMMA addons ({size_hint}). Existing installations are preserved."
@@ -440,7 +529,9 @@ class InstallPage(QWidget):
         self._runner = CommandRunner(cmd, parent=self)
         self._runner.line.connect(self.full_progress.on_line)
         self._runner.finished.connect(self._on_full_finished)
-        self._runner.cancelled.connect(lambda: self.full_progress.status_message('Cancelled'))
+        self._runner.cancelled.connect(
+            lambda: self.full_progress.status_message("Cancelled")
+        )
         self.full_progress.set_runner(self._runner)
         self.full_progress.on_started()
         self._runner.start()
@@ -451,8 +542,8 @@ class InstallPage(QWidget):
         self.full_progress.set_runner(None)
         if cancelled:
             self.full_progress.bar.setFormat("Cancelled")
-            self.full_progress.status_message('Cancelled')
-        elif rc != 0:
+            self.full_progress.status_message("Cancelled")
+        elif not cli_ok(rc, output, ""):
             self.full_progress.status_message(f"Failed (exit code {rc})")
             self._show_error_popup("Install Failed", rc, output)
         self._update_install_status()
@@ -469,24 +560,35 @@ class InstallPage(QWidget):
         if self._anomaly_runner is not None and self._anomaly_runner.is_running():
             return
         if self.window.install_busy and not skip_confirm:
-            QMessageBox.information(self, 'Busy', 'An install is already running.')
+            QMessageBox.information(self, "Busy", "An install is already running.")
             return
         if self.window.settings.active_profile is None:
-            QMessageBox.warning(self, 'No Profile', 'Create or activate a profile first (Profiles page).')
+            QMessageBox.warning(
+                self,
+                "No Profile",
+                "Create or activate a profile first (Profiles page).",
+            )
             return
         if not skip_confirm:
-            answer = QMessageBox.question(self, 'Confirm Anomaly Install', 'Download and install Stalker Anomaly 1.5.3?', (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No))
+            answer = QMessageBox.question(
+                self,
+                "Confirm Anomaly install",
+                "Download and install STALKER Anomaly 1.5.3?",
+                (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+            )
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.window.set_install_busy(True)
         self.anomaly_progress.reset()
         self.anomaly_button.setEnabled(False)
         self.install_button.setEnabled(False)
-        cmd = cli_command(['anomaly', 'install'], progress_interval_ms=200)
+        cmd = cli_command(["anomaly", "install"], progress_interval_ms=200)
         self._anomaly_runner = CommandRunner(cmd, parent=self)
         self._anomaly_runner.line.connect(self.anomaly_progress.on_line)
         self._anomaly_runner.finished.connect(self._on_anomaly_finished)
-        self._anomaly_runner.cancelled.connect(lambda: self.anomaly_progress.status_message('Cancelled'))
+        self._anomaly_runner.cancelled.connect(
+            lambda: self.anomaly_progress.status_message("Cancelled")
+        )
         self._anomaly_runner.cancelled.connect(self._on_anomaly_cancelled)
         self.anomaly_progress.on_started()
         self._anomaly_runner.start()
@@ -507,14 +609,13 @@ class InstallPage(QWidget):
         self._auto_cancelled = True
 
     def _on_anomaly_finished(self, rc, output):
-        cancelled = (
-            self._auto_cancelled
-            or (self._anomaly_runner is not None and self._anomaly_runner.was_cancelled)
+        cancelled = self._auto_cancelled or (
+            self._anomaly_runner is not None and self._anomaly_runner.was_cancelled
         )
         self.anomaly_progress.on_finished(rc, output)
         if cancelled:
-            self.anomaly_progress.status_message('Cancelled')
-        elif rc != 0:
+            self.anomaly_progress.status_message("Cancelled")
+        elif not cli_ok(rc, output, ""):
             self.anomaly_progress.status_message(f"Failed (exit code {rc})")
             self._show_error_popup("Anomaly Install Failed", rc, output)
         self._update_install_status()
@@ -522,7 +623,7 @@ class InstallPage(QWidget):
         # The chain is single-shot: clear it on every outcome so a failed
         # anomaly install cannot leave it armed for a later manual run.
         self._auto_chain = False
-        if chain and not cancelled and rc == 0:
+        if chain and not cancelled and cli_ok(rc, output, ""):
             self._start_full_install(skip_confirm=True)
             return
         self.window.set_install_busy(False)
@@ -535,10 +636,15 @@ class InstallPage(QWidget):
     def _show_error_popup(self, title: str, rc: int, output: str) -> None:
         """Show the last meaningful lines of CLI output in a popup."""
         import re
+
         progress_re = re.compile(
             r"^\[\d{2}:\d{2}:\d{2}\]\s+.+?\s*\|.+\|\s*\d+(?:[.,]\d+)?\s*%\s*\|\s*\[\d+/\d+\]$"
         )
-        lines = [l for l in (output or "").splitlines() if l.strip() and not progress_re.match(l)]
+        lines = [
+            l
+            for l in (output or "").splitlines()
+            if l.strip() and not progress_re.match(l)
+        ]
         tail = "\n".join(lines[-20:]) if lines else "(no details available)"
         QMessageBox.warning(
             self,
@@ -550,15 +656,19 @@ class InstallPage(QWidget):
         if self._verify_runner is not None and self._verify_runner.is_running():
             return
         if self.window.install_busy:
-            QMessageBox.information(self, 'Busy', 'An install is already running.')
+            QMessageBox.information(self, "Busy", "An install is already running.")
             return
         if mo2_running():
             # The game holds the Wine prefix; verification must not read it.
             return
         if self.window.settings.active_profile is None:
-            QMessageBox.warning(self, 'No Profile', 'Create or activate a profile first (Profiles page).')
+            QMessageBox.warning(
+                self,
+                "No Profile",
+                "Create or activate a profile first (Profiles page).",
+            )
             return
-        self._verify_counts = {'OK': 0, 'CORRUPT': 0, 'NOT FOUND': 0}
+        self._verify_counts = {"OK": 0, "CORRUPT": 0, "NOT FOUND": 0}
         self._verify_anomaly_ok = False
         self._presence = None
         self._repair_plan = None
@@ -569,9 +679,9 @@ class InstallPage(QWidget):
         self.verify_progress.reset()
         self.verify_button.setEnabled(False)
         self.verify_progress.on_started()
-        self.verify_progress.status_message('Checking Anomaly files...')
-        self.verify_progress.log.append_line('== Anomaly integrity check ==')
-        runner = CommandRunner(cli_command(['anomaly', 'check']), parent=self)
+        self.verify_progress.status_message("Checking Anomaly files...")
+        self.verify_progress.log.append_line("== Anomaly integrity check ==")
+        runner = CommandRunner(cli_command(["anomaly", "check"]), parent=self)
         runner.line.connect(self._on_verify_line)
         runner.finished.connect(self._on_anomaly_verify_finished)
         runner.cancelled.connect(self._on_verify_cancelled)
@@ -593,27 +703,31 @@ class InstallPage(QWidget):
         if self._verify_runner is not None and self._verify_runner.was_cancelled:
             return
         counts = self._verify_counts
-        self.verify_progress.log.append_line('')
-        parsed = counts['OK'] + counts['CORRUPT'] + counts['NOT FOUND']
+        self.verify_progress.log.append_line("")
+        parsed = counts["OK"] + counts["CORRUPT"] + counts["NOT FOUND"]
         # The CLI exits 0 on some failures, so trust it only when no failure
         # markers appear and at least one status line was actually parsed.
         if not cli_ok(rc, output, ""):
-            self.verify_progress.log.append_line('Anomaly check failed.')
+            self.verify_progress.log.append_line("Anomaly check failed.")
             self._verify_anomaly_ok = False
         elif parsed == 0:
-            self.verify_progress.log.append_line('Anomaly check produced no results - treated as failed.')
+            self.verify_progress.log.append_line(
+                "Anomaly check produced no results - treated as failed."
+            )
             self._verify_anomaly_ok = False
         else:
-            self._verify_anomaly_ok = counts['NOT FOUND'] == 0
-            self.verify_progress.log.append_line(f"Anomaly: {counts['OK']} OK, {counts['CORRUPT']} CORRUPT, {counts['NOT FOUND']} NOT FOUND")
+            self._verify_anomaly_ok = counts["NOT FOUND"] == 0
+            self.verify_progress.log.append_line(
+                f"Anomaly: {counts['OK']} OK, {counts['CORRUPT']} CORRUPT, {counts['NOT FOUND']} NOT FOUND"
+            )
         self._start_gamma_verify()
 
     def _start_gamma_verify(self):
         self._scan_cancel = threading.Event()
         self.verify_progress.cancel_button.show()
-        self.verify_progress.status_message('Checking GAMMA mods...')
-        self.verify_progress.log.append_line('')
-        self.verify_progress.log.append_line('== GAMMA integrity check ==')
+        self.verify_progress.status_message("Checking GAMMA mods...")
+        self.verify_progress.log.append_line("")
+        self.verify_progress.log.append_line("== GAMMA integrity check ==")
         task = StreamTask(self._run_gamma_verify, parent=self)
         task.line.connect(self._on_gamma_verify_progress)
         task.result.connect(self._on_gamma_verify_done)
@@ -625,17 +739,34 @@ class InstallPage(QWidget):
         profile = self.window.settings.active_profile
         if profile is None:
             raise RuntimeError("No active profile")
-        report('Downloading official GAMMA mod list...')
+        report("Downloading official GAMMA mod list...")
         official = fetch_official_mod_names(profile.mod_list_url)
         if official is None:
-            report('Official mod list not reachable - showing total counts only')
-        presence = verify_gamma(profile.gamma, profile.mo2_profile, on_progress=(lambda done, total, name: report(f"Checking GAMMA mod {done}/{total}: {name}")), official_mods=official)
-        report('Starting full MD5 scan of mod files...')
-        scan = scan_mods_md5(profile.gamma, on_progress=(lambda done, total, size: report(f"MD5 hashing {done}/{total} files ({size})")), cancel=self._scan_cancel)
+            report("Official mod list not reachable - showing total counts only")
+        presence = verify_gamma(
+            profile.gamma,
+            profile.mo2_profile,
+            on_progress=(
+                lambda done, total, name: report(
+                    f"Checking GAMMA mod {done}/{total}: {name}"
+                )
+            ),
+            official_mods=official,
+        )
+        report("Starting full MD5 scan of mod files...")
+        scan = scan_mods_md5(
+            profile.gamma,
+            on_progress=(
+                lambda done, total, size: report(
+                    f"MD5 hashing {done}/{total} files ({size})"
+                )
+            ),
+            cancel=self._scan_cancel,
+        )
         plan = None
         records = {}
         if scan.problems and not scan.cancelled and not scan.created:
-            report('Looking up download sources for broken mods...')
+            report("Looking up download sources for broken mods...")
             records = fetch_modpack_records(profile.mod_pack_maker_url)
             plan = classify_problems(scan, records)
         return (presence, scan, plan, records)
@@ -654,13 +785,21 @@ class InstallPage(QWidget):
         for line in scan.lines():
             self.verify_progress.log.append_line(line)
         counts = self._verify_counts
-        anomaly_ok = self._verify_anomaly_ok and counts['CORRUPT'] == 0
+        anomaly_ok = self._verify_anomaly_ok and counts["CORRUPT"] == 0
         presence_ok = presence.problems == 0
         if scan.cancelled:
-            self._finish_verify(ok=False, message='Verify cancelled during the GAMMA MD5 scan.', summary='Verify cancelled')
+            self._finish_verify(
+                ok=False,
+                message="Verify cancelled during the GAMMA MD5 scan.",
+                summary="Verify cancelled",
+            )
             return
-        if presence_ok and scan.problems == 0:
-            self._finish_verify(ok=anomaly_ok, message=self._gamma_ok_message(repaired=0), summary=presence.summary)
+        if presence_ok and scan.problems == 0 and anomaly_ok:
+            self._finish_verify(
+                ok=True,
+                message=self._gamma_ok_message(repaired=0),
+                summary=presence.summary,
+            )
             return
         if plan is not None and plan.has_repairable:
             self._prompt_repair()
@@ -670,20 +809,24 @@ class InstallPage(QWidget):
     def _gamma_ok_message(self, repaired):
         if repaired:
             return f"Confirmed: GAMMA repaired ({repaired} mod(s)) and verified successfully."
-        return 'Confirmed: Anomaly and GAMMA verified successfully.'
+        return "Confirmed: Anomaly and GAMMA verified successfully."
 
     def _finish_with_issues(self):
         plan = self._repair_plan
         if plan is not None:
             if plan.unrepairable:
-                shown = ', '.join(plan.unrepairable[:5])
+                shown = ", ".join(plan.unrepairable[:5])
                 if len(plan.unrepairable) > 5:
                     shown += f"... (+{(len(plan.unrepairable) - 5)} more)"
-                self.verify_progress.log.append_line(f"Not repairable ({len(plan.unrepairable)}): no download source found - {shown}")
+                self.verify_progress.log.append_line(
+                    f"Not repairable ({len(plan.unrepairable)}): no download source found - {shown}"
+                )
             if plan.added_only:
-                self.verify_progress.log.append_line(f"Left untouched ({len(plan.added_only)} mod(s) with added files - your own edits are kept).")
-        message = 'Verify finished with issues - Anomaly and/or GAMMA are not fully verified (see details above).'
-        self._finish_verify(ok=False, message=message, summary='GAMMA has issues')
+                self.verify_progress.log.append_line(
+                    f"Left untouched ({len(plan.added_only)} mod(s) with added files - your own edits are kept)."
+                )
+        message = "Verify finished with issues - Anomaly and/or GAMMA are not fully verified (see details above)."
+        self._finish_verify(ok=False, message=message, summary="GAMMA has issues")
 
     def _prompt_repair(self):
         plan = self._repair_plan
@@ -691,7 +834,12 @@ class InstallPage(QWidget):
         shown = "\n".join(f"  - {name}" for name in names[:8])
         if len(names) > 8:
             shown += f"\n  ... and {(len(names) - 8)} more"
-        answer = QMessageBox.question(self, 'Repair Broken Mods', f"Verify Integrity found {len(names)} broken mod(s):\n\n{shown}\n\nRepair now? This permanently deletes each mod folder and its cached archive, then re-downloads and re-installs it (MD5-verified).\n\nExtra mods and your own added files are never touched.", (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No))
+        answer = QMessageBox.question(
+            self,
+            "Repair Broken Mods",
+            f"Verify Integrity found {len(names)} broken mod(s):\n\n{shown}\n\nRepair now? This permanently deletes each mod folder and its cached archive, then re-downloads and re-installs it (MD5-verified).\n\nExtra mods and your own added files are never touched.",
+            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+        )
         if answer != QMessageBox.StandardButton.Yes:
             self._finish_with_issues()
             return
@@ -699,9 +847,9 @@ class InstallPage(QWidget):
 
     def _start_repair(self):
         self.verify_progress.cancel_button.show()
-        self.verify_progress.status_message('Deleting broken mods...')
-        self.verify_progress.log.append_line('')
-        self.verify_progress.log.append_line('== Repairing GAMMA mods ==')
+        self.verify_progress.status_message("Deleting broken mods...")
+        self.verify_progress.log.append_line("")
+        self.verify_progress.log.append_line("== Repairing GAMMA mods ==")
         task = StreamTask(self._run_repair_deletion, parent=self)
         task.line.connect(self._on_gamma_verify_progress)
         task.result.connect(self._on_repair_deleted)
@@ -716,21 +864,35 @@ class InstallPage(QWidget):
         removed = []
         for folder in self._repair_plan.repairable:
             if self._scan_cancel is not None and self._scan_cancel.is_set():
-                report('Repair cancelled - deletion aborted.')
+                report("Repair cancelled - deletion aborted.")
                 return removed
             report(f"Deleting {folder}")
-            removed.extend(delete_mod_and_archive(profile.gamma, folder, self._repair_records.get(folder)))
+            removed.extend(
+                delete_mod_and_archive(
+                    profile.gamma, folder, self._repair_records.get(folder)
+                )
+            )
         return removed
 
     def _on_repair_deleted(self, removed):
-        self.verify_progress.log.append_line(f"Deleted {len(removed)} folder(s)/archive(s)")
+        if self._scan_cancel is not None and self._scan_cancel.is_set():
+            self.verify_progress.log.append_line("Repair cancelled before reinstall.")
+            self._finish_verify(
+                ok=False, message="Repair cancelled.", summary="Repair cancelled"
+            )
+            return
+        self.verify_progress.log.append_line(
+            f"Deleted {len(removed)} folder(s)/archive(s)"
+        )
         self._start_repair_install()
 
     def _start_repair_install(self):
-        self.verify_progress.status_message('Re-downloading and re-installing broken mods...')
-        self.verify_progress.log.append_line('')
-        self.verify_progress.log.append_line('== Running installer (repair) ==')
-        args = ['full-install', '--skip-extract-on-hash-match']
+        self.verify_progress.status_message(
+            "Re-downloading and re-installing broken mods..."
+        )
+        self.verify_progress.log.append_line("")
+        self.verify_progress.log.append_line("== Running installer (repair) ==")
+        args = ["full-install", "--skip-extract-on-hash-match"]
         runner = CommandRunner(cli_command(args, progress_interval_ms=200), parent=self)
         runner.line.connect(self._on_verify_line)
         runner.finished.connect(self._on_repair_install_finished)
@@ -745,25 +907,27 @@ class InstallPage(QWidget):
         # the new reference.
         if self._repair_runner is not None and self._repair_runner.was_cancelled:
             return
-        self.verify_progress.log.append_line('')
+        self.verify_progress.log.append_line("")
         if not cli_ok(rc, output, ""):
-            self.verify_progress.log.append_line('Repair install failed.')
+            self.verify_progress.log.append_line("Repair install failed.")
             self._finish_verify(
                 ok=False,
-                message='Repair install failed - GAMMA is not fully repaired (see details above).',
-                summary='Repair failed',
+                message="Repair install failed - GAMMA is not fully repaired (see details above).",
+                summary="Repair failed",
             )
             return
         self._start_post_scan()
 
     def _on_repair_install_cancelled(self):
-        self.verify_progress.log.append_line('Repair install cancelled')
-        self._finish_verify(ok=False, message='Repair cancelled.', summary='Repair cancelled')
+        self.verify_progress.log.append_line("Repair install cancelled")
+        self._finish_verify(
+            ok=False, message="Repair cancelled.", summary="Repair cancelled"
+        )
 
     def _start_post_scan(self):
-        self.verify_progress.status_message('Re-checking GAMMA mods...')
-        self.verify_progress.log.append_line('')
-        self.verify_progress.log.append_line('== Re-checking after repair ==')
+        self.verify_progress.status_message("Re-checking GAMMA mods...")
+        self.verify_progress.log.append_line("")
+        self.verify_progress.log.append_line("== Re-checking after repair ==")
         task = StreamTask(self._run_post_scan, parent=self)
         task.line.connect(self._on_gamma_verify_progress)
         task.result.connect(self._on_post_scan_done)
@@ -775,11 +939,28 @@ class InstallPage(QWidget):
         profile = self.window.settings.active_profile
         if profile is None:
             raise RuntimeError("No active profile")
-        post = scan_mods_md5(profile.gamma, on_progress=(lambda done, total, size: report(f"MD5 hashing {done}/{total} files ({size})")), cancel=self._scan_cancel, rebaseline=True)
+        post = scan_mods_md5(
+            profile.gamma,
+            on_progress=(
+                lambda done, total, size: report(
+                    f"MD5 hashing {done}/{total} files ({size})"
+                )
+            ),
+            cancel=self._scan_cancel,
+            rebaseline=True,
+        )
         if post.cancelled:
             return (post, None)
-        report('Re-checking GAMMA mods are present...')
-        presence = verify_gamma(profile.gamma, profile.mo2_profile, on_progress=(lambda done, total, name: report(f"Checking GAMMA mod {done}/{total}: {name}")))
+        report("Re-checking GAMMA mods are present...")
+        presence = verify_gamma(
+            profile.gamma,
+            profile.mo2_profile,
+            on_progress=(
+                lambda done, total, name: report(
+                    f"Checking GAMMA mod {done}/{total}: {name}"
+                )
+            ),
+        )
         return (post, presence)
 
     def _on_post_scan_done(self, result):
@@ -790,32 +971,46 @@ class InstallPage(QWidget):
             for line in presence.lines():
                 self.verify_progress.log.append_line(line)
         counts = self._verify_counts
-        anomaly_ok = self._verify_anomaly_ok and counts['CORRUPT'] == 0
+        anomaly_ok = self._verify_anomaly_ok and counts["CORRUPT"] == 0
         if post.cancelled:
-            self._finish_verify(ok=False, message='Verify cancelled during the post-repair scan.', summary='Verify cancelled')
+            self._finish_verify(
+                ok=False,
+                message="Verify cancelled during the post-repair scan.",
+                summary="Verify cancelled",
+            )
             return
         repaired = len(self._repair_plan.repairable) if self._repair_plan else 0
         remaining = post.problems + (presence.problems if presence is not None else 0)
         if remaining == 0:
-            self._finish_verify(ok=anomaly_ok, message=self._gamma_ok_message(repaired=repaired), summary=f"GAMMA repaired ({repaired} mod(s))")
+            self._finish_verify(
+                ok=anomaly_ok,
+                message=self._gamma_ok_message(repaired=repaired),
+                summary=f"GAMMA repaired ({repaired} mod(s))",
+            )
             return
-        self.verify_progress.log.append_line(f"{remaining} problem(s) remain after repair.")
+        self.verify_progress.log.append_line(
+            f"{remaining} problem(s) remain after repair."
+        )
         self._finish_with_issues()
 
     def _on_gamma_verify_error(self, message):
         self.verify_progress.log.append_line(f"GAMMA check failed: {message}")
-        self._finish_verify(ok=False, message='Verify failed - Anomaly and/or GAMMA are not fully verified.', summary='GAMMA check failed')
+        self._finish_verify(
+            ok=False,
+            message="Verify failed - Anomaly and/or GAMMA are not fully verified.",
+            summary="GAMMA check failed",
+        )
 
     def _finish_verify(self, ok, message, summary):
         self.verify_button.setEnabled(True)
         self.verify_progress.cancel_button.hide()
         self._scan_cancel = None
-        self.verify_progress.log.append_line('')
+        self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line(message)
         if ok:
-            self.verify_progress.on_finished(0, '')
+            self.verify_progress.set_success_state("Verified successfully")
         else:
-            self.verify_progress.on_finished(1, '')
+            self.verify_progress.on_finished(1, "")
         self.verify_progress.status_message(message)
         self.window.statusBar().showMessage(summary, 8000)
         self.window.set_install_busy(False)
@@ -828,9 +1023,9 @@ class InstallPage(QWidget):
             return
 
     def _on_verify_cancelled(self):
-        self.verify_progress.log.append_line('Anomaly check cancelled')
+        self.verify_progress.log.append_line("Anomaly check cancelled")
         self.verify_button.setEnabled(True)
-        self.verify_progress.status_message('Cancelled')
+        self.verify_progress.status_message("Cancelled")
         self.verify_progress.cancel_button.hide()
         self.window.set_install_busy(False)
 
@@ -848,12 +1043,16 @@ class InstallPage(QWidget):
         closes and this page next refreshes.
         """
         paused = {verb: True for verb in WINETRICKS_VERBS}
+        paused["wine"] = True
+        paused["protontricks"] = True
         total = len(paused)
         self._wt_installed = True
-        self.wt_status.set_state(True, f"{total}/{total} runtimes installed (paused - game running)")
+        self.wt_status.set_state(
+            True, f"{total}/{total} dependencies installed (paused - game running)"
+        )
         self.wt_status.set_status_tooltip(winetricks_tooltip(paused))
         self.wt_progress.set_installed_state(
-            True, f"{total}/{total} runtimes installed (paused - game running)"
+            True, f"{total}/{total} dependencies installed (paused - game running)"
         )
         self._update_button_states()
 
@@ -868,7 +1067,9 @@ class InstallPage(QWidget):
         self._wt_installed = None
         self._update_button_states()
         self._wt_checking = True
-        task = BackgroundTask(check_winetricks_status, self._wt_prefix(), parent=self)
+        task = BackgroundTask(
+            check_winetricks_full_status, self._wt_prefix(), parent=self
+        )
         task.result.connect(self._on_winetricks_status)
         task.error.connect(self._on_winetricks_status_error)
         self._wt_task = task
@@ -883,10 +1084,12 @@ class InstallPage(QWidget):
         installed = sum(1 for ok in status.values() if ok)
         total = len(status)
         self._wt_installed = installed == total
-        self.wt_status.set_state(installed == total, f"{installed}/{total} runtimes installed")
+        self.wt_status.set_state(
+            installed == total, f"{installed}/{total} dependencies installed"
+        )
         self.wt_status.set_status_tooltip(winetricks_tooltip(status))
         self.wt_progress.set_installed_state(
-            installed == total, f"{installed}/{total} runtimes installed"
+            installed == total, f"{installed}/{total} dependencies installed"
         )
         self._update_button_states()
 
@@ -897,7 +1100,7 @@ class InstallPage(QWidget):
             self._paused_status()
             return
         self._wt_installed = None
-        self.wt_status.set_state(None, 'status unavailable', pending_text='Unknown')
+        self.wt_status.set_state(None, "status unavailable", pending_text="Unknown")
         self.wt_status.set_status_tooltip(f"Could not query winetricks: {message}")
         self.wt_progress.set_installed_state(None, "Status unavailable")
         self._update_button_states()
@@ -907,14 +1110,20 @@ class InstallPage(QWidget):
         if self._wt_runner is not None and self._wt_runner.is_running():
             return
         if self.window.install_busy:
-            QMessageBox.information(self, 'Busy', 'An install is already running.')
+            QMessageBox.information(self, "Busy", "An install is already running.")
             return
         if mo2_running():
             # The game holds the Wine prefix; winetricks must not touch it.
             return
-        if not winetricks_binary():
-            QMessageBox.warning(self, 'winetricks Not Found', """winetricks is not installed. Install it, for example with:
-    sudo apt install winetricks""")
+        errors = check_all_dependencies()
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Missing Dependencies",
+                "The following are required but not found:\n\n"
+                + "\n\n".join(errors)
+                + "\n\nInstall them and try again.",
+            )
             return
         prefix = self._wt_prefix()
         need_protontricks = not protontricks_binary()
@@ -923,25 +1132,62 @@ class InstallPage(QWidget):
             message += """
 
     protontricks is missing and will be installed first."""
-        answer = QMessageBox.question(self, 'Confirm Winetricks Configuration', message, (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No))
+        answer = QMessageBox.question(
+            self,
+            "Confirm Winetricks Configuration",
+            message,
+            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+        )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._wt_stage = 'tools' if need_protontricks else 'verbs'
+        self._wt_stage = "tools" if need_protontricks else "verbs"
+        self._wt_completed_verbs.clear()
         self.window.set_install_busy(True)
         self.wt_progress.reset()
         self._start_winetricks_stage()
 
     def _start_winetricks_stage(self):
         self.wt_progress.on_started()
-        tools_stage = self._wt_stage == 'tools'
-        command = protontricks_install_command() if tools_stage else winetricks_install_command()
+        self.wt_progress.bar.setRange(0, 100)
+        self.wt_progress.bar.setValue(0)
+        self.wt_progress.bar.setFormat("%p%")
+        tools_stage = self._wt_stage == "tools"
+        command = (
+            protontricks_install_command()
+            if tools_stage
+            else winetricks_install_command()
+        )
+        if tools_stage and not command:
+            from ..dependencies import _externally_managed, _install_command
+
+            msg = "protontricks could not be installed."
+            if _externally_managed():
+                cmd = _install_command("pipx")
+                msg += (
+                    "\n\nThis system marks Python as externally managed "
+                    "(PEP 668), so pip cannot install packages directly."
+                    f"\n\nInstall pipx first:\n  {cmd}\n\n"
+                    "Then try again — protontricks will be installed automatically."
+                )
+            else:
+                msg += "\n\nInstall pipx or pip, then try again."
+            self.wt_progress.on_finished(1, msg)
+            self._wt_runner = None
+            self.window.set_install_busy(False)
+            return
         if tools_stage:
-            self.wt_progress.status_message('Installing protontricks...')
-            self.wt_progress.log.append_line('== Installing protontricks ==')
+            self.wt_progress.status_message("Installing protontricks...")
+            self.wt_progress.log.append_line("== Installing protontricks ==")
         else:
-            self.wt_progress.status_message('Installing runtimes...')
-            self.wt_progress.log.append_line('== Winetricks: ' + ' '.join(WINETRICKS_VERBS) + ' ==')
-        self._wt_runner = CommandRunner(command, env={'WINEPREFIX': self._wt_prefix(), 'WINEDEBUG': '-all'}, parent=self)
+            self.wt_progress.status_message("Installing runtimes...")
+            self.wt_progress.log.append_line(
+                "== Winetricks: " + " ".join(WINETRICKS_VERBS) + " =="
+            )
+        self._wt_runner = CommandRunner(
+            command,
+            env={"WINEPREFIX": self._wt_prefix(), "WINEDEBUG": "-all"},
+            parent=self,
+        )
         self._wt_runner.line.connect(self._on_winetricks_line)
         self._wt_runner.finished.connect(self._on_winetricks_finished)
         self._wt_runner.cancelled.connect(self._on_winetricks_cancelled)
@@ -950,25 +1196,34 @@ class InstallPage(QWidget):
     def _on_winetricks_line(self, line):
         self.wt_progress.on_line(line)
         clean = line.strip()
-        if clean:
-            if not clean.startswith(('Using winetricks', 'gamemodeauto')):
-                self.wt_progress.status_message(clean[:160])
-                return
+        if not clean:
             return
+        # Skip noisy winetricks/gamemode lines.
+        if clean.startswith(("Using winetricks", "gamemodeauto")):
+            return
+        pct = _winetricks_progress(clean, self._wt_stage, self._wt_completed_verbs)
+        if pct is not None:
+            self.wt_progress.bar.setRange(0, 100)
+            self.wt_progress.bar.setValue(pct)
+            self.wt_progress.bar.setFormat("%p%")
 
     def _on_winetricks_finished(self, rc, output):
         # 'finished' still arrives after a cancel; don't overwrite the
         # 'Cancelled' status with a spurious failure.
         if self._wt_runner is not None and self._wt_runner.was_cancelled:
+            self._wt_runner = None
+            self.window.set_install_busy(False)
+            self._refresh_winetricks_status()
             return
-        if self._wt_stage == 'tools' and rc == 0:
-            self._wt_stage = 'verbs'
-            self.wt_progress.on_finished(rc, output)
+        if self._wt_stage == "tools" and rc == 0:
+            self._wt_stage = "verbs"
+            self._wt_runner = None
+            # Do not call on_finished — the verbs stage continues directly.
             self._start_winetricks_stage()
             return
         self.wt_progress.on_finished(rc, output)
         if rc == 0:
-            self.wt_progress.status_message('Complete - runtimes installed')
+            self.wt_progress.status_message("Complete - runtimes installed")
         else:
             self.wt_progress.status_message(f"Failed (exit code {rc})")
         self._wt_runner = None
@@ -976,14 +1231,22 @@ class InstallPage(QWidget):
         self._refresh_winetricks_status()
 
     def _on_winetricks_cancelled(self):
-        self.wt_progress.log.append_line('Winetricks cancelled')
-        self.wt_progress.status_message('Cancelled')
-        self.wt_progress.cancel_button.hide()
-        # Keep the runner reference: 'finished' still fires after a cancel and
-        # the finished handler reads was_cancelled to skip cleanup.
-        self.window.set_install_busy(False)
+        self.wt_progress.log.append_line("Winetricks cancelled")
+        self.wt_progress.status_message("Cancelled")
 
     def _cancel_winetricks(self):
-        if self._wt_runner is not None:
-            self._wt_runner.cancel()
+        if self._wt_runner is None or not self._wt_runner.is_running():
             return
+        answer = QMessageBox.question(
+            self,
+            "Cancel Winetricks Configuration",
+            "Winetricks is downloading or installing runtime dependencies.\n\n"
+            "Cancel the operation? The prefix may be left partially configured.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.wt_progress.cancel_button.setEnabled(False)
+        self.wt_progress.cancel_button.setText("Cancelling...")
+        self.wt_progress.status_message("Cancelling Winetricks...")
+        self._wt_runner.cancel()

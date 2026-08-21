@@ -30,7 +30,12 @@ def cli_binary_path() -> Path:
     ]
     if getattr(sys, "frozen", False):
         candidates.insert(
-            0, Path(sys.executable).resolve().parent / "cli" / "usr" / "bin" / "stalker-gamma"
+            0,
+            Path(sys.executable).resolve().parent
+            / "cli"
+            / "usr"
+            / "bin"
+            / "stalker-gamma",
         )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -46,7 +51,7 @@ def cli_binary_path() -> Path:
 
 
 def settings_dir() -> Path:
-    """Directory where the CLI stores its settings (%APPDATA%/stalker-gamma)."""
+    """Directory where the CLI stores its settings (~/.config/stalker-gamma)."""
     base = os.environ.get("XDG_CONFIG_HOME")
     if not base:
         base = os.path.join(Path.home(), ".config")

@@ -19,20 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..config import logs_dir
 from ..gui_settings import load_gui_settings
-from .common import clear_layout, info_label, make_card, section_label
-
-
-def _kv_row(label: str, value: str) -> QHBoxLayout:
-    row = QHBoxLayout()
-    key = QLabel(label)
-    key.setObjectName("dim")
-    key.setAlignment(Qt.AlignmentFlag.AlignTop)
-    val = QLabel(value)
-    val.setWordWrap(True)
-    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
-    row.addWidget(val, 1)
-    return row
+from .common import _kv_row, clear_layout, info_label, make_card, section_label
 
 
 def _bullets(lines: list[str]) -> QLabel:
@@ -58,19 +45,22 @@ class HelpPage(QWidget):
         outer.addWidget(scroll)
 
         content = QWidget()
+        content.setObjectName("pageContent")
         root = QVBoxLayout(content)
         root.setContentsMargins(0, 0, 8, 0)
         root.setSpacing(14)
         scroll.setWidget(content)
 
-        root.addWidget(section_label("GAMMA HELP", level=1))
-        root.addWidget(
-            info_label(
-                "Everything in this guide maps to a page or setting in this "
-                "application. Start with Profiles, install the game, configure "
-                "your runner, then launch through Mod Organizer 2."
-            )
+        _title = section_label("HELP", level=1)
+        _title.setWordWrap(True)
+        _title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(_title)
+        _sub = info_label(
+            "This guide explains each COMMANDER page. Start with a COMMANDER profile, "
+            "install Anomaly and GAMMA, choose a Wine/Proton runner, then launch through MO2."
         )
+        _sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(_sub)
 
         root.addWidget(self._quickstart_card())
         root.addWidget(self._snapshot_card())
@@ -82,7 +72,7 @@ class HelpPage(QWidget):
         config.addWidget(section_label("Configuration", level=2))
         config.addWidget(
             info_label(
-                "Commander respects XDG_CONFIG_HOME; the paths below assume the "
+                "COMMANDER respects XDG_CONFIG_HOME; the paths below assume the "
                 "default location."
             )
         )
@@ -157,7 +147,7 @@ class HelpPage(QWidget):
                 "01",
                 "Create a profile",
                 (
-                    "Fill in the Anomaly path, G.A.M.M.A. path and Cache path, "
+                    "Fill in the Anomaly folder, GAMMA folder, and cache folder, "
                     "then Create Profile — it activates automatically. Use "
                     "absolute paths; the CLI defaults are relative to where the "
                     "app was started."
@@ -167,12 +157,13 @@ class HelpPage(QWidget):
             ),
             (
                 "02",
-                "Install Anomaly, then G.A.M.M.A.",
+                "Install Anomaly, then GAMMA",
                 (
-                    "Install Anomaly, then Start Full Install for G.A.M.M.A. "
+                    "Open Install and select Install GAMMA. Anomaly is installed "
+                    "first when it is missing. "
                     "Expect a very large download (~150 GB, or ~100 GB with "
-                    "Minimal). Start Full Install is idempotent — it doubles as "
-                    "the update and repair path."
+                    "Minimal). Use Updates for normal addon updates and Verify "
+                    "Integrity when checking or repairing installed files."
                 ),
                 "install",
                 "Open Install",
@@ -181,9 +172,9 @@ class HelpPage(QWidget):
                 "03",
                 "Install the runtimes",
                 (
-                    "Install / Update Runtimes in the Winetricks panel. MO2 will "
-                    "not start without the Visual C++ and DirectX runtimes "
-                    "(concrt140.dll)."
+                    "Install / Update Runtimes in the Winetricks panel. The "
+                    "workflow may install protontricks first, then the Visual C++ "
+                    "and DirectX runtimes required by MO2 (concrt140.dll)."
                 ),
                 "install",
                 "Open Winetricks",
@@ -192,9 +183,10 @@ class HelpPage(QWidget):
                 "04",
                 "Launch the game",
                 (
-                    "Pick a runner and launch target on Play, then Launch Game. "
-                    "The game starts detached — closing Commander does not kill "
-                    "your session."
+                    "Pick a Wine/Proton runner and launch target on Play, then "
+                    "choose Launch Game, Open MO2, or Launch Anomaly. The game "
+                    "starts detached, so closing COMMANDER does not kill your "
+                    "session."
                 ),
                 "play",
                 "Open Play",
@@ -214,7 +206,9 @@ class HelpPage(QWidget):
             row.addLayout(body, 1)
             button = QPushButton(button_text)
             button.setObjectName("secondary")
-            button.clicked.connect(lambda _checked=False, key=page: self.window.set_page(key))
+            button.clicked.connect(
+                lambda _checked=False, key=page: self.window.set_page(key)
+            )
             row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
             layout.addLayout(row)
         return card
@@ -246,7 +240,7 @@ class HelpPage(QWidget):
                 "Dashboard",
                 (
                     "The landing page. Active profile summary, install status for "
-                    "Anomaly and G.A.M.M.A., Winetricks runtime status, storage "
+                    "Anomaly and GAMMA, Winetricks runtime status, storage "
                     "usage across your folders, a background update check, and "
                     "quick-open buttons for each folder and the log directory."
                 ),
@@ -258,19 +252,33 @@ class HelpPage(QWidget):
                 (
                     "Launches the selected executable through ModOrganizer.exe "
                     "run -e so the MO2 virtual file system is active and every "
-                    "G.A.M.M.A. mod is loaded."
+                    "GAMMA mod is loaded."
                 ),
                 [
-                    "Auto runner detection — UMU Proton, then Steam Proton, then Wine",
+                    "Auto runner detection — Proton, then Wine",
                     "Per-runner prefixes, live command preview with a copy button",
                     "Detached launch, with launcher.log diagnostics",
                 ],
                 "play",
             ),
             (
+                "System Check",
+                (
+                    "Check whether Linux has the dependencies, runners, Proton "
+                    "builds, prefixes, and graphics support needed to install and "
+                    "run S.T.A.L.K.E.R. G.A.M.M.A."
+                ),
+                [
+                    "Commands are shown for manual installation only",
+                    "Copy package commands and refresh checks after installing",
+                    "Separate runner and prefix checks help prevent Proton mismatches",
+                ],
+                "systemcheck",
+            ),
+            (
                 "Install",
                 (
-                    "Full Anomaly and G.A.M.M.A. installation with a live per-addon "
+                    "Full Anomaly and GAMMA installation with a live per-addon "
                     "progress table, an overall completion bar and clean "
                     "cancellation."
                 ),
@@ -298,7 +306,7 @@ class HelpPage(QWidget):
                 "Mod Manager",
                 (
                     "Direct, careful editing of the MO2 profile's modlist.txt — "
-                    "mods grouped by the _separator category entries G.A.M.M.A. "
+                    "mods grouped by the _separator category entries GAMMA "
                     "ships, with search."
                 ),
                 [
@@ -344,7 +352,9 @@ class HelpPage(QWidget):
                 card_layout.addWidget(_bullets(bullets))
             button = QPushButton(f"Open {title}")
             button.setObjectName("secondary")
-            button.clicked.connect(lambda _checked=False, key=page: self.window.set_page(key))
+            button.clicked.connect(
+                lambda _checked=False, key=page: self.window.set_page(key)
+            )
             card_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
             grid.addWidget(card_widget, index // 2, index % 2)
         layout.addLayout(grid)
@@ -355,44 +365,50 @@ class HelpPage(QWidget):
         layout.addWidget(section_label("Troubleshooting", level=2))
         rows = [
             (
-                "CLI Not Found on startup",
+                "CLI not found on startup",
                 (
-                    "The bundled binary is missing or not executable — chmod +x "
-                    "cli/usr/bin/stalker-gamma, or set STALKER_GAMMA_CLI."
+                    "The bundled binary is missing or not executable. Run chmod +x "
+                    "cli/usr/bin/stalker-gamma, or set STALKER_GAMMA_CLI to an "
+                    "executable elsewhere."
                 ),
             ),
             (
-                "MO2 exits immediately; log mentions concrt140.dll",
+                "MO2 exits immediately or mentions concrt140.dll",
                 (
-                    "Winetricks runtimes are not installed in the prefix — "
-                    "Install page → Install / Update Runtimes."
+                    "Install the required Wine/Proton runtimes into the active "
+                    "runner prefix from Install → Install / Update Runtimes."
                 ),
             ),
             (
-                "wine client error: version mismatch",
+                "Wine client error: version mismatch",
                 (
-                    "The prefix was built by a different Wine/Proton version. "
-                    "Select the original runner, or use a separate prefix for the "
-                    "new one."
+                    "This prefix was created by a different Wine/Proton version. "
+                    "Select the original runner or configure a separate prefix "
+                    "for the new runner. Close MO2 and the game before switching."
                 ),
             ),
             (
                 "Play page has no launch targets",
                 (
-                    "G.A.M.M.A. is not installed yet, or ModOrganizer.ini has no "
-                    "[customExecutables] section."
+                    "The active profile may point to the wrong GAMMA folder, GAMMA "
+                    "may not be installed, or ModOrganizer.ini may not contain a "
+                    "parseable executable. If available, AnomalyLauncher.exe is "
+                    "used as a direct-launch fallback."
                 ),
             ),
             (
                 "Mod Manager edits are disabled",
                 (
-                    "Mod Organizer is running — close it first; it rewrites "
-                    "modlist.txt on exit and would discard your edits."
+                    "MO2 is running. Close it first because MO2 rewrites modlist.txt "
+                    "when it exits and could discard your edits."
                 ),
             ),
             (
-                "Install folders look wrong / files in odd places",
-                "Profile paths are relative. Set absolute paths on the Profiles page.",
+                "Install folders look wrong / files are in odd places",
+                (
+                    "Profile paths are relative to the directory where COMMANDER "
+                    "was started. Set absolute paths on the Profiles page."
+                ),
             ),
             (
                 "Everything shows No active profile",
@@ -403,6 +419,51 @@ class HelpPage(QWidget):
                 (
                     "Install libxcb-cursor0 / xcb-util-cursor (see the README "
                     "requirements section)."
+                ),
+            ),
+            (
+                "Launch fails or exits immediately",
+                (
+                    "Check launcher.log, the selected target, runner, prefix, and "
+                    "required dependencies. The Play page reports the exit code "
+                    "and recent launcher output."
+                ),
+            ),
+            (
+                "No runner detected or umu-run is missing",
+                (
+                    "Install or configure Wine, Steam Proton, or umu-run. Auto "
+                    "detection tries Proton, then Wine."
+                ),
+            ),
+            (
+                "Winetricks or runtime installation fails",
+                (
+                    "Install Wine and Winetricks. If protontricks is missing, "
+                    "COMMANDER can install it with pipx or user-level pip; PEP 668 "
+                    "systems should use pipx. Keep MO2 and the game closed."
+                ),
+            ),
+            (
+                "Settings or autostart changes do not take effect",
+                (
+                    "GUI settings follow XDG_CONFIG_HOME. Autostart uses the "
+                    "stalker-gamma-commander.desktop file under the autostart "
+                    "directory; recreate it from Settings if it was removed."
+                ),
+            ),
+            (
+                "An installation move was interrupted",
+                (
+                    "Restart COMMANDER and review the orphan-folder prompt before "
+                    "removing anything. Verify the listed destination first."
+                ),
+            ),
+            (
+                "Need diagnostics for a bug report",
+                (
+                    "Use Settings → Export diagnostics for a report, or Utilities "
+                    "→ Create diagnostic archive for the CLI install hash archive."
                 ),
             ),
         ]
@@ -429,7 +490,9 @@ class HelpPage(QWidget):
         if profile is None:
             self.snapshot_status.setText("No active profile. Start on Profiles.")
             self._set_snapshot_value("Profile", "Not configured")
-            self._set_snapshot_value("Runner", load_gui_settings().get("runner", "auto"))
+            self._set_snapshot_value(
+                "Runner", load_gui_settings().get("runner", "auto")
+            )
             return
 
         gui = load_gui_settings()

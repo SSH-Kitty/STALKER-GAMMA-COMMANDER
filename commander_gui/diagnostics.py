@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -15,6 +16,15 @@ from pathlib import Path
 
 from . import __version__
 from .config import cli_binary_path, gui_settings_path, logs_dir, settings_path
+
+_MAX_DIAGNOSTIC_FILE_BYTES = 1_000_000
+_SENSITIVE_VALUE_RE = re.compile(
+    r'(?i)("[^"]*(?:token|password|passwd|secret|credential|api[_-]?key)[^"]*"\s*:\s*)"[^"]*"'
+)
+
+
+def _redact(text: str) -> str:
+    return _SENSITIVE_VALUE_RE.sub(r'\1"[REDACTED]"', text)
 
 
 def _section(title: str, body: str) -> str:
@@ -42,8 +52,10 @@ def _system_info() -> str:
         if app is not None:
             screen = app.primaryScreen()
             if screen is not None:
-                lines.append(f"Screen: {screen.name()} {screen.size().width()}x{screen.size().height()}")
-    except Exception:  # noqa: BLE001, S110
+                lines.append(
+                    f"Screen: {screen.name()} {screen.size().width()}x{screen.size().height()}"
+                )
+    except (ImportError, RuntimeError):
         pass
     return "\n".join(lines)
 
@@ -62,7 +74,7 @@ def _cli_version() -> str:
         )
         output = (result.stdout + result.stderr).strip()
         return output if output else f"(no output, exit code {result.returncode})"
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return f"Failed to run CLI: {exc}"
 
 
@@ -70,7 +82,16 @@ def _read_file(path: Path) -> str:
     if not path.is_file():
         return f"File not found: {path}"
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - _MAX_DIAGNOSTIC_FILE_BYTES))
+            text = stream.read(_MAX_DIAGNOSTIC_FILE_BYTES).decode(
+                "utf-8", errors="replace"
+            )
+        if size > _MAX_DIAGNOSTIC_FILE_BYTES:
+            return "[file tail; beginning omitted]\n" + text
+        return text
     except OSError as exc:
         return f"Could not read {path}: {exc}"
 
@@ -79,13 +100,25 @@ def collect_diagnostics() -> str:
     sections = [
         _section("System Info", _system_info()),
         _section("CLI Version", _cli_version()),
-        _section("CLI Settings (settings.json)", _read_file(settings_path())),
-        _section("GUI Settings (gui-settings.json)", _read_file(gui_settings_path())),
-        _section("Launcher Log", _read_file(logs_dir() / "launcher.log")),
+        _section("CLI Settings (settings.json)", _redact(_read_file(settings_path()))),
+        _section(
+            "GUI Settings (gui-settings.json)",
+            _redact(_read_file(gui_settings_path())),
+        ),
+        _section("Launcher Log", _redact(_read_file(logs_dir() / "launcher.log"))),
     ]
     return "\n".join(sections)
 
 
 def export_diagnostics(path: Path) -> None:
+    import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(collect_diagnostics(), encoding="utf-8")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(collect_diagnostics())
+        Path(tmp).replace(path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise

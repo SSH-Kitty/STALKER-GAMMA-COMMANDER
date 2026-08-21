@@ -23,7 +23,7 @@ def load_bundled_font() -> str:
         return "sans-serif"
     try:
         id_ = QFontDatabase.addApplicationFont(str(font_path))
-    except Exception:  # noqa: BLE001
+    except RuntimeError:
         return "sans-serif"
     if id_ == -1:
         return "sans-serif"

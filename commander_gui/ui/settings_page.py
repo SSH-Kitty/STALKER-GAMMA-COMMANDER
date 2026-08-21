@@ -29,12 +29,9 @@ from PySide6.QtWidgets import (
 from .. import gui_settings
 from ..launcher import (
     find_extra_protons,
-    find_steam_protons,
-    find_wine_versions,
 )
 from ..themes import THEME_INFO, active_theme
 from .common import info_label, make_card, section_label
-from .play_page import RUNNER_LABELS
 
 
 def _swatch(color: str) -> QFrame:
@@ -80,6 +77,7 @@ class SettingsPage(QWidget):
         outer.addWidget(scroll)
 
         content = QWidget()
+        content.setObjectName("pageContent")
         root = QVBoxLayout(content)
         root.setContentsMargins(0, 0, 8, 0)
         root.setSpacing(14)
@@ -97,19 +95,13 @@ class SettingsPage(QWidget):
     # ------------------------------------------------------------------ cards
     def _launch_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Launch", level=2))
-        layout.addWidget(
-            info_label(
-                "Choose which page COMMANDER opens on when you start it."
-            )
-        )
+        layout.addWidget(section_label("Startup", level=2))
+        layout.addWidget(info_label("Choose the page COMMANDER opens when it starts."))
         self._start_page_combo = QComboBox()
         self._start_page_combo.currentIndexChanged.connect(self._on_start_page)
-        layout.addLayout(
-            _option_row("Start page on launch:", self._start_page_combo)
-        )
+        layout.addLayout(_option_row("Page on startup:", self._start_page_combo))
 
-        self._autostart_check = QCheckBox("Launch on startup")
+        self._autostart_check = QCheckBox("Start COMMANDER when I log in")
         self._autostart_check.setToolTip(
             "Add COMMANDER to your desktop's autostart list so it starts "
             "automatically when you log in."
@@ -120,18 +112,17 @@ class SettingsPage(QWidget):
 
     def _launcher_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Default Runner", level=2))
+        layout.addWidget(section_label("Wine/Proton runner", level=2))
         layout.addWidget(
             info_label(
-                "The default runner is used by the Play page. It can still be "
-                "overridden per launch there."
+                "Choose the runner used by default on the Play page. You can override it for each launch."
             )
         )
         self._runner_combo = QComboBox()
         self._runner_combo.currentIndexChanged.connect(self._on_runner_changed)
         layout.addLayout(_option_row("Default runner:", self._runner_combo))
 
-        self._gamemode_check = QCheckBox("Always use gamemoderun")
+        self._gamemode_check = QCheckBox("Always use GameMode")
         self._gamemode_check.setToolTip(
             "Wrap every launch in gamemoderun (enables the Feral GameMode "
             "CPU governor / scheduler optimisation), even for Wine and Proton."
@@ -140,8 +131,7 @@ class SettingsPage(QWidget):
         layout.addWidget(self._gamemode_check)
         layout.addWidget(
             info_label(
-                "Note: umu-run launches already use gamemoderun automatically "
-                "when it is installed."
+                "umu-run launches already use gamemoderun automatically when it is installed."
             )
         )
         return card
@@ -151,15 +141,26 @@ class SettingsPage(QWidget):
         layout.addWidget(section_label("Appearance", level=2))
         layout.addWidget(
             info_label(
-                "Set the base font size. The whole interface scales with it "
-                "and the change applies immediately."
+                "Set the interface font family and size. Changes apply immediately."
             )
         )
+        self._font_family_combo = QComboBox()
+        for family in (
+            "Exo 2",
+            "Noto Sans",
+            "DejaVu Sans",
+            "Ubuntu",
+            "Liberation Sans",
+            "Inter",
+        ):
+            self._font_family_combo.addItem(family, family)
+        self._font_family_combo.currentIndexChanged.connect(self._on_font_family)
+        layout.addLayout(_option_row("Font family:", self._font_family_combo))
         self._font_spin = QSpinBox()
-        self._font_spin.setRange(9, 22)
+        self._font_spin.setRange(9, 20)
         self._font_spin.setSuffix(" px")
         self._font_spin.valueChanged.connect(self._on_font_size)
-        layout.addLayout(_option_row("UI scale / font size:", self._font_spin))
+        layout.addLayout(_option_row("Interface font size:", self._font_spin))
         return card
 
     def _themes_card(self) -> QWidget:
@@ -167,8 +168,7 @@ class SettingsPage(QWidget):
         layout.addWidget(section_label("Themes", level=2))
         layout.addWidget(
             info_label(
-                "Choose the look of COMMANDER. The selection is saved and "
-                "applied on every launch."
+                "Choose a COMMANDER theme. The selection is saved and applied on every launch."
             )
         )
         self._group = QButtonGroup(self)
@@ -204,11 +204,10 @@ class SettingsPage(QWidget):
         layout.addWidget(section_label("Diagnostics", level=2))
         layout.addWidget(
             info_label(
-                "Export a log file with system info, settings and launcher "
-                "output for troubleshooting."
+                "Export system information, settings, and launcher output for troubleshooting."
             )
         )
-        export_btn = QPushButton("Export Log")
+        export_btn = QPushButton("Export diagnostics")
         export_btn.setObjectName("secondary")
         export_btn.clicked.connect(self._on_export_log)
         layout.addWidget(export_btn, 0, Qt.AlignmentFlag.AlignLeft)
@@ -228,6 +227,10 @@ class SettingsPage(QWidget):
         else:
             ok = disable_autostart()
         gui_settings.save_gui_settings(autostart=bool(checked) and ok)
+        if not ok:
+            self._autostart_check.blockSignals(True)
+            self._autostart_check.setChecked(not checked)
+            self._autostart_check.blockSignals(False)
 
     def _on_runner_changed(self, *_args) -> None:
         runner = self._runner_combo.currentData()
@@ -240,11 +243,16 @@ class SettingsPage(QWidget):
     def _on_font_size(self, value: int) -> None:
         self.window.apply_font_size(value)
 
+    def _on_font_family(self, *_args) -> None:
+        family = self._font_family_combo.currentData()
+        if family:
+            self.window.apply_font_family(family)
+
     def _on_toggled(self, button: QRadioButton, checked: bool) -> None:
         if not checked:
             return
         key = next((k for k, radio in self._radios.items() if radio is button), None)
-        if key is None or key == active_theme():
+        if key is not None and key != active_theme():
             self.window.apply_theme(key)
 
     def _on_export_log(self) -> None:
@@ -293,25 +301,28 @@ class SettingsPage(QWidget):
 
         self._runner_combo.blockSignals(True)
         self._runner_combo.clear()
-        self._runner_combo.addItem(RUNNER_LABELS["auto"], "auto")
-        self._runner_combo.addItem(RUNNER_LABELS["umu"], "umu")
-        self._runner_combo.addItem(RUNNER_LABELS["wine"], "wine")
-        for label, path in find_steam_protons():
-            self._runner_combo.addItem(label, f"proton:{path}")
-        for label, path in find_extra_protons():
-            self._runner_combo.addItem(label, f"umup:{path}")
-        for label, path in find_wine_versions():
-            self._runner_combo.addItem(label, f"wine:{path}")
+        self._runner_combo.addItem("Auto-detect (latest GE-Proton)", "auto")
+        extra_protons = find_extra_protons()
+        if extra_protons:
+            self._runner_combo.insertSeparator(self._runner_combo.count())
+            for label, path in extra_protons:
+                self._runner_combo.addItem(f"{label} (Installed)", f"umup:{path}")
         saved_runner = state.get("runner") or "auto"
         runner_index = self._runner_combo.findData(saved_runner)
         if runner_index < 0:
             runner_index = self._runner_combo.findData("auto")
-        self._runner_combo.setCurrentIndex(runner_index)
+        self._runner_combo.setCurrentIndex(max(runner_index, 0))
         self._runner_combo.blockSignals(False)
 
         self._font_spin.blockSignals(True)
         self._font_spin.setValue(int(state.get("font_size") or 13))
         self._font_spin.blockSignals(False)
+
+        saved_font_family = state.get("font_family") or "Exo 2"
+        family_index = self._font_family_combo.findData(saved_font_family)
+        self._font_family_combo.blockSignals(True)
+        self._font_family_combo.setCurrentIndex(max(family_index, 0))
+        self._font_family_combo.blockSignals(False)
 
         self._gamemode_check.blockSignals(True)
         self._gamemode_check.setChecked(bool(state.get("always_gamemoderun")))

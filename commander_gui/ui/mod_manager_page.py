@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -45,6 +46,7 @@ from .common import (
     ITEM_GREEN,
     STATUS_GREY,
     BackgroundTask,
+    info_label,
     make_card,
     mo2_running,
     section_label,
@@ -75,50 +77,69 @@ class ModManagerPage(QWidget):
         self._populating = False
         self._reorder_warned = False
         self._profiles_loading = False
+        self._profiles_generation = 0
         self._profiles_task = None
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget()
+        content.setObjectName("pageContent")
+        root = QVBoxLayout(content)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
+        scroll.setWidget(content)
+
+        title = section_label("MOD MANAGER", level=1)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(title)
+        subtitle = info_label(
+            "Choose an MO2 profile and safely manage its GAMMA modlist."
+        )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(subtitle)
 
         card, layout = make_card()
         root.addWidget(card, 1)
-        layout.addWidget(section_label("GAMMA MOD MANAGER"))
+        layout.addWidget(section_label("GAMMA modlist"))
 
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("MO2 profile:"))
+        top_row.addWidget(QLabel("MO2 profile to edit:"))
         self.profile_combo = QComboBox()
         self.profile_combo.currentIndexChanged.connect(self._load_mods)
         top_row.addWidget(self.profile_combo, 1)
 
-        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button = QPushButton("Refresh profiles")
         self.refresh_button.clicked.connect(self.refresh)
         top_row.addWidget(self.refresh_button)
         layout.addLayout(top_row)
 
         sel_row = QHBoxLayout()
-        self.selected_label = QLabel("Selected profile: -")
+        self.selected_label = QLabel("MO2 selected profile: -")
         self.selected_label.setObjectName("dim")
         sel_row.addWidget(self.selected_label)
-        self.set_selected_button = QPushButton("Set as selected")
+        self.set_selected_button = QPushButton("Use as MO2 selected profile")
         self.set_selected_button.clicked.connect(self._set_selected)
         sel_row.addWidget(self.set_selected_button)
-        self.open_mo2_button = QPushButton("Open Mod Organizer")
+        self.open_mo2_button = QPushButton("Open MO2")
         self.open_mo2_button.clicked.connect(self._open_mo2)
         sel_row.addWidget(self.open_mo2_button)
         sel_row.addStretch(1)
         layout.addLayout(sel_row)
 
         self.guard_label = QLabel(
-            "Mod Organizer is running - close it before editing mods. "
-            "Edits are disabled while it is open."
+            "MO2 is running. Close it before editing the modlist; edits are disabled while it is open."
         )
         self.guard_label.setObjectName("warn")
         self.guard_label.hide()
         layout.addWidget(self.guard_label)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search mods...")
+        self.search.setPlaceholderText("Search the modlist...")
         self.search.textChanged.connect(self._apply_filter)
         layout.addWidget(self.search)
 
@@ -203,11 +224,12 @@ class ModManagerPage(QWidget):
 
     # ----- load -----
     def refresh(self) -> None:
+        self._profiles_generation += 1
         self.window.refresh_settings()
-        self._load_profiles()
+        self._load_profiles(self._profiles_generation)
         self._update_guard()
 
-    def _load_profiles(self) -> None:
+    def _load_profiles(self, generation: int) -> None:
         """Query MO2 profiles off the GUI thread.
 
         Both queries shell out to the CLI; running them inline froze the window
@@ -218,13 +240,28 @@ class ModManagerPage(QWidget):
         self._profiles_loading = True
         self.count_label.setText("Loading MO2 profiles...")
         task = BackgroundTask(_query_mo2_profiles, parent=self)
-        task.result.connect(self._on_profiles_loaded)
-        task.error.connect(self._on_profiles_error)
+        task.result.connect(
+            lambda result, task=task, generation=generation: self._on_profiles_loaded(
+                result, task, generation
+            )
+        )
+        task.error.connect(
+            lambda message, task=task, generation=generation: self._on_profiles_error(
+                message, task, generation
+            )
+        )
         self._profiles_task = task
         task.start()
 
-    def _on_profiles_loaded(self, result: tuple[list[str], str]) -> None:
+    def _on_profiles_loaded(
+        self, result: tuple[list[str], str], task: BackgroundTask, generation: int
+    ) -> None:
+        if self._profiles_task is not task:
+            return
         self._profiles_loading = False
+        self._profiles_task = None
+        if generation != self._profiles_generation:
+            return
         names, selected = result
         self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
@@ -234,16 +271,25 @@ class ModManagerPage(QWidget):
             if active is not None and active.mo2_profile in names:
                 self.profile_combo.setCurrentText(active.mo2_profile)
         self.profile_combo.blockSignals(False)
-        self.selected_label.setText(f"Selected profile: {selected or '-'}")
+        self.selected_label.setText(f"MO2 selected profile: {selected or '-'}")
         if not names:
-            self.count_label.setText("No MO2 profiles found. Run a full install first.")
+            self.count_label.setText(
+                "No MO2 profiles found. Complete a GAMMA installation first."
+            )
             self.tree.clear()
             return
         self._load_mods()
 
-    def _on_profiles_error(self, message: str) -> None:
+    def _on_profiles_error(
+        self, message: str, task: BackgroundTask, generation: int
+    ) -> None:
+        if self._profiles_task is not task:
+            return
         self._profiles_loading = False
-        self.selected_label.setText("Selected profile: -")
+        self._profiles_task = None
+        if generation != self._profiles_generation:
+            return
+        self.selected_label.setText("MO2 selected profile: -")
         self.count_label.setText(f"Could not list MO2 profiles: {message}")
         self.tree.clear()
 
@@ -304,7 +350,9 @@ class ModManagerPage(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, line_index)
                 item.setForeground(
                     0,
-                    QColor(STATUS_GREY.name()) if status != "Enabled" else QColor(ITEM_GREEN.name()),
+                    QColor(STATUS_GREY.name())
+                    if status != "Enabled"
+                    else QColor(ITEM_GREEN.name()),
                 )
                 header.addChild(item)
         self.tree.expandAll()
@@ -379,10 +427,12 @@ class ModManagerPage(QWidget):
         enabled = item.checkState(0) == Qt.CheckState.Checked
         new_lines = set_status_at(self._lines, line_index, enabled)
         if self._write_lines(new_lines):
+            self._populating = True
             item.setForeground(
                 0,
                 QColor(ITEM_GREEN.name()) if enabled else QColor(STATUS_GREY.name()),
             )
+            self._populating = False
             self._update_count()
             return
         # The write failed, so put the checkbox back rather than showing a
@@ -473,7 +523,9 @@ class ModManagerPage(QWidget):
         if rc == 0:
             self.selected_label.setText(f"Selected profile: {profile}")
         else:
-            QMessageBox.warning(self, "Failed", out.strip() or "Could not set selected profile")
+            QMessageBox.warning(
+                self, "Failed", out.strip() or "Could not set selected profile"
+            )
 
     def _on_set_selected_error(self, msg: str) -> None:
         self.set_selected_button.setEnabled(True)
@@ -524,9 +576,12 @@ class ModManagerPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        tmp = path.with_name(path.name + ".restore.tmp")
         try:
-            shutil.copy2(bak, path)
+            shutil.copy2(bak, tmp)
+            tmp.replace(path)
         except Exception as exc:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)
             QMessageBox.warning(self, "Failed", str(exc))
             return
         self._load_mods()

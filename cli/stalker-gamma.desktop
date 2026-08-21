@@ -1,8 +1,8 @@
-#!/usr/bin/env xdg-open
 [Desktop Entry]
-Name=Stalker GAMMA
+Name=STALKER GAMMA CLI
 Exec=stalker-gamma
+TryExec=stalker-gamma
 Icon=stalker-gamma
 Type=Application
-Categories=Utility;
+Categories=Game;
 Terminal=true

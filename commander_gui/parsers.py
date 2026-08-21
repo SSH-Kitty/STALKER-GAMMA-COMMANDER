@@ -40,12 +40,10 @@ ANOMALY_CHECK_RE = re.compile(
 PRUNE_ARCHIVE_RE = re.compile(
     r"^(?P<file>.+?)\s*\|\s*(?P<mb>\d+)mb\s*\|\s*(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$"
 )
-UPDATE_DIFF_RE = re.compile(
-    r"^(?P<status>Modified|Added|Removed):\s+(?P<rest>.+)$"
-)
+UPDATE_DIFF_RE = re.compile(r"^(?P<status>Modified|Added|Removed):\s+(?P<rest>.+)$")
 UPDATES_AVAILABLE_RE = re.compile(r"^Updates available:\s*(?P<count>\d+)$")
 
-PROGRESS_EVENT_LINES = ("Download", "Extract", "Expand", "Check MD5", "Skipped")
+PROGRESS_EVENT_LINES = OPERATIONS
 
 FINAL_STATUS_LINES = (
     "Install finished",
@@ -134,7 +132,9 @@ def parse_prune_archive(line: str) -> PruneArchive | None:
     if not match:
         return None
     return PruneArchive(
-        file=match.group("file").strip(), mb=int(match.group("mb")), date=match.group("date")
+        file=match.group("file").strip(),
+        mb=int(match.group("mb")),
+        date=match.group("date"),
     )
 
 

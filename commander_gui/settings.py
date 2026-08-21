@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
+from .atomic import write_text
 from .config import cli_binary_path, settings_path
 
 DEFAULT_MOD_PACK_MAKER_URL = "https://stalker-gamma.com/api/client/v1/mods/list"
@@ -37,7 +38,9 @@ class CliProfile:
     gamma_setup_repo_branch: str = "main"
     stalker_gamma_repo_url: str = "https://github.com/Grokitach/Stalker_GAMMA"
     stalker_gamma_repo_branch: str = "main"
-    gamma_large_files_repo_url: str = "https://github.com/Grokitach/gamma_large_files_v2"
+    gamma_large_files_repo_url: str = (
+        "https://github.com/Grokitach/gamma_large_files_v2"
+    )
     gamma_large_files_repo_branch: str = "main"
     teivaz_anomaly_gunslinger_repo_url: str = (
         "https://github.com/Grokitach/teivaz_anomaly_gunslinger"
@@ -93,7 +96,17 @@ class CliProfile:
                 except (TypeError, ValueError):
                     continue
             elif python_key == "active":
-                value = bool(value)
+                if isinstance(value, bool):
+                    pass
+                elif isinstance(value, str) and value.strip().lower() in {
+                    "true",
+                    "false",
+                }:
+                    value = value.strip().lower() == "true"
+                else:
+                    continue
+            elif not isinstance(value, str):
+                continue
             setattr(profile, python_key, value)
         known = set(cls._JSON_KEYS.values())
         profile.extra = {k: v for k, v in data.items() if k not in known}
@@ -120,13 +133,18 @@ class CliSettings:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = dict(self.extra)
         data["Profiles"] = [p.to_dict() for p in self.profiles]
-        tmp = path.with_name(path.name + ".tmp")
-        try:
-            tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-            tmp.replace(path)
-        except OSError:
-            tmp.unlink(missing_ok=True)
-            raise
+        write_text(path, json.dumps(data, indent=2) + "\n")
+
+
+def _reset_settings(path: Path, backup: Path) -> CliSettings:
+    try:
+        path.replace(backup)
+    except OSError:
+        pass
+    settings = CliSettings()
+    settings.profiles = [CliProfile(active=True)]
+    settings.save(path)
+    return settings
 
 
 def load_settings(path: Path | None = None) -> CliSettings:
@@ -140,14 +158,13 @@ def load_settings(path: Path | None = None) -> CliSettings:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return CliSettings()
+        # Back up corrupt file and start fresh.
+        return _reset_settings(path, path.with_name(path.name + ".corrupt"))
     if not isinstance(data, dict):
-        return CliSettings()
+        return _reset_settings(path, path.with_name(path.name + ".corrupt"))
     settings = CliSettings()
     settings.profiles = [
-        CliProfile.from_dict(p)
-        for p in data.get("Profiles", [])
-        if isinstance(p, dict)
+        CliProfile.from_dict(p) for p in data.get("Profiles", []) if isinstance(p, dict)
     ]
     settings.extra = {k: v for k, v in data.items() if k != "Profiles"}
     if not settings.profiles:
@@ -176,7 +193,8 @@ def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, s
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return 124, "", f"'config {args[0]}' timed out after {timeout}s"
+        label = args[0] if args else "<no args>"
+        return 124, "", f"'config {label}' timed out after {timeout}s"
     except OSError as exc:
         return 126, "", f"Failed to start {binary!r}: {exc}"
     return proc.returncode, proc.stdout, proc.stderr
@@ -186,7 +204,13 @@ def cli_ok(
     rc: int,
     out: str,
     err: str,
-    markers: tuple[str, ...] = ("not found", "already exists", "exception", "unhandled"),
+    markers: tuple[str, ...] = (
+        "error:",
+        "not found",
+        "already exists",
+        "exception",
+        "unhandled",
+    ),
 ) -> bool:
     """Whether a CLI invocation succeeded.
 
