@@ -393,7 +393,10 @@ Logs live in `~/.config/stalker-gamma/logs/`; the Dashboard and Utilities pages 
 - **[FaithBeam](https://github.com/FaithBeam)** — [`stalker-gamma-cli`](https://github.com/FaithBeam/stalker-gamma-cli), the installer this GUI drives and bundles. All installation, download, checksum and ModDB logic is theirs.
 - **[Grokitach](https://github.com/Grokitach)** and the G.A.M.M.A. team — [the mod pack itself](https://github.com/Grokitach/Stalker_GAMMA).
 - **[python-appimage](https://github.com/niess/python-appimage)** and **[AppImageKit](https://github.com/AppImage/appimagetool)** — portable packaging.
-- GSC Game World and the Anomaly team, for the game.
+- **[GSC Game World](https://www.gsc-game.com/)** and the Anomaly team, for the game.
+
+- **[dnttnd](https://github.com/dnttnd)** **Application Tester** - Thank you for testing implementations, dev builds, bug reports, and helping polish the overall UI.
+
 
 ## License
 
