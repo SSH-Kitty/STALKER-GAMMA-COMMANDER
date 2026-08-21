@@ -40,8 +40,14 @@ Active profile summary, installation status for Anomaly and GAMMA, Wine/Proton r
 ### System Check
 Checks the GAMMA CLI, Linux, Steam, `umu-run`, Wine, Winetricks, Protontricks, Vulkan, 32-bit Vulkan, each configured Winetricks runtime dependency, GE-Proton builds, GameMode and MangoHud. Each check includes its current status and copyable installation guidance where available. Manual overrides can browse for Steam libraries, executables, GE-Proton builds and Vulkan tooling; overrides are saved and rechecked on refresh.
 
+<img width="1161" height="537" alt="System Check" src="https://github.com/user-attachments/assets/d55c673f-6139-48f7-9eff-190737d7dd64" />
+
+
 ### Play
 Launches GAMMA through Mod Organizer 2 (MO2), opens MO2 for mod management, or launches a selected Anomaly executable directly. Targets are read from `ModOrganizer.ini`; if no MO2 target is available, `AnomalyLauncher.exe` is used as a direct-launch fallback.
+
+<img width="1234" height="949" alt="Play" src="https://github.com/user-attachments/assets/a64d8611-e23a-4b76-ae1a-ec465223489c" />
+
 
 - **Auto runner detection** — the latest discovered GE-Proton build is selected automatically and launched through `umu-run`, wrapped in `gamemoderun` when enabled.
 - **Explicit runner picking** — discovered GE-Proton builds from `compatibilitytools.d` can be selected directly. The current GUI exposes Auto-detect and GE-Proton builds only.
@@ -53,6 +59,9 @@ Launches GAMMA through Mod Organizer 2 (MO2), opens MO2 for mod management, or l
 ### Install
 Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent), an overall completion bar driven by the CLI's `[done/total]` counter, and clean cancellation.
 
+<img width="1184" height="1088" alt="Install" src="https://github.com/user-attachments/assets/653778d2-049d-4b84-b780-c3141c33ffab" />
+
+
 - Options for `--minimal` (delete archives after extract, ~50 GB saved), and preserving `user.ltx` and MCM settings across a reinstall.
 - Anomaly 1.5.3 installation can be chained automatically before GAMMA installation when Anomaly is missing. Installation and cache folder fields are editable and browseable directly on this page.
 - **Winetricks panel** — checks Wine, Winetricks, and protontricks first. If protontricks is missing, it can be installed automatically before the eight runtime verbs run: `d3dcompiler_43`, `d3dcompiler_47`, `d3dx10`, `d3dx11_43`, `d3dx9`, `quartz`, `dx8vb`, and `vcrun2022`. PEP 668 systems are directed to install pipx instead of using system pip. Per-verb and tool status is shown in the panel.
@@ -61,8 +70,14 @@ Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table
 ### Update
 GUI-side GAMMA update checks compare the official mod list and version files without using the rate-limited GitHub REST API. The page shows Added / Modified / Removed addon changes, archive-name changes and version information, then runs `update apply` through the same live progress UI. GAMMA must already be installed and the official files must be reachable. Updates hold the global install lock so they cannot run concurrently with an install.
 
+<img width="1183" height="583" alt="Updates" src="https://github.com/user-attachments/assets/8547ab1f-2660-4df8-997c-9957447dca81" />
+
+
 ### Mod Manager
 Direct, careful editing of the selected MO2 profile's `modlist.txt`. MO2 profiles are discovered from the active GAMMA installation and the selected profile is shown in the page.
+
+<img width="1198" height="892" alt="image" src="https://github.com/user-attachments/assets/6f2367b1-fa7f-4e01-8b0f-6f851d038fd1" />
+
 
 - Mods grouped by the `_separator` category entries G.A.M.M.A. ships, with search.
 - Enable, disable, delete and reorder within a category, including multi-selection actions.
@@ -78,6 +93,9 @@ COMMANDER profiles store Anomaly, GAMMA, cache, MO2 profile, download-thread, re
 
 ### Utilities
 Anomaly integrity checks, shader-cache cleanup, ReShade removal, download-cache cleanup with reclaimable-size totals and preview, GOG installation-path repair, installation-folder moves with cancellation and copy verification, log-folder access, a collapsible console, and `debug hash-install` diagnostic archives. Interrupted moves are recovered and reviewed at startup.
+
+<img width="1178" height="616" alt="Utilities" src="https://github.com/user-attachments/assets/7f5e790e-f532-4f1c-97f9-b249eb2b5e63" />
+
 
 Plus two guarded destructive actions:
 - **Fresh Reset** — wipe the Anomaly and GAMMA folders and reinstall both from scratch into the same locations.
