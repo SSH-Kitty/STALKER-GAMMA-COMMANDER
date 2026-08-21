@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .network import read_response_bytes
 from .parsers import UpdateDiff
 from .repair import USER_AGENT, ModPackRecord, parse_modpack_records
 
@@ -28,6 +29,9 @@ VERSION_FILENAME = "G.A.M.M.A_definition_version.txt"
 PATCHNOTES_FILENAME = "Patchnotes.md"
 README_FILENAME = "README.md"
 REMOTE_TIMEOUT = 15.0
+_MAX_VERSION_BYTES = 1 * 1024 * 1024
+_MAX_MARKDOWN_BYTES = 8 * 1024 * 1024
+_MAX_MODPACK_BYTES = 32 * 1024 * 1024
 
 _PATCHNOTES_VERSION_RE = re.compile(
     r"^#\s*\*\*GAMMA\s+(?P<version>[0-9]+(?:\.[0-9]+)+)\*\*"
@@ -56,7 +60,9 @@ class UpdateStatus:
         return bool(self.latest and self.installed and self.latest != self.installed)
 
 
-def format_version(build: str | None, human: str | None, missing: str = "Not installed") -> str:
+def format_version(
+    build: str | None, human: str | None, missing: str = "Not installed"
+) -> str:
     """Render a version as ``"0.9.5 (build 920)"``.
 
     The build number is always kept because the human label is coarse and only
@@ -102,7 +108,7 @@ def installed_version(gamma_dir: str | None) -> str | None:
         text = Path(gamma_dir, "version.txt").read_text(
             encoding="utf-8", errors="replace"
         )
-    except OSError:
+    except (OSError, ValueError, UnicodeError):
         return None
     version = text.strip()
     return version or None
@@ -129,7 +135,11 @@ def remote_version(profile) -> str | None:
             headers={"User-Agent": USER_AGENT},
         )
         with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-            version = resp.read().decode("utf-8", errors="replace").strip()
+            version = (
+                read_response_bytes(resp, _MAX_VERSION_BYTES)
+                .decode("utf-8", errors="replace")
+                .strip()
+            )
     except OSError:
         return None
     return version or None
@@ -149,10 +159,12 @@ def latest_version_human(profile) -> str | None:
                 headers={"User-Agent": USER_AGENT},
             )
             with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
+                text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
+                    "utf-8", errors="replace"
+                )
             if text:
                 break
-        except OSError:
+        except (OSError, ValueError, UnicodeError):
             text = None
             continue
     if not text:
@@ -179,7 +191,9 @@ def _records_by_dl_link(
     return by_link
 
 
-def local_modpack_records(gamma_dir: str, mo2_profile: str) -> dict[str, ModPackRecord] | None:
+def local_modpack_records(
+    gamma_dir: str, mo2_profile: str
+) -> dict[str, ModPackRecord] | None:
     """Records of what this install contains, or None if the profile has none.
 
     The CLI writes ``modpack_maker_list.txt`` (and a JSON twin) into the active
@@ -197,7 +211,11 @@ def local_modpack_records(gamma_dir: str, mo2_profile: str) -> dict[str, ModPack
         if json_path.is_file():
             records: dict[str, ModPackRecord] = {}
             entries = json.loads(json_path.read_text(encoding="utf-8"))
+            if not isinstance(entries, list):
+                return None
             for counter, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    continue
                 addon = (entry.get("addonName") or "").strip()
                 if not addon:
                     continue
@@ -239,13 +257,18 @@ def diff_records(
     for key in sorted(local_keys - remote_keys):
         diffs.append(UpdateDiff("Removed", local_by_link[key].folder_name))
     for key in sorted(local_keys & remote_keys):
-        local_hash = (local_by_link[key].md5_mod_db or "").lower()
-        remote_hash = (remote_by_link[key].md5_mod_db or "").lower()
-        if local_hash and remote_hash and local_hash != remote_hash:
+        local_record = local_by_link[key]
+        remote_record = remote_by_link[key]
+        local_hash = (local_record.md5_mod_db or "").lower()
+        remote_hash = (remote_record.md5_mod_db or "").lower()
+        archive_changed = local_record.zip_name != remote_record.zip_name
+        hash_changed = local_hash != remote_hash and (local_hash or remote_hash)
+        if archive_changed or hash_changed:
             diffs.append(
                 UpdateDiff(
                     "Modified",
-                    f"{local_by_link[key].folder_name} -> {local_hash} -> {remote_hash}",
+                    f"{local_record.folder_name} -> {local_hash or '(none)'} -> "
+                    f"{remote_hash or '(none)'}",
                 )
             )
     return diffs
@@ -280,13 +303,24 @@ def check_updates(profile) -> UpdateStatus:
             )
             with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
                 remote = parse_modpack_records(
-                    resp.read().decode("utf-8", errors="replace")
+                    read_response_bytes(resp, _MAX_MODPACK_BYTES).decode(
+                        "utf-8", errors="replace"
+                    )
                 )
-        except OSError as exc:
+        except (OSError, ValueError, UnicodeError) as exc:
             status.error = f"Could not reach the official mod list: {exc}"
             return status
     else:
         status.error = "The profile has no modpack maker URL configured."
+        return status
+
+    # If the remote list is empty but local addons exist, treat as a fetch
+    # failure rather than reporting every local addon as "Removed".
+    if not remote and local:
+        status.error = (
+            "The remote mod list is empty; this usually means the fetch "
+            "returned an error page. Try again later."
+        )
         return status
 
     status.latest = remote_version(profile)

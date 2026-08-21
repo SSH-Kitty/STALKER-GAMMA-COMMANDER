@@ -10,6 +10,7 @@ the absolute path; otherwise ``sys.executable -m commander_gui`` is used.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -26,11 +27,37 @@ def _exec_command() -> str | None:
     appimage = os.environ.get("APPIMAGE")
     if appimage:
         return appimage
+    # Frozen build (PyInstaller, etc.): use the executable directly.
+    if getattr(sys, "frozen", False):
+        return sys.executable
     # Source / venv install: invoke the package via the current interpreter.
     python = sys.executable
     if python and Path(python).is_file():
         return f"{python} -m commander_gui"
     return None
+
+
+def _project_root() -> Path | None:
+    """Return the project root for source installs, or None."""
+    if os.environ.get("APPIMAGE") or getattr(sys, "frozen", False):
+        return None
+    return Path(__file__).resolve().parent.parent
+
+
+def _desktop_exec(command: str) -> str:
+    """Quote executable arguments using the desktop-entry syntax."""
+    parts = shlex.split(command)
+    escaped: list[str] = []
+    for part in parts:
+        escaped_part = part.replace("%", "%%")
+        if any(char.isspace() for char in escaped_part) or any(
+            char in escaped_part for char in '"\\'
+        ):
+            escaped_part = escaped_part.replace("\\", "\\\\").replace('"', '\\"')
+            escaped.append(f'"{escaped_part}"')
+        else:
+            escaped.append(escaped_part)
+    return " ".join(escaped)
 
 
 def autostart_desktop_path() -> Path:
@@ -50,12 +77,15 @@ def enable_autostart() -> bool:
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=STALKER GAMMA Commander\n"
-        "Comment=Install, update and launch the S.T.A.L.K.E.R. Anomaly + GAMMA mod pack\n"
-        f"Exec={cmd}\n"
+        "Comment=Install, update and launch the STALKER Anomaly + GAMMA Modpack\n"
+        f"Exec={_desktop_exec(cmd)}\n"
         "Icon=stalker-gamma-commander\n"
         "Terminal=false\n"
         "X-GNOME-Autostart-enabled=true\n"
     )
+    root = _project_root()
+    if root is not None:
+        content += f"Path={root}\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")

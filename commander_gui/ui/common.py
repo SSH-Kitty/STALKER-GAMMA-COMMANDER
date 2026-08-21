@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -40,28 +41,41 @@ GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
 GAMMA_PROFILE = "G.A.M.M.A"
 
 
+_MO2_RUNNING_CACHE: float = 0.0
+_MO2_RUNNING_RESULT: bool = False
+_MO2_CACHE_TTL: float = 3.0
+
+
 def mo2_running() -> bool:
     """True when a Mod Organizer process (and so typically the game) is running.
 
     Mod Organizer stays alive while it runs the game through ``run -e``, so this
-    is the reliable proxy for "the Wine prefix is in use".
+    is the reliable proxy for "the Wine prefix is in use".  Results are cached
+    for a few seconds to avoid blocking the GUI thread repeatedly.
     """
+    global _MO2_RUNNING_CACHE, _MO2_RUNNING_RESULT
+
+    import time
+
+    now = time.monotonic()
+    if now - _MO2_RUNNING_CACHE < _MO2_CACHE_TTL:
+        return _MO2_RUNNING_RESULT
     exe = shutil.which("pgrep")
     if not exe:
         return False
     try:
         proc = subprocess.run(
-            # Match the executable, not the bare word: '-f ModOrganizer'
-            # also hits this GUI when its own path contains that string.
             [exe, "-f", r"ModOrganizer\.exe"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=10,
+            timeout=2,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return proc.returncode == 0
+    _MO2_RUNNING_CACHE = now
+    _MO2_RUNNING_RESULT = proc.returncode == 0
+    return _MO2_RUNNING_RESULT
 
 
 def anomaly_installed(path: str) -> bool:
@@ -102,7 +116,9 @@ class InstallStatusRow(QWidget):
         self._status = QLabel("Unknown")
         self._detail = QLabel(detail)
         self._detail.setObjectName("info")
-        self._detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._detail.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         row.addWidget(self._dot)
         row.addWidget(self._status)
         if name:
@@ -114,7 +130,9 @@ class InstallStatusRow(QWidget):
         row.addStretch(1)
         self.set_state(ok, detail)
 
-    def set_state(self, ok: bool | None, detail: str = "", pending_text: str | None = None) -> None:
+    def set_state(
+        self, ok: bool | None, detail: str = "", pending_text: str | None = None
+    ) -> None:
         self._detail.setText(detail)
         self._detail.setVisible(bool(detail))
         if ok is True:
@@ -137,12 +155,23 @@ class InstallStatusRow(QWidget):
 
 
 _ACTIVE_RUNNERS: set[CommandRunner] = set()
+_ACTIVE_TASKS: set[QObject] = set()
 
 
 def shutdown_active_runners(timeout_ms: int = 5000) -> None:
     """Cancel and wait for all active command threads (called on app quit)."""
     for runner in list(_ACTIVE_RUNNERS):
-        runner.shutdown(timeout_ms=timeout_ms)
+        try:
+            runner.shutdown(timeout_ms=timeout_ms)
+        except Exception:  # noqa: BLE001, S110
+            pass
+    for task in list(_ACTIVE_TASKS):
+        shutdown = getattr(task, "shutdown", None)
+        if shutdown is not None:
+            try:
+                shutdown(timeout_ms=timeout_ms)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
 
 class CommandRunner(QObject):
@@ -222,10 +251,10 @@ class CommandRunner(QObject):
             if not thread.wait(timeout_ms):
                 if self._worker is not None:
                     self._worker.kill()
-                thread.wait(3000)
-        _ACTIVE_RUNNERS.discard(self)
-        self._worker = None
-        self._thread = None
+                if not thread.wait(3000):
+                    return
+        if thread.isRunning():
+            return
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
@@ -253,6 +282,7 @@ class _Worker(QObject):
 
     result = Signal(object)
     error = Signal(str)
+    finished = Signal()
 
     def __init__(self, fn, *args, **kwargs) -> None:
         super().__init__()
@@ -265,6 +295,8 @@ class _Worker(QObject):
             self.result.emit(self._fn(*self._args, **self._kwargs))
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
+        finally:
+            self.finished.emit()
 
 
 class BackgroundTask(QObject):
@@ -278,16 +310,34 @@ class BackgroundTask(QObject):
         self._fn = fn
         self._args = args
         self._kwargs = kwargs
+        self._thread: QThread | None = None
+        self._worker: _Worker | None = None
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            return
+        if self._thread is not None:
+            self._thread.deleteLater()
+            self._thread = None
+            self._worker = None
         self._thread = QThread(self)
         self._worker = _Worker(self._fn, *self._args, **self._kwargs)
         self._worker.moveToThread(self._thread)
         self._worker.result.connect(self.result)
         self._worker.error.connect(self.error)
+        self._worker.finished.connect(self._thread.quit)
         self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(lambda: _ACTIVE_TASKS.discard(self))
+        _ACTIVE_TASKS.add(self)
         self._thread.start()
+
+    def shutdown(self, timeout_ms: int = 5000) -> None:
+        if (
+            self._thread is not None
+            and self._thread.isRunning()
+            and not self._thread.wait(timeout_ms)
+        ):
+            self._thread.wait(1000)
 
 
 class _StreamWorker(QObject):
@@ -296,6 +346,7 @@ class _StreamWorker(QObject):
     line = Signal(str)
     result = Signal(object)
     error = Signal(str)
+    finished = Signal()
 
     def __init__(self, fn) -> None:
         super().__init__()
@@ -306,6 +357,8 @@ class _StreamWorker(QObject):
             self.result.emit(self._fn(self.line.emit))
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
+        finally:
+            self.finished.emit()
 
 
 class StreamTask(QObject):
@@ -323,17 +376,45 @@ class StreamTask(QObject):
     def __init__(self, fn, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._fn = fn
+        self._cancel_event = threading.Event()
+        self._thread: QThread | None = None
+        self._worker: _StreamWorker | None = None
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            return
+        if self._thread is not None:
+            self._thread.deleteLater()
+            self._thread = None
+            self._worker = None
+        self._cancel_event.clear()
         self._thread = QThread(self)
         self._worker = _StreamWorker(self._fn)
         self._worker.moveToThread(self._thread)
         self._worker.line.connect(self.line)
         self._worker.result.connect(self.result)
         self._worker.error.connect(self.error)
+        self._worker.finished.connect(self._thread.quit)
         self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(lambda: _ACTIVE_TASKS.discard(self))
+        _ACTIVE_TASKS.add(self)
         self._thread.start()
+
+    @property
+    def cancel_event(self) -> threading.Event:
+        return self._cancel_event
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def shutdown(self, timeout_ms: int = 5000) -> None:
+        self.cancel()
+        if (
+            self._thread is not None
+            and self._thread.isRunning()
+            and not self._thread.wait(timeout_ms)
+        ):
+            self._thread.wait(1000)
 
 
 class OutputPane(QFrame):
@@ -346,6 +427,17 @@ class OutputPane(QFrame):
         self.edit = QPlainTextEdit(self)
         self.edit.setReadOnly(True)
         self.edit.setMaximumBlockCount(20000)
+        self.edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.edit.setWordWrapMode(
+            __import__(
+                "PySide6.QtGui", fromlist=["QTextOption"]
+            ).QTextOption.WrapMode.WrapAnywhere
+        )
+        self.edit.setHorizontalScrollBarPolicy(
+            __import__(
+                "PySide6.QtCore", fromlist=["Qt"]
+            ).Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.edit)
@@ -357,7 +449,9 @@ class OutputPane(QFrame):
         self.edit.clear()
 
 
-def make_card(parent: QWidget | None = None, *, expand: bool = False) -> tuple[QFrame, QVBoxLayout]:
+def make_card(
+    parent: QWidget | None = None, *, expand: bool = False
+) -> tuple[QFrame, QVBoxLayout]:
     """Create a titled card container. Returns (frame, inner layout)."""
     from PySide6.QtWidgets import QSizePolicy
 
@@ -402,18 +496,51 @@ def info_label(text: str, *, wrap: bool = True) -> QLabel:
     return label
 
 
+def _kv_row(label: str, value: str) -> QHBoxLayout:
+    """Key-value row: dim label on the left, selectable value on the right."""
+    row = QHBoxLayout()
+    key = QLabel(label)
+    key.setObjectName("dim")
+    key.setAlignment(Qt.AlignmentFlag.AlignTop)
+    val = QLabel(value)
+    val.setWordWrap(True)
+    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
+    row.addWidget(val, 1)
+    return row
+
+
 #: Re-exported so UI code keeps a single, obvious import site for sizes.
 human_size = format_size
 
 
 def winetricks_tooltip(status: dict[str, bool]) -> str:
-    """Rich-text bullet list of per-verb winetricks state."""
-    rows = []
+    """Rich-text bullet list of tool availability and per-verb winetricks state."""
+    rows: list[str] = []
+    # Tools section (wine, protontricks) — only shown when present in status.
+    tool_keys = [("wine", "Wine"), ("protontricks", "Protontricks")]
+    tool_items = [
+        (label, status.get(key, False)) for key, label in tool_keys if key in status
+    ]
+    if tool_items:
+        rows.append("<b>Tools</b>")
+        for label, ok in tool_items:
+            color = OK_GREEN.name() if ok else STATUS_RED.name()
+            state = "installed" if ok else "missing"
+            rows.append(
+                f"<span style='color:{color}'>&#9679;</span> "
+                f"<span style='color:{color}'>{label} - {state}</span>"
+            )
+    # Runtimes section (winetricks verbs).
+    rows.append("<b>Runtimes</b>")
     for verb in WINETRICKS_VERBS:
         ok = status.get(verb, False)
         color = OK_GREEN.name() if ok else STATUS_RED.name()
         state = "installed" if ok else "missing"
-        rows.append(f"<span style='color:{color}'>&#9679;</span> <span style='color:{color}'>{verb} - {state}</span>")
+        rows.append(
+            f"<span style='color:{color}'>&#9679;</span> "
+            f"<span style='color:{color}'>{verb} - {state}</span>"
+        )
     return "<br>".join(rows)
 
 
@@ -455,7 +582,22 @@ def open_in_file_manager(path: str | Path) -> bool:
                     command = [exe, "open", path] if opener == "gio" else [exe, path]
                     break
         if command is None and shutil.which("explorer.exe"):
-            command = ["explorer.exe", path.replace("/", "\\")]
+            wsl_path = path
+            wslpath = shutil.which("wslpath")
+            if wslpath:
+                try:
+                    wsl_path = subprocess.run(
+                        [wslpath, "-w", str(path)],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    ).stdout.strip()
+                except (OSError, subprocess.TimeoutExpired):
+                    wsl_path = str(path).replace("/", "\\")
+            else:
+                wsl_path = str(path).replace("/", "\\")
+            command = ["explorer.exe", wsl_path]
 
     if command is None:
         return False
@@ -483,8 +625,12 @@ class ProgressTable(QTableWidget):
         self.horizontalHeader().setSectionResizeMode(
             0, self.horizontalHeader().ResizeMode.Stretch
         )
-        self.horizontalHeader().setSectionResizeMode(1, self.horizontalHeader().ResizeMode.ResizeToContents)
-        self.horizontalHeader().setSectionResizeMode(2, self.horizontalHeader().ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(
+            1, self.horizontalHeader().ResizeMode.ResizeToContents
+        )
+        self.horizontalHeader().setSectionResizeMode(
+            2, self.horizontalHeader().ResizeMode.ResizeToContents
+        )
         self.setSortingEnabled(False)
         self._rows: dict[str, int] = {}
 
@@ -541,10 +687,6 @@ class ProgressArea(QWidget):
     sits directly under the bar, so the panel stays compact.
     """
 
-    _PROGRESS_LINE_RE = __import__("re").compile(
-        r"^\[\d{2}:\d{2}:\d{2}\]\s+.+?\s*\|.+\|\s*\d+(?:[.,]\d+)?\s*%\s*\|\s*\[\d+/\d+\]$"
-    )
-
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -586,6 +728,7 @@ class ProgressArea(QWidget):
         self.cancel_button.setFixedSize(100, 32)
         self.cancel_button.setStyleSheet("padding: 0px;")
         self.cancel_button.hide()
+        self.cancel_button.setText("Cancel")
 
         status_row = QHBoxLayout()
         status_row.addWidget(self.bar, 1)
@@ -612,6 +755,7 @@ class ProgressArea(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(self._bar_idle_format)
+        self.bar.setStyleSheet("")
         self._seen.clear()
         self._completed.clear()
         self._max_bar_value = 0
@@ -656,6 +800,7 @@ class ProgressArea(QWidget):
             self.log.append_line(clean)
         event = parse_progress_line(clean)
         if event is not None:
+            self.bar.setStyleSheet("")
             self.status_label.setText(
                 f"{event.name} - {event.operation} - {event.percent:.1%}"
             )
@@ -682,19 +827,23 @@ class ProgressArea(QWidget):
     def on_started(self) -> None:
         self.cancel_button.show()
         self.cancel_button.setEnabled(True)
+        self.cancel_button.setText("Cancel")
         self.pause_button.show()
         self.pause_button.setEnabled(True)
         self.pause_button.setText("Pause")
         self._paused = False
+        self.bar.setStyleSheet("")
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat("Starting...")
 
-    def on_finished(self, rc: int, _output: str) -> None:
+    def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()
         self.pause_button.hide()
         self._paused = False
-        if rc == 0:
+        from ..settings import cli_ok
+
+        if cli_ok(rc, output, ""):
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
             self.bar.setFormat("Finished")
@@ -705,6 +854,28 @@ class ProgressArea(QWidget):
             self.bar.setFormat("Failed")
             self.bar.setValue(0)
             self.status_label.setText("Failed")
+        self._seen.clear()
+        self._completed.clear()
+
+    def set_success_state(self, text: str = "Verified successfully") -> None:
+        """Show a successful completed state using the install-bar styling."""
+        from ..themes import active_theme_tokens
+
+        self.cancel_button.hide()
+        self.pause_button.hide()
+        self._paused = False
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        self.bar.setFormat(text)
+        tokens = active_theme_tokens()
+        gradient = (
+            f"qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {tokens['hero1']},stop:1 {tokens['accent_strong']})"
+        )
+        self.bar.setStyleSheet(
+            f"QProgressBar::chunk {{ background: {gradient}; border-radius: 4px; }}"
+        )
+        self.status_label.setText(text)
         self._seen.clear()
         self._completed.clear()
 

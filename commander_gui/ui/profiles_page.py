@@ -38,10 +38,22 @@ class ProfilesPage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         outer.addWidget(scroll)
         content = QWidget()
+        content.setObjectName("pageContent")
         root = QVBoxLayout(content)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
+
+        title = section_label("PROFILES", level=1)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(title)
+        subtitle = info_label(
+            "Create and manage COMMANDER profiles. Each one keeps its Anomaly, "
+            "GAMMA, and download-cache folders."
+        )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(subtitle)
 
         top = QHBoxLayout()
         top.setSpacing(16)
@@ -53,12 +65,11 @@ class ProfilesPage(QWidget):
         root.addLayout(top)
 
         # ----- profile list -----
-        list_layout.addWidget(section_label("GAMMA PROFILES"))
+        list_layout.addWidget(section_label("COMMANDER profiles"))
         list_layout.addWidget(
             info_label(
-                "Each profile keeps its own Anomaly, GAMMA and cache folders "
-                "plus download and repository settings. The active profile is "
-                "what the other pages operate on."
+                "A COMMANDER profile stores install folders, download settings, and "
+                "repository options. The active profile is what the other pages use."
             )
         )
         self.profile_list = QListWidget()
@@ -66,16 +77,16 @@ class ProfilesPage(QWidget):
         list_layout.addWidget(self.profile_list, 1)
 
         btn_row = QHBoxLayout()
-        self.new_button = QPushButton("New")
-        self.new_button.setToolTip("Start a blank profile form.")
+        self.new_button = QPushButton("New profile")
+        self.new_button.setToolTip("Start a blank COMMANDER profile form.")
         self.new_button.clicked.connect(self._new_profile)
-        self.active_button = QPushButton("Set Active")
+        self.active_button = QPushButton("Set active")
         self.active_button.setObjectName("primary")
         self.active_button.setToolTip(
-            "Make the selected profile active so the other pages use it."
+            "Make the selected COMMANDER profile active for the other pages."
         )
         self.active_button.clicked.connect(self._set_active)
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = QPushButton("Delete profile")
         self.delete_button.setObjectName("danger")
         self.delete_button.setToolTip("Remove the selected profile.")
         self.delete_button.clicked.connect(self._delete_profile)
@@ -84,11 +95,10 @@ class ProfilesPage(QWidget):
         list_layout.addLayout(btn_row)
 
         # ----- form -----
-        form_layout.addWidget(section_label("Profile Details"))
+        form_layout.addWidget(section_label("Profile details"))
         form_layout.addWidget(
             info_label(
-                "Anomaly, GAMMA and Cache paths are required. "
-                "Hover a field for details."
+                "Anomaly, GAMMA, and cache folders are required. Hover a field for details."
             )
         )
         self.form = QFormLayout()
@@ -119,14 +129,16 @@ class ProfilesPage(QWidget):
             return label
 
         self.form.addRow(
-            field("Name", self.name_edit, "A short label used to identify this profile."),
+            field(
+                "Name", self.name_edit, "A short label used to identify this profile."
+            ),
             self.name_edit,
         )
         self.form.addRow(
             field(
                 "Anomaly path",
                 self.anomaly_edit,
-                "The base S.T.A.L.K.E.R. Anomaly folder.",
+                "The folder containing the STALKER Anomaly base game.",
             ),
             path_row(self.anomaly_edit),
         )
@@ -134,7 +146,7 @@ class ProfilesPage(QWidget):
             field(
                 "GAMMA path",
                 self.gamma_edit,
-                "The folder containing ModOrganizer.exe.",
+                "The GAMMA folder containing ModOrganizer.exe.",
             ),
             path_row(self.gamma_edit),
         )
@@ -142,7 +154,7 @@ class ProfilesPage(QWidget):
             field(
                 "Cache path",
                 self.cache_edit,
-                "A location with enough room for downloaded archives.",
+                "A location with enough free space for downloaded addon archives.",
             ),
             path_row(self.cache_edit),
         )
@@ -150,9 +162,8 @@ class ProfilesPage(QWidget):
             field(
                 "MO2 profile",
                 self.mo2_edit,
-                "Must match a profile inside the GAMMA folder's profiles/ "
-                "directory (e.g. G.A.M.M.A). Creating a CLI profile does not "
-                "create an MO2 profile.",
+                "The MO2 profile directory inside GAMMA/profiles (for example, "
+                "G.A.M.M.A). Creating a COMMANDER profile does not create an MO2 profile.",
             ),
             self.mo2_edit,
         )
@@ -165,10 +176,12 @@ class ProfilesPage(QWidget):
             self.threads_spin,
         )
         form_layout.addLayout(self.form)
-        form_layout.addWidget(info_label(
-            "Tip: 4 threads = safe on slow connections, "
-            "6 = balanced, 8 = fast on good connections (may timeout on slow networks)."
-        ))
+        form_layout.addWidget(
+            info_label(
+                "Tip: 4 threads = safe on slow connections, "
+                "6 = balanced, 8 = fast on good connections (may timeout on slow networks)."
+            )
+        )
 
         self.save_button = QPushButton("Create Profile")
         self.save_button.setObjectName("primary")
@@ -309,11 +322,17 @@ class ProfilesPage(QWidget):
         profile.cache = self.cache_edit.text().strip()
         profile.mo2_profile = self.mo2_edit.text().strip() or "G.A.M.M.A"
         profile.download_threads = self.threads_spin.value()
-        profile.mod_pack_maker_url = self.modpack_edit.text().strip() or profile.mod_pack_maker_url
+        profile.mod_pack_maker_url = (
+            self.modpack_edit.text().strip() or profile.mod_pack_maker_url
+        )
         profile.mod_list_url = self.modlist_edit.text().strip() or profile.mod_list_url
-        profile.gamma_setup_repo_url = self.gs_url.text().strip() or profile.gamma_setup_repo_url
+        profile.gamma_setup_repo_url = (
+            self.gs_url.text().strip() or profile.gamma_setup_repo_url
+        )
         profile.gamma_setup_repo_branch = self.gs_branch.text().strip() or "main"
-        profile.stalker_gamma_repo_url = self.sg_url.text().strip() or profile.stalker_gamma_repo_url
+        profile.stalker_gamma_repo_url = (
+            self.sg_url.text().strip() or profile.stalker_gamma_repo_url
+        )
         profile.stalker_gamma_repo_branch = self.sg_branch.text().strip() or "main"
         profile.gamma_large_files_repo_url = (
             self.glf_url.text().strip() or profile.gamma_large_files_repo_url
@@ -345,7 +364,8 @@ class ProfilesPage(QWidget):
         # exists) would silently overwrite that profile's data.
         if exists and name != self._form_state:
             QMessageBox.warning(
-                self, "Name In Use",
+                self,
+                "Name In Use",
                 f"A profile named '{name}' already exists. Choose a different name.",
             )
             return
@@ -357,7 +377,7 @@ class ProfilesPage(QWidget):
 
     # ----- actions -----
     def _browse(self, edit: QLineEdit) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
+        path = QFileDialog.getExistingDirectory(self, "Select a folder", edit.text())
         if path:
             edit.setText(path)
 
@@ -376,35 +396,52 @@ class ProfilesPage(QWidget):
             QMessageBox.warning(self, "Missing Name", "A profile name is required.")
             return
         if not (profile.anomaly and profile.gamma and profile.cache):
-            QMessageBox.warning(self, "Missing Paths", "Anomaly, GAMMA and Cache paths are required.")
+            QMessageBox.warning(
+                self,
+                "Missing folders",
+                "Anomaly, GAMMA, and cache folders are required.",
+            )
             return
         if self._task is not None:
             return
         args = [
             "create",
-            "--anomaly", profile.anomaly,
-            "--gamma", profile.gamma,
-            "--cache", profile.cache,
-            "--name", profile.profile_name,
-            "--mo2-profile", profile.mo2_profile,
-            "--mod-pack-maker-url", profile.mod_pack_maker_url,
-            "--mod-list-url", profile.mod_list_url,
-            "--download-threads", str(profile.download_threads),
-            "--gamma-setup-repo-url", profile.gamma_setup_repo_url,
-            "--gamma-setup-repo-branch", profile.gamma_setup_repo_branch,
-            "--stalker-gamma-repo-url", profile.stalker_gamma_repo_url,
-            "--stalker-gamma-repo-branch", profile.stalker_gamma_repo_branch,
-            "--gamma-large-files-repo-url", profile.gamma_large_files_repo_url,
-            "--gamma-large-files-repo-branch", profile.gamma_large_files_repo_branch,
-            "--teivaz-anomaly-gunslinger-repo-url", profile.teivaz_anomaly_gunslinger_repo_url,
+            "--anomaly",
+            profile.anomaly,
+            "--gamma",
+            profile.gamma,
+            "--cache",
+            profile.cache,
+            "--name",
+            profile.profile_name,
+            "--mo2-profile",
+            profile.mo2_profile,
+            "--mod-pack-maker-url",
+            profile.mod_pack_maker_url,
+            "--mod-list-url",
+            profile.mod_list_url,
+            "--download-threads",
+            str(profile.download_threads),
+            "--gamma-setup-repo-url",
+            profile.gamma_setup_repo_url,
+            "--gamma-setup-repo-branch",
+            profile.gamma_setup_repo_branch,
+            "--stalker-gamma-repo-url",
+            profile.stalker_gamma_repo_url,
+            "--stalker-gamma-repo-branch",
+            profile.stalker_gamma_repo_branch,
+            "--gamma-large-files-repo-url",
+            profile.gamma_large_files_repo_url,
+            "--gamma-large-files-repo-branch",
+            profile.gamma_large_files_repo_branch,
+            "--teivaz-anomaly-gunslinger-repo-url",
+            profile.teivaz_anomaly_gunslinger_repo_url,
             "--teivaz-anomaly-gunslinger-repo-branch",
             profile.teivaz_anomaly_gunslinger_repo_branch,
         ]
         self._set_buttons_enabled(False)
         self._task = BackgroundTask(run_config_command, args, timeout=300, parent=self)
-        self._task.result.connect(
-            lambda res: self._on_create_done(profile, *res)
-        )
+        self._task.result.connect(lambda res: self._on_create_done(profile, *res))
         self._task.error.connect(self._on_task_error)
         self._task.start()
 
@@ -413,15 +450,24 @@ class ProfilesPage(QWidget):
         self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
-                self, "Create Failed", (out + "\n" + err).strip() or "config create failed"
+                self,
+                "Create Failed",
+                (out + "\n" + err).strip() or "config create failed",
             )
             return
         self.window.refresh_settings()
-        if not any(p.profile_name == profile.profile_name for p in self.window.settings.profiles):
-            QMessageBox.warning(self, "Create Failed", "The CLI did not create the profile.")
+        if not any(
+            p.profile_name == profile.profile_name
+            for p in self.window.settings.profiles
+        ):
+            QMessageBox.warning(
+                self, "Create Failed", "The CLI did not create the profile."
+            )
             return
         self.refresh()
-        QMessageBox.information(self, "Created", f"Profile '{profile.profile_name}' created and activated.")
+        QMessageBox.information(
+            self, "Created", f"Profile '{profile.profile_name}' created and activated."
+        )
 
     def _save_profile(self) -> None:
         profile = self._form_values()
@@ -430,35 +476,44 @@ class ProfilesPage(QWidget):
             return
         if not (profile.anomaly and profile.gamma and profile.cache):
             QMessageBox.warning(
-                self, "Missing Paths", "Anomaly, GAMMA and Cache paths are required."
+                self,
+                "Missing folders",
+                "Anomaly, GAMMA, and cache folders are required.",
             )
             return
         active = self.settings.active_profile
         existing = next(
-            (p for p in self.settings.profiles if p.profile_name == profile.profile_name),
+            (
+                p
+                for p in self.settings.profiles
+                if p.profile_name == profile.profile_name
+            ),
             None,
         )
+        # Build the new list without mutating self.settings.profiles yet.
+        profiles = [p for p in self.settings.profiles if p is not existing]
         if existing is not None:
-            # Keep any CLI-only keys this GUI does not model.
             profile.extra = dict(existing.extra)
-            self.settings.profiles.remove(existing)
-        # bool() is required: the `and` below yields '' for a new profile, and
-        # the CLI deserializes Active into a C# bool and throws on a string.
         profile.active = bool(
             active is None
             or (existing is not None and existing.profile_name == active.profile_name)
         )
-        self.settings.profiles.append(profile)
+        profiles.append(profile)
+        original_profiles = self.settings.profiles[:]
+        self.settings.profiles = profiles
         try:
             self.settings.save()
         except OSError as exc:
+            self.settings.profiles = original_profiles
             QMessageBox.warning(
                 self, "Save Failed", f"Could not write settings.json:\n{exc}"
             )
             return
         self.window.refresh_settings()
         self.refresh()
-        QMessageBox.information(self, "Saved", f"Profile '{profile.profile_name}' saved.")
+        QMessageBox.information(
+            self, "Saved", f"Profile '{profile.profile_name}' saved."
+        )
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         self.new_button.setEnabled(enabled)
@@ -488,7 +543,9 @@ class ProfilesPage(QWidget):
         if self._task is not None:
             return
         self._set_buttons_enabled(False)
-        self._task = BackgroundTask(run_config_command, ["use", name], timeout=300, parent=self)
+        self._task = BackgroundTask(
+            run_config_command, ["use", name], timeout=300, parent=self
+        )
         self._task.result.connect(lambda res: self._on_set_active_done(name, *res))
         self._task.error.connect(self._on_task_error)
         self._task.start()
@@ -497,12 +554,16 @@ class ProfilesPage(QWidget):
         self._task = None
         self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
-            QMessageBox.warning(self, "Failed", (out + "\n" + err).strip() or "config use failed")
+            QMessageBox.warning(
+                self, "Failed", (out + "\n" + err).strip() or "config use failed"
+            )
             return
         self.window.refresh_settings()
         active = self.window.settings.active_profile
         if active is None or active.profile_name != name:
-            QMessageBox.warning(self, "Failed", f"Profile '{name}' could not be activated.")
+            QMessageBox.warning(
+                self, "Failed", f"Profile '{name}' could not be activated."
+            )
             return
         self.refresh()
         QMessageBox.information(self, "Activated", f"Profile '{name}' is now active.")
@@ -522,7 +583,9 @@ class ProfilesPage(QWidget):
         if self._task is not None:
             return
         self._set_buttons_enabled(False)
-        self._task = BackgroundTask(run_config_command, ["delete", name], timeout=300, parent=self)
+        self._task = BackgroundTask(
+            run_config_command, ["delete", name], timeout=300, parent=self
+        )
         self._task.result.connect(lambda res: self._on_delete_done(name, *res))
         self._task.error.connect(self._on_task_error)
         self._task.start()
@@ -531,10 +594,14 @@ class ProfilesPage(QWidget):
         self._task = None
         self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
-            QMessageBox.warning(self, "Failed", (out + "\n" + err).strip() or "config delete failed")
+            QMessageBox.warning(
+                self, "Failed", (out + "\n" + err).strip() or "config delete failed"
+            )
             return
         self.window.refresh_settings()
         if any(p.profile_name == name for p in self.window.settings.profiles):
-            QMessageBox.warning(self, "Failed", f"Profile '{name}' could not be deleted.")
+            QMessageBox.warning(
+                self, "Failed", f"Profile '{name}' could not be deleted."
+            )
             return
         self.refresh()

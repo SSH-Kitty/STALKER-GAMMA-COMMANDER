@@ -22,6 +22,12 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         ("#0d130c", "#9fe96f", "#e2ead8"),
     ),
     (
+        "black",
+        "GAMMA Black",
+        "Pure black and near-monochrome with a muted green accent.",
+        ("#000000", "#9fe96f", "#e0e0e0"),
+    ),
+    (
         "dusk",
         "Dusk",
         "Warm charcoal and amber with orange sunset accents.",
@@ -38,12 +44,6 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         "Terminal",
         "Retro CRT: pure black with neon green phosphor text.",
         ("#000000", "#33ff66", "#33cc55"),
-    ),
-    (
-        "black",
-        "Black",
-        "Pure black and near-monochrome with a muted green accent.",
-        ("#000000", "#9fe96f", "#e0e0e0"),
     ),
 ]
 
@@ -64,20 +64,35 @@ def active_theme_tokens() -> dict[str, str]:
     return THEMES[_ACTIVE]
 
 
-def build_stylesheet(name: str, font_size: int | None = None) -> str:
+_FALLBACK_FONT = '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif'
+
+_FONT_FAMILY_MAP: dict[str, str] = {
+    "Exo 2": '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif',
+    "Noto Sans": '"Noto Sans", "DejaVu Sans", sans-serif',
+    "DejaVu Sans": '"DejaVu Sans", "Noto Sans", sans-serif',
+    "Ubuntu": '"Ubuntu", "DejaVu Sans", sans-serif',
+    "Liberation Sans": '"Liberation Sans", "DejaVu Sans", sans-serif',
+    "Inter": '"Inter", "DejaVu Sans", sans-serif',
+}
+
+
+def build_stylesheet(
+    name: str, font_size: int | None = None, font_family: str | None = None
+) -> str:
     tokens = THEMES.get(name) or THEMES["gamma"]
     if font_size is None:
         font_size = int(tokens["font_size"].rstrip("px"))
-    qss = _TEMPLATE.substitute(tokens)
+    qss = _TEMPLATE.safe_substitute(tokens)
     if font_size != 13:
         scale = font_size / 13.0
         qss = _FONT_SIZE_RE.sub(
             lambda m: f"font-size: {max(1, round(int(m.group(1)) * scale))}px",
             qss,
         )
-    # %FONT_SIZE% is a literal marker (not a template placeholder) so the
-    # scaling regex above never touches it; substitute the exact base size last.
-    return qss.replace("%FONT_SIZE%", f"{font_size}px")
+    qss = qss.replace("%FONT_SIZE%", f"{font_size}px")
+    resolved_family = _FONT_FAMILY_MAP.get(font_family or "Exo 2", _FALLBACK_FONT)
+    qss = qss.replace("%FONT_FAMILY%", resolved_family)
+    return qss
 
 
 def build_palette(name: str) -> QPalette:
@@ -98,7 +113,7 @@ def build_palette(name: str) -> QPalette:
 
 
 _TEMPLATE = string.Template("""* {
-    font-family: "Exo 2", "DejaVu Sans", "Noto Sans", sans-serif;
+    font-family: %FONT_FAMILY%;
     font-size: %FONT_SIZE%;
 }
 QMainWindow {
@@ -108,6 +123,14 @@ QMainWindow {
 QWidget {
     background-color: $page;
     color: $text;
+}
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+QScrollArea > QWidget#qt_scrollarea_viewport,
+QWidget#pageContent {
+    background: transparent;
 }
 #topbar {
     background-color: $topbar;
@@ -139,11 +162,18 @@ QWidget {
     border-bottom: 2px solid transparent;
 }
 #navtabs::tab:hover {
-    color: $text_btn_hover;
+    color: $accent;
 }
 #navtabs::tab:selected {
     color: $accent;
     border-bottom: 2px solid $accent_strong;
+}
+#navtabs[settingsMode="true"]::tab:selected {
+    color: $text_nav;
+    border-bottom: 2px solid transparent;
+}
+#navtabs[settingsMode="true"]::tab:hover {
+    color: $accent;
 }
 #cogButton {
     background: transparent;
@@ -155,10 +185,48 @@ QWidget {
 #cogButton:hover {
     color: $accent;
 }
+#cogButton[active="true"] {
+    color: $accent;
+}
 #card {
     background-color: $card;
     border: 1px solid $border;
     border-radius: 10px;
+}
+#systemCheckCard {
+    background: transparent;
+    border: 1px solid $border_strong;
+    border-radius: 12px;
+}
+#checkSection {
+    background: transparent;
+    border-bottom: 1px solid $border;
+}
+QLabel#section3 {
+    color: #7dc963;
+}
+#statusReady, #statusNotReady, #statusOptional, #statusChecking {
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    padding: 3px 8px;
+    border-radius: 4px;
+}
+#statusReady {
+    color: $accent_text;
+    background-color: $accent;
+}
+#statusNotReady {
+    color: $text_bright;
+    background-color: $danger_bg;
+}
+#statusOptional {
+    color: $accent_text;
+    background-color: $warn;
+}
+#statusChecking {
+    color: $text_dim;
+    background-color: $checking_bg;
 }
 #section1 {
     font-size: 20px;
@@ -279,6 +347,45 @@ QPushButton#secondary:hover {
     background-color: $btn_hover;
     border-color: $secondary_hover_border;
 }
+QPushButton#secondary:disabled {
+    color: $text_disabled;
+    background-color: $btn_disabled;
+    border: 1px solid $btn_disabled;
+}
+QPushButton#copyCommand {
+    background-color: $btn;
+    border: 1px solid $border_secondary;
+    border-radius: 8px;
+    padding: 4px 10px;
+    color: $text_btn_hover;
+    font-size: 12px;
+}
+QPushButton#copyCommand:hover {
+    background-color: $btn_hover;
+    border-color: $secondary_hover_border;
+}
+QPushButton#copyCommand:disabled {
+    color: $text_disabled;
+    background-color: $btn_disabled;
+    border: 1px solid $btn_disabled;
+}
+QPushButton#consoleToggle {
+    background-color: $btn;
+    border: 1px solid $border_secondary;
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: $text_btn_hover;
+    font-size: 11px;
+}
+QPushButton#consoleToggle:hover {
+    background-color: $btn_hover;
+    border-color: $secondary_hover_border;
+}
+QPushButton#consoleToggle:disabled {
+    color: $text_disabled;
+    background-color: $btn_disabled;
+    border-color: $btn_disabled;
+}
 QPushButton#tertiary {
     background: transparent;
     border: none;
@@ -332,6 +439,11 @@ QComboBox QAbstractItemView {
     border: 1px solid $border_input;
     selection-background-color: $selection;
 }
+QComboBox::separator {
+    height: 1px;
+    background: $border_input;
+    margin: 4px 8px;
+}
 QProgressBar {
     background-color: $input;
     border: 1px solid $border_input;
@@ -345,6 +457,12 @@ QProgressBar::chunk {
         stop: 0 $hero1, stop: 1 $accent_strong
     );
     border-radius: 4px;
+}
+QProgressBar::text {
+    color: $text_btn;
+    background: rgba(0, 0, 0, 0.55);
+    padding: 1px 6px;
+    border-radius: 3px;
 }
 QTableWidget, QListWidget {
     background-color: $input;
@@ -479,6 +597,7 @@ THEMES: dict[str, dict[str, str]] = {
         "focus": "#8fe45c",
         "chip_ok": "#9fe96f",
         "chip_ok_border": "#3a5a30",
+        "checking_bg": "#242c24",
         "warn": "#d9a04c",
         "danger_bg": "#7a2f2a",
         "danger_border": "#c0554f",
@@ -557,6 +676,7 @@ THEMES: dict[str, dict[str, str]] = {
         "focus": "#5ec99b",
         "chip_ok": "#6fd3a8",
         "chip_ok_border": "#2a5342",
+        "checking_bg": "#202933",
         "warn": "#d9a04c",
         "danger_bg": "#6e2f2a",
         "danger_border": "#b0554f",
@@ -635,6 +755,7 @@ THEMES: dict[str, dict[str, str]] = {
         "focus": "#2ee75c",
         "chip_ok": "#33ff66",
         "chip_ok_border": "#1c6b2e",
+        "checking_bg": "#112817",
         "warn": "#cc9933",
         "danger_bg": "#5a1f1c",
         "danger_border": "#a0443f",
@@ -713,6 +834,7 @@ THEMES: dict[str, dict[str, str]] = {
         "focus": "#8fe45c",
         "chip_ok": "#9fe96f",
         "chip_ok_border": "#2c3c24",
+        "checking_bg": "#25212e",
         "warn": "#d9a04c",
         "danger_bg": "#4d1f1b",
         "danger_border": "#8f3f3a",
@@ -791,6 +913,7 @@ THEMES: dict[str, dict[str, str]] = {
         "focus": "#ff8f2e",
         "chip_ok": "#ff9f45",
         "chip_ok_border": "#7a4f1c",
+        "checking_bg": "#2e261d",
         "warn": "#e0a24a",
         "danger_bg": "#6e2a1e",
         "danger_border": "#b04f3d",

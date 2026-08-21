@@ -45,19 +45,6 @@ def _mono(text: str) -> QLabel:
     return label
 
 
-def _kv_row(label: str, value: str) -> QHBoxLayout:
-    row = QHBoxLayout()
-    key = QLabel(label)
-    key.setObjectName("dim")
-    key.setAlignment(Qt.AlignmentFlag.AlignTop)
-    val = QLabel(value)
-    val.setWordWrap(True)
-    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
-    row.addWidget(val, 1)
-    return row
-
-
 class AboutPage(QWidget):
     """Project overview, scope, architecture, credits and environment details."""
 
@@ -75,10 +62,21 @@ class AboutPage(QWidget):
         outer.addWidget(scroll)
 
         content = QWidget()
+        content.setObjectName("pageContent")
         root = QVBoxLayout(content)
         root.setContentsMargins(0, 0, 8, 0)
         root.setSpacing(14)
         scroll.setWidget(content)
+
+        title = section_label("ABOUT", level=1)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(title)
+        subtitle = info_label(
+            "What COMMANDER does, what it requires, and how its safeguards and licensing work."
+        )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(subtitle)
 
         root.addWidget(self._hero_card())
 
@@ -101,14 +99,14 @@ class AboutPage(QWidget):
 
     def _hero_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("S.T.A.L.K.E.R. G.A.M.M.A. COMMANDER", level=1))
+        layout.addWidget(section_label("STALKER Anomaly + GAMMA COMMANDER", level=1))
         version = QLabel(f"COMMANDER GUI v{__version__}")
         version.setObjectName("accent")
         layout.addWidget(version)
         layout.addWidget(
             info_label(
-                "A complete graphical front-end for installing, updating, managing "
-                "and launching the S.T.A.L.K.E.R. Anomaly + G.A.M.M.A. mod pack "
+                "COMMANDER is a graphical front-end for installing, updating, managing "
+                "and launching STALKER Anomaly + the GAMMA Modpack "
                 "on Linux."
             )
         )
@@ -125,7 +123,7 @@ class AboutPage(QWidget):
         layout.addWidget(section_label("What this is", level=2))
         layout.addWidget(
             info_label(
-                "G.A.M.M.A. is normally installed through a Windows launcher and "
+                "GAMMA is normally installed through a Windows launcher and "
                 "run through Mod Organizer 2. On Linux the community solution is "
                 "FaithBeam's stalker-gamma-cli — an excellent but entirely "
                 "terminal-driven installer."
@@ -133,7 +131,7 @@ class AboutPage(QWidget):
         )
         layout.addWidget(
             info_label(
-                "Commander is a desktop GUI around that CLI. It does not "
+                "COMMANDER is a desktop GUI around that CLI. It does not "
                 "reimplement any installer logic: it drives the real stalker-gamma "
                 "binary as a subprocess and parses its output live. Every "
                 "download, checksum, ModDB fetch and extraction is performed by "
@@ -163,7 +161,7 @@ class AboutPage(QWidget):
         layout.addWidget(section_label("How it works", level=2))
         layout.addWidget(
             info_label(
-                "This is a graphical version of the GAMMA setup process with "
+                "COMMANDER is a graphical version of the GAMMA setup process with "
                 "extra features on top. It uses the stalker-gamma CLI as its "
                 "framework: the app builds the commands, runs them in the "
                 "background, and reads their progress to fill the interface, so "
@@ -247,14 +245,27 @@ class AboutPage(QWidget):
     def _installation_card(self) -> QWidget:
         card, layout = make_card(expand=True)
         layout.addWidget(section_label("Installation", level=2))
-        layout.addWidget(info_label("AppImage (recommended) — grab the latest "
-                                    "release from GitHub."))
-        layout.addWidget(_mono("chmod +x STALKER-GAMMA-COMMANDER-*-x86_64.AppImage\n"
-                               "./STALKER-GAMMA-COMMANDER-*-x86_64.AppImage"))
-        layout.addWidget(info_label("From source — run.sh creates the virtual "
-                                    "environment and installs PySide6 for you."))
-        layout.addWidget(_mono("git clone https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER.git\n"
-                               "cd STALKER-GAMMA-COMMANDER && ./run.sh"))
+        layout.addWidget(
+            info_label("AppImage (recommended) — grab the latest release from GitHub.")
+        )
+        layout.addWidget(
+            _mono(
+                "chmod +x STALKER-GAMMA-COMMANDER-*-x86_64.AppImage\n"
+                "./STALKER-GAMMA-COMMANDER-*-x86_64.AppImage"
+            )
+        )
+        layout.addWidget(
+            info_label(
+                "From source — run.sh creates the virtual "
+                "environment and installs PySide6 for you."
+            )
+        )
+        layout.addWidget(
+            _mono(
+                "git clone https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER.git\n"
+                "cd STALKER-GAMMA-COMMANDER && ./run.sh"
+            )
+        )
         layout.addWidget(info_label("To point at a different CLI build:"))
         layout.addWidget(_mono("STALKER_GAMMA_CLI=/path/to/stalker-gamma ./run.sh"))
         layout.addStretch(1)
@@ -265,7 +276,9 @@ class AboutPage(QWidget):
         layout.addWidget(section_label("Current environment", level=2))
         self.profile_value = self._path_row(layout, "Active profile", "")
         self.cli_value = self._path_row(layout, "CLI binary", str(cli_binary_path()))
-        self.settings_value = self._path_row(layout, "CLI settings", str(settings_path()))
+        self.settings_value = self._path_row(
+            layout, "CLI settings", str(settings_path())
+        )
         self.gui_settings_value = self._path_row(
             layout, "GUI settings", str(gui_settings_path())
         )
@@ -282,7 +295,7 @@ class AboutPage(QWidget):
                 "bundles. All installation, download, checksum and ModDB logic is "
                 "theirs."
             ),
-            "Grokitach and the G.A.M.M.A. team — the mod pack itself.",
+            "Grokitach and the GAMMA team — the modpack itself.",
             "GSC Game World and the Anomaly team — for the game.",
         ):
             layout.addWidget(info_label(f"• {line}"))
@@ -302,7 +315,7 @@ class AboutPage(QWidget):
             info_label(
                 "Copyright for the underlying CLI installer logic: FaithBeam. "
                 "Copyright for this Python/Qt graphical interface: SSH-Kitty. "
-                "Not affiliated with GSC Game World or the G.A.M.M.A. development "
+                "Not affiliated with GSC Game World or the GAMMA development "
                 "team."
             )
         )
@@ -314,8 +327,16 @@ class AboutPage(QWidget):
         links = [
             ("Project on GitHub", _GITHUB, "primary"),
             ("Releases", f"{_GITHUB}/releases", "secondary"),
-            ("stalker-gamma-cli (FaithBeam)", "https://github.com/FaithBeam/stalker-gamma-cli", "secondary"),
-            ("G.A.M.M.A. mod pack (Grokitach)", "https://github.com/Grokitach/Stalker_GAMMA", "secondary"),
+            (
+                "stalker-gamma-cli (FaithBeam)",
+                "https://github.com/FaithBeam/stalker-gamma-cli",
+                "secondary",
+            ),
+            (
+                "GAMMA Modpack (Grokitach)",
+                "https://github.com/Grokitach/Stalker_GAMMA",
+                "secondary",
+            ),
         ]
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -324,7 +345,9 @@ class AboutPage(QWidget):
             button = QPushButton(text)
             button.setObjectName(style)
             button.clicked.connect(
-                lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target))
+                lambda _checked=False, target=url: QDesktopServices.openUrl(
+                    QUrl(target)
+                )
             )
             row.addWidget(button)
             buttons.append(button)
@@ -337,7 +360,8 @@ class AboutPage(QWidget):
         value_label = QLabel(value)
         value_label.setWordWrap(True)
         value_label.setTextInteractionFlags(
-            value_label.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse
+            value_label.textInteractionFlags()
+            | Qt.TextInteractionFlag.TextSelectableByMouse
         )
         inner = QVBoxLayout()
         inner.setContentsMargins(0, 0, 0, 0)
@@ -351,4 +375,6 @@ class AboutPage(QWidget):
 
     def refresh(self) -> None:
         profile = self.window.settings.active_profile
-        self.profile_value.setText(profile.profile_name if profile else "No active profile")
+        self.profile_value.setText(
+            profile.profile_name if profile else "No active profile"
+        )

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .integrity import Md5ScanResult
+from .network import read_response_bytes
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -93,8 +94,10 @@ def fetch_modpack_records(url: str, timeout: float = 20) -> dict[str, ModPackRec
     try:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8", errors="replace")
-    except OSError:
+            text = read_response_bytes(resp, 32 * 1024 * 1024).decode(
+                "utf-8", errors="replace"
+            )
+    except (OSError, ValueError, UnicodeError):
         return {}
     return parse_modpack_records(text)
 
@@ -169,10 +172,7 @@ def delete_mod_and_archive(
     if not _is_direct_child(mods_root, mod_path):
         raise ValueError(f"Refusing to delete mod folder outside mods/: {folder!r}")
     if mod_path.is_dir():
-        try:
-            shutil.rmtree(mod_path)
-        except OSError:
-            pass
+        shutil.rmtree(mod_path)
         removed.append(mod_path)
     if record is not None:
         downloads = base / "downloads"

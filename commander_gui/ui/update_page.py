@@ -8,6 +8,7 @@ out to ``update apply``, whose output is surfaced in the progress log.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -57,6 +58,7 @@ class UpdatePage(QWidget):
         self._diffs: list[UpdateDiff] = []
         self._checking = False
         self._applying = False
+        self._check_generation = 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -65,37 +67,50 @@ class UpdatePage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         outer.addWidget(scroll)
         content = QWidget()
+        content.setObjectName("pageContent")
         root = QVBoxLayout(content)
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
 
+        title = section_label("UPDATES", level=1)
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(title)
+        subtitle = info_label(
+            "Check the installed GAMMA version and addon list against the latest available data, then apply any changes."
+        )
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(subtitle)
+
         # ---------- status card ----------
         card, layout = make_card()
         root.addWidget(card)
-        layout.addWidget(section_label("Updates"))
+        layout.addWidget(section_label("Update status"))
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(6)
-        grid.addWidget(info_label("Installed version:"), 0, 0)
+        grid.addWidget(info_label("Installed GAMMA version:"), 0, 0)
         self.installed_value = QLabel("-")
         self.installed_value.setObjectName("mono")
         grid.addWidget(self.installed_value, 0, 1)
-        grid.addWidget(info_label("Latest version:"), 1, 0)
+        grid.addWidget(info_label("Latest GAMMA version:"), 1, 0)
         self.latest_value = QLabel("-")
         self.latest_value.setObjectName("mono")
         grid.addWidget(self.latest_value, 1, 1)
         grid.setColumnStretch(2, 1)
         layout.addLayout(grid)
 
-        self.status_label = QLabel("Open this page to check for updates.")
+        self.status_label = QLabel(
+            "Open this page to check the active GAMMA installation."
+        )
         self.status_label.setObjectName("dim")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
         row = QHBoxLayout()
-        self.check_button = QPushButton("Check for Updates")
+        self.check_button = QPushButton("Check for updates")
         self.check_button.setObjectName("primary")
         self.check_button.clicked.connect(self._check)
         row.addWidget(self.check_button)
@@ -105,10 +120,8 @@ class UpdatePage(QWidget):
         # ---------- updates card ----------
         updates_card, updates_layout = make_card()
         root.addWidget(updates_card)
-        updates_layout.addWidget(section_label("Available Updates"))
-        self.no_updates_label = info_label(
-            "No addon changes - GAMMA is up to date."
-        )
+        updates_layout.addWidget(section_label("Available addon changes"))
+        self.no_updates_label = info_label("No addon changes. GAMMA is up to date.")
         self.no_updates_label.setObjectName("accent")
         updates_layout.addWidget(self.no_updates_label)
 
@@ -129,22 +142,24 @@ class UpdatePage(QWidget):
         # ---------- apply card ----------
         apply_card, apply_layout = make_card()
         root.addWidget(apply_card)
-        apply_layout.addWidget(section_label("Apply Updates"))
-        self.minimal_cb = QCheckBox("Minimal (delete archives after extract)")
-        self.preserve_user_cb = QCheckBox("Preserve user.ltx settings")
+        apply_layout.addWidget(section_label("Update options"))
+        self.minimal_cb = QCheckBox("Minimal (delete archives after extraction)")
+        self.preserve_user_cb = QCheckBox("Keep user.ltx settings")
         self.preserve_user_cb.setToolTip(
             "Keep your existing user.ltx (game options) across the update. "
             "If unchecked, controls, keybindings and mod-specific settings will be reset."
         )
-        self.preserve_mcm_cb = QCheckBox("Preserve MCM settings")
+        self.preserve_mcm_cb = QCheckBox("Keep MCM settings")
         self.preserve_mcm_cb.setToolTip(
             "Keep your Mod Configuration Menu (MCM) settings across the update. "
             "If unchecked, all mod configurations (axr_options.ltx) will be lost."
         )
+        self.preserve_user_cb.setChecked(True)
+        self.preserve_mcm_cb.setChecked(True)
         for cb in (self.minimal_cb, self.preserve_user_cb, self.preserve_mcm_cb):
             apply_layout.addWidget(cb)
 
-        self.apply_button = QPushButton("Apply Updates")
+        self.apply_button = QPushButton("Apply updates")
         self.apply_button.setObjectName("primary")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self._apply)
@@ -159,6 +174,7 @@ class UpdatePage(QWidget):
 
     def refresh(self) -> None:
         """Called every time the page is shown; auto-check updates."""
+        self._check_generation += 1
         self.window.refresh_settings()
         self._update_button_states()
         self._check()
@@ -176,7 +192,9 @@ class UpdatePage(QWidget):
         stopped by the time its ``finished`` handler runs, which would leave
         the buttons stuck disabled.
         """
-        idle = not self.window.install_busy and not self._checking and not self._applying
+        idle = (
+            not self.window.install_busy and not self._checking and not self._applying
+        )
         self.check_button.setEnabled(idle)
         self.apply_button.setEnabled(idle and bool(self._diffs))
 
@@ -210,7 +228,9 @@ class UpdatePage(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         status_item = QTableWidgetItem(diff.status)
-        status_item.setForeground(QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY.name())))
+        status_item.setForeground(
+            QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY.name()))
+        )
         parts = diff.text.split(" -> ")
         name = parts[0].strip()
         change = " -> ".join(p.strip() for p in parts[1:]) if len(parts) > 1 else ""
@@ -223,33 +243,72 @@ class UpdatePage(QWidget):
         if self._checking or self._applying:
             return
         if self.window.install_busy:
-            self._set_status("Install running - update check paused.", "warn")
+            self._set_status(
+                "An installation is running. The update check is paused.", "warn"
+            )
             return
         profile = self.window.settings.active_profile
         if profile is None:
             self._set_status(
-                "No active profile - create or activate one on the Profiles page.",
+                "No active profile. Create or activate one on the Profiles page.",
                 "warn",
             )
             return
         self._checking = True
+        generation = self._check_generation
+        profile_id = (
+            profile.profile_name,
+            profile.anomaly,
+            profile.gamma,
+            profile.cache,
+        )
         self.check_button.setText("Checking...")
         self._update_button_states()
-        self._set_status("Checking for updates...", "dim")
+        self._set_status("Checking the active GAMMA installation...", "dim")
         task = BackgroundTask(check_updates, profile, parent=self)
-        task.result.connect(self._on_check_done)
-        task.error.connect(self._on_check_error)
+        task.result.connect(
+            lambda status, task=task, generation=generation, profile_id=profile_id: (
+                self._on_check_done(status, task, generation, profile_id)
+            )
+        )
+        task.error.connect(
+            lambda message, task=task, generation=generation, profile_id=profile_id: (
+                self._on_check_error(message, task, generation, profile_id)
+            )
+        )
         self._check_task = task
         task.start()
 
-    def _on_check_done(self, status: UpdateStatus) -> None:
+    def _on_check_done(
+        self, status: UpdateStatus, task: BackgroundTask, generation: int, profile_id
+    ) -> None:
+        if self._check_task is not task:
+            return
+        self._check_task = None
         self._checking = False
-        self.check_button.setText("Check for Updates")
+        self.check_button.setText("Check for updates")
+        current = self.window.settings.active_profile
+        if (
+            generation != self._check_generation
+            or current is None
+            or profile_id
+            != (current.profile_name, current.anomaly, current.gamma, current.cache)
+        ):
+            self._update_button_states()
+            return
         self._render(status)
 
-    def _on_check_error(self, message: str) -> None:
+    def _on_check_error(
+        self, message: str, task: BackgroundTask, generation: int, profile_id
+    ) -> None:
+        if self._check_task is not task:
+            return
+        self._check_task = None
         self._checking = False
-        self.check_button.setText("Check for Updates")
+        self.check_button.setText("Check for updates")
+        if generation != self._check_generation:
+            self._update_button_states()
+            return
         self._set_status(f"Update check failed: {message}", "warn")
         self._update_button_states()
 
@@ -259,7 +318,9 @@ class UpdatePage(QWidget):
             return
         if self.window.install_busy:
             QMessageBox.information(
-                self, "Busy", "An install is already running. Wait for it to finish."
+                self,
+                "Busy",
+                "An installation is already running. Wait for it to finish.",
             )
             return
         if not self._diffs:

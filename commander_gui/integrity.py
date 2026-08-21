@@ -18,10 +18,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .atomic import write_text
 from .modlist import entries, read_lines
+from .network import read_response_bytes
 
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
-DEFAULT_PROFILE = "G.A.M.M.A"
 MANIFEST_FILENAME = "gamma-md5.txt"
 
 _ANOMALY_STATUS_RE = re.compile(r"\|\s*(OK|CORRUPT|NOT FOUND)\s*$")
@@ -75,8 +76,10 @@ class GammaVerifyResult:
         if self.used_official_list:
             out.append(
                 self._section_line(
-                    "Official GAMMA mods", self.official,
-                    self.official_missing, self.official_empty,
+                    "Official GAMMA mods",
+                    self.official,
+                    self.official_missing,
+                    self.official_empty,
                 )
             )
             for name in self.official_missing:
@@ -85,8 +88,10 @@ class GammaVerifyResult:
                 out.append(f"  EMPTY    {name}")
             out.append(
                 self._section_line(
-                    "Extra Mods", self.extra,
-                    self.extra_missing, self.extra_empty,
+                    "Extra Mods",
+                    self.extra,
+                    self.extra_missing,
+                    self.extra_empty,
                 )
             )
             for name in self.extra:
@@ -102,7 +107,7 @@ class GammaVerifyResult:
                 out.append(f"EMPTY    mods/{name}")
             if self.problems == 0:
                 out.append("GAMMA: all enabled mods are present and non-empty")
-            out.append(self.summary)
+        out.append(self.summary)
         out.extend(self.notes)
         return out
 
@@ -130,9 +135,7 @@ class GammaVerifyResult:
         return "GAMMA: " + ", ".join(parts)
 
 
-def fetch_official_mod_names(
-    url: str, timeout: float = 10
-) -> set[str] | None:
+def fetch_official_mod_names(url: str, timeout: float = 10) -> set[str] | None:
     """Download the official GAMMA modlist and return its mod names.
 
     Returns ``None`` if the list cannot be fetched or parsed (the caller can
@@ -140,7 +143,9 @@ def fetch_official_mod_names(
     """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            text = resp.read().decode("utf-8", errors="replace")
+            text = read_response_bytes(resp, 32 * 1024 * 1024).decode(
+                "utf-8", errors="replace"
+            )
     except (OSError, ValueError):  # ValueError: malformed/unsupported URL
         return None
     return {name for _, name in entries(text.splitlines())}
@@ -187,7 +192,10 @@ def verify_gamma(
                 (p for p in candidates if p.name.upper() == profile.upper()),
                 None,
             )
-        if match is None:
+            if match is None:
+                result.marker_missing.append(f"profiles/{profile}/modlist.txt")
+                return result
+        else:
             match = next(
                 (p for p in candidates if (p / "modlist.txt").is_file()),
                 None,
@@ -195,7 +203,12 @@ def verify_gamma(
         if match is not None and (match / "modlist.txt").is_file():
             modlist_path = match / "modlist.txt"
     if modlist_path is None:
-        result.marker_missing.append("profiles/G.A.M.M.A/modlist.txt")
+        marker = (
+            f"profiles/{profile}/modlist.txt"
+            if profile
+            else "profiles/G.A.M.M.A/modlist.txt"
+        )
+        result.marker_missing.append(marker)
         return result
 
     try:
@@ -210,15 +223,13 @@ def verify_gamma(
         return result
 
     enabled = [name for status, name in mod_pairs if status == "Enabled"]
-    result.disabled_mods = sum(
-        1 for status, _ in mod_pairs if status == "Disabled"
-    )
+    result.disabled_mods = sum(1 for status, _ in mod_pairs if status == "Disabled")
 
     total = len(enabled)
     for index, name in enumerate(enabled, start=1):
         if on_progress is not None:
             on_progress(index, total, name)
-        if "separator" in name.lower():
+        if name.endswith("_separator"):
             result.separators += 1
             continue
         is_official = official_mods is not None and name in official_mods
@@ -270,23 +281,28 @@ def _md5_file(path: Path) -> tuple[str, int] | None:
         return None
 
 
-def _read_manifest(path: Path) -> dict[str, str]:
+def _read_manifest(path: Path) -> dict[str, str] | None:
     out: dict[str, str] = {}
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return out
+        return None
     for line in text.splitlines():
-        if len(line) >= 34 and line[32:34] == "  ":
-            out[line[34:]] = line[:32]
+        if not line.strip():
+            continue
+        if len(line) < 34 or line[32:34] != "  ":
+            return None
+        digest = line[:32]
+        relative_path = line[34:]
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", digest) or not relative_path:
+            return None
+        out[relative_path] = digest.lower()
     return out
 
 
 def _write_manifest(path: Path, mapping: dict[str, str]) -> None:
     lines = [f"{mapping[rel]}  {rel}" for rel in sorted(mapping)]
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_text(path, "\n".join(lines) + "\n")
 
 
 @dataclass
@@ -306,16 +322,14 @@ class Md5ScanResult:
 
     @property
     def problems(self) -> int:
-        return len(self.changed) + len(self.added) + len(self.removed) + len(
-            self.errors
+        return (
+            len(self.changed) + len(self.added) + len(self.removed) + len(self.errors)
         )
 
     def lines(self) -> list[str]:
         out: list[str] = []
         if self.cancelled:
-            out.append(
-                f"GAMMA MD5 scan cancelled after {self.files_scanned} files"
-            )
+            out.append(f"GAMMA MD5 scan cancelled after {self.files_scanned} files")
             return out
         out.append(
             f"GAMMA MD5 scan: {self.files_scanned} files "
@@ -358,6 +372,24 @@ class Md5ScanResult:
         return f"MD5: {self.problems} change(s) since baseline"
 
 
+def _iter_mod_files(mods: Path):
+    """Yield safe mod files in stable order without materializing the tree."""
+    root_path = mods.resolve()
+    for root, dirs, names in os.walk(mods):
+        dirs.sort()
+        names.sort()
+        for name in names:
+            candidate = Path(root) / name
+            try:
+                if candidate.is_symlink() or not candidate.resolve().is_relative_to(
+                    root_path
+                ):
+                    continue
+            except (OSError, RuntimeError):
+                continue
+            yield candidate
+
+
 def scan_mods_md5(
     gamma_dir: str,
     on_progress: Callable[[int, int, str], None] | None = None,
@@ -384,16 +416,11 @@ def scan_mods_md5(
         return result
 
     started = time.monotonic()
-    files: list[Path] = []
-    for root, _dirs, names in os.walk(mods):
-        for name in names:
-            files.append(Path(root) / name)
-    files.sort(key=lambda p: p.relative_to(base).as_posix())
-    total = len(files)
+    total = sum(1 for _ in _iter_mod_files(mods))
 
     current: dict[str, str] = {}
     bytes_total = 0
-    for index, path in enumerate(files, start=1):
+    for index, path in enumerate(_iter_mod_files(mods), start=1):
         if cancel is not None and cancel.is_set():
             result.cancelled = True
             break
@@ -404,9 +431,7 @@ def scan_mods_md5(
         else:
             current[rel] = digest[0]
             bytes_total += digest[1]
-        if on_progress is not None and (
-            index % 5000 == 0 or index == total or result.cancelled
-        ):
+        if on_progress is not None and (index % 5000 == 0 or index == total):
             on_progress(index, total, format_size(bytes_total))
 
     result.files_scanned = len(current)
@@ -423,15 +448,20 @@ def scan_mods_md5(
         return result
     if manifest_path.is_file():
         baseline = _read_manifest(manifest_path)
-        for rel, digest in current.items():
-            if rel in baseline:
-                if baseline[rel] != digest:
-                    result.changed.append(rel)
-            else:
-                result.added.append(rel)
-        result.removed = sorted(set(baseline) - set(current))
-        result.changed.sort()
-        result.added.sort()
+        if baseline is None:
+            result.errors.append(
+                f"Baseline manifest '{manifest_path.name}' is empty or corrupt"
+            )
+        else:
+            for rel, digest in current.items():
+                if rel in baseline:
+                    if baseline[rel] != digest:
+                        result.changed.append(rel)
+                else:
+                    result.added.append(rel)
+            result.removed = sorted(set(baseline) - set(current))
+            result.changed.sort()
+            result.added.sort()
     else:
         result.created = True
         try:

@@ -1,10 +1,7 @@
 # Requirements
 
-You need these applications installed to run stalker-gamma:
-
-1. unzip
-
-Refer to your distro how to install them if they're not installed.
+The CLI bundles its `7zz` archive helper under `resources/7zz`; no external
+archive utility is required.
 
 # Usage
 
@@ -35,4 +32,4 @@ Your directory structure should look like this:
 
 3. Set your WINE prefix to run gamma/ModOrganizer.exe
 4. Install these dependencies with winetricks into your prefix:
-   - `winetricks d3dcompiler_43 d3dcompiler_47 d3dx10 d3dx11_43 d3dx9 vcrun2022`
+   - `winetricks d3dcompiler_43 d3dcompiler_47 d3dx10 d3dx11_43 d3dx9 quartz dx8vb vcrun2022`

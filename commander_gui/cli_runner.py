@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
+import time
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -26,13 +29,22 @@ else:
 SPAWN_FAILED_RC = 126
 #: Exit code reported when a synchronous command exceeded its timeout.
 TIMEOUT_RC = 124
+_MAX_OUTPUT_LINES = 5000
+_MAX_OUTPUT_CHARS = 1_000_000
+
+
+def _bounded_output(text: str) -> str:
+    """Keep command diagnostics bounded even when a subprocess is very noisy."""
+    if len(text) <= _MAX_OUTPUT_CHARS:
+        return text
+    return "[output truncated]\n" + text[-_MAX_OUTPUT_CHARS:]
 
 
 class CliWorker(QObject):
     """Runs one CLI invocation, streaming output lines.
 
-    Usage: move to a QThread, call run(command) via invokeMethod/queued signal,
-    cancel() sends the cancellation signal to the child process.
+    Usage: configure with ``setup()`` after moving to a QThread, then call the
+    parameterless ``run()`` slot. ``cancel()`` signals the child process.
     """
 
     line_ready = Signal(str)
@@ -45,11 +57,16 @@ class CliWorker(QObject):
         self._cwd = ""
         self._env: dict[str, str] | None = None
         self._cancel_pending = False
+        self._cancel_event = threading.Event()
 
-    def setup(self, command: list[str], cwd: str = "", env: dict[str, str] | None = None) -> None:
+    def setup(
+        self, command: list[str], cwd: str = "", env: dict[str, str] | None = None
+    ) -> None:
         self._command = command
         self._cwd = cwd
         self._env = env
+        self._cancel_pending = False
+        self._cancel_event.clear()
 
     @Slot()
     def run(self) -> None:
@@ -65,7 +82,10 @@ class CliWorker(QObject):
         if self._env:
             env = dict(os.environ)
             env.update(self._env)
-        collected: list[str] = []
+        collected: deque[str] = deque(maxlen=_MAX_OUTPUT_LINES)
+        if not command:
+            self.finished.emit(SPAWN_FAILED_RC, "No command specified")
+            return
         try:
             self._process = subprocess.Popen(
                 command,
@@ -77,14 +97,19 @@ class CliWorker(QObject):
                 bufsize=1,
                 encoding="utf-8",
                 errors="replace",
+                start_new_session=os.name != "nt",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self._process = None
-            message = f"Failed to start {command[0]!r}: {exc}"
+            name = command[0] if command else "<empty>"
+            message = f"Failed to start {name!r}: {exc}"
             self.line_ready.emit(message)
             self.finished.emit(SPAWN_FAILED_RC, message)
             return
-        if self._cancel_pending:
+        if self._cancel_event.is_set():
             # Cancel arrived before the process spawned; apply it now.
             self.cancel()
         try:
@@ -103,10 +128,11 @@ class CliWorker(QObject):
             proc, self._process = self._process, None
             if proc is not None and proc.poll() is None:
                 proc.kill()
-            self.finished.emit(SPAWN_FAILED_RC, "\n".join(collected))
+                proc.wait()
+            self.finished.emit(SPAWN_FAILED_RC, _bounded_output("\n".join(collected)))
             return
         self._process = None
-        self.finished.emit(rc, "\n".join(collected))
+        self.finished.emit(rc, _bounded_output("\n".join(collected)))
 
     @Slot()
     def cancel(self) -> None:
@@ -115,25 +141,41 @@ class CliWorker(QObject):
             # The process has not been spawned yet (or already exited); run()
             # checks this flag right after Popen and cancels immediately.
             self._cancel_pending = True
+            self._cancel_event.set()
             return
+        self._cancel_event.set()
+        pid = proc.pid
         try:
             if os.name == "nt":
                 proc.send_signal(_CANCEL_SIGNAL)
             else:
-                os.kill(proc.pid, _CANCEL_SIGNAL)
+                os.killpg(pid, _CANCEL_SIGNAL)
         except OSError:
             try:
                 proc.kill()
             except OSError:
                 pass
+        threading.Thread(
+            target=self._force_kill_after_cancel,
+            args=(pid,),
+            daemon=True,
+        ).start()
+
+    def _force_kill_after_cancel(self, pid: int) -> None:
+        time.sleep(3)
+        proc = self._process
+        if proc is None or proc.pid != pid or proc.poll() is not None:
+            return
+        self.kill()
 
     def pause(self) -> None:
         """SIGSTOP the child process to freeze it in place."""
         proc = self._process
         if proc is None or proc.poll() is not None or os.name == "nt":
             return
+        pid = proc.pid
         try:
-            os.kill(proc.pid, signal.SIGSTOP)
+            os.kill(pid, signal.SIGSTOP)
         except OSError:
             pass
 
@@ -142,8 +184,9 @@ class CliWorker(QObject):
         proc = self._process
         if proc is None or proc.poll() is not None or os.name == "nt":
             return
+        pid = proc.pid
         try:
-            os.kill(proc.pid, signal.SIGCONT)
+            os.kill(pid, signal.SIGCONT)
         except OSError:
             pass
 
@@ -151,7 +194,11 @@ class CliWorker(QObject):
     def kill(self) -> None:
         proc = self._process
         if proc is not None and proc.poll() is None:
-            proc.kill()
+            pid = proc.pid
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(pid, signal.SIGKILL)
 
 
 def _as_text(value: str | bytes | None) -> str:
@@ -186,14 +233,16 @@ def run_sync(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        output = _as_text(exc.stdout) + _as_text(exc.stderr)
+        output = _bounded_output(_as_text(exc.stdout) + _as_text(exc.stderr))
         return TIMEOUT_RC, f"{output}\n[timed out after {timeout}s]"
     except OSError as exc:
         return SPAWN_FAILED_RC, f"Failed to start {cmd[0]!r}: {exc}"
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode, _bounded_output((proc.stdout or "") + (proc.stderr or ""))
 
 
-def cli_command(args: list[str], *, progress_interval_ms: int | None = None) -> list[str]:
+def cli_command(
+    args: list[str], *, progress_interval_ms: int | None = None
+) -> list[str]:
     """Build the full command line for a CLI invocation."""
     cmd = [str(cli_binary_path()), *args]
     if progress_interval_ms is not None:
