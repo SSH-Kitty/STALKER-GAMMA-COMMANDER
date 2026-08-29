@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -119,8 +120,25 @@ def ensure_runner_prefix(runner: Runner) -> None:
     owner = f"{runner.kind}:{runner.label}"
     try:
         prefix.mkdir(parents=True, exist_ok=True)
-        if marker.is_file():
-            saved_owner = marker.read_text(encoding="utf-8").strip()
+        try:
+            marker_stat = marker.lstat()
+        except FileNotFoundError:
+            marker_stat = None
+        if marker_stat is not None:
+            if not stat.S_ISREG(marker_stat.st_mode):
+                raise LaunchError(f"Runner marker is not a regular file: {marker}")
+            fd = os.open(
+                marker,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+            try:
+                with os.fdopen(fd, encoding="utf-8") as stream:
+                    saved_owner = stream.read().strip()
+            except BaseException:
+                os.close(fd)
+                raise
             saved_kind = saved_owner.split(":", 1)[0] if saved_owner else ""
             if saved_kind and saved_kind != runner.kind:
                 raise LaunchError(
@@ -131,11 +149,51 @@ def ensure_runner_prefix(runner: Runner) -> None:
                     "separate prefix for the selected runner."
                 )
         else:
-            marker.write_text(owner + "\n", encoding="utf-8")
+            created = True
+            try:
+                fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                created = False
+                fd = os.open(
+                    marker,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                )
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise LaunchError(f"Runner marker is not a regular file: {marker}")
+            if created:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(owner + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            else:
+                with os.fdopen(fd, encoding="utf-8") as stream:
+                    saved_owner = stream.read().strip()
+                saved_kind = saved_owner.split(":", 1)[0] if saved_owner else ""
+                if saved_kind and saved_kind != runner.kind:
+                    raise LaunchError(
+                        f"Prefix owner: {saved_owner}\nSelected runner: {owner}"
+                    )
     except LaunchError:
         raise
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         raise LaunchError(f"Could not prepare runner prefix {prefix}: {exc}") from exc
+
+
+def build_runner_tool_command(
+    runner: Runner,
+    executable: str,
+    args: list[str] | None = None,
+    cwd: str = ".",
+) -> tuple[list[str], dict[str, str], str]:
+    """Build a Wine/Proton utility command for the selected runner."""
+    if runner.kind == "native":
+        raise LaunchError("Wine configuration is not available for native launches.")
+    ensure_runner_prefix(runner)
+    wrapper = [part for part in runner.wrapper if Path(part).name != "gamemoderun"]
+    return [*wrapper, executable, *(args or [])], dict(runner.env), cwd
 
 
 def mo2_path_to_host(value: str) -> str:
@@ -448,13 +506,14 @@ def _wine_runner(wine_binary: str, prefix: str = "") -> Runner:
         raise LaunchError(f"Wine not found at {wine_binary}")
     env = {}
     if prefix:
-        env["WINEPREFIX"] = prefix
+        env["WINEPREFIX"] = str(Path(prefix).expanduser())
     label = wine.parent.parent.name
     return Runner("wine", f"Wine ({label})", [str(wine)], env)
 
 
 def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
     """Resolve a runner preset (``auto``/``umu``/``wine``/``proton:``/``umup:``/``wine:``)."""
+    wine_prefix = os.path.expanduser((wine_prefix or "").strip()) if wine_prefix else ""
     if os.name == "nt":
         return Runner("native", "Native (Windows)")
     if kind.startswith("proton:"):
@@ -521,7 +580,10 @@ def build_command(
     if not mo2.is_file():
         raise LaunchError(f"ModOrganizer.exe not found in {gamma_dir}")
     args = [str(mo2)]
-    if profile and (Path(gamma_dir) / "profiles" / profile).is_dir():
+    if profile:
+        profile_path = Path(gamma_dir) / "profiles" / profile
+        if not profile_path.is_dir():
+            raise LaunchError(f"MO2 profile not found: {profile}")
         args += ["-p", profile]
     if target:
         args += ["run", "-e", target]

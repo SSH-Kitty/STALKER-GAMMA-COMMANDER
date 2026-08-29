@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -27,8 +28,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import gui_settings
+from ..config import logs_dir
 from ..launcher import (
+    LaunchError,
+    build_runner_tool_command,
     find_extra_protons,
+    launch_detached,
+    resolve_runner,
 )
 from ..themes import THEME_INFO, active_theme
 from .common import info_label, make_card, section_label
@@ -112,7 +118,7 @@ class SettingsPage(QWidget):
 
     def _launcher_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Wine/Proton runner", level=2))
+        layout.addWidget(section_label("Runner", level=2))
         layout.addWidget(
             info_label(
                 "Choose the runner used by default on the Play page. You can override it for each launch."
@@ -125,13 +131,42 @@ class SettingsPage(QWidget):
         self._gamemode_check = QCheckBox("Always use GameMode")
         self._gamemode_check.setToolTip(
             "Wrap every launch in gamemoderun (enables the Feral GameMode "
-            "CPU governor / scheduler optimisation), even for Wine and Proton."
+            "CPU governor / scheduler optimisation), even for Proton."
         )
         self._gamemode_check.toggled.connect(self._on_gamemode_toggled)
         layout.addWidget(self._gamemode_check)
         layout.addWidget(
             info_label(
                 "umu-run launches already use gamemoderun automatically when it is installed."
+            )
+        )
+        self._winecfg_button = QPushButton("Open Winecfg")
+        self._winecfg_button.setObjectName("secondary")
+        self._winecfg_button.setToolTip(
+            "Open Wine Configuration for the default runner and prefix."
+        )
+        self._winecfg_button.clicked.connect(self._open_winecfg)
+        layout.addWidget(self._winecfg_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        display_row = QHBoxLayout()
+        display_row.addWidget(QLabel("MO2 Display Scale"))
+        self._display_scale_combo = QComboBox()
+        for percent, dpi in ((100, 96), (125, 120), (150, 144), (175, 168), (200, 192)):
+            self._display_scale_combo.addItem(f"{percent}% ({dpi} DPI)", dpi)
+        self._display_scale_combo.currentIndexChanged.connect(
+            self._on_display_scale_changed
+        )
+        display_row.addWidget(self._display_scale_combo, 1)
+        self._apply_display_scale_button = QPushButton("Apply")
+        self._apply_display_scale_button.setObjectName("secondary")
+        self._apply_display_scale_button.setFixedSize(64, 30)
+        self._apply_display_scale_button.setStyleSheet("padding: 0 6px;")
+        self._apply_display_scale_button.clicked.connect(self._apply_display_scale)
+        display_row.addWidget(self._apply_display_scale_button)
+        layout.addLayout(display_row)
+        layout.addWidget(
+            info_label(
+                "125% is recommended for small MO2 text. Restart MO2 after applying."
             )
         )
         return card
@@ -240,6 +275,59 @@ class SettingsPage(QWidget):
     def _on_gamemode_toggled(self, checked: bool) -> None:
         gui_settings.save_gui_settings(always_gamemoderun=bool(checked))
 
+    def _open_winecfg(self) -> None:
+        state = gui_settings.load_gui_settings()
+        kind = state.get("runner") or "auto"
+        prefixes = state.get("prefixes") or {}
+        prefix = prefixes.get(kind) or state.get("wine_prefix") or ""
+        try:
+            runner = resolve_runner(kind, prefix)
+            profile = self.window.settings.active_profile
+            cwd = profile.gamma if profile is not None else str(Path.home())
+            command, env, cwd = build_runner_tool_command(runner, "winecfg", cwd=cwd)
+            launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
+        except (LaunchError, OSError) as exc:
+            QMessageBox.warning(self, "Could not open Winecfg", str(exc))
+
+    def _on_display_scale_changed(self, index: int) -> None:
+        if index >= 0:
+            gui_settings.save_gui_settings(
+                mo2_display_dpi=int(self._display_scale_combo.itemData(index))
+            )
+
+    def _apply_display_scale(self) -> None:
+        dpi = self._display_scale_combo.currentData()
+        if not isinstance(dpi, int):
+            return
+        state = gui_settings.load_gui_settings()
+        kind = state.get("runner") or "auto"
+        prefixes = state.get("prefixes") or {}
+        prefix = prefixes.get(kind) or state.get("wine_prefix") or ""
+        try:
+            runner = resolve_runner(kind, prefix)
+            profile = self.window.settings.active_profile
+            cwd = profile.gamma if profile is not None else str(Path.home())
+            command, env, cwd = build_runner_tool_command(
+                runner,
+                "reg",
+                [
+                    "add",
+                    r"HKCU\Control Panel\Desktop",
+                    "/v",
+                    "LogPixels",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    str(dpi),
+                    "/f",
+                ],
+                cwd,
+            )
+            launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
+            self._apply_display_scale_button.setText("Applied")
+        except (LaunchError, OSError) as exc:
+            QMessageBox.warning(self, "Could not apply display scale", str(exc))
+
     def _on_font_size(self, value: int) -> None:
         self.window.apply_font_size(value)
 
@@ -327,6 +415,13 @@ class SettingsPage(QWidget):
         self._gamemode_check.blockSignals(True)
         self._gamemode_check.setChecked(bool(state.get("always_gamemoderun")))
         self._gamemode_check.blockSignals(False)
+
+        dpi = int(state.get("mo2_display_dpi", 120))
+        scale_index = self._display_scale_combo.findData(dpi)
+        self._display_scale_combo.blockSignals(True)
+        self._display_scale_combo.setCurrentIndex(max(scale_index, 0))
+        self._display_scale_combo.blockSignals(False)
+        self._apply_display_scale_button.setText("Apply")
 
         from ..autostart import is_autostart_enabled
 

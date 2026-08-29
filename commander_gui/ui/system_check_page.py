@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,10 +36,13 @@ from ..dependencies import (
 )
 from ..gui_settings import configured_wine_prefix
 from ..launcher import find_extra_protons
+from ..settings import load_settings
 from ..winetricks import WINETRICKS_VERBS, check_winetricks_status, winetricks_binary
 from .common import (
     BackgroundTask,
+    anomaly_installed,
     clear_layout,
+    gamma_installed,
     info_label,
     make_card,
     section_label,
@@ -58,15 +62,38 @@ def _manual_command(tool: str, manager: str | None) -> str:
             "dnf": "sudo dnf install mesa-vulkan-drivers",
             "pacman": "sudo pacman -S vulkan-radeon",
             "zypper": "sudo zypper install Mesa-vulkan-drivers",
+            "apk": "sudo apk add mesa-vulkan-lavapipe vulkan-tools",
+            "xbps": "sudo xbps-install -S Vulkan-Headers vulkan-loader",
+            "emerge": "sudo emerge media-libs/vulkan-loader",
+            "eopkg": "sudo eopkg install vulkan-tools",
+            "nix": "Install vulkan-loader and vulkan-tools from nixpkgs",
         }
         return commands.get(manager or "", "Install your GPU vendor's Vulkan drivers")
     if tool == "umu-run":
-        return "Install umu-launcher from https://github.com/Open-Wine-Components/umu-launcher"
+        return (
+            "Install umu-launcher from https://github.com/Open-Wine-Components/umu-launcher "
+            "or run: mkdir -p ~/.local/bin && curl -sL "
+            '"https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar" '
+            "| tar -xOf - umu-run > ~/.local/bin/umu-run && chmod +x ~/.local/bin/umu-run"
+        )
     return ""
 
 
 def _check_tool(label: str, command: str, manager: str | None) -> dict[str, str]:
     found = configured_tool(command) or shutil.which(command)
+    # Validate umu-run actually runs — PATH may point to a broken Lutris stub.
+    if found and command == "umu-run":
+        try:
+            result = subprocess.run(
+                [found, "--version"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                found = None
+        except (OSError, subprocess.TimeoutExpired):
+            found = None
     return {
         "label": label,
         "state": "ready" if found else "missing",
@@ -101,9 +128,64 @@ def _winetricks_checks(status: dict[str, bool], binary: str) -> list[dict[str, s
     ]
 
 
+def _installation_checks() -> list[dict[str, str]]:
+    """Report the active profile and whether its game folders are installed."""
+    profile = load_settings().active_profile
+    if profile is None:
+        return [
+            {
+                "label": "Active profile",
+                "state": "missing",
+                "detail": "Create or activate a profile before installing GAMMA.",
+                "command": "",
+            },
+            {
+                "label": "Anomaly installation",
+                "state": "missing",
+                "detail": "No active profile provides an Anomaly folder.",
+                "command": "",
+            },
+            {
+                "label": "GAMMA modpack",
+                "state": "missing",
+                "detail": "No active profile provides a GAMMA folder.",
+                "command": "",
+            },
+        ]
+    return [
+        {
+            "label": "Active profile",
+            "state": "ready",
+            "detail": profile.profile_name,
+            "command": "",
+        },
+        {
+            "label": "Anomaly installation",
+            "state": "ready" if anomaly_installed(profile.anomaly) else "missing",
+            "detail": (
+                f"Installed at {profile.anomaly}."
+                if anomaly_installed(profile.anomaly)
+                else f"Not installed at {profile.anomaly}."
+            ),
+            "command": "",
+        },
+        {
+            "label": "GAMMA modpack",
+            "state": "ready" if gamma_installed(profile.gamma) else "missing",
+            "detail": (
+                f"Installed at {profile.gamma}."
+                if gamma_installed(profile.gamma)
+                else f"Not installed at {profile.gamma}."
+            ),
+            "command": "",
+        },
+    ]
+
+
 def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     manager = detect_package_manager()
     checks: list[dict[str, str]] = []
+    checks.extend(_installation_checks())
     binary = cli_binary_path()
     checks.append(
         {
@@ -126,6 +208,7 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     checks.extend(
         [
             _check_tool("Steam", "steam", manager),
+            _check_tool("Wine", "wine", manager),
             _check_tool("umu-run", "umu-run", manager),
             _check_tool("Winetricks", "winetricks", manager),
             _check_tool("Protontricks", "protontricks", manager),
@@ -308,7 +391,7 @@ class SystemCheckPage(QWidget):
         for section_title in (
             "System",
             "Required Tools",
-            "Winetricks Dependencies",
+            "Dependencies",
             "Proton Builds",
             "Optional Enhancements",
         ):
@@ -424,7 +507,13 @@ class SystemCheckPage(QWidget):
                 "System",
                 [
                     by_label.get(label, _missing)
-                    for label in ("GAMMA CLI", "Linux system")
+                    for label in (
+                        "Active profile",
+                        "Anomaly installation",
+                        "GAMMA modpack",
+                        "GAMMA CLI",
+                        "Linux system",
+                    )
                 ],
             )
             self._update_section(
@@ -433,6 +522,7 @@ class SystemCheckPage(QWidget):
                     by_label.get(label, _missing)
                     for label in (
                         "Steam",
+                        "Wine",
                         "umu-run",
                         "Winetricks",
                         "Protontricks",
@@ -441,7 +531,7 @@ class SystemCheckPage(QWidget):
                 ],
             )
             self._update_section(
-                "Winetricks Dependencies",
+                "Dependencies",
                 [by_label.get(verb, _missing) for verb in WINETRICKS_VERBS],
             )
             self._update_section(

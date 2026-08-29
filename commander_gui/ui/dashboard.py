@@ -23,6 +23,7 @@ from .common import (
     anomaly_installed,
     clear_layout,
     dir_size,
+    display_state,
     gamma_installed,
     human_size,
     info_label,
@@ -52,6 +53,7 @@ class DashboardPage(QWidget):
         self._winetricks_task: BackgroundTask | None = None
         self._size_task: BackgroundTask | None = None
         self._refresh_generation = 0
+        self._play_button_connection = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -117,23 +119,37 @@ class DashboardPage(QWidget):
             layout.addWidget(InstallStatusRow("STALKER Anomaly", "No active profile"))
             layout.addWidget(InstallStatusRow("GAMMA Modpack", "No active profile"))
             return
-        layout.addWidget(
-            InstallStatusRow(
+        op = getattr(self.window, "install_operation", None)
+        anomaly_state = display_state(anomaly_installed(profile.anomaly), op, "anomaly")
+        gamma_state = display_state(gamma_installed(profile.gamma), op, "gamma")
+        if anomaly_state == "installing":
+            self.anomaly_status = InstallStatusRow("STALKER Anomaly", profile.anomaly)
+            self.anomaly_status.set_installing("Installing Anomaly...")
+        else:
+            self.anomaly_status = InstallStatusRow(
                 "STALKER Anomaly",
                 profile.anomaly,
-                ok=anomaly_installed(profile.anomaly),
+                ok=bool(anomaly_state),
             )
-        )
-        layout.addWidget(
-            InstallStatusRow(
-                "GAMMA Modpack", profile.gamma, ok=gamma_installed(profile.gamma)
+        layout.addWidget(self.anomaly_status)
+        if gamma_state == "installing":
+            self.gamma_status = InstallStatusRow("GAMMA Modpack", profile.gamma)
+            self.gamma_status.set_installing("Installing GAMMA...")
+        else:
+            self.gamma_status = InstallStatusRow(
+                "GAMMA Modpack", profile.gamma, ok=bool(gamma_state)
             )
-        )
+        layout.addWidget(self.gamma_status)
         self.winetricks_status = InstallStatusRow(
-            "Winetricks", "Checking...", ok=None, pending_text="Checking"
+            "Dependencies", "Checking...", ok=None, pending_text="Checking"
         )
         layout.addWidget(self.winetricks_status)
-        self._start_winetricks_status(self._refresh_generation, self.winetricks_status)
+        if op == "dependencies":
+            self.winetricks_status.set_installing("Installing dependencies...")
+        else:
+            self._start_winetricks_status(
+                self._refresh_generation, self.winetricks_status
+            )
 
     def _paused_winetricks_status(self) -> None:
         """Hold the status as Installed while the game is running.
@@ -145,6 +161,7 @@ class DashboardPage(QWidget):
         paused = {verb: True for verb in WINETRICKS_VERBS}
         paused["wine"] = True
         paused["protontricks"] = True
+        paused["umu"] = True
         total = len(paused)
         self.winetricks_status.set_state(
             True, f"{total}/{total} dependencies installed (paused - game running)"
@@ -180,6 +197,11 @@ class DashboardPage(QWidget):
             generation != self._refresh_generation
             or status_widget is not self.winetricks_status
         ):
+            if generation != self._refresh_generation:
+                self._render_install_status()
+            return
+        if getattr(self.window, "install_operation", None) == "dependencies":
+            # Live "Installing..." status must survive refreshes.
             return
         if status is None:
             self._paused_winetricks_status()
@@ -200,12 +222,16 @@ class DashboardPage(QWidget):
             generation != self._refresh_generation
             or status_widget is not self.winetricks_status
         ):
+            if generation != self._refresh_generation:
+                self._render_install_status()
+            return
+        if getattr(self.window, "install_operation", None) == "dependencies":
             return
         self.winetricks_status.set_state(
             None, "status unavailable", pending_text="Unknown"
         )
         self.winetricks_status.set_status_tooltip(
-            f"Could not query winetricks: {message}"
+            f"Could not query dependencies: {message}"
         )
 
     def _render_profile(self) -> None:
@@ -265,11 +291,22 @@ class DashboardPage(QWidget):
         task.result.connect(
             lambda sizes, generation=generation: self._render_sizes(sizes, generation)
         )
+        task.error.connect(
+            lambda message, generation=generation: self._on_size_error(
+                message, generation
+            )
+        )
         task.start()
 
-    def _render_sizes(self, sizes: dict[str, int], generation: int) -> None:
+    def _render_sizes(
+        self,
+        sizes: dict[str, int],
+        generation: int,
+        unavailable: str | None = None,
+    ) -> None:
         self._size_task = None
         if generation != self._refresh_generation:
+            self._start_size_task()
             return
         self._sizes = sizes
         layout = self.sizes_card.layout()
@@ -282,6 +319,17 @@ class DashboardPage(QWidget):
         total_label = QLabel(f"Total: {human_size(total)}")
         total_label.setObjectName("accent")
         layout.addWidget(total_label)
+        if unavailable is not None:
+            status_label = info_label(f"Storage usage unavailable: {unavailable}")
+            status_label.setObjectName("warn")
+            layout.addWidget(status_label)
+
+    def _on_size_error(self, message: str, generation: int) -> None:
+        self._size_task = None
+        if generation != self._refresh_generation:
+            self._start_size_task()
+            return
+        self._render_sizes(self._sizes, generation, unavailable=message)
 
     # ----- updates card -----
     def _start_update_check(self) -> None:
@@ -341,6 +389,8 @@ class DashboardPage(QWidget):
             or profile_id
             != (current.profile_name, current.anomaly, current.gamma, current.cache)
         ):
+            self._update_checking = False
+            self._start_update_check()
             return
         self._update_checking = False
         text, kind = status_summary(status)
@@ -355,6 +405,8 @@ class DashboardPage(QWidget):
             or profile_id
             != (current.profile_name, current.anomaly, current.gamma, current.cache)
         ):
+            self._update_checking = False
+            self._start_update_check()
             return
         self._update_checking = False
         self._render_update_card(None, f"Update check failed: {message}", "warn")
@@ -447,10 +499,37 @@ class DashboardPage(QWidget):
         button = getattr(self, "_play_button", None)
         if play_page is None or button is None:
             return
-        button.setEnabled(not play_page._launching)
-        play_page.launch_state_changed.connect(button.setDisabled)
+        button.setEnabled(not play_page.is_launching and not self.window.install_busy)
+        # Connect only once - reconnecting each refresh disconnects the stale
+        # connection object, which PySide6 reports as "Failed to disconnect".
+        if self._play_button_connection is None:
+            self._play_button_connection = play_page.launch_state_changed.connect(
+                self._set_play_button_disabled
+            )
+
+    def _set_play_button_disabled(self, disabled: bool) -> None:
+        button = getattr(self, "_play_button", None)
+        if button is not None:
+            button.setDisabled(disabled)
+
+    def on_busy_changed(self, busy: bool) -> None:
+        """Mirror the Play page lock while installation work is active."""
+        button = getattr(self, "_play_button", None)
+        if button is not None:
+            button.setEnabled(not busy and not self.window._pages["play"].is_launching)
+
+    def on_install_activity_changed(self, operation: str | None) -> None:
+        """Show active Anomaly/GAMMA installs in the dashboard status card."""
+        if operation == "anomaly" and hasattr(self, "anomaly_status"):
+            self.anomaly_status.set_installing("Installing Anomaly...")
+        elif operation == "gamma" and hasattr(self, "gamma_status"):
+            self.gamma_status.set_installing("Installing GAMMA...")
+        elif operation is None and self.settings.active_profile is not None:
+            self._render_install_status()
 
     def _play_gamma(self) -> None:
+        if self.window.install_busy:
+            return
         self.window._pages["play"].launch_game()
 
     def _open_folder(self, target: str) -> None:

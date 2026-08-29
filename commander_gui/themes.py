@@ -132,6 +132,9 @@ QScrollArea > QWidget#qt_scrollarea_viewport,
 QWidget#pageContent {
     background: transparent;
 }
+QWidget#panelTransparent {
+    background: transparent;
+}
 #topbar {
     background-color: $topbar;
     border-bottom: 1px solid $border;
@@ -201,6 +204,38 @@ QWidget#pageContent {
 #checkSection {
     background: transparent;
     border-bottom: 1px solid $border;
+}
+#installPage QLabel#info {
+    color: $text_info;
+    font-size: 14px;
+}
+#installPage QLabel#dim {
+    color: $text;
+}
+#installPage QLabel#section2 {
+    color: $accent_section;
+    margin-top: 4px;
+    margin-bottom: 2px;
+}
+#installPage QLabel#section3 {
+    color: $accent_section;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
+#installPage QGroupBox {
+    margin-top: 12px;
+    padding-top: 10px;
+}
+#installPage QGroupBox::title {
+    font-size: 13px;
+    font-weight: bold;
+}
+#installPage QLineEdit {
+    min-height: 30px;
+}
+#installPage QCheckBox {
+    padding: 3px 0;
 }
 QLabel#section3 {
     color: #7dc963;
@@ -602,7 +637,7 @@ THEMES: dict[str, dict[str, str]] = {
         "danger_bg": "#7a2f2a",
         "danger_border": "#c0554f",
         "danger_text": "#ffe6dd",
-        "danger_hover": "#8f3a33",
+        "danger_hover": "#c74e46",
         "danger_disabled_bg": "#321b1a",
         "danger_disabled_border": "#57302d",
         "danger_disabled_text": "#80635e",
@@ -681,7 +716,7 @@ THEMES: dict[str, dict[str, str]] = {
         "danger_bg": "#6e2f2a",
         "danger_border": "#b0554f",
         "danger_text": "#ffe6dd",
-        "danger_hover": "#803a33",
+        "danger_hover": "#b84940",
         "danger_disabled_bg": "#2c1b1a",
         "danger_disabled_border": "#4d302d",
         "danger_disabled_text": "#7a635e",
@@ -760,7 +795,7 @@ THEMES: dict[str, dict[str, str]] = {
         "danger_bg": "#5a1f1c",
         "danger_border": "#a0443f",
         "danger_text": "#ffd9d4",
-        "danger_hover": "#6f2a26",
+        "danger_hover": "#9a3a34",
         "danger_disabled_bg": "#241211",
         "danger_disabled_border": "#40201e",
         "danger_disabled_text": "#7a504d",
@@ -839,7 +874,7 @@ THEMES: dict[str, dict[str, str]] = {
         "danger_bg": "#4d1f1b",
         "danger_border": "#8f3f3a",
         "danger_text": "#ffd9d4",
-        "danger_hover": "#5f2823",
+        "danger_hover": "#a03b34",
         "danger_disabled_bg": "#1f1211",
         "danger_disabled_border": "#38201e",
         "danger_disabled_text": "#6b4a47",
@@ -918,7 +953,7 @@ THEMES: dict[str, dict[str, str]] = {
         "danger_bg": "#6e2a1e",
         "danger_border": "#b04f3d",
         "danger_text": "#ffe0d4",
-        "danger_hover": "#833424",
+        "danger_hover": "#b04a36",
         "danger_disabled_bg": "#2d1610",
         "danger_disabled_border": "#4d2919",
         "danger_disabled_text": "#7a5a48",

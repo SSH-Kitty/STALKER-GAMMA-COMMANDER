@@ -14,6 +14,8 @@ import shlex
 import sys
 from pathlib import Path
 
+from .atomic import write_text
+
 _DESKTOP_NAME = "stalker-gamma-commander.desktop"
 
 
@@ -85,12 +87,10 @@ def enable_autostart() -> bool:
     )
     root = _project_root()
     if root is not None:
-        content += f"Path={root}\n"
+        content += f'Path="{root}"\n'
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+        write_text(path, content)
         return True
     except OSError:
         return False

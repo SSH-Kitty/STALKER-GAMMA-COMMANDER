@@ -93,7 +93,7 @@ def status_summary(status: UpdateStatus) -> tuple[str, str]:
                 f"{format_version(status.latest, status.latest_human)})"
             )
         else:
-            text = "Addon updates available"
+            text = "Mod updates available"
         if status.diffs:
             text += f" - {len(status.diffs)} change(s)"
         return text, "accent"
@@ -140,7 +140,7 @@ def remote_version(profile) -> str | None:
                 .decode("utf-8", errors="replace")
                 .strip()
             )
-    except OSError:
+    except (OSError, ValueError, UnicodeError):
         return None
     return version or None
 

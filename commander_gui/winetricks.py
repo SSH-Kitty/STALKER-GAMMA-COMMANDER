@@ -14,7 +14,7 @@ import subprocess
 
 from .dependencies import _externally_managed, configured_tool
 
-#: Verbs installed by the "Install / Update Runtimes" action, in order.
+#: Verbs installed by the "Install Dependencies" action, in order.
 WINETRICKS_VERBS = (
     "d3dcompiler_43",
     "d3dcompiler_47",
@@ -24,6 +24,13 @@ WINETRICKS_VERBS = (
     "quartz",
     "dx8vb",
     "vcrun2022",
+)
+
+#: Hardcoded UMU release version for zipapp downloads.
+UMU_VERSION = "1.4.4"
+UMU_ZIPAPP_URL = (
+    f"https://github.com/Open-Wine-Components/umu-launcher/releases/"
+    f"download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar"
 )
 
 _NOISE_PREFIXES = (
@@ -45,6 +52,11 @@ def protontricks_binary() -> str:
     return configured_tool("protontricks") or shutil.which("protontricks") or ""
 
 
+def umu_binary() -> str:
+    """Path to umu-run, or '' when it is not on PATH."""
+    return configured_tool("umu-run") or shutil.which("umu-run") or ""
+
+
 def winetricks_install_command(verbs: tuple[str, ...] = WINETRICKS_VERBS) -> list[str]:
     """Build the ``winetricks -q <verbs>`` command line."""
     binary = winetricks_binary()
@@ -64,6 +76,27 @@ def protontricks_install_command() -> list[str]:
     if _externally_managed():
         return []
     return ["python3", "-m", "pip", "install", "--user", "protontricks"]
+
+
+def umu_install_command() -> list[str]:
+    """Download umu-run zipapp to ``~/.local/bin/`` via curl + tar.
+
+    Uses the universal zipapp tarball (no sudo required, works on any distro).
+    Returns an empty list when curl is not available.
+    """
+    if not shutil.which("curl"):
+        return []
+    return [
+        "bash",
+        "-c",
+        (
+            "set -o pipefail && "
+            f"mkdir -p ~/.local/bin && "
+            f'curl -fL --retry 3 --connect-timeout 30 "{UMU_ZIPAPP_URL}" '
+            f"| tar -xOf - umu-run > ~/.local/bin/umu-run && "
+            f"chmod +x ~/.local/bin/umu-run"
+        ),
+    ]
 
 
 def check_winetricks_status(
@@ -101,6 +134,8 @@ def check_winetricks_status(
         )
     except (OSError, subprocess.TimeoutExpired):
         return result
+    if proc.returncode != 0:
+        return result
     tokens: set[str] = set()
     for raw in (proc.stdout or "").splitlines():
         line = raw.strip()
@@ -117,12 +152,13 @@ def check_winetricks_full_status(
     verbs: tuple[str, ...] = WINETRICKS_VERBS,
     timeout: int = 30,
 ) -> dict[str, bool]:
-    """Return {name: installed} for verbs *and* tool availability (wine, protontricks).
+    """Return {name: installed} for verbs *and* tool availability (wine, protontricks, umu-run).
 
     Combines the slow ``winetricks list-installed`` query with instant
-    ``shutil.which()`` checks for wine and protontricks.
+    ``shutil.which()`` checks for wine, protontricks, and umu-run.
     """
     status = check_winetricks_status(prefix, verbs, timeout)
     status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
     status["protontricks"] = bool(protontricks_binary())
+    status["umu"] = bool(umu_binary())
     return status

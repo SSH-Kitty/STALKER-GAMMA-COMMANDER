@@ -7,21 +7,87 @@ import shutil
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import (
+    QLockFile,
+    QtMsgType,
+    qCritical,
+    qDebug,
+    qInfo,
+    qInstallMessageHandler,
+    qWarning,
+)
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import gui_settings
-from .config import cli_binary_path
+from .config import cli_binary_path, settings_dir
 from .fonts import load_bundled_font
 from .themes import build_palette, build_stylesheet, set_active_theme
-from .ui.common import shutdown_active_runners
+from .ui.common import begin_shutdown, shutdown_active_runners
 from .ui.main_window import MainWindow
+
+_INSTANCE_LOCK: QLockFile | None = None
+
+
+def _is_svg_noise(mode: QtMsgType, message: str | None) -> bool:
+    """True for cosmetic Qt SVG renderer warnings from icon-theme SVGs.
+
+    Some system icon themes (e.g. Mkos-Big-Sur-Night) ship SVG files that
+    reference undefined patterns.  Qt's SVG renderer emits a ``qt.svg:``
+    warning for every such file whenever the file dialog renders a zip/7z
+    icon, drowning the console in noise.
+    """
+    if mode != QtMsgType.QtWarningMsg:
+        return False
+    text = message or ""
+    return text.startswith("qt.svg:") or "Could not resolve property" in text
+
+
+def _quiet_qt_message_handler(mode: QtMsgType, context, message: str) -> None:
+    """Forward Qt messages to the default handler, skipping SVG noise."""
+    if _is_svg_noise(mode, message):
+        return
+    qInstallMessageHandler(None)
+    try:
+        if mode == QtMsgType.QtDebugMsg:
+            qDebug(message)
+        elif mode == QtMsgType.QtInfoMsg:
+            qInfo(message)
+        elif mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+            qCritical(message)
+        else:
+            qWarning(message)
+    finally:
+        qInstallMessageHandler(_quiet_qt_message_handler)
+
+
+def _acquire_instance_lock() -> QLockFile | None:
+    """Acquire the shared lock used to prevent duplicate Commander windows."""
+    lock_path = settings_dir() / "commander.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(lock_path))
+    return lock if lock.tryLock(0) else None
 
 
 def main() -> int:
+    global _INSTANCE_LOCK
+    qInstallMessageHandler(_quiet_qt_message_handler)
     app = QApplication(sys.argv)
     app.setApplicationName("Stalker GAMMA GUI")
     app.setOrganizationName("stalker-gamma")
     app.setStyle("Fusion")
+
+    try:
+        _INSTANCE_LOCK = _acquire_instance_lock()
+    except OSError as exc:
+        QMessageBox.critical(
+            None,
+            "COMMANDER",
+            f"Could not create the Commander instance lock:\n{exc}",
+        )
+        return 1
+    if _INSTANCE_LOCK is None:
+        QMessageBox.information(None, "COMMANDER", "COMMANDER is already running.")
+        return 0
 
     load_bundled_font()
 
@@ -124,7 +190,11 @@ def main() -> int:
     # Background network checks have bounded timeouts but may outlive the
     # window-close event. Wait long enough for them to finish before Qt tears
     # down their QThreads.
-    app.aboutToQuit.connect(lambda: shutdown_active_runners(timeout_ms=30000))
+    def _shutdown() -> None:
+        begin_shutdown()
+        shutdown_active_runners(timeout_ms=30000)
+
+    app.aboutToQuit.connect(_shutdown)
     window = MainWindow()
     window.show()
     return app.exec()

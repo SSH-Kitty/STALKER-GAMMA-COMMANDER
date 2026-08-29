@@ -12,9 +12,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -234,7 +235,13 @@ def verify_gamma(
             continue
         is_official = official_mods is not None and name in official_mods
         mod_path = mods_dir / name
-        if not mod_path.is_dir():
+        try:
+            safe_mod_path = not mod_path.is_symlink() and mod_path.resolve().is_relative_to(
+                mods_dir.resolve()
+            )
+        except (OSError, RuntimeError):
+            safe_mod_path = False
+        if not safe_mod_path or not mod_path.is_dir():
             result.missing.append(name)
             if is_official:
                 result.official_missing.append(name)
@@ -271,7 +278,11 @@ def _md5_file(path: Path) -> tuple[str, int] | None:
     """Return (md5, size) for a file, or None if it cannot be read."""
     digest = hashlib.md5()
     try:
-        with path.open("rb") as f:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd, "rb") as f:
             size = 0
             for chunk in iter(lambda: f.read(1 << 16), b""):
                 digest.update(chunk)
@@ -279,6 +290,81 @@ def _md5_file(path: Path) -> tuple[str, int] | None:
         return digest.hexdigest(), size
     except OSError:
         return None
+
+
+@dataclass
+class CacheArchiveVerifyResult:
+    """Result of checking expected GAMMA download archives."""
+
+    cache_dir: str = ""
+    verified: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    mismatched: list[str] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
+    cancelled: bool = False
+
+    @property
+    def problems(self) -> int:
+        return len(self.missing) + len(self.mismatched) + len(self.unreadable)
+
+    def lines(self) -> list[str]:
+        if self.cancelled:
+            return ["GAMMA cache verification cancelled"]
+        lines = [
+            (
+                "GAMMA cache: "
+                f"{len(self.verified)} reusable, "
+                f"{len(self.missing)} missing, "
+                f"{len(self.mismatched)} outdated/corrupt, "
+                f"{len(self.unreadable)} unreadable"
+            )
+        ]
+        for label, values in (
+            ("Missing", self.missing),
+            ("Outdated/corrupt", self.mismatched),
+            ("Unreadable", self.unreadable),
+        ):
+            if values:
+                lines.append(f"  {label}: {', '.join(values)}")
+        return lines
+
+
+def verify_cache_archives(
+    cache_dir: str,
+    expected: Mapping[str, str],
+    on_progress: Callable[[int, int, str], None] | None = None,
+    cancel=None,
+) -> CacheArchiveVerifyResult:
+    """Check cached archives against the current official MD5 mapping."""
+    result = CacheArchiveVerifyResult(cache_dir=cache_dir)
+    cache = Path(cache_dir)
+    items = sorted((name, digest.lower()) for name, digest in expected.items())
+    total = len(items)
+    for index, (name, expected_digest) in enumerate(items, start=1):
+        if cancel is not None and cancel.is_set():
+            result.cancelled = True
+            break
+        if not name or Path(name).name != name:
+            result.unreadable.append(name or "(empty archive name)")
+            if on_progress is not None:
+                on_progress(index, total, name)
+            continue
+        archive = cache / name
+        if not archive.is_file() or archive.is_symlink():
+            result.missing.append(name)
+        elif not re.fullmatch(r"[0-9a-f]{32}", expected_digest):
+            result.unreadable.append(name)
+        else:
+            actual = _md5_file(archive)
+            if actual is None:
+                result.unreadable.append(name)
+            elif actual[0] == expected_digest:
+                result.verified.append(name)
+            else:
+                result.mismatched.append(name)
+        if on_progress is not None:
+            on_progress(index, total, name)
+    return result
 
 
 def _read_manifest(path: Path) -> dict[str, str] | None:

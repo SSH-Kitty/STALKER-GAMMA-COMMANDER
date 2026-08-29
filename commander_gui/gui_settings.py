@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 
 from .atomic import write_text
 from .config import gui_settings_path
@@ -24,6 +25,7 @@ _DEFAULTS = {
     "always_gamemoderun": False,  # wrap every launch command in gamemoderun
     "autostart": False,  # add to XDG autostart so the app starts at login
     "custom_launch_options": "",  # extra tokens prepended to the launch command
+    "mo2_display_dpi": 120,  # Wine display DPI for Mod Organizer 2 (125%)
     "tool_overrides": {},  # manually selected Linux tools and runner locations
     "move_dest": "",  # in-progress Move Game destination (cleared on completion)
     "move_expected": [],  # destination folder names owned by an in-progress move
@@ -31,15 +33,38 @@ _DEFAULTS = {
     "window_height": 950,
 }
 
+_cache: dict | None = None
+_cache_path_str: str = ""
+_cache_file_mtime: float = 0.0
+
 
 def load_gui_settings() -> dict:
+    global _cache, _cache_path_str, _cache_file_mtime
     path = gui_settings_path()
+    try:
+        current_mtime = path.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+    if (
+        _cache is not None
+        and str(path) == _cache_path_str
+        and current_mtime == _cache_file_mtime
+    ):
+        return copy.deepcopy(_cache)
     data = copy.deepcopy(_DEFAULTS)
     if path.exists():
         try:
             stored = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return data
+            # Try the last-known-good backup if the main file is corrupt.
+            backup = path.with_suffix(".json.last-good")
+            if backup.exists():
+                try:
+                    stored = json.loads(backup.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    return data
+            else:
+                return data
         if isinstance(stored, dict):
             data.update(stored)
     if not isinstance(data.get("runner"), str):
@@ -111,15 +136,37 @@ def load_gui_settings() -> dict:
     if not isinstance(data.get("move_expected"), list):
         data["move_expected"] = []
     data["move_expected"] = [x for x in data["move_expected"] if isinstance(x, str)]
+    try:
+        dpi = int(data.get("mo2_display_dpi", 120))
+    except (TypeError, ValueError):
+        dpi = 120
+    data["mo2_display_dpi"] = dpi if dpi in {96, 120, 144, 168, 192} else 120
+    _cache = copy.deepcopy(data)
+    _cache_path_str = str(path)
+    try:
+        _cache_file_mtime = path.stat().st_mtime
+    except OSError:
+        _cache_file_mtime = 0.0
     return data
 
 
 def save_gui_settings(**changes) -> None:
+    global _cache, _cache_path_str, _cache_file_mtime
     path = gui_settings_path()
     data = load_gui_settings()
     data.update(changes)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Preserve a last-known-good backup before overwriting.
+    if path.exists():
+        try:
+            backup = path.with_suffix(".json.last-good")
+            shutil.copy2(path, backup)
+        except OSError:
+            pass
     write_text(path, json.dumps(data, indent=2) + "\n")
+    _cache = None
+    _cache_path_str = ""
+    _cache_file_mtime = 0.0
 
 
 def configured_wine_prefix() -> str:

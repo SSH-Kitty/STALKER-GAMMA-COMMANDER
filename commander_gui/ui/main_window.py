@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__, gui_settings
+from .. import __version_label__, gui_settings
 from ..settings import load_settings
 from ..themes import (
     active_theme_tokens,
@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         self.resize(gui_state["window_width"], gui_state["window_height"])
         self.settings = load_settings()
         self.install_busy = False
+        self.install_operation: str | None = None
         self._settings_open = False
         self._last_tab_key = "dashboard"
         self._nav_refresh_serial = 0
@@ -233,7 +234,7 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(self._page_index[start_page])
 
         self.statusBar().showMessage(
-            f"COMMANDER {__version__}   |   Active profile: {self._active_name()}"
+            f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}"
         )
         github_link = QPushButton("GitHub")
         github_link.setObjectName("githubLink")
@@ -397,7 +398,7 @@ class MainWindow(QMainWindow):
         self.tabs.update()
         self.backdrop.update()
 
-    def set_install_busy(self, busy: bool) -> None:
+    def set_install_busy(self, busy: bool, operation: str | None = None) -> None:
         """Lock/unlock every install-affecting control across pages.
 
         While busy, none of full install / anomaly install / verify / update
@@ -406,17 +407,21 @@ class MainWindow(QMainWindow):
         defining ``on_busy_changed``.
         """
         self.install_busy = busy
+        self.install_operation = operation if busy else None
         for page in self._pages.values():
             notify = getattr(page, "on_busy_changed", None)
             if callable(notify):
                 notify(busy)
+            activity = getattr(page, "on_install_activity_changed", None)
+            if callable(activity):
+                activity(self.install_operation)
 
     def closeEvent(self, event) -> None:
         if self.install_busy:
             answer = QMessageBox.question(
                 self,
                 "Install Running",
-                "An installation, verification, update, or Winetricks runtime "
+                "An installation, verification, update, or dependency "
                 "download is currently running. Are you sure you want to close?\n\n"
                 "This will terminate the running process and may leave the "
                 "prefix partially configured.",
@@ -426,12 +431,13 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         gui_settings.save_gui_settings(
-            window_width=self.width(), window_height=self.height()
+            window_width=self.normalGeometry().width(),
+            window_height=self.normalGeometry().height(),
         )
         event.accept()
 
     def refresh_settings(self) -> None:
         self.settings = load_settings()
         self.statusBar().showMessage(
-            f"COMMANDER {__version__}   |   Active profile: {self._active_name()}"
+            f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}"
         )

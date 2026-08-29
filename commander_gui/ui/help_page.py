@@ -19,7 +19,14 @@ from PySide6.QtWidgets import (
 
 from ..config import logs_dir
 from ..gui_settings import load_gui_settings
-from .common import _kv_row, clear_layout, info_label, make_card, section_label
+from .common import (
+    _kv_row,
+    assistant_token,
+    clear_layout,
+    info_label,
+    make_card,
+    section_label,
+)
 
 
 def _bullets(lines: list[str]) -> QLabel:
@@ -56,8 +63,9 @@ class HelpPage(QWidget):
         _title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(_title)
         _sub = info_label(
-            "This guide explains each COMMANDER page. Start with a COMMANDER profile, "
-            "install Anomaly and GAMMA, choose a Wine/Proton runner, then launch through MO2."
+            "This guide explains each COMMANDER page. A default profile is "
+            "created automatically; select an installation directory, install "
+            "Anomaly and GAMMA, pick a GE-Proton runner, then launch through MO2."
         )
         _sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(_sub)
@@ -145,48 +153,48 @@ class HelpPage(QWidget):
         steps = [
             (
                 "01",
-                "Create a profile",
+                "Select an installation directory",
                 (
-                    "Fill in the Anomaly folder, GAMMA folder, and cache folder, "
-                    "then Create Profile — it activates automatically. Use "
-                    "absolute paths; the CLI defaults are relative to where the "
-                    "app was started."
+                    "A default profile is created automatically. On Install, "
+                    "select a base directory under Installation Directory and "
+                    "click Create folders - the tool creates the anomaly, "
+                    "gamma, and cache folders and sets them on your profile."
                 ),
-                "profiles",
-                "Open Profiles",
+                "install",
+                "Open Install",
             ),
             (
                 "02",
-                "Install Anomaly, then GAMMA",
+                "Install STALKER Anomaly then GAMMA",
                 (
-                    "Open Install and select Install GAMMA. Anomaly is installed "
-                    "first when it is missing. "
-                    "Expect a very large download (~150 GB, or ~100 GB with "
-                    "Minimal). Use Updates for normal addon updates and Verify "
-                    "Integrity when checking or repairing installed files."
+                    "On Install, select Install GAMMA. Anomaly is installed "
+                    "first when it is missing. Expect a large download (~150 "
+                    "GB, or ~100 GB with Minimal). Use Updates for addon "
+                    "updates and Verify Integrity to check or repair installed "
+                    "files."
                 ),
                 "install",
                 "Open Install",
             ),
             (
                 "03",
-                "Install the runtimes",
+                "Install dependencies",
                 (
-                    "Install / Update Runtimes in the Winetricks panel. The "
-                    "workflow may install protontricks first, then the Visual C++ "
-                    "and DirectX runtimes required by MO2 (concrt140.dll)."
+                    "Use Install Dependencies. It installs umu-run and "
+                    "protontricks first, then the Visual C++ and DirectX "
+                    "runtimes MO2 needs (concrt140.dll)."
                 ),
                 "install",
-                "Open Winetricks",
+                "Open Install Dependencies",
             ),
             (
                 "04",
                 "Launch the game",
                 (
-                    "Pick a Wine/Proton runner and launch target on Play, then "
-                    "choose Launch Game, Open MO2, or Launch Anomaly. The game "
-                    "starts detached, so closing COMMANDER does not kill your "
-                    "session."
+                    "On Play, pick a GE-Proton runner (Auto-detect selects the "
+                    "latest GE-Proton) and a launch target, then choose Launch "
+                    "Game, Open MO2, or Launch Anomaly. The game starts "
+                    "detached, so closing COMMANDER will not kill your session."
                 ),
                 "play",
                 "Open Play",
@@ -240,7 +248,7 @@ class HelpPage(QWidget):
                 "Dashboard",
                 (
                     "The landing page. Active profile summary, install status for "
-                    "Anomaly and GAMMA, Winetricks runtime status, storage "
+                    "Anomaly and GAMMA, dependency status, storage "
                     "usage across your folders, a background update check, and "
                     "quick-open buttons for each folder and the log directory."
                 ),
@@ -255,7 +263,7 @@ class HelpPage(QWidget):
                     "GAMMA mod is loaded."
                 ),
                 [
-                    "Auto runner detection — Proton, then Wine",
+                    "Auto-detect (latest GE-Proton) or an installed GE-Proton build",
                     "Per-runner prefixes, live command preview with a copy button",
                     "Detached launch, with launcher.log diagnostics",
                 ],
@@ -285,7 +293,7 @@ class HelpPage(QWidget):
                 [
                     "Minimal mode deletes archives after extract (~50 GB saved)",
                     "Preserve user.ltx and MCM settings across a reinstall",
-                    "Winetricks runtimes panel + Verify Integrity",
+                    "Dependencies panel + Verify Integrity",
                 ],
                 "install",
             ),
@@ -332,9 +340,9 @@ class HelpPage(QWidget):
             (
                 "Utilities",
                 (
-                    "Anomaly integrity, shader cache purge, ReShade removal, "
-                    "cache prune, GOG fix-install, log folder, and debug "
-                    "hash-install."
+                    "Preview cache cleanup, clean the download cache, clear "
+                    "shader cache, remove ReShade, fix GOG installation, and "
+                    "create Log Dump."
                 ),
                 [
                     "Fresh Reset wipes both folders and reinstalls from scratch",
@@ -375,16 +383,17 @@ class HelpPage(QWidget):
             (
                 "MO2 exits immediately or mentions concrt140.dll",
                 (
-                    "Install the required Wine/Proton runtimes into the active "
-                    "runner prefix from Install → Install / Update Runtimes."
+                    "Install the required runtimes into the active "
+                    "runner prefix from Install → Install Dependencies."
                 ),
             ),
             (
                 "Wine client error: version mismatch",
                 (
-                    "This prefix was created by a different Wine/Proton version. "
-                    "Select the original runner or configure a separate prefix "
-                    "for the new runner. Close MO2 and the game before switching."
+                    "This prefix was created by a different runner version. "
+                    "Select the original GE-Proton build or configure a separate "
+                    "prefix for the new runner. Close MO2 and the game before "
+                    "switching."
                 ),
             ),
             (
@@ -432,12 +441,13 @@ class HelpPage(QWidget):
             (
                 "No runner detected or umu-run is missing",
                 (
-                    "Install or configure Wine, Steam Proton, or umu-run. Auto "
-                    "detection tries Proton, then Wine."
+                    "Ensure umu-run is installed and at least one GE-Proton "
+                    "build is available. Auto-detect selects the latest "
+                    "GE-Proton."
                 ),
             ),
             (
-                "Winetricks or runtime installation fails",
+                "Dependency installation fails",
                 (
                     "Install Wine and Winetricks. If protontricks is missing, "
                     "COMMANDER can install it with pipx or user-level pip; PEP 668 "
@@ -463,7 +473,8 @@ class HelpPage(QWidget):
                 "Need diagnostics for a bug report",
                 (
                     "Use Settings → Export diagnostics for a report, or Utilities "
-                    "→ Create diagnostic archive for the CLI install hash archive."
+                    "→ Create Log Dump to bundle the logs into one zip, then open "
+                    f"it in {assistant_token()} to check the errors and warnings."
                 ),
             ),
         ]
@@ -472,8 +483,8 @@ class HelpPage(QWidget):
         layout.addWidget(
             info_label(
                 f"Launch logs are written to {logs_dir() / 'launcher.log'}. The "
-                "Dashboard and Utilities pages both have a button to open the "
-                "logs folder."
+                "Dashboard page has a button to open the logs folder; on "
+                "Utilities, Create Log Dump bundles them into one archive."
             )
         )
         return card
