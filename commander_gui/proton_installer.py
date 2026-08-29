@@ -14,10 +14,11 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from . import __version__
 from .network import read_response_bytes
 
 _GITHUB_API = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
-_USER_AGENT = "CommanderGUI/1.2"
+_USER_AGENT = f"CommanderGUI/{__version__}"
 _ASSET_RE = re.compile(r"GE-Proton\d+-\d+(?:-\w+)?\.tar\.gz$")
 _CHECKSUM_RE = re.compile(r"\.sha512sum$")
 _MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -94,6 +95,8 @@ def _safe_extract(tf: tarfile.TarFile, destination: Path) -> None:
             raise ValueError("Refusing Proton archive with too many members")
         if member.issym() or member.islnk():
             raise ValueError(f"Refusing unsafe link in Proton archive: {member.name}")
+        if not (member.isdir() or member.isreg()):
+            raise ValueError(f"Refusing special file in Proton archive: {member.name}")
         expanded_bytes += max(0, member.size)
         if expanded_bytes > _MAX_EXPANDED_BYTES:
             raise ValueError("Refusing Proton archive with excessive expanded size")
@@ -119,9 +122,14 @@ def install_proton(
     Returns the path to the installed build directory.
     Raises ``ValueError`` or ``OSError`` on failure.
     """
+    def check_cancelled() -> None:
+        if cancel_event and cancel_event.is_set():
+            raise ValueError("Download cancelled")
+
     tar_url, sum_url = _find_assets(version_tag)
 
     install_dir.mkdir(parents=True, exist_ok=True)
+    installed_by_us = False
     with tempfile.TemporaryDirectory(prefix="proton_install_") as tmp:
         tmp_path = Path(tmp)
         tar_name = tar_url.rsplit("/", 1)[-1]
@@ -153,16 +161,20 @@ def install_proton(
                         progress_cb(downloaded, total)
 
         # --- verify checksum ---
+        check_cancelled()
         req_sum = urllib.request.Request(sum_url, headers={"User-Agent": _USER_AGENT})
         with urllib.request.urlopen(req_sum, timeout=30) as resp:
             checksum_text = read_response_bytes(resp, _MAX_CHECKSUM_BYTES).decode(
                 errors="replace"
             )
+        check_cancelled()
         match = re.search(r"\b([0-9a-fA-F]{128})\b", checksum_text)
         if match is None:
             raise ValueError("Checksum asset did not contain a valid SHA512 digest")
         expected = match.group(1).lower()
+        check_cancelled()
         actual = _sha512(tar_path)
+        check_cancelled()
         if actual != expected:
             raise ValueError(
                 f"SHA512 mismatch: expected {expected[:16]}… got {actual[:16]}…"
@@ -175,18 +187,28 @@ def install_proton(
             raise ValueError(f"Proton build already exists: {destination.name}")
         staging = Path(tempfile.mkdtemp(prefix=".proton-staging-", dir=install_dir))
         try:
+            check_cancelled()
             with tarfile.open(tar_path, "r:gz") as tf:
                 _safe_extract(tf, staging)
             installed_staged = staging / dir_name
             if not installed_staged.is_dir():
                 raise ValueError(f"Expected directory {dir_name} not found in archive")
+            check_cancelled()
             os.replace(installed_staged, destination)
+            installed_by_us = True
+            check_cancelled()
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+            if installed_by_us and cancel_event and cancel_event.is_set():
+                shutil.rmtree(destination, ignore_errors=True)
 
     # --- locate installed dir ---
     # The top-level dir inside the tarball is the asset name minus .tar.gz
     installed = install_dir / dir_name
+    if cancel_event and cancel_event.is_set():
+        if installed_by_us:
+            shutil.rmtree(installed, ignore_errors=True)
+        raise ValueError("Download cancelled")
     if not installed.is_dir():
         raise ValueError(f"Expected directory {dir_name} not found after installation")
     return installed

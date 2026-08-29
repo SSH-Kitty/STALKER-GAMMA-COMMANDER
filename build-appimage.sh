@@ -60,9 +60,10 @@ log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ -d "$PROJECT_DIR/commander_gui" ] || die "run this from the project root"
+[ -f "$PROJECT_DIR/assistant/__main__.py" ] || die "assistant package missing"
 [ -x "$PROJECT_DIR/cli/usr/bin/stalker-gamma" ] || die "cli/usr/bin/stalker-gamma missing or not executable"
 
-for required in curl sha256sum awk grep sed sort tail cut du install readlink cp mv rm objdump ldconfig; do
+for required in curl sha256sum awk grep sed sort tail cut du install readlink cp mv rm objdump ldconfig find dirname basename; do
   command -v "$required" >/dev/null 2>&1 || die "required build command missing: $required"
 done
 
@@ -200,10 +201,19 @@ log "copying application payload"
 PAYLOAD="$APPDIR/opt/$APP_ID"
 mkdir -p "$PAYLOAD"
 cp -r "$PROJECT_DIR/commander_gui" "$PAYLOAD/"
+cp -r "$PROJECT_DIR/assistant" "$PAYLOAD/"
 cp -r "$PROJECT_DIR/cli" "$PAYLOAD/"
 [ -f "$PROJECT_DIR/README.md" ] && cp "$PROJECT_DIR/README.md" "$PAYLOAD/"
 [ -f "$PROJECT_DIR/LICENSE" ] && cp "$PROJECT_DIR/LICENSE" "$PAYLOAD/"
 find "$PAYLOAD/commander_gui" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$PAYLOAD/assistant" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$PAYLOAD/assistant" -name '*.pyc' -delete 2>/dev/null || true
+
+# Verify the bundled analyzer imports with the exact interpreter that will ship.
+# Do not let this check recreate bytecode after the payload cleanup above.
+env -u PYTHONPATH PYTHONPATH="$PAYLOAD" PYTHONDONTWRITEBYTECODE=1 "$PY" -s -P -c \
+  'import assistant; from assistant.dump import DumpArchive; print(assistant.__version__)' \
+  || die "bundled ASSISTANT package failed its import check"
 
 # ---------------------------------------------------- AppRun / desktop / icon
 log "writing AppRun, desktop entry and icons"
@@ -295,8 +305,11 @@ rm -f "$OUTPUT"
 env APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$ARCH" VERSION="$VERSION" \
     "$CACHE_DIR/appimagetool" --comp zstd --no-appstream "$APPDIR" "$OUTPUT" \
   || { log "zstd failed, retrying with default compression"
+       rm -f "$OUTPUT"
        env APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$ARCH" VERSION="$VERSION" \
            "$CACHE_DIR/appimagetool" --no-appstream "$APPDIR" "$OUTPUT"; }
+
+[ -f "$OUTPUT" ] || die "appimagetool failed to produce $OUTPUT"
 
 chmod +x "$OUTPUT"
 log "done: $OUTPUT ($(du -h "$OUTPUT" | cut -f1))"

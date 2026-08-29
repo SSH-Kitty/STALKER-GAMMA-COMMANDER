@@ -14,17 +14,33 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__
+from . import __version_label__
 from .config import cli_binary_path, gui_settings_path, logs_dir, settings_path
 
 _MAX_DIAGNOSTIC_FILE_BYTES = 1_000_000
 _SENSITIVE_VALUE_RE = re.compile(
     r'(?i)("[^"]*(?:token|password|passwd|secret|credential|api[_-]?key)[^"]*"\s*:\s*)"[^"]*"'
 )
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b(?:token|password|passwd|secret|credential|api[_-]?key)\b\s*[:=]\s*)"
+    r'''("[^"]*"|'[^']*')'''
+)
+_SENSITIVE_ASSIGNMENT_UNQUOTED_RE = re.compile(
+    r"(?i)(\b(?:token|password|passwd|secret|credential|api[_-]?key)\b\s*[:=]\s*)"
+    r"[^\s,;&]+"
+)
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+)\S+"
+)
+_URL_CREDENTIALS_RE = re.compile(r"(?i)(://)[^/@\s]+:[^/@\s]+@")
 
 
 def _redact(text: str) -> str:
-    return _SENSITIVE_VALUE_RE.sub(r'\1"[REDACTED]"', text)
+    redacted = _SENSITIVE_VALUE_RE.sub(r'\1"[REDACTED]"', text)
+    redacted = _SENSITIVE_ASSIGNMENT_RE.sub(r'\1"[REDACTED]"', redacted)
+    redacted = _SENSITIVE_ASSIGNMENT_UNQUOTED_RE.sub(r"\1[REDACTED]", redacted)
+    redacted = _AUTH_HEADER_RE.sub(r"\1[REDACTED]", redacted)
+    return _URL_CREDENTIALS_RE.sub(r"\1[REDACTED]@", redacted)
 
 
 def _section(title: str, body: str) -> str:
@@ -34,7 +50,7 @@ def _section(title: str, body: str) -> str:
 def _system_info() -> str:
     lines = [
         f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        f"GUI version: {__version__}",
+        f"GUI version: {__version_label__}",
         f"Python: {sys.version}",
         f"Platform: {platform.platform()}",
         f"Executable: {sys.executable}",

@@ -127,8 +127,16 @@ class CliWorker(QObject):
             self.line_ready.emit(message)
             proc, self._process = self._process, None
             if proc is not None and proc.poll() is None:
-                proc.kill()
-                proc.wait()
+                try:
+                    if os.name != "nt":
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except OSError:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
             self.finished.emit(SPAWN_FAILED_RC, _bounded_output("\n".join(collected)))
             return
         self._process = None
@@ -169,24 +177,28 @@ class CliWorker(QObject):
         self.kill()
 
     def pause(self) -> None:
-        """SIGSTOP the child process to freeze it in place."""
+        """SIGSTOP the child process group to freeze it in place."""
         proc = self._process
         if proc is None or proc.poll() is not None or os.name == "nt":
             return
-        pid = proc.pid
         try:
-            os.kill(pid, signal.SIGSTOP)
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGSTOP)
+            else:
+                os.kill(proc.pid, signal.SIGSTOP)
         except OSError:
             pass
 
     def resume(self) -> None:
-        """SIGCONT the child process to resume from where it was stopped."""
+        """SIGCONT the child process group to resume from where it was stopped."""
         proc = self._process
         if proc is None or proc.poll() is not None or os.name == "nt":
             return
-        pid = proc.pid
         try:
-            os.kill(pid, signal.SIGCONT)
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGCONT)
+            else:
+                os.kill(proc.pid, signal.SIGCONT)
         except OSError:
             pass
 
@@ -194,11 +206,16 @@ class CliWorker(QObject):
     def kill(self) -> None:
         proc = self._process
         if proc is not None and proc.poll() is None:
-            pid = proc.pid
-            if os.name == "nt":
-                proc.kill()
-            else:
-                os.killpg(pid, signal.SIGKILL)
+            try:
+                if os.name != "nt":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except OSError:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
 
 
 def _as_text(value: str | bytes | None) -> str:
@@ -237,7 +254,9 @@ def run_sync(
         return TIMEOUT_RC, f"{output}\n[timed out after {timeout}s]"
     except OSError as exc:
         return SPAWN_FAILED_RC, f"Failed to start {cmd[0]!r}: {exc}"
-    return proc.returncode, _bounded_output((proc.stdout or "") + (proc.stderr or ""))
+    return proc.returncode, _bounded_output(
+        (proc.stdout or "") + "\n" + (proc.stderr or "")
+    )
 
 
 def cli_command(

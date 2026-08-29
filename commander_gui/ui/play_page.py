@@ -53,13 +53,13 @@ from ..launcher import (
 from ..proton_installer import fetch_ge_proton_releases, install_proton
 from .common import (
     ACCENT,
-    OK_GREEN,
-    STATUS_RED,
     WARN,
     BackgroundTask,
+    gamma_installed,
     info_label,
     make_card,
     section_label,
+    update_cache_label,
 )
 
 _HIDDEN_LAUNCH_TARGETS = {"dx8", "dx8-avx"}
@@ -101,6 +101,7 @@ class PlayPage(QWidget):
         self.window = window
         self.executables: list[Mo2Executable] = []
         self._launching = False
+        self._install_busy = False
         self._proc = None
         self._launch_timer = None
         self._launch_status_clear_timer = QTimer(self)
@@ -110,6 +111,7 @@ class PlayPage(QWidget):
         #: Steam Proton labels, refreshed with the runner combo so the chip row
         #: does not re-scan Steam libraries on every keystroke.
         self._proton_labels: list[str] = []
+        self._installed_protons: list[tuple[str, str]] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -358,6 +360,11 @@ class PlayPage(QWidget):
         self._releases: list[dict] = []
         self._fetch_proton_releases()
 
+    @property
+    def is_launching(self) -> bool:
+        """Public read-only access to the launch-in-progress state."""
+        return self._launching
+
     # ------------------------------------------------------------------ state
     def _load_state(self) -> None:
         state = gui_settings.load_gui_settings()
@@ -376,6 +383,7 @@ class PlayPage(QWidget):
         self.runner_combo.addItem("Auto-detect (latest GE-Proton)", "auto")
         extra_protons = find_extra_protons()
         self._proton_labels = [label for label, _ in extra_protons]
+        self._installed_protons = extra_protons
         if extra_protons:
             self.runner_combo.insertSeparator(self.runner_combo.count())
             for label, path in extra_protons:
@@ -410,7 +418,7 @@ class PlayPage(QWidget):
         task.start()
 
     def _update_install_button(self) -> None:
-        installed = {label for label, _ in find_extra_protons()}
+        installed = {label for label, _ in self._installed_protons}
         selected = self.proton_version_combo.currentData() or ""
         if not selected and self._releases:
             selected = self._releases[0]["tag"]
@@ -429,7 +437,7 @@ class PlayPage(QWidget):
         version = self.proton_version_combo.currentData()
         if not version:
             return
-        installed = {label for label, _ in find_extra_protons()}
+        installed = {label for label, _ in self._installed_protons}
         if any(version in label for label in installed):
             return
         overrides = gui_settings.load_gui_settings().get("tool_overrides") or {}
@@ -521,8 +529,6 @@ class PlayPage(QWidget):
     def _default_prefix(self, kind: str) -> str:
         if kind.startswith("proton:"):
             return str(DEFAULT_PROTON_PREFIX)
-        if kind == "wine" or kind.startswith("wine:"):
-            return str(Path.home() / "Games" / "wine" / "default")
         return str(DEFAULT_UMU_PREFIX)
 
     def _prefix_for(self, *, kind: str | None) -> str:
@@ -565,6 +571,9 @@ class PlayPage(QWidget):
         default = preferred if preferred in titles else default_launch_target(titles)
         if default:
             self.target_combo.setCurrentText(default)
+        if self.target_combo.currentIndex() < 0 and self.target_combo.count():
+            # Belt and braces: never leave the target combo without a selection.
+            self.target_combo.setCurrentIndex(0)
         self.target_combo.blockSignals(False)
 
     def refresh(self) -> None:
@@ -610,21 +619,7 @@ class PlayPage(QWidget):
             self._update_cache_info(self.cache_edit.text().strip())
 
     def _update_cache_info(self, cache_path: str) -> None:
-        if not cache_path:
-            self.cache_info_label.setText("")
-            return
-        cache_dir = Path(cache_path)
-        if not cache_dir.is_dir():
-            self.cache_info_label.setText("No archives cached")
-            self.cache_info_label.setStyleSheet(f"color: {STATUS_RED.name()};")
-            return
-        count = sum(1 for _ in cache_dir.glob("*.zip"))
-        if count == 0:
-            self.cache_info_label.setText("No archives cached")
-            self.cache_info_label.setStyleSheet(f"color: {STATUS_RED.name()};")
-        else:
-            self.cache_info_label.setText(f"{count} archives cached")
-            self.cache_info_label.setStyleSheet(f"color: {OK_GREEN.name()};")
+        update_cache_label(self.cache_info_label, cache_path)
 
     def _persist_dirs(self) -> None:
         if self._persisting:
@@ -681,8 +676,7 @@ class PlayPage(QWidget):
 
     def _runner(self):
         kind = self.runner_combo.currentData() or "auto"
-        # Expand for every runner, not just plain Wine: '~' is equally invalid
-        # as a Proton/umu prefix path.
+        # Expand for every runner: '~' is equally invalid as a Proton/umu prefix path.
         prefix = os.path.expanduser(self.prefix_edit.text().strip())
         runner = resolve_runner(kind, prefix)
         if gui_settings.load_gui_settings().get("always_gamemoderun"):
@@ -732,8 +726,24 @@ class PlayPage(QWidget):
         return command, env, cwd
 
     def _refresh_preview(self) -> None:
+        """Refresh the launch preview, surfacing unexpected errors.
+
+        Any exception here previously left the launch buttons silently dead;
+        it is now reported in the preview pane instead.
+        """
+        try:
+            self._refresh_preview_inner()
+        except Exception as exc:  # noqa: BLE001 - never leave buttons silently dead
+            self.preview_label.setPlainText(f"Launch check failed: {exc}")
+            self.preview_label.setStyleSheet(f"color: {WARN.name()};")
+            self.launch_button.setEnabled(False)
+            self.open_mo2_button.setEnabled(False)
+            self.direct_button.setEnabled(False)
+
+    def _refresh_preview_inner(self) -> None:
         # Resolve the runner once: each resolution probes the filesystem for
         # Steam libraries and Proton builds, and this runs on every edit.
+        profile = self.window.settings.active_profile
         try:
             runner = self._runner()
         except LaunchError as exc:
@@ -776,10 +786,37 @@ class PlayPage(QWidget):
             return
         self.preview_label.setPlainText(shlex.join(command))
         self.preview_label.setStyleSheet("")
-        self.launch_button.setEnabled(not self._launching and (mo2_ok or direct_ok))
-        self.open_mo2_button.setEnabled(not self._launching and mo2_ok)
+        # Anomaly-direct availability is independent of the MO2/target
+        # pipeline: with only Anomaly installed, Launch Anomaly must work.
+        anomaly_fallback = next(
+            (
+                e
+                for e in self.executables
+                if e.title == "Anomaly" and e.binary and Path(e.binary).is_file()
+            ),
+            None,
+        )
+        base_ok = not self._launching and not self._install_busy
+        self.launch_button.setEnabled(base_ok and mo2_ok)
+        self.open_mo2_button.setEnabled(base_ok and mo2_ok)
         self.direct_button.setEnabled(
-            not self._launching and direct_ok and bool(self._selected_target())
+            base_ok and (mo2_ok or direct_ok or anomaly_fallback is not None)
+        )
+        if mo2_ok:
+            self.launch_button.setToolTip("")
+            self.open_mo2_button.setToolTip("")
+        elif not gamma_installed(profile.gamma):
+            tip = (
+                "Install GAMMA first - Mod Organizer launches require a "
+                "GAMMA installation."
+            )
+            self.launch_button.setToolTip(tip)
+            self.open_mo2_button.setToolTip(tip)
+        else:
+            self.launch_button.setToolTip("")
+            self.open_mo2_button.setToolTip("")
+        self.direct_button.setToolTip(
+            "" if self.direct_button.isEnabled() else "No launch target available"
         )
         self._build_chips(ok=True, runner=runner)
         target = self._selected_target()
@@ -864,11 +901,6 @@ class PlayPage(QWidget):
                 "Steam Proton — may crash with MO2 (concrt140.dll). "
                 "Use GE-Proton instead if available."
             )
-        elif kind.startswith("wine"):
-            self.runner_hint.setText(
-                "System Wine — not recommended. MO2 and GAMMA are tested "
-                "against GE-Proton."
-            )
         else:
             self.runner_hint.setText("")
 
@@ -878,13 +910,25 @@ class PlayPage(QWidget):
 
     def launch_game(self) -> None:
         """Launch the selected game target using the primary Play workflow."""
+        if self._install_busy:
+            return
         # Try MO2 first; fall back to direct launch if MO2 is unavailable.
         try:
             runner = self._runner()
             self._resolve_command(open_mo2=False, direct=False, runner=runner)
             self._launch_via_mo2()
-        except LaunchError:
-            self._launch_direct()
+        except LaunchError as exc:
+            answer = QMessageBox.question(
+                self,
+                "MO2 launch unavailable",
+                "Mod Organizer could not be prepared for this launch.\n\n"
+                f"Reason: {exc}\n\n"
+                "Launch Anomaly directly instead? Mods managed by MO2 will not "
+                "be active in a direct launch.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._launch_direct()
 
     def _launch_via_mo2(self) -> None:
         if self._launching:
@@ -905,14 +949,21 @@ class PlayPage(QWidget):
         self._run(open_mo2=False, direct=False)
 
     def _open_mo2(self) -> None:
-        if self._launching:
+        if self._launching or self._install_busy:
             return
         self._set_launch_button_state(True)
         self._run(open_mo2=True, direct=False)
 
     def _launch_direct(self) -> None:
-        if self._launching:
+        if self._launching or self._install_busy:
             return
+        if self._selected_target() is None:
+            # Anomaly-only installs may have no combo selection yet.
+            fallback = next(
+                (e.title for e in self.executables if e.title == "Anomaly"), None
+            )
+            if fallback is not None:
+                self.target_combo.setCurrentText(fallback)
         self._set_launch_button_state(True)
         self._run(open_mo2=False, direct=True)
 
@@ -1044,3 +1095,13 @@ class PlayPage(QWidget):
         self.open_mo2_button.setEnabled(not launching)
         self.direct_button.setEnabled(not launching)
         self.launch_state_changed.emit(launching)
+
+    def on_busy_changed(self, busy: bool) -> None:
+        """Prevent launch actions from racing an install or reset operation."""
+        self._install_busy = busy
+        if busy:
+            self.launch_button.setEnabled(False)
+            self.open_mo2_button.setEnabled(False)
+            self.direct_button.setEnabled(False)
+        else:
+            self._refresh_preview()

@@ -1,43 +1,20 @@
-"""About page for S.T.A.L.K.E.R. G.A.M.M.A. COMMANDER.
-
-Project overview, architecture, requirements, credits and license. Content
-mirrors the project README so the About page and the docs never drift apart.
-"""
+"""Product About page for STALKER GAMMA COMMANDER."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from .. import __version__
+from .. import __version_label__
 from ..config import cli_binary_path, gui_settings_path, logs_dir, settings_path
 from .common import info_label, make_card, section_label
 
 _GITHUB = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
 
 
-def _equalize_widths(buttons: list[QPushButton]) -> None:
-    max_w = max(btn.sizeHint().width() for btn in buttons)
-    for btn in buttons:
-        btn.setFixedWidth(max_w)
-
-
-def _chip(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setObjectName("chip")
-    return label
-
-
 def _mono(text: str) -> QLabel:
+    """Create a selectable label for a path or other environment value."""
     label = QLabel(text)
     label.setObjectName("mono")
     label.setWordWrap(True)
@@ -46,7 +23,7 @@ def _mono(text: str) -> QLabel:
 
 
 class AboutPage(QWidget):
-    """Project overview, scope, architecture, credits and environment details."""
+    """Product overview, requirements, environment details and project credits."""
 
     def __init__(self, window) -> None:
         super().__init__()
@@ -69,27 +46,19 @@ class AboutPage(QWidget):
         scroll.setWidget(content)
 
         title = section_label("ABOUT", level=1)
-        title.setWordWrap(True)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
         subtitle = info_label(
-            "What COMMANDER does, what it requires, and how its safeguards and licensing work."
+            "A focused Linux desktop companion for installing, managing and playing GAMMA."
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(subtitle)
 
         root.addWidget(self._hero_card())
-
-        cards = QGridLayout()
-        cards.setSpacing(16)
-        root.addLayout(cards)
-        cards.addWidget(self._what_card(), 0, 0)
-        cards.addWidget(self._architecture_card(), 0, 1)
-        cards.addWidget(self._features_card(), 1, 0)
-        cards.addWidget(self._requirements_card(), 1, 1)
-        cards.addWidget(self._installation_card(), 2, 0)
-        cards.addWidget(self._environment_card(), 2, 1)
-
+        root.addWidget(self._included_card())
+        root.addWidget(self._how_it_works_card())
+        root.addWidget(self._requirements_card())
+        root.addWidget(self._environment_card())
         root.addWidget(self._credits_card())
         root.addWidget(self._license_card())
         root.addWidget(self._links_card())
@@ -99,204 +68,96 @@ class AboutPage(QWidget):
 
     def _hero_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("STALKER Anomaly + GAMMA COMMANDER", level=1))
-        version = QLabel(f"COMMANDER GUI v{__version__}")
+        layout.addWidget(section_label("STALKER GAMMA COMMANDER", level=1))
+        version = QLabel(f"COMMANDER GUI {__version_label__}")
         version.setObjectName("accent")
         layout.addWidget(version)
         layout.addWidget(
             info_label(
-                "COMMANDER is a graphical front-end for installing, updating, managing "
-                "and launching STALKER Anomaly + the GAMMA Modpack "
-                "on Linux."
+                "COMMANDER is a GUI around FaithBeam/stalker-gamma-cli. It keeps the "
+                "CLI's installation workflow and adds a practical desktop interface "
+                "for management, launch and repair tasks."
             )
         )
-        chips = QHBoxLayout()
-        chips.setSpacing(8)
-        for text in ("Linux x86_64", "Python 3.10+", "PySide6 / Qt 6", "GPL-3.0"):
-            chips.addWidget(_chip(text))
-        chips.addStretch(1)
-        layout.addLayout(chips)
         return card
 
-    def _what_card(self) -> QWidget:
-        card, layout = make_card(expand=True)
-        layout.addWidget(section_label("What this is", level=2))
-        layout.addWidget(
-            info_label(
-                "GAMMA is normally installed through a Windows launcher and "
-                "run through Mod Organizer 2. On Linux the community solution is "
-                "FaithBeam's stalker-gamma-cli — an excellent but entirely "
-                "terminal-driven installer."
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "COMMANDER is a desktop GUI around that CLI. It does not "
-                "reimplement any installer logic: it drives the real stalker-gamma "
-                "binary as a subprocess and parses its output live. Every "
-                "download, checksum, ModDB fetch and extraction is performed by "
-                "the upstream CLI, so results are identical to using it by hand."
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "On top of the CLI it adds what the CLI does not do: launching the "
-                "game through Mod Organizer in a Wine/Proton prefix, editing "
-                "modlist.txt, installing the Visual C++/DirectX runtimes MO2 needs, "
-                "and a full MD5 integrity-and-repair pass over your installed mods."
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "Scope: Linux desktop, x86_64. The underlying CLI also supports "
-                "Windows, but this GUI's launcher, prefix handling and runner "
-                "detection are Linux-specific."
-            )
-        )
-        layout.addStretch(1)
-        return card
-
-    def _architecture_card(self) -> QWidget:
-        card, layout = make_card(expand=True)
-        layout.addWidget(section_label("How it works", level=2))
-        layout.addWidget(
-            info_label(
-                "COMMANDER is a graphical version of the GAMMA setup process with "
-                "extra features on top. It uses the stalker-gamma CLI as its "
-                "framework: the app builds the commands, runs them in the "
-                "background, and reads their progress to fill the interface, so "
-                "installs and updates behave the same way every time."
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "While a task runs you see live progress instead of a frozen "
-                "window, and you can cancel at any time. A global lock makes "
-                "sure only one install or update runs at once, so two "
-                "operations can never touch the same folders."
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "Destructive actions such as Fresh Reset and Full Uninstall "
-                "double-check the folders before deleting anything, and refuse "
-                "system directories, home directories and symlinks. Config and "
-                "modlist files are written atomically, so a crash cannot "
-                "corrupt them."
-            )
-        )
-        layout.addStretch(1)
-        return card
-
-    def _features_card(self) -> QWidget:
-        card, layout = make_card(expand=True)
-        layout.addWidget(section_label("Features at a glance", level=2))
+    def _included_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label("What is included", level=2))
         for line in (
-            (
-                "Dashboard — install status, Winetricks runtimes, storage usage, "
-                "background update check"
-            ),
-            (
-                "Play — auto runner detection, per-runner prefixes, detached MO2 "
-                "launch with launcher.log diagnostics"
-            ),
-            (
-                "Install — live per-addon progress table, minimal mode, winetricks "
-                "panel and Verify Integrity"
-            ),
-            (
-                "Update — diff review (Added / Modified / Removed) then apply, "
-                "holding the global install lock"
-            ),
-            (
-                "Mod Manager — safe modlist.txt editing with backup and atomic "
-                "writes, blocked while MO2 runs"
-            ),
-            (
-                "Profiles — create/edit/activate/delete delegated to the CLI, with "
-                "all repo URLs and branches"
-            ),
-            (
-                "Utilities — integrity, shader cache, ReShade, cache pruning, "
-                "logs, guarded Fresh Reset and Full Uninstall"
-            ),
+            "Dashboard — see profile, install, storage and update status at a glance.",
+            "System Check — inspect Linux, CLI, graphics, Wine/Proton and runtime readiness.",
+            "Install — set up Anomaly and GAMMA with live progress, Install Dependencies and Verify Integrity.",
+            "Play — choose from detected GE-Proton builds, then launch through MO2 or launch Anomaly directly.",
+            "Updates — review GAMMA addon changes and apply updates through the CLI.",
+            "Mod Manager — safely search and edit the active MO2 modlist with backups.",
+            "Profiles — create, edit, activate and remove COMMANDER profiles.",
+            "Utilities — clean cache or shader files, remove ReShade, repair GOG paths, create log dumps, reset or move an installation.",
+            "Settings — choose themes, startup behavior and desktop autostart options.",
+            "ASSISTANT — the bundled, optional companion opens log dumps for focused analysis.",
         ):
             layout.addWidget(info_label(f"• {line}"))
-        layout.addStretch(1)
+        return card
+
+    def _how_it_works_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label("Safety and how it works", level=2))
+        layout.addWidget(
+            info_label(
+                "COMMANDER builds and runs real stalker-gamma-cli commands, showing their "
+                "progress in the GUI instead of reimplementing the installer. The CLI "
+                "continues to own downloads, checksums and GAMMA data operations."
+            )
+        )
+        layout.addWidget(
+            info_label(
+                "Only one install, update or repair operation runs at a time. File edits "
+                "are made atomically, and destructive reset or move actions show the "
+                "affected locations before they proceed."
+            )
+        )
+        layout.addWidget(
+            info_label(
+                "Play uses Mod Organizer 2 or a direct Anomaly target in a Wine/Proton "
+                "environment. The current runner selector is GE-Proton-only; COMMANDER "
+                "keeps runner prefixes separate and captures launch logs for diagnostics."
+            )
+        )
         return card
 
     def _requirements_card(self) -> QWidget:
-        card, layout = make_card(expand=True)
+        card, layout = make_card()
         layout.addWidget(section_label("Requirements", level=2))
         for line in (
-            "AppImage — x86_64, glibc 2.34+, any X11 or Wayland session",
-            "Bundled — Python 3.12, Qt 6 (PySide6), the stalker-gamma CLI",
-            "May need — libxcb-cursor0 / xcb-util-cursor when the xcb plugin cannot load",
-            "From source — Python 3.10+, PySide6 >= 6.6",
-            (
-                "To play — umu-run (recommended), Steam with any Proton, or system Wine; "
-                "optionally gamemoderun"
-            ),
+            "Platform — Linux desktop on x86_64 with an X11 or Wayland session.",
+            "AppImage — glibc 2.34 or newer; Python 3.12, Qt 6 and the CLI are bundled.",
+            "From source — Python 3.10+, PySide6 6.6+ and network access on first launch.",
+            "To play — umu-run with GE-Proton is recommended; a suitable Wine/Proton runtime and Vulkan support are required.",
+            "Optional — GameMode and MangoHud can be used when installed on the system.",
         ):
             layout.addWidget(info_label(f"• {line}"))
-        layout.addStretch(1)
-        return card
-
-    def _installation_card(self) -> QWidget:
-        card, layout = make_card(expand=True)
-        layout.addWidget(section_label("Installation", level=2))
-        layout.addWidget(
-            info_label("AppImage (recommended) — grab the latest release from GitHub.")
-        )
-        layout.addWidget(
-            _mono(
-                "chmod +x STALKER-GAMMA-COMMANDER-*-x86_64.AppImage\n"
-                "./STALKER-GAMMA-COMMANDER-*-x86_64.AppImage"
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "From source — run.sh creates the virtual "
-                "environment and installs PySide6 for you."
-            )
-        )
-        layout.addWidget(
-            _mono(
-                "git clone https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER.git\n"
-                "cd STALKER-GAMMA-COMMANDER && ./run.sh"
-            )
-        )
-        layout.addWidget(info_label("To point at a different CLI build:"))
-        layout.addWidget(_mono("STALKER_GAMMA_CLI=/path/to/stalker-gamma ./run.sh"))
-        layout.addStretch(1)
         return card
 
     def _environment_card(self) -> QWidget:
-        card, layout = make_card(expand=True)
+        card, layout = make_card()
         layout.addWidget(section_label("Current environment", level=2))
         self.profile_value = self._path_row(layout, "Active profile", "")
         self.cli_value = self._path_row(layout, "CLI binary", str(cli_binary_path()))
-        self.settings_value = self._path_row(
-            layout, "CLI settings", str(settings_path())
-        )
+        self.settings_value = self._path_row(layout, "CLI settings", str(settings_path()))
         self.gui_settings_value = self._path_row(
             layout, "GUI settings", str(gui_settings_path())
         )
         self.logs_value = self._path_row(layout, "Logs", str(logs_dir()))
-        layout.addStretch(1)
         return card
 
     def _credits_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label("Credits", level=2))
         for line in (
-            (
-                "FaithBeam — stalker-gamma-cli, the installer this GUI drives and "
-                "bundles. All installation, download, checksum and ModDB logic is "
-                "theirs."
-            ),
-            "Grokitach and the GAMMA team — the modpack itself.",
-            "GSC Game World and the Anomaly team — for the game.",
+            "FaithBeam — stalker-gamma-cli, the CLI this GUI drives.",
+            "Grokitach and the GAMMA team — the GAMMA modpack.",
+            "GSC Game World and the Anomaly team — the game.",
+            "SSH-Kitty — the COMMANDER graphical interface.",
         ):
             layout.addWidget(info_label(f"• {line}"))
         return card
@@ -306,17 +167,8 @@ class AboutPage(QWidget):
         layout.addWidget(section_label("License", level=2))
         layout.addWidget(
             info_label(
-                "Licensed under the GNU General Public License v3.0. This project "
-                "bundles and drives stalker-gamma-cli, which is GPL-3.0, so this "
-                "front-end is GPL-3.0 as well."
-            )
-        )
-        layout.addWidget(
-            info_label(
-                "Copyright for the underlying CLI installer logic: FaithBeam. "
-                "Copyright for this Python/Qt graphical interface: SSH-Kitty. "
-                "Not affiliated with GSC Game World or the GAMMA development "
-                "team."
+                "COMMANDER is licensed under the GNU General Public License 3.0 "
+                "(GPL-3.0). It is not affiliated with GSC Game World or the GAMMA team."
             )
         )
         return card
@@ -324,7 +176,7 @@ class AboutPage(QWidget):
     def _links_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label("Links", level=2))
-        links = [
+        links = (
             ("Project on GitHub", _GITHUB, "primary"),
             ("Releases", f"{_GITHUB}/releases", "secondary"),
             (
@@ -337,44 +189,24 @@ class AboutPage(QWidget):
                 "https://github.com/Grokitach/Stalker_GAMMA",
                 "secondary",
             ),
-        ]
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        buttons = []
+        )
         for text, url, style in links:
             button = QPushButton(text)
             button.setObjectName(style)
             button.clicked.connect(
-                lambda _checked=False, target=url: QDesktopServices.openUrl(
-                    QUrl(target)
-                )
+                lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target))
             )
-            row.addWidget(button)
-            buttons.append(button)
-        row.addStretch(1)
-        layout.addLayout(row)
-        QTimer.singleShot(0, lambda: _equalize_widths(buttons))
+            layout.addWidget(button)
         return card
 
     def _path_row(self, layout: QVBoxLayout, label: str, value: str) -> QLabel:
-        value_label = QLabel(value)
-        value_label.setWordWrap(True)
-        value_label.setTextInteractionFlags(
-            value_label.textInteractionFlags()
-            | Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        inner = QVBoxLayout()
-        inner.setContentsMargins(0, 0, 0, 0)
-        inner.setSpacing(0)
         key = QLabel(label)
         key.setObjectName("dim")
-        inner.addWidget(key)
-        inner.addWidget(value_label)
-        layout.addLayout(inner)
+        layout.addWidget(key)
+        value_label = _mono(value)
+        layout.addWidget(value_label)
         return value_label
 
     def refresh(self) -> None:
         profile = self.window.settings.active_profile
-        self.profile_value.setText(
-            profile.profile_name if profile else "No active profile"
-        )
+        self.profile_value.setText(profile.profile_name if profile else "No active profile")

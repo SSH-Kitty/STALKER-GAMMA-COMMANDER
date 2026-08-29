@@ -23,13 +23,14 @@ if [ -x "$VENV_DIR/bin/python" ]; then
         'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || true)"
 fi
 if [ ! -x "$VENV_DIR/bin/python" ] || [ "$venv_version" != "$requested_version" ]; then
-    if [ ! -x "$VENV_DIR/bin/python" ]; then
-        echo "Creating virtual environment..."
-        "$PYTHON_BIN" -m venv "$VENV_DIR"
-        "$VENV_DIR/bin/pip" install --upgrade pip
+    if [ -x "$VENV_DIR/bin/python" ] && [ -n "$venv_version" ]; then
+        echo "Recreating virtual environment (Python $venv_version -> $requested_version)..."
+        rm -rf "$VENV_DIR"
     else
-        echo "Warning: existing virtual environment uses Python $venv_version; requested $requested_version. Using the existing environment." >&2
+        echo "Creating virtual environment..."
     fi
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+    "$VENV_DIR/bin/pip" install --upgrade pip
 fi
 
 requirements_hash="$(sha256sum "$REQUIREMENTS" | awk '{print $1}')"

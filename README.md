@@ -4,7 +4,7 @@
 
 **A complete graphical front-end for installing, updating, managing and launching S.T.A.L.K.E.R. Anomaly with the GAMMA modpack on Linux.**
 
-**Current GUI version: 1.2.0**
+**Current GUI version: 1.2.5**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)](#requirements)
@@ -59,8 +59,9 @@ Launches GAMMA through Mod Organizer 2 (MO2), opens MO2 for mod management, or l
 ### Install
 Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent), an overall completion bar driven by the CLI's `[done/total]` counter, and clean cancellation.
 
-<img width="1184" height="1088" alt="Install" src="https://github.com/user-attachments/assets/653778d2-049d-4b84-b780-c3141c33ffab" />
+If an installation is interrupted or a download fails, Commander marks it as resumable. The next launch shows **Resume GAMMA Installation**; valid cached archives are reused and only missing, incomplete, corrupt, or changed archives are downloaded again.
 
+<img width="1184" height="1088" alt="Install" src="https://github.com/user-attachments/assets/653778d2-049d-4b84-b780-c3141c33ffab" />
 
 - Options for `--minimal` (delete archives after extract, ~50 GB saved), and preserving `user.ltx` and MCM settings across a reinstall.
 - Anomaly 1.5.3 installation can be chained automatically before GAMMA installation when Anomaly is missing. Installation and cache folder fields are editable and browseable directly on this page.
@@ -266,9 +267,15 @@ Output defaults to the project root: `STALKER-GAMMA-COMMANDER-<version>-x86_64.A
 
 5. **Copies the payload** to `opt/stalker-gamma-commander/`, laid out so `config.py`'s `project_root()` resolves `cli/usr/bin/stalker-gamma` with no code changes.
 
+   The `assistant/` source package is required in the project tree. It is copied into the image as the bundled COMMANDER ASSISTANT; it is not downloaded or installed as a separate package. The build then imports `assistant` and `assistant.dump` with the exact Python interpreter shipped in the image. That verification disables bytecode generation so it does not add `__pycache__` or `.pyc` files back into the payload.
+
 6. **Writes `AppRun`**, the `.desktop` entry and icons, then packages with `appimagetool` (zstd, falling back to gzip).
 
 `AppRun` launches Python with `-s -P`, and deliberately **not** `-E`: `-E` would discard the `PYTHONPATH` pointing at the bundled payload, while `-P` stops a stray `commander_gui` directory in the launch directory from shadowing it.
+
+### Bundled ASSISTANT
+
+The Utilities page launches the bundled ASSISTANT with the AppImage's Python as `python -m assistant`. It can also open diagnostic archives passed from Commander. Source runs use the same `assistant/` package from the checkout, so that package must be present when building or running the project; the build script does not fetch it. These build-script and documentation changes take effect the next time an AppImage is built and do not rebuild an existing image.
 
 ### Tuning
 
@@ -287,7 +294,7 @@ Edit the settings block at the top of the script:
 
 ```bash
 # Highest glibc symbol any bundled binary needs — this is your real floor
-./STALKER-GAMMA-COMMANDER-1.2.0-x86_64.AppImage --appimage-extract >/dev/null
+./STALKER-GAMMA-COMMANDER-1.2.5-x86_64.AppImage --appimage-extract >/dev/null
 find squashfs-root -type f \( -name '*.so*' -o -perm -u+x \) \
   -exec sh -c 'objdump -T "$1" 2>/dev/null | grep -oE "GLIBC_[0-9]+\.[0-9]+"' _ {} \; \
   | sort -uV | tail -1

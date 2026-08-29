@@ -40,6 +40,34 @@ ANOMALY_MARKERS = ("AnomalyLauncher.exe", "fsgame.ltx")
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
 GAMMA_PROFILE = "G.A.M.M.A"
 
+def count_cached_archives(cache_path: str) -> int:
+    """Count .zip archives in *cache_path*."""
+    if not cache_path:
+        return 0
+    cache_dir = Path(cache_path)
+    if not cache_dir.is_dir():
+        return 0
+    count = 0
+    for _ in cache_dir.glob("*.zip"):
+        count += 1
+    return count
+
+
+def update_cache_label(label: QLabel, cache_path: str) -> None:
+    """Set *label* text and colour based on archive count."""
+    if not cache_path:
+        label.setText("")
+        return
+    count = count_cached_archives(cache_path)
+    if count == 0:
+        label.setText("No archives cached")
+        label.setStyleSheet(f"color: {STATUS_RED.name()};")
+    else:
+        label.setText(
+            f"{count} archive{'s' if count != 1 else ''} cached"
+        )
+        label.setStyleSheet(f"color: {OK_GREEN.name()};")
+
 
 _MO2_RUNNING_CACHE: float = 0.0
 _MO2_RUNNING_RESULT: bool = False
@@ -65,7 +93,9 @@ def mo2_running() -> bool:
         return False
     try:
         proc = subprocess.run(
-            [exe, "-f", r"ModOrganizer\.exe"],
+            # The bracket expression matches MO2 but not this pgrep command's
+            # own arguments, avoiding a false positive when MO2 is closed.
+            [exe, "-f", r"[Mm]odOrganizer\.exe"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
@@ -93,6 +123,17 @@ def gamma_installed(path: str) -> bool:
     return profiles.is_dir() and any(
         p.is_dir() and p.name.upper() == GAMMA_PROFILE for p in profiles.iterdir()
     )
+
+
+def display_state(installed: bool, operation: str | None, key: str) -> bool | str:
+    """Resolve a target's displayed install state.
+
+    Returns ``"installing"`` while that target's operation is active,
+    otherwise the filesystem-derived boolean.
+    """
+    if operation == key:
+        return "installing"
+    return installed
 
 
 class InstallStatusRow(QWidget):
@@ -148,6 +189,15 @@ class InstallStatusRow(QWidget):
         self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
         self._status.setStyleSheet(f"color: {color};")
 
+    def set_installing(self, detail: str = "") -> None:
+        """Show the transient orange state used while an install is running."""
+        color = WARN.name()
+        self._detail.setText(detail)
+        self._detail.setVisible(bool(detail))
+        self._status.setText("Installing")
+        self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
+        self._status.setStyleSheet(f"color: {color};")
+
     def set_status_tooltip(self, text: str) -> None:
         """Show the same status details when hovering any part of the row."""
         for widget in (self, self._dot, self._status, self._detail):
@@ -156,10 +206,18 @@ class InstallStatusRow(QWidget):
 
 _ACTIVE_RUNNERS: set[CommandRunner] = set()
 _ACTIVE_TASKS: set[QObject] = set()
+_SHUTTING_DOWN = False
+
+
+def begin_shutdown() -> None:
+    """Stop background results from reaching UI handlers during app teardown."""
+    global _SHUTTING_DOWN
+    _SHUTTING_DOWN = True
 
 
 def shutdown_active_runners(timeout_ms: int = 5000) -> None:
     """Cancel and wait for all active command threads (called on app quit)."""
+    begin_shutdown()
     for runner in list(_ACTIVE_RUNNERS):
         try:
             runner.shutdown(timeout_ms=timeout_ms)
@@ -215,7 +273,7 @@ class CommandRunner(QObject):
         worker.setup(self._command, self._cwd, self._env)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.line_ready.connect(self.line)
+        worker.line_ready.connect(self._on_line)
         worker.finished.connect(self._on_finished)
         thread.finished.connect(self._on_thread_finished)
         self._thread = thread
@@ -227,7 +285,8 @@ class CommandRunner(QObject):
         if self._worker is not None:
             self._cancel_requested = True
             self._worker.cancel()
-            self.cancelled.emit()
+            if not _SHUTTING_DOWN:
+                self.cancelled.emit()
 
     def pause(self) -> None:
         """SIGSTOP the child process to freeze it in place."""
@@ -263,15 +322,22 @@ class CommandRunner(QObject):
         thread = self._thread
         if thread is not None:
             thread.quit()
-        self.finished.emit(rc, output)
+        if not _SHUTTING_DOWN:
+            self.finished.emit(rc, output)
 
-    def _on_thread_finished(self) -> None:
+    def _on_line(self, line: str) -> None:
+        if not _SHUTTING_DOWN:
+            self.line.emit(line)
+
+    def _on_thread_finished(self, thread: QThread | None = None) -> None:
         # The worker thread has fully stopped; it is now safe to release the
         # worker and thread objects. Dropping the Python references earlier (as
         # the old deleteLater setup did) double-frees the C++ objects, because a
         # queued DeferredDelete in the worker thread still pointed at them.
         # The runner also stays in _ACTIVE_RUNNERS until this point so it is not
         # garbage-collected (destroying its QThread) while the thread still runs.
+        if thread is not None and self._thread is not thread:
+            return
         _ACTIVE_RUNNERS.discard(self)
         self._worker = None
         self._thread = None
@@ -312,6 +378,7 @@ class BackgroundTask(QObject):
         self._kwargs = kwargs
         self._thread: QThread | None = None
         self._worker: _Worker | None = None
+        self._cancel_event = threading.Event()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.isRunning():
@@ -323,21 +390,54 @@ class BackgroundTask(QObject):
         self._thread = QThread(self)
         self._worker = _Worker(self._fn, *self._args, **self._kwargs)
         self._worker.moveToThread(self._thread)
-        self._worker.result.connect(self.result)
-        self._worker.error.connect(self.error)
+        self._worker.result.connect(self._on_result)
+        self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._thread.quit)
         self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(lambda: _ACTIVE_TASKS.discard(self))
+        self._thread.finished.connect(
+            lambda thread=self._thread: self._on_thread_finished(thread)
+        )
         _ACTIVE_TASKS.add(self)
         self._thread.start()
 
+    @property
+    def cancel_event(self) -> threading.Event:
+        """Cancellation token for callables that support cooperative cancel."""
+        return self._cancel_event
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation of the running callable."""
+        self._cancel_event.set()
+
+    def _on_result(self, result) -> None:
+        if not _SHUTTING_DOWN:
+            self.result.emit(result)
+
+    def _on_error(self, message: str) -> None:
+        if not _SHUTTING_DOWN:
+            self.error.emit(message)
+
+    def _on_thread_finished(self, thread: QThread) -> None:
+        if self._thread is not thread:
+            return
+        _ACTIVE_TASKS.discard(self)
+        self._worker = None
+        self._thread = None
+
     def shutdown(self, timeout_ms: int = 5000) -> None:
-        if (
-            self._thread is not None
-            and self._thread.isRunning()
-            and not self._thread.wait(timeout_ms)
-        ):
-            self._thread.wait(1000)
+        self.cancel()
+        thread = self._thread
+        if thread is None:
+            _ACTIVE_TASKS.discard(self)
+            return
+        if not thread.isRunning():
+            self._on_thread_finished(thread)
+            return
+        # A Python callable cannot safely be force-killed. Keep all references
+        # and the active-task entry until QThread.finished if it outlives this
+        # bounded wait.
+        if thread.wait(max(0, timeout_ms)):
+            self._on_thread_finished(thread)
 
 
 class _StreamWorker(QObject):
@@ -391,12 +491,14 @@ class StreamTask(QObject):
         self._thread = QThread(self)
         self._worker = _StreamWorker(self._fn)
         self._worker.moveToThread(self._thread)
-        self._worker.line.connect(self.line)
-        self._worker.result.connect(self.result)
-        self._worker.error.connect(self.error)
+        self._worker.line.connect(self._on_line)
+        self._worker.result.connect(self._on_result)
+        self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._thread.quit)
         self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(lambda: _ACTIVE_TASKS.discard(self))
+        self._thread.finished.connect(
+            lambda thread=self._thread: self._on_thread_finished(thread)
+        )
         _ACTIVE_TASKS.add(self)
         self._thread.start()
 
@@ -407,14 +509,38 @@ class StreamTask(QObject):
     def cancel(self) -> None:
         self._cancel_event.set()
 
+    def _on_line(self, line: str) -> None:
+        if not _SHUTTING_DOWN:
+            self.line.emit(line)
+
+    def _on_result(self, result) -> None:
+        if not _SHUTTING_DOWN:
+            self.result.emit(result)
+
+    def _on_error(self, message: str) -> None:
+        if not _SHUTTING_DOWN:
+            self.error.emit(message)
+
+    def _on_thread_finished(self, thread: QThread) -> None:
+        if self._thread is not thread:
+            return
+        _ACTIVE_TASKS.discard(self)
+        self._worker = None
+        self._thread = None
+
     def shutdown(self, timeout_ms: int = 5000) -> None:
         self.cancel()
-        if (
-            self._thread is not None
-            and self._thread.isRunning()
-            and not self._thread.wait(timeout_ms)
-        ):
-            self._thread.wait(1000)
+        thread = self._thread
+        if thread is None:
+            _ACTIVE_TASKS.discard(self)
+            return
+        if not thread.isRunning():
+            self._on_thread_finished(thread)
+            return
+        # Retain the worker and thread when cooperative cancellation exceeds
+        # the timeout; releasing either while the thread runs is unsafe.
+        if thread.wait(max(0, timeout_ms)):
+            self._on_thread_finished(thread)
 
 
 class OutputPane(QFrame):
@@ -496,6 +622,21 @@ def info_label(text: str, *, wrap: bool = True) -> QLabel:
     return label
 
 
+def assistant_token(text: str = "ASSISTANT") -> str:
+    """Return *text* as a highlighted, link-styled HTML span.
+
+    Used to call out the ASSISTANT support companion tool. The span reads as
+    a link so it can later be wrapped in an ``<a href=...>`` for a GitHub link.
+    """
+    from ..themes import active_theme_tokens
+
+    accent = active_theme_tokens().get("accent", "#9fe96f")
+    return (
+        f"<span style='color:{accent}; text-decoration:underline;"
+        f" font-weight:bold;'>{text}</span>"
+    )
+
+
 def _kv_row(label: str, value: str) -> QHBoxLayout:
     """Key-value row: dim label on the left, selectable value on the right."""
     row = QHBoxLayout()
@@ -518,7 +659,7 @@ def winetricks_tooltip(status: dict[str, bool]) -> str:
     """Rich-text bullet list of tool availability and per-verb winetricks state."""
     rows: list[str] = []
     # Tools section (wine, protontricks) — only shown when present in status.
-    tool_keys = [("wine", "Wine"), ("protontricks", "Protontricks")]
+    tool_keys = [("wine", "Wine"), ("protontricks", "Protontricks"), ("umu", "umu-run")]
     tool_items = [
         (label, status.get(key, False)) for key, label in tool_keys if key in status
     ]
@@ -677,6 +818,43 @@ class ProgressTable(QTableWidget):
             pct.setForeground(QColor(OK_GREEN.name()))
 
 
+def progress_value(complete: int, total: int) -> int:
+    """Convert aggregate completed/total mod counts to a bounded percentage."""
+    if total <= 0:
+        return 0
+    return max(0, min(100, round(complete / total * 100)))
+
+
+def aggregate_progress_value(complete: int, total: int, percent: float) -> int:
+    """Return overall progress using the CLI counter and current item fraction."""
+    if total <= 0:
+        return 0
+    current = max(0.0, min(1.0, percent))
+    completed_before_current = max(0, complete - 1)
+    fraction = (completed_before_current + current) / total
+    return max(0, min(100, round(fraction * 100)))
+
+
+def single_file_progress(operation: str, percent: float) -> int:
+    """Per-phase progress for single-file installs.
+
+    Download tracks the true percent so the bar matches the reported
+    download size exactly; later phases map into fixed tail ranges and are
+    kept for any numeric source that appears upstream.
+    """
+    pct = max(0, min(100, round(percent * 100)))
+    if operation == "Download":
+        return pct
+    stages = {
+        "Extract": (50, 85),
+        "Expand": (85, 95),
+        "Check MD5": (95, 100),
+        "Skipped": (100, 100),
+    }
+    start, end = stages.get(operation, (pct, pct))
+    return round(start + (end - start) * pct / 100)
+
+
 class ProgressArea(QWidget):
     """Combined progress bar + optional addon table + log pane + cancel button.
 
@@ -693,15 +871,19 @@ class ProgressArea(QWidget):
         *,
         show_table: bool = True,
         show_log: bool = True,
+        stage_progress: bool = False,
+        log_max_height: int | None = None,
     ) -> None:
         super().__init__(parent)
         self.show_table = show_table
         self.show_log = show_log
+        self.stage_progress = stage_progress
         self._bar_idle_format = "Idle"
         self._bar_percent_format = "%p%"
         self._status_idle = ""
         self._seen: set[str] = set()
         self._completed: set[str] = set()
+        self._per_archive: dict[str, float] = {}
         self._max_bar_value: int = 0
         self._runner: CommandRunner | None = None
         self._paused = False
@@ -715,6 +897,8 @@ class ProgressArea(QWidget):
         self.status_label.setObjectName("info")
 
         self.log = OutputPane(self) if show_log else None
+        if self.log is not None and log_max_height is not None:
+            self.log.setMaximumHeight(log_max_height)
 
         self.pause_button = QPushButton("Pause", self)
         self.pause_button.setObjectName("secondary")
@@ -758,6 +942,7 @@ class ProgressArea(QWidget):
         self.bar.setStyleSheet("")
         self._seen.clear()
         self._completed.clear()
+        self._per_archive.clear()
         self._max_bar_value = 0
         self._paused = False
         if self.table is not None:
@@ -801,24 +986,66 @@ class ProgressArea(QWidget):
         event = parse_progress_line(clean)
         if event is not None:
             self.bar.setStyleSheet("")
-            self.status_label.setText(
-                f"{event.name} - {event.operation} - {event.percent:.1%}"
-            )
+            if self.stage_progress:
+                if event.operation == "Download":
+                    # The bar must mirror the true download percentage; no
+                    # duplicate percent text below the bar during download.
+                    pct = max(0, min(100, round(event.percent * 100)))
+                    self.bar.setRange(0, 100)
+                    self.bar.setValue(pct)
+                    self.bar.setFormat(f"{pct}%")
+                    self.status_label.setText("")
+                elif event.operation == "Skipped":
+                    self.bar.setRange(0, 1)
+                    self.bar.setValue(1)
+                    self.bar.setFormat("Skipped")
+                    self.status_label.setText(f"{event.name} - Skipped")
+                else:
+                    # Extract/Expand/Check MD5 report a numeric percentage
+                    # for single-file installs; map each phase onto its fixed
+                    # range so the bar advances rather than looping.
+                    pct = single_file_progress(event.operation, event.percent)
+                    self.bar.setRange(0, 100)
+                    self.bar.setValue(pct)
+                    self.bar.setFormat(f"{pct}%")
+                    self.status_label.setText(f"{event.name} - {event.operation}...")
+            else:
+                self.status_label.setText(
+                    f"{event.name} - {event.operation} - {event.percent:.1%}"
+                )
+                if self.table is None:
+                    self.bar.setRange(0, 100)
+                    self.bar.setValue(round(event.percent * 100))
+                    self.bar.setFormat(self._bar_percent_format)
             if self.table is not None:
                 self.table.upsert(event)
             self._seen.add(event.name)
-            if event.percent >= 1.0:
+            # Track per-archive percent for average-based progress.
+            # Terminal states (percent >= 1.0, Skipped) pin at 1.0.
+            # Extract/Expand/Check MD5 keep prior value (no regression).
+            if event.percent >= 1.0 or event.operation == "Skipped":
+                self._per_archive[event.name] = 1.0
                 self._completed.add(event.name)
-            total = event.total
-            if total > 0:
-                value = round(len(self._completed) / total * 100)
-                self._max_bar_value = max(self._max_bar_value, value)
+            elif event.operation in ("Extract", "Expand", "Check MD5"):
+                # Keep prior value; don't regress to 0
+                pass
+            else:
+                # Download or other: update current percent
+                self._per_archive[event.name] = event.percent
+            # The CLI counter is authoritative for overall progress. Include
+            # the current archive's fraction so a large download does not look
+            # stalled until that archive finishes.
+            value = aggregate_progress_value(
+                event.complete, event.total, event.percent
+            )
+            self._max_bar_value = max(self._max_bar_value, value)
+            if self.table is not None:
                 self.bar.setRange(0, 100)
                 self.bar.setValue(self._max_bar_value)
                 self.bar.setFormat(self._bar_percent_format)
-            else:
+            elif event.operation == "Download":
                 self.bar.setRange(0, 100)
-                self.bar.setValue(0)
+                self.bar.setValue(round(event.percent * 100))
                 self.bar.setFormat(self._bar_percent_format)
 
     def status_message(self, text: str) -> None:
@@ -856,6 +1083,19 @@ class ProgressArea(QWidget):
             self.status_label.setText("Failed")
         self._seen.clear()
         self._completed.clear()
+        self._per_archive.clear()
+
+    def on_cancelled(self) -> None:
+        """Reset the bar/buttons to an idle Cancelled state (keeps the log)."""
+        self.cancel_button.hide()
+        self.pause_button.hide()
+        self._paused = False
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        self.bar.setFormat("Cancelled")
+        self._seen.clear()
+        self._completed.clear()
+        self._per_archive.clear()
 
     def set_success_state(self, text: str = "Verified successfully") -> None:
         """Show a successful completed state using the install-bar styling."""
@@ -878,6 +1118,7 @@ class ProgressArea(QWidget):
         self.status_label.setText(text)
         self._seen.clear()
         self._completed.clear()
+        self._per_archive.clear()
 
     def set_installed_state(self, installed: bool | None, detail: str = "") -> None:
         """Set the bar to a persistent Installed / Not installed / Unknown state."""
@@ -908,3 +1149,4 @@ class ProgressArea(QWidget):
         self.status_label.setText(detail)
         self._seen.clear()
         self._completed.clear()
+        self._per_archive.clear()

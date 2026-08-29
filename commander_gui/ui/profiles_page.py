@@ -30,6 +30,7 @@ class ProfilesPage(QWidget):
         self.window = window
         self.settings = window.settings
         self._task: BackgroundTask | None = None
+        self._browse_buttons: list[QPushButton] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -119,6 +120,7 @@ class ProfilesPage(QWidget):
             browse = QPushButton("Browse...")
             browse.setToolTip("Pick the folder with a file dialog.")
             browse.clicked.connect(lambda: self._browse(edit))
+            self._browse_buttons.append(browse)
             row.addWidget(browse)
             return row
 
@@ -183,7 +185,7 @@ class ProfilesPage(QWidget):
             )
         )
 
-        self.save_button = QPushButton("Create Profile")
+        self.save_button = QPushButton("Create profile")
         self.save_button.setObjectName("primary")
         self.save_button.clicked.connect(self._save_or_create)
         form_layout.addWidget(self.save_button)
@@ -268,6 +270,7 @@ class ProfilesPage(QWidget):
         else:
             self._form_state = ""
             self._load_form(CliProfile())
+        self._update_busy_state()
 
     def _profile_item_widget(self, profile: CliProfile) -> QWidget:
         widget = QWidget()
@@ -354,10 +357,40 @@ class ProfilesPage(QWidget):
             self.save_button.setText("Save Changes")
             self.save_button.setToolTip("Save changes to the selected profile.")
         else:
-            self.save_button.setText("Create Profile")
+            self.save_button.setText("Create profile")
             self.save_button.setToolTip("Create a new profile and activate it.")
+        self._update_busy_state()
+
+    def _update_busy_state(self) -> None:
+        busy = self.window.install_busy
+        for button in (self.new_button, self.active_button, self.delete_button, self.save_button):
+            button.setEnabled(
+                not busy and (button is self.new_button or self.profile_list.count() > 0)
+            )
+        for edit in (
+            self.name_edit, self.anomaly_edit, self.gamma_edit, self.cache_edit,
+            self.mo2_edit, self.threads_spin, self.modpack_edit, self.modlist_edit,
+            self.gs_url, self.gs_branch, self.sg_url, self.sg_branch,
+            self.glf_url, self.glf_branch, self.tg_url, self.tg_branch,
+        ):
+            edit.setEnabled(not busy)
+        for button in self._browse_buttons:
+            button.setEnabled(not busy)
+        self.profile_list.setEnabled(not busy)
+
+    def on_busy_changed(self, _busy: bool) -> None:
+        """Disable profile edits while an install-affecting task is running."""
+        self._update_busy_state()
+
+    def _busy_guard(self) -> bool:
+        if not self.window.install_busy:
+            return False
+        self._update_busy_state()
+        return True
 
     def _save_or_create(self) -> None:
+        if self._busy_guard():
+            return
         name = self.name_edit.text().strip()
         exists = any(p.profile_name == name for p in self.settings.profiles)
         # Renaming onto an existing profile (or New keeping a name that already
@@ -377,11 +410,15 @@ class ProfilesPage(QWidget):
 
     # ----- actions -----
     def _browse(self, edit: QLineEdit) -> None:
+        if self._busy_guard():
+            return
         path = QFileDialog.getExistingDirectory(self, "Select a folder", edit.text())
         if path:
             edit.setText(path)
 
     def _new_profile(self) -> None:
+        if self._busy_guard():
+            return
         self._form_state = ""
         self._load_form(CliProfile())
         # An empty name field: "New" must never prefill a default name that
@@ -403,6 +440,8 @@ class ProfilesPage(QWidget):
             )
             return
         if self._task is not None:
+            return
+        if self._busy_guard():
             return
         args = [
             "create",
@@ -470,6 +509,8 @@ class ProfilesPage(QWidget):
         )
 
     def _save_profile(self) -> None:
+        if self._task is not None:
+            return
         profile = self._form_values()
         if not profile.profile_name:
             QMessageBox.warning(self, "Missing Name", "A profile name is required.")
@@ -499,6 +540,8 @@ class ProfilesPage(QWidget):
             or (existing is not None and existing.profile_name == active.profile_name)
         )
         profiles.append(profile)
+        if self._busy_guard():
+            return
         original_profiles = self.settings.profiles[:]
         self.settings.profiles = profiles
         try:
@@ -516,6 +559,9 @@ class ProfilesPage(QWidget):
         )
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
+        if self.window.install_busy:
+            self._update_busy_state()
+            return
         self.new_button.setEnabled(enabled)
         self.active_button.setEnabled(enabled)
         self.delete_button.setEnabled(enabled)
@@ -537,10 +583,14 @@ class ProfilesPage(QWidget):
         return item.data(Qt.ItemDataRole.UserRole)
 
     def _set_active(self) -> None:
+        if self._busy_guard():
+            return
         name = self._selected_profile_name()
         if name is None:
             return
         if self._task is not None:
+            return
+        if self._busy_guard():
             return
         self._set_buttons_enabled(False)
         self._task = BackgroundTask(
@@ -569,6 +619,8 @@ class ProfilesPage(QWidget):
         QMessageBox.information(self, "Activated", f"Profile '{name}' is now active.")
 
     def _delete_profile(self) -> None:
+        if self._busy_guard():
+            return
         name = self._selected_profile_name()
         if name is None:
             return
@@ -581,6 +633,8 @@ class ProfilesPage(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
         if self._task is not None:
+            return
+        if self._busy_guard():
             return
         self._set_buttons_enabled(False)
         self._task = BackgroundTask(

@@ -42,6 +42,18 @@ _PKG_MANAGER_MAP: dict[str, str] = {
     "sles": "zypper",
 }
 
+_PKG_MANAGER_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("apt-get", "apt"),
+    ("dnf", "dnf"),
+    ("pacman", "pacman"),
+    ("zypper", "zypper"),
+    ("apk", "apk"),
+    ("xbps-install", "xbps"),
+    ("emerge", "emerge"),
+    ("eopkg", "eopkg"),
+    ("nix-env", "nix"),
+)
+
 # Package names per manager.  Most distros use the same name; differences
 # are captured here.
 _PKG_NAMES: dict[str, dict[str, str]] = {
@@ -112,13 +124,16 @@ def detect_package_manager() -> str | None:
         if candidate in _PKG_MANAGER_MAP:
             return _PKG_MANAGER_MAP[candidate]
 
+    for command, manager in _PKG_MANAGER_COMMANDS:
+        if shutil.which(command):
+            return manager
     return None
 
 
 def _pkg_name(tool: str) -> str:
     """Return the package name for *tool* on the current distro."""
-    mgr = detect_package_manager() or "apt"
-    names = _PKG_NAMES.get(mgr, _PKG_NAMES["apt"])
+    mgr = detect_package_manager()
+    names = _PKG_NAMES.get(mgr, {})
     return names.get(tool, tool)
 
 
@@ -134,6 +149,16 @@ def _install_command(tool: str) -> str:
         return f"sudo pacman -S {pkg}"
     if mgr == "zypper":
         return f"sudo zypper install {pkg}"
+    if mgr == "apk":
+        return f"sudo apk add {pkg}"
+    if mgr == "xbps":
+        return f"sudo xbps-install -S {pkg}"
+    if mgr == "emerge":
+        return f"sudo emerge {pkg}"
+    if mgr == "eopkg":
+        return f"sudo eopkg install {pkg}"
+    if mgr == "nix":
+        return f"nix-env -iA nixpkgs.{pkg}"
     # Generic fallback.
     return f"Install '{pkg}' with your package manager"
 
@@ -180,6 +205,44 @@ def check_wine() -> str | None:
         "Wine is required but was not found.\n"
         f"Install it with:  {cmd}\n"
         "Generic: https://www.winehq.org/download"
+    )
+
+
+def _umu_binary_valid() -> bool:
+    """Return True if umu-run is on PATH and actually runs."""
+    path = configured_tool("umu-run") or shutil.which("umu-run")
+    if not path:
+        return False
+    try:
+        result = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def check_umu() -> tuple[bool, str | None]:
+    """Check for umu-run (Proton launcher) availability.
+
+    Returns ``(need_install, error_message)``:
+
+    * ``(False, None)`` — umu-run is on PATH and validated.
+    * ``(True, None)``  — missing but can be auto-installed via curl.
+    * ``(True, msg)``   — missing and curl is not available; *msg* tells
+      the user what to install first.
+    """
+    if _umu_binary_valid():
+        return False, None
+    if shutil.which("curl"):
+        return True, None
+    return True, (
+        "umu-run is required but was not found, and curl is not available "
+        "to download it automatically.\n\n"
+        "Install curl with your package manager, then try again."
     )
 
 
@@ -277,6 +340,10 @@ def _pip_usable() -> bool:
 def check_all_dependencies() -> list[str]:
     """Run all pre-flight checks.  Returns a list of error messages (empty = OK)."""
     errors: list[str] = []
+
+    need_umu, umu_err = check_umu()
+    if need_umu and umu_err:
+        errors.append(umu_err)
 
     wt_err = check_winetricks()
     if wt_err:

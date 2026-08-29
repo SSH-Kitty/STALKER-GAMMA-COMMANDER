@@ -10,6 +10,7 @@ against the official archive checksum) and re-extracts just those mods.
 
 from __future__ import annotations
 
+import enum
 import shutil
 import urllib.request
 from dataclasses import dataclass, field
@@ -174,6 +175,8 @@ def delete_mod_and_archive(
     if mod_path.is_dir():
         shutil.rmtree(mod_path)
         removed.append(mod_path)
+    if mod_path.exists():
+        raise OSError(f"Mod folder still exists after deletion: {mod_path}")
     if record is not None:
         downloads = base / "downloads"
         for name in record.archive_names():
@@ -183,14 +186,201 @@ def delete_mod_and_archive(
             if archive.is_file():
                 archive.unlink(missing_ok=True)
                 removed.append(archive)
+            if archive.exists():
+                raise OSError(f"Archive still exists after deletion: {archive}")
     return removed
 
 
 def _is_direct_child(parent: Path, child: Path) -> bool:
     """True when ``child`` is exactly one level inside ``parent``."""
+    if parent.is_symlink() or child.is_symlink():
+        return False
     if not child.name or child.name in (".", ".."):
         return False
     try:
-        return child.resolve().parent == parent.resolve()
+        return child.parent == parent and child.resolve().parent == parent.resolve()
     except OSError:
         return False
+
+
+# ── verify / repair state machine (pure logic, testable without UI) ────────
+
+
+class VerifyPhase(enum.Enum):
+    """High-level phase of a verify + optional repair run."""
+
+    IDLE = "idle"
+    CHECKING_ANOMALY = "checking_anomaly"
+    CHECKING_GAMMA = "checking_gamma"
+    SCANNING_MD5 = "scanning_md5"
+    LOOKING_UP_RECORDS = "looking_up_records"
+    PROMPTING_REPAIR = "prompting_repair"
+    REPAIRING_ANOMALY = "repairing_anomaly"
+    REPAIRING_GAMMA = "repairing_gamma"
+    RECHECKING_ANOMALY = "rechecking_anomaly"
+    COMPLETE = "complete"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class VerifyRepairState:
+    """Snapshot of the verify / repair pipeline at a point in time.
+
+    The *pure* helper :func:`decide_next_phase` takes a ``VerifyRepairState``
+    and returns the next phase + any commands the caller should execute.  The
+    caller (UI layer) runs those commands asynchronously and feeds the results
+    back into a new ``VerifyRepairState``.  This keeps all decision logic in
+    ``repair.py`` where it can be unit-tested without PySide6.
+    """
+
+    phase: VerifyPhase = VerifyPhase.IDLE
+
+    # Anomaly check results
+    anomaly_ok: int = 0
+    anomaly_corrupt: int = 0
+    anomaly_not_found: int = 0
+    anomaly_recheck_done: bool = False
+
+    # GAMMA presence check results
+    gamma_missing: int = 0
+    gamma_empty: int = 0
+    gamma_ok: int = 0
+    gamma_disabled: int = 0
+    gamma_not_installed: bool = False
+
+    # GAMMA MD5 scan results
+    scan: Md5ScanResult | None = None
+    scan_cancelled: bool = False
+
+    # Repair plan
+    plan: RepairPlan | None = None
+    records: dict[str, ModPackRecord] = field(default_factory=dict)
+
+    # Repair orchestration
+    anomaly_needs_repair: bool = False
+    gamma_repairable: bool = False
+    repair_anomaly_pending: bool = False
+    gamma_repair_pending: bool = False
+
+    # Final verdict
+    final_ok: bool | None = None
+    final_message: str = ""
+
+    @property
+    def anomaly_clean(self) -> bool:
+        return self.anomaly_corrupt == 0 and self.anomaly_not_found == 0
+
+    @property
+    def gamma_clean(self) -> bool:
+        return self.gamma_missing == 0 and self.gamma_empty == 0
+
+    @property
+    def scan_clean(self) -> bool:
+        return self.scan is not None and self.scan.problems == 0
+
+
+@dataclass
+class PhaseCommand:
+    """A command the caller should execute, returned by :func:`decide_next_phase`.
+
+    ``kind`` is a stable string tag (``"anomaly_check"``, ``"gamma_verify"``,
+    ``"md5_scan"``, ``"fetch_records"``, ``"repair_anomaly"``,
+    ``"repair_gamma_delete"``, ``"none"``).  Extra data is carried in ``args``.
+    """
+
+    kind: str
+    args: dict = field(default_factory=dict)
+
+
+def decide_next_phase(state: VerifyRepairState) -> PhaseCommand:
+    """Pure function: given the current state, return the next command.
+
+    This is the single source of truth for the verify / repair pipeline.
+    The caller never makes sequencing decisions — it always asks this
+    function.
+    """
+    if state.phase in (VerifyPhase.COMPLETE, VerifyPhase.CANCELLED):
+        return PhaseCommand("none")
+
+    # ── initial: start anomaly check ──
+    if state.phase == VerifyPhase.IDLE:
+        return PhaseCommand("anomaly_check")
+
+    # ── anomaly check done → start GAMMA check ──
+    if state.phase == VerifyPhase.CHECKING_ANOMALY:
+        return PhaseCommand("gamma_verify")
+
+    # ── GAMMA presence check done → decide whether to scan ──
+    if state.phase == VerifyPhase.CHECKING_GAMMA:
+        if state.gamma_not_installed:
+            return PhaseCommand(
+                "complete",
+                args={"ok": state.anomaly_clean, "message": "GAMMA not installed"},
+            )
+        if state.anomaly_clean and state.gamma_clean:
+            # Still need MD5 scan for mod file integrity.
+            return PhaseCommand("md5_scan")
+        # Issues exist — still scan to build repair plan.
+        return PhaseCommand("md5_scan")
+
+    # ── MD5 scan done → look up records if problems found ──
+    if state.phase == VerifyPhase.SCANNING_MD5:
+        if state.scan_cancelled:
+            return PhaseCommand(
+                "complete",
+                args={"ok": False, "message": "MD5 scan cancelled"},
+            )
+        if state.scan_clean and state.anomaly_clean and state.gamma_clean:
+            return PhaseCommand(
+                "complete",
+                args={"ok": True, "message": "All checks passed"},
+            )
+        if state.scan is not None and state.scan.problems > 0:
+            return PhaseCommand("fetch_records")
+        # Presence issues but no scan problems → report without repair.
+        return PhaseCommand(
+            "complete",
+            args={"ok": False, "message": "Issues found but not repairable via MD5"},
+        )
+
+    # ── records fetched (or skipped) → decide repair ──
+    if state.phase == VerifyPhase.LOOKING_UP_RECORDS:
+        needs_anomaly = state.anomaly_corrupt > 0 or state.anomaly_not_found > 0
+        needs_gamma = state.plan is not None and state.plan.has_repairable
+        if not needs_anomaly and not needs_gamma:
+            return PhaseCommand(
+                "complete",
+                args={"ok": False, "message": "Issues found but not auto-repairable"},
+            )
+        return PhaseCommand(
+            "prompt_repair",
+            args={"anomaly": needs_anomaly, "gamma": needs_gamma},
+        )
+
+    # ── user accepted repair → advance pipeline ──
+    if state.phase == VerifyPhase.PROMPTING_REPAIR:
+        if state.repair_anomaly_pending:
+            return PhaseCommand("repair_anomaly")
+        if state.gamma_repair_pending:
+            return PhaseCommand("repair_gamma_delete")
+        # Both done → conclude.
+        return PhaseCommand("conclude_after_repairs")
+
+    # ── anomaly repair done → recheck, then move to gamma or conclude ──
+    if state.phase == VerifyPhase.REPAIRING_ANOMALY:
+        if not state.anomaly_recheck_done:
+            return PhaseCommand("recheck_anomaly")
+        # After recheck: advance to gamma repair or conclude.
+        if state.gamma_repair_pending:
+            return PhaseCommand("repair_gamma_delete")
+        return PhaseCommand("conclude_after_repairs")
+
+    # ── rechecking anomaly → back to repair flow ──
+    if state.phase == VerifyPhase.RECHECKING_ANOMALY:
+        return PhaseCommand("repair_anomaly")
+
+    # ── gamma repair done → conclude ──
+    if state.phase == VerifyPhase.REPAIRING_GAMMA:
+        return PhaseCommand("conclude_after_repairs")
+
+    return PhaseCommand("none")
