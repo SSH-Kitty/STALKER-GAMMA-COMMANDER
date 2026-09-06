@@ -21,7 +21,15 @@ from PySide6.QtWidgets import (
 )
 
 from ..settings import CliProfile, cli_ok, run_config_command
-from .common import BackgroundTask, info_label, make_card, section_label
+from .common import (
+    BackgroundTask,
+    info_label,
+    make_card,
+    mo2_running,
+    normalize_path,
+    section_label,
+    tr,
+)
 
 
 class ProfilesPage(QWidget):
@@ -45,13 +53,12 @@ class ProfilesPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label("PROFILES", level=1)
+        title = section_label(tr("PROFILES"), level=1)
         title.setWordWrap(True)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
         subtitle = info_label(
-            "Create and manage COMMANDER profiles. Each one keeps its Anomaly, "
-            "GAMMA, and download-cache folders."
+            tr("Create and manage COMMANDER profiles. Each one keeps its Anomaly, GAMMA, and download-cache folders.")
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(subtitle)
@@ -66,11 +73,10 @@ class ProfilesPage(QWidget):
         root.addLayout(top)
 
         # ----- profile list -----
-        list_layout.addWidget(section_label("COMMANDER profiles"))
+        list_layout.addWidget(section_label(tr("COMMANDER profiles")))
         list_layout.addWidget(
             info_label(
-                "A COMMANDER profile stores install folders, download settings, and "
-                "repository options. The active profile is what the other pages use."
+                tr("A COMMANDER profile stores install folders, download settings, and repository options. The active profile is what the other pages use.")
             )
         )
         self.profile_list = QListWidget()
@@ -78,28 +84,28 @@ class ProfilesPage(QWidget):
         list_layout.addWidget(self.profile_list, 1)
 
         btn_row = QHBoxLayout()
-        self.new_button = QPushButton("New profile")
-        self.new_button.setToolTip("Start a blank COMMANDER profile form.")
+        self.new_button = QPushButton(tr("New profile"))
+        self.new_button.setToolTip(tr("Start a blank COMMANDER profile form."))
         self.new_button.clicked.connect(self._new_profile)
-        self.active_button = QPushButton("Set active")
+        self.active_button = QPushButton(tr("Set active"))
         self.active_button.setObjectName("primary")
         self.active_button.setToolTip(
-            "Make the selected COMMANDER profile active for the other pages."
+            tr("Make the selected COMMANDER profile active for the other pages.")
         )
         self.active_button.clicked.connect(self._set_active)
-        self.delete_button = QPushButton("Delete profile")
+        self.delete_button = QPushButton(tr("Delete profile"))
         self.delete_button.setObjectName("danger")
-        self.delete_button.setToolTip("Remove the selected profile.")
+        self.delete_button.setToolTip(tr("Remove the selected profile."))
         self.delete_button.clicked.connect(self._delete_profile)
         for b in (self.new_button, self.active_button, self.delete_button):
             btn_row.addWidget(b)
         list_layout.addLayout(btn_row)
 
         # ----- form -----
-        form_layout.addWidget(section_label("Profile details"))
+        form_layout.addWidget(section_label(tr("Profile details")))
         form_layout.addWidget(
             info_label(
-                "Anomaly, GAMMA, and cache folders are required. Hover a field for details."
+                tr("Anomaly, GAMMA, and cache folders are required. Hover a field for details.")
             )
         )
         self.form = QFormLayout()
@@ -117,8 +123,8 @@ class ProfilesPage(QWidget):
         def path_row(edit: QLineEdit) -> QHBoxLayout:
             row = QHBoxLayout()
             row.addWidget(edit, 1)
-            browse = QPushButton("Browse...")
-            browse.setToolTip("Pick the folder with a file dialog.")
+            browse = QPushButton(tr("Browse..."))
+            browse.setToolTip(tr("Pick the folder with a file dialog."))
             browse.clicked.connect(lambda: self._browse(edit))
             self._browse_buttons.append(browse)
             row.addWidget(browse)
@@ -180,12 +186,11 @@ class ProfilesPage(QWidget):
         form_layout.addLayout(self.form)
         form_layout.addWidget(
             info_label(
-                "Tip: 4 threads = safe on slow connections, "
-                "6 = balanced, 8 = fast on good connections (may timeout on slow networks)."
+                tr("Tip: 4 threads = safe on slow connections, 6 = balanced, 8 = fast on good connections (may timeout on slow networks).")
             )
         )
 
-        self.save_button = QPushButton("Create profile")
+        self.save_button = QPushButton(tr("Create profile"))
         self.save_button.setObjectName("primary")
         self.save_button.clicked.connect(self._save_or_create)
         form_layout.addWidget(self.save_button)
@@ -204,11 +209,10 @@ class ProfilesPage(QWidget):
 
         advanced_card, adv_layout = make_card()
         root.addWidget(advanced_card)
-        adv_layout.addWidget(section_label("Advanced: Repositories & URLs", level=2))
+        adv_layout.addWidget(section_label(tr("Advanced: Repositories & URLs"), level=2))
         adv_layout.addWidget(
             info_label(
-                "Used to build the addon list. Only change these if you use a "
-                "fork or mirror."
+                tr("Used to build the addon list. Only change these if you use a fork or mirror.")
             )
         )
         repo_fields = [
@@ -222,9 +226,9 @@ class ProfilesPage(QWidget):
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(6)
-        grid.addWidget(info_label("Repository"), 0, 0)
-        grid.addWidget(info_label("URL"), 0, 1)
-        grid.addWidget(info_label("Branch"), 0, 2)
+        grid.addWidget(info_label(tr("Repository")), 0, 0)
+        grid.addWidget(info_label(tr("URL")), 0, 1)
+        grid.addWidget(info_label(tr("Branch")), 0, 2)
         for row, (label, url_edit, branch_edit) in enumerate(repo_fields, start=1):
             name_label = QLabel(label)
             name_label.setObjectName("dim")
@@ -320,9 +324,9 @@ class ProfilesPage(QWidget):
     def _form_values(self) -> CliProfile:
         profile = CliProfile()
         profile.profile_name = self.name_edit.text().strip()
-        profile.anomaly = self.anomaly_edit.text().strip()
-        profile.gamma = self.gamma_edit.text().strip()
-        profile.cache = self.cache_edit.text().strip()
+        profile.anomaly = normalize_path(self.anomaly_edit.text())
+        profile.gamma = normalize_path(self.gamma_edit.text())
+        profile.cache = normalize_path(self.cache_edit.text())
         profile.mo2_profile = self.mo2_edit.text().strip() or "G.A.M.M.A"
         profile.download_threads = self.threads_spin.value()
         profile.mod_pack_maker_url = (
@@ -354,11 +358,11 @@ class ProfilesPage(QWidget):
         name = self.name_edit.text().strip()
         editing = any(p.profile_name == name for p in self.settings.profiles)
         if editing:
-            self.save_button.setText("Save Changes")
-            self.save_button.setToolTip("Save changes to the selected profile.")
+            self.save_button.setText(tr("Save Changes"))
+            self.save_button.setToolTip(tr("Save changes to the selected profile."))
         else:
-            self.save_button.setText("Create profile")
-            self.save_button.setToolTip("Create a new profile and activate it.")
+            self.save_button.setText(tr("Create profile"))
+            self.save_button.setToolTip(tr("Create a new profile and activate it."))
         self._update_busy_state()
 
     def _update_busy_state(self) -> None:
@@ -392,18 +396,27 @@ class ProfilesPage(QWidget):
         if self._busy_guard():
             return
         name = self.name_edit.text().strip()
-        exists = any(p.profile_name == name for p in self.settings.profiles)
-        # Renaming onto an existing profile (or New keeping a name that already
-        # exists) would silently overwrite that profile's data.
-        if exists and name != self._form_state:
+        # _form_state is the name of the profile the form was loaded from
+        # (empty for "New"). Editing that profile - including renaming it -
+        # must update that same entry in place instead of creating a
+        # separate profile and leaving the original orphaned.
+        editing_existing = bool(self._form_state) and any(
+            p.profile_name == self._form_state for p in self.settings.profiles
+        )
+        # Renaming onto a *different* existing profile (or New keeping a name
+        # that already exists) would silently overwrite that profile's data.
+        collision = any(
+            p.profile_name == name and p.profile_name != self._form_state
+            for p in self.settings.profiles
+        )
+        if collision:
             QMessageBox.warning(
                 self,
-                "Name In Use",
-                f"A profile named '{name}' already exists. Choose a different name.",
+                tr("Name In Use"),
+                tr("A profile named '{name}' already exists. Choose a different name.", name=name),
             )
             return
-        if exists:
-            self._form_state = name
+        if editing_existing:
             self._save_profile()
         else:
             self._create_profile()
@@ -430,13 +443,13 @@ class ProfilesPage(QWidget):
     def _create_profile(self) -> None:
         profile = self._form_values()
         if not profile.profile_name:
-            QMessageBox.warning(self, "Missing Name", "A profile name is required.")
+            QMessageBox.warning(self, tr("Missing Name"), tr("A profile name is required."))
             return
         if not (profile.anomaly and profile.gamma and profile.cache):
             QMessageBox.warning(
                 self,
-                "Missing folders",
-                "Anomaly, GAMMA, and cache folders are required.",
+                tr("Missing folders"),
+                tr("Anomaly, GAMMA, and cache folders are required."),
             )
             return
         if self._task is not None:
@@ -490,7 +503,7 @@ class ProfilesPage(QWidget):
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
                 self,
-                "Create Failed",
+                tr("Create Failed"),
                 (out + "\n" + err).strip() or "config create failed",
             )
             return
@@ -500,12 +513,12 @@ class ProfilesPage(QWidget):
             for p in self.window.settings.profiles
         ):
             QMessageBox.warning(
-                self, "Create Failed", "The CLI did not create the profile."
+                self, tr("Create Failed"), tr("The CLI did not create the profile.")
             )
             return
         self.refresh()
         QMessageBox.information(
-            self, "Created", f"Profile '{profile.profile_name}' created and activated."
+            self, tr("Created"), tr("Profile '{profile_name}' created and activated.", profile_name=profile.profile_name)
         )
 
     def _save_profile(self) -> None:
@@ -513,21 +526,24 @@ class ProfilesPage(QWidget):
             return
         profile = self._form_values()
         if not profile.profile_name:
-            QMessageBox.warning(self, "Missing Name", "A profile name is required.")
+            QMessageBox.warning(self, tr("Missing Name"), tr("A profile name is required."))
             return
         if not (profile.anomaly and profile.gamma and profile.cache):
             QMessageBox.warning(
                 self,
-                "Missing folders",
-                "Anomaly, GAMMA, and cache folders are required.",
+                tr("Missing folders"),
+                tr("Anomaly, GAMMA, and cache folders are required."),
             )
             return
         active = self.settings.active_profile
+        # Match on the name the form was loaded from, not the (possibly
+        # just-renamed) new name, so a rename replaces the original entry
+        # instead of leaving it behind as an orphaned duplicate.
         existing = next(
             (
                 p
                 for p in self.settings.profiles
-                if p.profile_name == profile.profile_name
+                if p.profile_name == self._form_state
             ),
             None,
         )
@@ -549,13 +565,14 @@ class ProfilesPage(QWidget):
         except OSError as exc:
             self.settings.profiles = original_profiles
             QMessageBox.warning(
-                self, "Save Failed", f"Could not write settings.json:\n{exc}"
+                self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
             )
             return
+        self._form_state = profile.profile_name
         self.window.refresh_settings()
         self.refresh()
         QMessageBox.information(
-            self, "Saved", f"Profile '{profile.profile_name}' saved."
+            self, tr("Saved"), tr("Profile '{profile_name}' saved.", profile_name=profile.profile_name)
         )
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
@@ -570,17 +587,36 @@ class ProfilesPage(QWidget):
     def _on_task_error(self, msg: str) -> None:
         self._task = None
         self._set_buttons_enabled(True)
-        QMessageBox.warning(self, "Error", msg)
+        QMessageBox.warning(self, tr("Error"), msg)
 
     def _selected_profile_name(self) -> str | None:
         """Name of the highlighted profile, or None when the list is empty."""
         item = self.profile_list.currentItem()
         if item is None:
             QMessageBox.information(
-                self, "No Selection", "Select a profile in the list first."
+                self, tr("No Selection"), tr("Select a profile in the list first.")
             )
             return None
         return item.data(Qt.ItemDataRole.UserRole)
+
+    def _warn_if_active_profile_running(self, name: str, message: str) -> bool:
+        """Ask to continue when MO2/the game is up and ``name`` is active.
+
+        COMMANDER cannot tell which profile a running MO2 actually belongs
+        to, so this only fires for the one case it *can* reason about: the
+        selected profile is the current active one and MO2 is running.
+        Returns True if the caller should proceed.
+        """
+        active = self.settings.active_profile
+        if active is None or active.profile_name != name or not mo2_running():
+            return True
+        answer = QMessageBox.question(
+            self,
+            tr("Game Running"),
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _set_active(self) -> None:
         if self._busy_guard():
@@ -588,6 +624,17 @@ class ProfilesPage(QWidget):
         name = self._selected_profile_name()
         if name is None:
             return
+        if self.settings.active_profile is not None and mo2_running():
+            active_name = self.settings.active_profile.profile_name
+            if name != active_name:
+                answer = QMessageBox.question(
+                    self,
+                    tr("Game Running"),
+                    tr("Mod Organizer / the game appears to be running under the current active profile ('{active_name}').\n\nSwitching the active profile now will not stop it, but COMMANDER's other pages will stop reflecting its state.\n\nSwitch anyway?", active_name=active_name),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
         if self._task is not None:
             return
         if self._busy_guard():
@@ -605,18 +652,18 @@ class ProfilesPage(QWidget):
         self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
-                self, "Failed", (out + "\n" + err).strip() or "config use failed"
+                self, tr("Failed"), (out + "\n" + err).strip() or "config use failed"
             )
             return
         self.window.refresh_settings()
         active = self.window.settings.active_profile
         if active is None or active.profile_name != name:
             QMessageBox.warning(
-                self, "Failed", f"Profile '{name}' could not be activated."
+                self, tr("Failed"), tr("Profile '{name}' could not be activated.", name=name)
             )
             return
         self.refresh()
-        QMessageBox.information(self, "Activated", f"Profile '{name}' is now active.")
+        QMessageBox.information(self, tr("Activated"), tr("Profile '{name}' is now active.", name=name))
 
     def _delete_profile(self) -> None:
         if self._busy_guard():
@@ -626,11 +673,20 @@ class ProfilesPage(QWidget):
             return
         answer = QMessageBox.question(
             self,
-            "Delete Profile",
-            f"Delete profile '{name}'?",
+            tr("Delete Profile"),
+            tr("Delete profile '{name}'?", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self._warn_if_active_profile_running(
+            name,
+            "Mod Organizer / the game appears to be running under this "
+            "profile.\n\n"
+            "Deleting it now will not stop it, but COMMANDER will no "
+            "longer have a profile to show its state under.\n\n"
+            "Delete anyway?",
+        ):
             return
         if self._task is not None:
             return
@@ -649,13 +705,13 @@ class ProfilesPage(QWidget):
         self._set_buttons_enabled(True)
         if not cli_ok(rc, out, err):
             QMessageBox.warning(
-                self, "Failed", (out + "\n" + err).strip() or "config delete failed"
+                self, tr("Failed"), (out + "\n" + err).strip() or "config delete failed"
             )
             return
         self.window.refresh_settings()
         if any(p.profile_name == name for p in self.window.settings.profiles):
             QMessageBox.warning(
-                self, "Failed", f"Profile '{name}' could not be deleted."
+                self, tr("Failed"), tr("Profile '{name}' could not be deleted.", name=name)
             )
             return
         self.refresh()

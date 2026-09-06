@@ -21,7 +21,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .network import read_response_bytes
+from .i18n import tr
+from .network import read_response_bytes, urlopen
 from .parsers import UpdateDiff
 from .repair import USER_AGENT, ModPackRecord, parse_modpack_records
 
@@ -84,20 +85,20 @@ def status_summary(status: UpdateStatus) -> tuple[str, str]:
     if status.error:
         return status.error, "warn"
     if status.installed is None:
-        return "GAMMA is not installed yet - run a full install first.", "warn"
+        return tr("GAMMA is not installed yet - run a full install first."), "warn"
     if status.update_available:
         if status.latest and status.installed and status.latest != status.installed:
-            text = (
-                "Update available "
-                f"({format_version(status.installed, status.installed_human)} → "
-                f"{format_version(status.latest, status.latest_human)})"
+            text = tr(
+                "Update available ({installed} → {latest})",
+                installed=format_version(status.installed, status.installed_human),
+                latest=format_version(status.latest, status.latest_human),
             )
         else:
-            text = "Mod updates available"
+            text = tr("Mod updates available")
         if status.diffs:
-            text += f" - {len(status.diffs)} change(s)"
+            text += " " + tr("- {count} change(s)", count=len(status.diffs))
         return text, "accent"
-    return "GAMMA is up to date", "accent"
+    return tr("GAMMA is up to date"), "accent"
 
 
 def installed_version(gamma_dir: str | None) -> str | None:
@@ -134,7 +135,7 @@ def remote_version(profile) -> str | None:
             _raw_repo_url(profile, VERSION_FILENAME),
             headers={"User-Agent": USER_AGENT},
         )
-        with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+        with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             version = (
                 read_response_bytes(resp, _MAX_VERSION_BYTES)
                 .decode("utf-8", errors="replace")
@@ -151,28 +152,24 @@ def latest_version_human(profile) -> str | None:
     Taken from the repo's ``Patchnotes.md`` heading (``# **GAMMA 0.9.5**``),
     falling back to the README badge ``gamma-v0.9.5``. None if unreachable.
     """
-    text: str | None = None
     for filename in (PATCHNOTES_FILENAME, README_FILENAME):
         try:
             req = urllib.request.Request(
                 _raw_repo_url(profile, filename),
                 headers={"User-Agent": USER_AGENT},
             )
-            with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
                 text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
                     "utf-8", errors="replace"
                 )
-            if text:
-                break
         except (OSError, ValueError, UnicodeError):
-            text = None
             continue
-    if not text:
-        return None
-    match = _PATCHNOTES_VERSION_RE.search(text)
-    if match is None:
-        match = _README_VERSION_RE.search(text)
-    return match.group("version") if match else None
+        if not text:
+            continue
+        match = _PATCHNOTES_VERSION_RE.search(text) or _README_VERSION_RE.search(text)
+        if match:
+            return match.group("version")
+    return None
 
 
 def _records_by_dl_link(
@@ -281,14 +278,14 @@ def check_updates(profile) -> UpdateStatus:
     mo2_profile = getattr(profile, "mo2_profile", "") or "G.A.M.M.A"
 
     if not gamma_dir or not Path(gamma_dir).is_dir():
-        status.error = "GAMMA is not installed yet. Run a full install first."
+        status.error = tr("GAMMA is not installed yet. Run a full install first.")
         return status
 
     status.installed = installed_version(gamma_dir)
 
     local = local_modpack_records(gamma_dir, mo2_profile)
     if local is None:
-        status.error = (
+        status.error = tr(
             "No modpack list found in this profile. Run a full install so the "
             "installer can generate the installed-addon list."
         )
@@ -296,42 +293,46 @@ def check_updates(profile) -> UpdateStatus:
 
     remote: dict[str, ModPackRecord] = {}
     mod_pack_url = getattr(profile, "mod_pack_maker_url", "") or ""
+    list_failed = False
     if mod_pack_url:
         try:
             req = urllib.request.Request(
                 mod_pack_url, headers={"User-Agent": USER_AGENT}
             )
-            with urllib.request.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
                 remote = parse_modpack_records(
                     read_response_bytes(resp, _MAX_MODPACK_BYTES).decode(
                         "utf-8", errors="replace"
                     )
                 )
         except (OSError, ValueError, UnicodeError) as exc:
-            status.error = f"Could not reach the official mod list: {exc}"
-            return status
+            status.error = tr("Could not reach the official mod list: {exc}", exc=exc)
+            list_failed = True
     else:
-        status.error = "The profile has no modpack maker URL configured."
-        return status
+        status.error = tr("The profile has no modpack maker URL configured.")
+        list_failed = True
 
     # If the remote list is empty but local addons exist, treat as a fetch
     # failure rather than reporting every local addon as "Removed".
-    if not remote and local:
-        status.error = (
+    if not list_failed and not remote and local:
+        status.error = tr(
             "The remote mod list is empty; this usually means the fetch "
             "returned an error page. Try again later."
         )
-        return status
+        list_failed = True
 
+    # The version marker is served independently of the addon list -- still
+    # fetch it so a list outage does not hide an available update.
     status.latest = remote_version(profile)
     status.latest_human = latest_version_human(profile)
     # The human label is only reliable for the latest release; an installed
     # build that is not current keeps its bare build number instead.
     if status.installed and status.latest and status.installed == status.latest:
         status.installed_human = status.latest_human
-    status.diffs = diff_records(local, remote)
+    if not list_failed:
+        status.diffs = diff_records(local, remote)
     if not status.error and not status.latest and not status.diffs:
-        status.error = (
+        status.error = tr(
             "Could not fetch the latest GAMMA version marker; the addon list "
             "itself is up to date."
         )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 
@@ -18,25 +17,15 @@ def cli_binary_path() -> Path:
     Resolution order:
       1. STALKER_GAMMA_CLI environment variable
       2. bundled: <project>/cli/usr/bin/stalker-gamma
-      3. cli/usr/bin/stalker-gamma relative to the executable dir (frozen apps)
-      4. system PATH
+      3. system PATH
     """
     env = os.environ.get("STALKER_GAMMA_CLI")
     if env:
-        return Path(env)
+        return Path(env).expanduser()
 
     candidates = [
         project_root() / "cli" / "usr" / "bin" / "stalker-gamma",
     ]
-    if getattr(sys, "frozen", False):
-        candidates.insert(
-            0,
-            Path(sys.executable).resolve().parent
-            / "cli"
-            / "usr"
-            / "bin"
-            / "stalker-gamma",
-        )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate

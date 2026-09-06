@@ -196,6 +196,14 @@ QWidget#panelTransparent {
     border: 1px solid $border;
     border-radius: 10px;
 }
+#updateHero {
+    background-color: $card;
+    border: 1px solid $border_strong;
+    border-radius: 12px;
+}
+#updateHeroIcon {
+    background: transparent;
+}
 #systemCheckCard {
     background: transparent;
     border: 1px solid $border_strong;
@@ -267,6 +275,11 @@ QLabel#section3 {
     font-size: 20px;
     font-weight: bold;
     color: $text_bright;
+}
+#modCounter {
+    font-size: 20px;
+    font-weight: bold;
+    color: $accent;
 }
 #section2 {
     font-size: 15px;

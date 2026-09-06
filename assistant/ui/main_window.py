@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -47,6 +47,27 @@ _MIN_SEVERITY_FILTERS = (
 )
 
 
+class _Worker(QObject):
+    """Runs ``fn(*args, **kwargs)`` on a worker thread and reports back."""
+
+    result = Signal(object)
+    error = Signal(object)
+
+    def __init__(self, fn, args, kwargs) -> None:
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+
+    def run(self) -> None:
+        try:
+            value = self._fn(*self._args, **self._kwargs)
+        except Exception as exc:  # noqa: BLE001 - reported to the caller, not swallowed
+            self.error.emit(exc)
+        else:
+            self.result.emit(value)
+
+
 def _safe_mtime(path: Path) -> float:
     """Modification time that survives files deleted mid-refresh."""
     try:
@@ -66,7 +87,13 @@ class MainWindow(QMainWindow):
 
         self._dump: DumpArchive | None = None
         self._findings: list[Finding] = []
+        self._partial = False
         self._session_paths: list[Path] = []
+        self._pending_candidates: list[Path] = []
+        self._pending_dump: DumpArchive | None = None
+        self._pending_partial = False
+        self._bg_thread: QThread | None = None
+        self._bg_worker: _Worker | None = None
 
         root = QVBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
@@ -406,16 +433,69 @@ class MainWindow(QMainWindow):
             return
         self._flash_reject("Only .zip archives can be analyzed.")
 
+    def _run_in_background(self, fn, *args, on_result, on_error, **kwargs) -> None:
+        """Run ``fn(*args, **kwargs)`` off the UI thread; deliver the result back on it.
+
+        A large, legitimately-sized log dump (a long play session's xray/launcher
+        logs, up to the 256 MB decode cap in dump.py) can take a noticeable time
+        to open and scan; running it inline on the UI thread would freeze the
+        window for that whole span.
+        """
+        thread = QThread(self)
+        worker = _Worker(fn, args, kwargs)
+        worker.moveToThread(thread)
+        worker.result.connect(on_result)
+        worker.error.connect(on_error)
+        worker.result.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.started.connect(worker.run)
+
+        def _cleanup(thread=thread) -> None:
+            # on_result may have already chained a second stage (a new
+            # thread) before this stage's own finished signal is delivered -
+            # only clear tracking / restore the cursor if nothing else has
+            # claimed self._bg_thread in the meantime.
+            if self._bg_thread is thread:
+                self._bg_thread = None
+                self._bg_worker = None
+                self._set_busy(False)
+
+        thread.finished.connect(_cleanup)
+        self._bg_thread = thread
+        self._bg_worker = worker
+        thread.start()
+
+    def _set_busy(self, busy: bool) -> None:
+        if busy:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+        self.welcome_drop.setEnabled(not busy)
+        self.analysis_drop.setEnabled(not busy)
+
     def _open_paths(self, paths: object) -> None:
+        if self._bg_thread is not None:
+            # A previous open/analyze run is still in flight - the drop zone
+            # is disabled meanwhile, but a recent-item click can still race it.
+            return
         candidates = [Path(p) for p in paths]  # type: ignore[arg-type]
         if not candidates:
             return
-        primary = candidates[0]
-        try:
-            dump = DumpArchive.open(primary)
-        except DumpError as exc:
-            QMessageBox.warning(self, "Could Not Open Archive", str(exc))
-            return
+        self._pending_candidates = candidates
+        self._set_busy(True)
+        self._run_in_background(
+            DumpArchive.open,
+            candidates[0],
+            on_result=self._on_dump_opened,
+            on_error=self._on_open_error,
+        )
+
+    def _on_open_error(self, exc: object) -> None:
+        message = str(exc) if isinstance(exc, DumpError) else f"Unexpected error: {exc}"
+        QMessageBox.warning(self, "Could Not Open Archive", message)
+
+    def _on_dump_opened(self, dump: object) -> None:
+        assert isinstance(dump, DumpArchive)
         partial = not dump.looks_like_dump()
         if partial:
             answer = QMessageBox.question(
@@ -428,12 +508,32 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        for path in candidates:
+        for path in self._pending_candidates:
             if path not in self._session_paths:
                 self._session_paths.append(path)
-        self._dump = dump
-        self._findings = run_analysis(dump, partial=partial)
-        self._partial = partial
+        # Stash on self rather than a closure: a plain lambda has no thread
+        # affinity Qt can resolve, so the cross-thread result signal below
+        # would invoke it directly on the worker thread instead of queuing
+        # it onto the main thread - exactly the UI-from-a-background-thread
+        # bug this whole background-worker change exists to avoid.
+        self._pending_dump = dump
+        self._pending_partial = partial
+        self._run_in_background(
+            run_analysis,
+            dump,
+            partial=partial,
+            on_result=self._on_analysis_done,
+            on_error=self._on_analysis_error,
+        )
+
+    def _on_analysis_error(self, exc: object) -> None:
+        QMessageBox.warning(self, "Analysis Failed", f"Could not analyze the archive: {exc}")
+
+    def _on_analysis_done(self, findings: object) -> None:
+        assert isinstance(findings, list)
+        self._dump = self._pending_dump
+        self._findings = findings
+        self._partial = self._pending_partial
         self._populate_analysis_view()
         self.stack.setCurrentIndex(1)
         self._refresh_recents()

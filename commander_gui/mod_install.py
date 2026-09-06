@@ -51,16 +51,75 @@ def default_mod_name(archive: Path) -> str:
 
 
 def _validate_tree(root: Path) -> None:
+    # os.walk(followlinks=False) never descends into a symlinked directory,
+    # unlike Path.rglob() which follows them while walking - a symlink loop
+    # (or a link to a huge unrelated tree) inside a malicious archive could
+    # otherwise make this scan hang or run away before ever reaching the
+    # is_symlink() check below.
     resolved_root = root.resolve()
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ModInstallError("Archive contains an unsupported symlink")
-        try:
-            path.resolve().relative_to(resolved_root)
-        except ValueError as exc:
-            raise ModInstallError(
-                "Archive contains a path outside its staging folder"
-            ) from exc
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            path = current / name
+            if path.is_symlink():
+                raise ModInstallError("Archive contains an unsupported symlink")
+            try:
+                path.resolve().relative_to(resolved_root)
+            except ValueError as exc:
+                raise ModInstallError(
+                    "Archive contains a path outside its staging folder"
+                ) from exc
+
+
+def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
+    """Return every member path the archiver reports for ``archive``."""
+    try:
+        result = subprocess.run(
+            [str(archiver), "l", "-slt", str(archive)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ModInstallError(f"Could not list archive contents: {exc}") from exc
+    if result.returncode != 0:
+        detail = "\n".join(result.stdout.splitlines()[-8:])
+        raise ModInstallError(
+            f"Could not list archive contents (exit code {result.returncode})\n{detail}"
+        )
+    paths: list[str] = []
+    for block in result.stdout.split("\n\n"):
+        # The archive-level info block (before the per-entry list starts)
+        # also has a "Path = " line - for the archive file itself - but is
+        # the only block carrying this field, so it's how we skip it.
+        if "Physical Size =" in block:
+            continue
+        for line in block.splitlines():
+            if line.startswith("Path = "):
+                paths.append(line[len("Path = ") :])
+                break
+    return paths
+
+
+def _validate_archive_entries(archiver: Path, archive: Path) -> None:
+    """Reject an archive containing an absolute or ``..``-escaping entry.
+
+    ``_validate_tree()`` below only inspects what actually landed inside
+    ``staging`` after extraction - a member the extractor wrote *outside*
+    staging (e.g. via a ``../`` path) would never be visited by that walk.
+    Listing entries first and rejecting anything that looks like a
+    path-traversal attempt closes that gap without depending on the
+    external 7-Zip binary refusing such paths on its own.
+    """
+    for entry in _list_archive_paths(archiver, archive):
+        normalized = entry.replace("\\", "/")
+        first_segment = normalized.split("/", 1)[0]
+        if normalized.startswith("/") or ":" in first_segment:
+            raise ModInstallError("Archive contains an absolute path entry")
+        if ".." in normalized.split("/"):
+            raise ModInstallError("Archive contains a path-traversal entry")
 
 
 def extract_archive(
@@ -74,8 +133,12 @@ def extract_archive(
         raise ModInstallError(f"Archive not found: {archive}")
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
+    archiver = find_archiver()
+    _validate_archive_entries(archiver, archive)
+    if cancel_event is not None and cancel_event.is_set():
+        raise ModInstallError("Mod installation cancelled")
     staging.mkdir(parents=True, exist_ok=False)
-    command = [str(find_archiver()), "x", str(archive), f"-o{staging}", "-y", "-bsp1"]
+    command = [str(archiver), "x", str(archive), f"-o{staging}", "-y", "-bsp1"]
     try:
         process = subprocess.Popen(
             command,

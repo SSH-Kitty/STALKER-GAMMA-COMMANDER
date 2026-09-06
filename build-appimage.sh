@@ -276,18 +276,11 @@ rm -f "$APPDIR"/python*.desktop "$APPDIR"/python*.png "$APPDIR/.DirIcon"
 rm -f "$APPDIR/usr/share/applications"/python*.desktop
 rm -f "$APPDIR/usr/share/metainfo"/python*.xml "$APPDIR/usr/share/metainfo"/python*.appdata.xml
 rm -f "$APPDIR/usr/share/icons"/hicolor/*/apps/python*.png
-cat > "$APPDIR/$APP_ID.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=$APP_TITLE
-GenericName=STALKER GAMMA Mod Manager
-Comment=Install, update and launch the S.T.A.L.K.E.R. Anomaly + GAMMA mod pack
-Exec=AppRun %U
-Icon=$APP_ID
-Terminal=false
-Categories=Game;
-Keywords=stalker;anomaly;gamma;mods;modorganizer;
-DESKTOP
+# Shared with the AUR package (packaging/PKGBUILD) so both installs ship
+# the same desktop-entry metadata; only Exec= differs per install method.
+DESKTOP_SRC="$PROJECT_DIR/packaging/stalker-gamma-commander.desktop"
+[ -f "$DESKTOP_SRC" ] || die "desktop entry not found at $DESKTOP_SRC"
+sed "s|^Exec=.*|Exec=AppRun %U|" "$DESKTOP_SRC" > "$APPDIR/$APP_ID.desktop"
 
 ICON_SRC="$PROJECT_DIR/cli/stalker-gamma.png"
 [ -f "$ICON_SRC" ] || die "icon not found at $ICON_SRC"

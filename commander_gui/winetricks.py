@@ -90,11 +90,25 @@ def umu_install_command() -> list[str]:
         "bash",
         "-c",
         (
+            # Download to a temp file with an overall time cap, then extract
+            # to a staging file and atomically move into place so a stalled
+            # or truncated transfer never leaves a broken umu-run behind.
+            # The member is located by name rather than assumed at the tar
+            # root: current releases nest it as "umu/umu-run", and a past
+            # hardcoded root-level path silently failed extraction outright.
             "set -o pipefail && "
-            f"mkdir -p ~/.local/bin && "
-            f'curl -fL --retry 3 --connect-timeout 30 "{UMU_ZIPAPP_URL}" '
-            f"| tar -xOf - umu-run > ~/.local/bin/umu-run && "
-            f"chmod +x ~/.local/bin/umu-run"
+            "mkdir -p ~/.local/bin && "
+            'tmp_tar="$(mktemp)" && '
+            'tmp_bin="$(mktemp -p ~/.local/bin .umu-run.XXXXXX)" && '
+            'trap \'rm -f "$tmp_tar" "$tmp_bin"\' EXIT && '
+            f'curl -fL --retry 3 --connect-timeout 30 --max-time 600 '
+            f'"{UMU_ZIPAPP_URL}" -o "$tmp_tar" && '
+            'member="$(tar -tf "$tmp_tar" | grep -E "(^|/)umu-run$" | head -n1)" && '
+            '[ -n "$member" ] && '
+            'tar -xOf "$tmp_tar" "$member" > "$tmp_bin" && '
+            'chmod +x "$tmp_bin" && '
+            'mv -f "$tmp_bin" ~/.local/bin/umu-run && '
+            'rm -f "$tmp_tar" && trap - EXIT'
         ),
     ]
 

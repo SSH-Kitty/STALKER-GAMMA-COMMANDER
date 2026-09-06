@@ -72,8 +72,8 @@ def log_dumps_dir() -> Path:
 
 
 def archive_name(now: datetime | None = None) -> str:
-    """Timestamped archive filename: commander-log-dump-YYYYMMDD-HHMM.zip."""
-    stamp = (now or datetime.now().astimezone()).strftime("%Y%m%d-%H%M")
+    """Timestamped archive filename: commander-log-dump-YYYYMMDD-HHMMSS.zip."""
+    stamp = (now or datetime.now().astimezone()).strftime("%Y%m%d-%H%M%S")
     return f"{_ARCHIVE_STEM}-{stamp}.zip"
 
 

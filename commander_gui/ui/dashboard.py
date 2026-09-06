@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -31,6 +33,7 @@ from .common import (
     mo2_running,
     open_in_file_manager,
     section_label,
+    tr,
     winetricks_tooltip,
 )
 
@@ -52,6 +55,11 @@ class DashboardPage(QWidget):
         self._update_checking = False
         self._winetricks_task: BackgroundTask | None = None
         self._size_task: BackgroundTask | None = None
+        # Re-walking a ~150GB install tree on every Dashboard visit is
+        # expensive; reuse a recent scan of the same paths instead.
+        self._size_cache_key: tuple[str, str, str] | None = None
+        self._size_cache_time: float = 0.0
+        self._SIZE_CACHE_TTL = 30.0
         self._refresh_generation = 0
         self._play_button_connection = None
 
@@ -68,12 +76,11 @@ class DashboardPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label("COMMANDER DASHBOARD", level=1)
+        title = section_label(tr("COMMANDER DASHBOARD"), level=1)
         title.setWordWrap(True)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         subtitle = info_label(
-            "COMMANDER manages STALKER Anomaly and the GAMMA Modpack on Linux. "
-            "Install, update, verify, and launch your game from one place."
+            tr("COMMANDER manages STALKER Anomaly and the GAMMA Modpack on Linux. Install, update, verify, and launch your game from one place.")
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
@@ -113,18 +120,20 @@ class DashboardPage(QWidget):
     def _render_install_status(self) -> None:
         layout = self.install_status_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label("Installation status"))
+        layout.addWidget(section_label(tr("Installation status")))
         profile = self.settings.active_profile
         if profile is None:
-            layout.addWidget(InstallStatusRow("STALKER Anomaly", "No active profile"))
-            layout.addWidget(InstallStatusRow("GAMMA Modpack", "No active profile"))
+            layout.addWidget(InstallStatusRow("STALKER Anomaly", tr("No active profile")))
+            layout.addWidget(InstallStatusRow("GAMMA Modpack", tr("No active profile")))
             return
         op = getattr(self.window, "install_operation", None)
         anomaly_state = display_state(anomaly_installed(profile.anomaly), op, "anomaly")
-        gamma_state = display_state(gamma_installed(profile.gamma), op, "gamma")
+        gamma_state = display_state(
+            gamma_installed(profile.gamma, profile.mo2_profile), op, "gamma"
+        )
         if anomaly_state == "installing":
             self.anomaly_status = InstallStatusRow("STALKER Anomaly", profile.anomaly)
-            self.anomaly_status.set_installing("Installing Anomaly...")
+            self.anomaly_status.set_installing(tr("Installing Anomaly..."))
         else:
             self.anomaly_status = InstallStatusRow(
                 "STALKER Anomaly",
@@ -134,18 +143,18 @@ class DashboardPage(QWidget):
         layout.addWidget(self.anomaly_status)
         if gamma_state == "installing":
             self.gamma_status = InstallStatusRow("GAMMA Modpack", profile.gamma)
-            self.gamma_status.set_installing("Installing GAMMA...")
+            self.gamma_status.set_installing(tr("Installing GAMMA..."))
         else:
             self.gamma_status = InstallStatusRow(
                 "GAMMA Modpack", profile.gamma, ok=bool(gamma_state)
             )
         layout.addWidget(self.gamma_status)
         self.winetricks_status = InstallStatusRow(
-            "Dependencies", "Checking...", ok=None, pending_text="Checking"
+            "Dependencies", tr("Checking..."), ok=None, pending_text=tr("Checking")
         )
         layout.addWidget(self.winetricks_status)
         if op == "dependencies":
-            self.winetricks_status.set_installing("Installing dependencies...")
+            self.winetricks_status.set_installing(tr("Installing dependencies..."))
         else:
             self._start_winetricks_status(
                 self._refresh_generation, self.winetricks_status
@@ -164,7 +173,11 @@ class DashboardPage(QWidget):
         paused["umu"] = True
         total = len(paused)
         self.winetricks_status.set_state(
-            True, f"{total}/{total} dependencies installed (paused - game running)"
+            True,
+            tr(
+                "{total}/{total} dependencies installed (paused - game running)",
+                total=total,
+            ),
         )
         self.winetricks_status.set_status_tooltip(winetricks_tooltip(paused))
 
@@ -210,7 +223,7 @@ class DashboardPage(QWidget):
         total = len(status)
         self.winetricks_status.set_state(
             installed == total,
-            f"{installed}/{total} dependencies installed",
+            tr("{installed}/{total} dependencies installed", installed=installed, total=total),
         )
         self.winetricks_status.set_status_tooltip(winetricks_tooltip(status))
 
@@ -228,10 +241,10 @@ class DashboardPage(QWidget):
         if getattr(self.window, "install_operation", None) == "dependencies":
             return
         self.winetricks_status.set_state(
-            None, "status unavailable", pending_text="Unknown"
+            None, tr("status unavailable"), pending_text=tr("Unknown")
         )
         self.winetricks_status.set_status_tooltip(
-            f"Could not query dependencies: {message}"
+            tr("Could not query dependencies: {message}", message=message)
         )
 
     def _render_profile(self) -> None:
@@ -239,18 +252,17 @@ class DashboardPage(QWidget):
         clear_layout(layout)
         profile = self.settings.active_profile
         if profile is None:
-            layout.addWidget(section_label("No Active Profile"))
+            layout.addWidget(section_label(tr("No Active Profile")))
             layout.addWidget(
                 info_label(
-                    "No COMMANDER profile is active yet. Create or activate one on "
-                    "the Profiles page to manage Anomaly and GAMMA."
+                    tr("No COMMANDER profile is active yet. Create or activate one on the Profiles page to manage Anomaly and GAMMA.")
                 )
             )
-            go = QPushButton("Go to Profiles")
+            go = QPushButton(tr("Go to Profiles"))
             go.clicked.connect(lambda: self.window.set_page("profiles"))
             layout.addWidget(go)
             return
-        layout.addWidget(section_label("Active COMMANDER profile"))
+        layout.addWidget(section_label(tr("Active COMMANDER profile")))
         for label, value in [
             ("Profile", profile.profile_name),
             ("Anomaly folder", profile.anomaly),
@@ -260,7 +272,7 @@ class DashboardPage(QWidget):
             ("Download threads", str(profile.download_threads)),
         ]:
             row = QHBoxLayout()
-            key = QLabel(label)
+            key = QLabel(tr(label))
             key.setObjectName("dim")
             val = QLabel(value)
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -282,6 +294,13 @@ class DashboardPage(QWidget):
             "Cache": profile.cache,
         }
         generation = self._refresh_generation
+        cache_key = (profile.anomaly, profile.gamma, profile.cache)
+        if (
+            cache_key == self._size_cache_key
+            and time.monotonic() - self._size_cache_time < self._SIZE_CACHE_TTL
+        ):
+            self._render_sizes(self._sizes, generation)
+            return
 
         def compute() -> dict[str, int]:
             return {k: dir_size(p) for k, p in paths.items()}
@@ -289,7 +308,9 @@ class DashboardPage(QWidget):
         task = BackgroundTask(compute, parent=self)
         self._size_task = task
         task.result.connect(
-            lambda sizes, generation=generation: self._render_sizes(sizes, generation)
+            lambda sizes, generation=generation, key=cache_key: self._render_sizes(
+                sizes, generation, cache_key=key
+            )
         )
         task.error.connect(
             lambda message, generation=generation: self._on_size_error(
@@ -303,24 +324,28 @@ class DashboardPage(QWidget):
         sizes: dict[str, int],
         generation: int,
         unavailable: str | None = None,
+        cache_key: tuple[str, str, str] | None = None,
     ) -> None:
         self._size_task = None
         if generation != self._refresh_generation:
             self._start_size_task()
             return
         self._sizes = sizes
+        if cache_key is not None:
+            self._size_cache_key = cache_key
+            self._size_cache_time = time.monotonic()
         layout = self.sizes_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label("Storage usage"))
+        layout.addWidget(section_label(tr("Storage usage")))
         total = sum(sizes.values())
         for key, value in sizes.items():
-            bar_label = QLabel(f"{key}: {human_size(value)}")
+            bar_label = QLabel(tr("{key}: {arg}", key=key, arg=human_size(value)))
             layout.addWidget(bar_label)
-        total_label = QLabel(f"Total: {human_size(total)}")
+        total_label = QLabel(tr("Total: {arg}", arg=human_size(total)))
         total_label.setObjectName("accent")
         layout.addWidget(total_label)
         if unavailable is not None:
-            status_label = info_label(f"Storage usage unavailable: {unavailable}")
+            status_label = info_label(tr("Storage usage unavailable: {unavailable}", unavailable=unavailable))
             status_label.setObjectName("warn")
             layout.addWidget(status_label)
 
@@ -337,14 +362,16 @@ class DashboardPage(QWidget):
         if profile is None:
             self._render_update_card(
                 None,
-                "No active profile. Create or activate one on the Profiles page.",
+                tr("No active profile. Create or activate one on the Profiles page."),
                 "warn",
             )
             return
         # Never spawn a second check against a tree an install is writing.
         if self.window.install_busy:
             self._render_update_card(
-                None, "An installation is running. The update check is paused.", "warn"
+                None,
+                tr("An installation is running. The update check is paused."),
+                "warn",
             )
             return
         if self._update_checking:
@@ -358,7 +385,7 @@ class DashboardPage(QWidget):
             profile.cache,
         )
         self._render_update_card(
-            None, "Checking the active GAMMA installation for updates...", "dim"
+            None, tr("Checking the active GAMMA installation for updates..."), "dim"
         )
         task = BackgroundTask(
             check_updates,
@@ -409,7 +436,9 @@ class DashboardPage(QWidget):
             self._start_update_check()
             return
         self._update_checking = False
-        self._render_update_card(None, f"Update check failed: {message}", "warn")
+        self._render_update_card(
+            None, tr("Update check failed: {message}", message=message), "warn"
+        )
 
     def _render_update_card(
         self,
@@ -419,18 +448,18 @@ class DashboardPage(QWidget):
     ) -> None:
         layout = self.updates_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label("Updates"))
+        layout.addWidget(section_label(tr("Updates")))
 
         if status is not None and status.installed is not None:
             grid = QGridLayout()
             grid.setHorizontalSpacing(16)
             grid.setVerticalSpacing(6)
-            grid.addWidget(info_label("Installed GAMMA version:"), 0, 0)
+            grid.addWidget(info_label(tr("Installed GAMMA version:")), 0, 0)
             installed_value = QLabel(
                 format_version(status.installed, status.installed_human)
             )
             grid.addWidget(installed_value, 0, 1)
-            grid.addWidget(info_label("Latest GAMMA version:"), 1, 0)
+            grid.addWidget(info_label(tr("Latest GAMMA version:")), 1, 0)
             latest_value = QLabel(
                 format_version(status.latest, status.latest_human, missing="-")
             )
@@ -445,7 +474,7 @@ class DashboardPage(QWidget):
         layout.addWidget(status_label)
 
         row = QHBoxLayout()
-        check_button = QPushButton("Check for updates")
+        check_button = QPushButton(tr("Check for updates"))
         check_button.setObjectName("primary")
         check_button.setEnabled(
             not self._update_checking
@@ -455,7 +484,7 @@ class DashboardPage(QWidget):
         check_button.clicked.connect(self._start_update_check)
         row.addWidget(check_button)
         if status is not None and status.update_available:
-            goto_button = QPushButton("Open updates")
+            goto_button = QPushButton(tr("Open updates"))
             goto_button.clicked.connect(lambda: self.window.set_page("update"))
             row.addWidget(goto_button)
         row.addStretch(1)
@@ -465,10 +494,10 @@ class DashboardPage(QWidget):
     def _build_actions(self) -> None:
         layout = self.actions_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label("Quick actions"))
+        layout.addWidget(section_label(tr("Quick actions")))
         profile = self.settings.active_profile
         if profile is not None:
-            play = QPushButton("Play GAMMA")
+            play = QPushButton(tr("Play GAMMA"))
             play.setObjectName("primary")
             self._play_button = play
             play.clicked.connect(self._play_gamma)
@@ -477,10 +506,10 @@ class DashboardPage(QWidget):
             grid = QGridLayout()
             grid.setSpacing(8)
             buttons: list[tuple[str, str]] = [
-                ("Open Anomaly folder", profile.anomaly),
-                ("Open GAMMA folder", profile.gamma),
-                ("Open cache folder", profile.cache),
-                ("Open log folder", "logs"),
+                (tr("Open Anomaly folder"), profile.anomaly),
+                (tr("Open GAMMA folder"), profile.gamma),
+                (tr("Open cache folder"), profile.cache),
+                (tr("Open log folder"), "logs"),
             ]
             for i, (text, target) in enumerate(buttons):
                 btn = QPushButton(text)
@@ -521,16 +550,18 @@ class DashboardPage(QWidget):
     def on_install_activity_changed(self, operation: str | None) -> None:
         """Show active Anomaly/GAMMA installs in the dashboard status card."""
         if operation == "anomaly" and hasattr(self, "anomaly_status"):
-            self.anomaly_status.set_installing("Installing Anomaly...")
+            self.anomaly_status.set_installing(tr("Installing Anomaly..."))
         elif operation == "gamma" and hasattr(self, "gamma_status"):
-            self.gamma_status.set_installing("Installing GAMMA...")
+            self.gamma_status.set_installing(tr("Installing GAMMA..."))
         elif operation is None and self.settings.active_profile is not None:
             self._render_install_status()
 
     def _play_gamma(self) -> None:
-        if self.window.install_busy:
+        play_page = self.window._pages.get("play")
+        # Reject duplicate dashboard clicks before delegating to the Play page.
+        if self.window.install_busy or play_page is None or play_page.is_launching:
             return
-        self.window._pages["play"].launch_game()
+        play_page.launch_game()
 
     def _open_folder(self, target: str) -> None:
         if not open_in_file_manager(target):

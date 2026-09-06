@@ -14,14 +14,13 @@ import os
 import re
 import stat
 import time
-import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .atomic import write_text
 from .modlist import entries, read_lines
-from .network import read_response_bytes
+from .network import read_response_bytes, urlopen
 
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
 MANIFEST_FILENAME = "gamma-md5.txt"
@@ -143,13 +142,16 @@ def fetch_official_mod_names(url: str, timeout: float = 10) -> set[str] | None:
     then fall back to a single combined section).
     """
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urlopen(url, timeout=timeout) as resp:
             text = read_response_bytes(resp, 32 * 1024 * 1024).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError):  # ValueError: malformed/unsupported URL
+        return {name for _, name in entries(text.splitlines())}
+    except (OSError, ValueError):
+        # ValueError: malformed/unsupported URL, or a malformed +/- line in
+        # the fetched list (entries() rejects those) - either way, callers
+        # already treat None as "fall back to a single combined section".
         return None
-    return {name for _, name in entries(text.splitlines())}
 
 
 def verify_gamma(
@@ -214,7 +216,11 @@ def verify_gamma(
 
     try:
         mod_pairs = entries(read_lines(modlist_path))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers both a non-UTF-8 modlist.txt (read_lines) and a
+        # malformed +/- line (entries/_line_info) - neither is an OSError,
+        # and this must degrade to the same reported-missing state as an
+        # unreadable file rather than crash the integrity check.
         result.marker_missing.append(f"cannot read modlist.txt: {exc}")
         return result
 
@@ -224,7 +230,14 @@ def verify_gamma(
         return result
 
     enabled = [name for status, name in mod_pairs if status == "Enabled"]
-    result.disabled_mods = sum(1 for status, _ in mod_pairs if status == "Disabled")
+    # Category _separator headers are conventionally written disabled; count
+    # them the same way the enabled loop below does (as separators, not
+    # mods) so "N disabled" isn't inflated by every category header.
+    result.disabled_mods = sum(
+        1
+        for status, name in mod_pairs
+        if status == "Disabled" and not name.endswith("_separator")
+    )
 
     total = len(enabled)
     for index, name in enumerate(enabled, start=1):
@@ -344,7 +357,10 @@ def verify_cache_archives(
         if cancel is not None and cancel.is_set():
             result.cancelled = True
             break
-        if not name or Path(name).name != name:
+        # Path(name).name alone does not reject ".." (Path("..").name == "..")
+        # or ".", so a manifest entry of exactly ".." would otherwise resolve
+        # `cache / name` to the cache directory's own parent.
+        if not name or name in (".", "..") or Path(name).name != name:
             result.unreadable.append(name or "(empty archive name)")
             if on_progress is not None:
                 on_progress(index, total, name)
@@ -502,11 +518,14 @@ def scan_mods_md5(
         return result
 
     started = time.monotonic()
-    total = sum(1 for _ in _iter_mod_files(mods))
+    # Materialize once: walking and stat-ing a 100k-file tree twice doubles
+    # the pre-scan latency on slow disks.
+    files = list(_iter_mod_files(mods))
+    total = len(files)
 
     current: dict[str, str] = {}
     bytes_total = 0
-    for index, path in enumerate(_iter_mod_files(mods), start=1):
+    for index, path in enumerate(files, start=1):
         if cancel is not None and cancel.is_set():
             result.cancelled = True
             break

@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -23,7 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import tr
 from ..integrity import format_size
+from ..modlist import count_mods, read_lines
 from ..parsers import ProgressEvent, parse_progress_line, strip_ansi
 from ..winetricks import WINETRICKS_VERBS
 
@@ -38,7 +41,27 @@ LIGHT_GREY = QColor("#cfd9c6")
 
 ANOMALY_MARKERS = ("AnomalyLauncher.exe", "fsgame.ltx")
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
+#: Fallback MO2 profile name, matching the default used when a profile's own
+#: form leaves the field blank (see profiles_page.py's ``_form_values``).
 GAMMA_PROFILE = "G.A.M.M.A"
+
+def normalize_path(raw: str) -> str:
+    """Expand ``~`` and resolve to an absolute path.
+
+    Typed manually (as opposed to via Browse, which already yields a clean
+    absolute path), a value like ``~/Games/Anomaly`` or a relative path must
+    be resolved here, in the GUI, before it ever reaches the CLI: the CLI
+    treats ``~`` as a literal folder-name segment and resolves a relative
+    value against its own subprocess cwd (unset by the launcher, so it can
+    differ run to run) rather than expanding it - either way it would create
+    the real install at a location neither this app nor the user intended,
+    not just report a false "not installed".
+    """
+    value = raw.strip()
+    if not value:
+        return value
+    return str(Path(value).expanduser().resolve())
+
 
 def count_cached_archives(cache_path: str) -> int:
     """Count .zip archives in *cache_path*."""
@@ -60,11 +83,18 @@ def update_cache_label(label: QLabel, cache_path: str) -> None:
         return
     count = count_cached_archives(cache_path)
     if count == 0:
-        label.setText("No archives cached")
+        label.setText(tr("No archives cached"))
         label.setStyleSheet(f"color: {STATUS_RED.name()};")
     else:
+        # Separate singular/plural keys instead of an English-only "s" suffix
+        # appended to a translated noun: Romanian (and most languages) plural
+        # by changing the word itself ("arhivă" -> "arhive"), not by adding a
+        # suffix, so a shared "{count} archive{arg} cached" template could
+        # never translate correctly for them.
         label.setText(
-            f"{count} archive{'s' if count != 1 else ''} cached"
+            tr("{count} archive cached", count=count)
+            if count == 1
+            else tr("{count} archives cached", count=count)
         )
         label.setStyleSheet(f"color: {OK_GREEN.name()};")
 
@@ -74,22 +104,30 @@ _MO2_RUNNING_RESULT: bool = False
 _MO2_CACHE_TTL: float = 3.0
 
 
-def mo2_running() -> bool:
+def mo2_running(*, force: bool = False) -> bool:
     """True when a Mod Organizer process (and so typically the game) is running.
 
     Mod Organizer stays alive while it runs the game through ``run -e``, so this
     is the reliable proxy for "the Wine prefix is in use".  Results are cached
-    for a few seconds to avoid blocking the GUI thread repeatedly.
+    for a few seconds to avoid blocking the GUI thread repeatedly on passive
+    UI polling. Pass ``force=True`` immediately before starting a write to a
+    file MO2 also owns (modlist.txt) or a use of the Wine prefix (Verify
+    Integrity, Winetricks) - the cache's TTL window is otherwise wide enough
+    for MO2 to have just started without that action seeing it yet.
     """
     global _MO2_RUNNING_CACHE, _MO2_RUNNING_RESULT
 
     import time
 
     now = time.monotonic()
-    if now - _MO2_RUNNING_CACHE < _MO2_CACHE_TTL:
+    if not force and now - _MO2_RUNNING_CACHE < _MO2_CACHE_TTL:
         return _MO2_RUNNING_RESULT
     exe = shutil.which("pgrep")
     if not exe:
+        # Cache the "pgrep unavailable" answer too, or every caller re-probes
+        # the PATH on each poll.
+        _MO2_RUNNING_CACHE = now
+        _MO2_RUNNING_RESULT = False
         return False
     try:
         proc = subprocess.run(
@@ -102,10 +140,46 @@ def mo2_running() -> bool:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
+        # Cache the failure for the TTL as well; a missing/slow pgrep must
+        # not block the GUI thread on every poll.
+        _MO2_RUNNING_CACHE = now
+        _MO2_RUNNING_RESULT = False
         return False
     _MO2_RUNNING_CACHE = now
     _MO2_RUNNING_RESULT = proc.returncode == 0
     return _MO2_RUNNING_RESULT
+
+
+def mo2_pids() -> set[int]:
+    """PIDs of currently running Mod Organizer processes, uncached.
+
+    Used to tell "the MO2 instance this launch started" apart from an
+    unrelated MO2 window the user already had open - ``mo2_running()``'s
+    cached, name-only check cannot make that distinction, and answering it
+    wrongly leaves the Play page's buttons disabled forever once the launch's
+    own instance closes while a pre-existing one lingers.
+    """
+    exe = shutil.which("pgrep")
+    if not exe:
+        return set()
+    try:
+        proc = subprocess.run(
+            [exe, "-f", r"[Mm]odOrganizer\.exe"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if proc.returncode != 0:
+        return set()
+    pids: set[int] = set()
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.add(int(line))
+    return pids
 
 
 def anomaly_installed(path: str) -> bool:
@@ -114,15 +188,68 @@ def anomaly_installed(path: str) -> bool:
     return base.is_dir() and any((base / m).is_file() for m in ANOMALY_MARKERS)
 
 
-def gamma_installed(path: str) -> bool:
-    """True when a GAMMA Mod Organizer instance (G.A.M.M.A profile) exists."""
+def _find_profile_dir(profiles: Path, mo2_profile: str) -> Path | None:
+    """Case-insensitive match for an MO2 profile's on-disk folder name."""
+    if not profiles.is_dir():
+        return None
+    wanted = (mo2_profile or GAMMA_PROFILE).upper()
+    return next(
+        (p for p in profiles.iterdir() if p.is_dir() and p.name.upper() == wanted),
+        None,
+    )
+
+
+def gamma_installed(path: str, mo2_profile: str = GAMMA_PROFILE) -> bool:
+    """True when a GAMMA Mod Organizer instance exists at ``path``.
+
+    ``mo2_profile`` is the active profile's actual MO2 profile folder name -
+    it defaults to the stock "G.A.M.M.A" only because callers that have no
+    profile object handy (or an unset field) need some name to check; a
+    profile with a custom MO2 profile name would otherwise always report
+    "not installed" here even with a fully working install.
+    """
     base = Path(path)
     if not base.is_dir() or not all((base / m).is_file() for m in GAMMA_MARKERS):
         return False
-    profiles = base / "profiles"
-    return profiles.is_dir() and any(
-        p.is_dir() and p.name.upper() == GAMMA_PROFILE for p in profiles.iterdir()
-    )
+    return _find_profile_dir(base / "profiles", mo2_profile) is not None
+
+
+def count_active_mods(
+    gamma_dir: str, mo2_profile: str = GAMMA_PROFILE
+) -> tuple[int, int] | None:
+    """Return (enabled, total) mod counts for a profile's modlist.txt.
+
+    None means "count unavailable" (GAMMA not installed, profile folder or
+    modlist.txt missing/unreadable) - callers must treat that as a reason
+    to hide the counter, not an error.
+    """
+    base = Path(gamma_dir)
+    if not base.is_dir() or not all((base / m).is_file() for m in GAMMA_MARKERS):
+        return None
+    profile_dir = _find_profile_dir(base / "profiles", mo2_profile)
+    if profile_dir is None:
+        return None
+    try:
+        lines = read_lines(profile_dir / "modlist.txt")
+    except (OSError, ValueError):
+        return None
+    return count_mods(lines)
+
+
+class NoWheelComboBox(QComboBox):
+    """A QComboBox that ignores mouse wheel events.
+
+    Placed inside a scrolling page, a plain QComboBox silently changes its
+    selection when the cursor happens to pass over it while the user is just
+    scrolling the page - easy to trigger by accident and easy to miss, since
+    nothing visually flags that the value changed. Ignoring the wheel event
+    here lets it bubble up to the enclosing QScrollArea instead, so hovering
+    the box while scrolling scrolls the page like everywhere else; the value
+    can still be changed by clicking the dropdown as normal.
+    """
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
 
 
 def display_state(installed: bool, operation: str | None, key: str) -> bool | str:
@@ -152,9 +279,9 @@ class InstallStatusRow(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
-        self._dot = QLabel("\u25cf")
+        self._dot = QLabel(tr("●"))
         self._dot.setFixedWidth(24)
-        self._status = QLabel("Unknown")
+        self._status = QLabel(tr("Unknown"))
         self._detail = QLabel(detail)
         self._detail.setObjectName("info")
         self._detail.setTextInteractionFlags(
@@ -163,7 +290,7 @@ class InstallStatusRow(QWidget):
         row.addWidget(self._dot)
         row.addWidget(self._status)
         if name:
-            name_lbl = QLabel(name)
+            name_lbl = QLabel(tr(name))
             name_lbl.setObjectName("dim")
             row.addSpacing(6)
             row.addWidget(name_lbl)
@@ -178,10 +305,10 @@ class InstallStatusRow(QWidget):
         self._detail.setVisible(bool(detail))
         if ok is True:
             color = OK_GREEN.name()
-            text = "Installed"
+            text = tr("Installed")
         elif ok is False:
             color = STATUS_RED.name()
-            text = "Not installed"
+            text = tr("Not installed")
         else:
             color = STATUS_GREY.name()
             text = pending_text if pending_text is not None else self._pending_text
@@ -194,7 +321,7 @@ class InstallStatusRow(QWidget):
         color = WARN.name()
         self._detail.setText(detail)
         self._detail.setVisible(bool(detail))
-        self._status.setText("Installing")
+        self._status.setText(tr("Installing"))
         self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
         self._status.setStyleSheet(f"color: {color};")
 
@@ -213,6 +340,21 @@ def begin_shutdown() -> None:
     """Stop background results from reaching UI handlers during app teardown."""
     global _SHUTTING_DOWN
     _SHUTTING_DOWN = True
+
+
+def resume_after_shutdown() -> None:
+    """Re-arm background task result delivery after a mid-session teardown.
+
+    ``begin_shutdown()``/``shutdown_active_runners()`` exist for app exit,
+    where the process ends right after and the flag never needs to flip
+    back. A live UI rebuild (e.g. changing the language without
+    restarting) reuses the exact same "stop stale results from touching
+    about-to-be-destroyed widgets" mechanism, but the app keeps running -
+    call this once the old pages have been torn down and the new ones
+    built, so their own background tasks work normally again.
+    """
+    global _SHUTTING_DOWN
+    _SHUTTING_DOWN = False
 
 
 def shutdown_active_runners(timeout_ms: int = 5000) -> None:
@@ -267,6 +409,10 @@ class CommandRunner(QObject):
     def start(self) -> None:
         from ..cli_runner import CliWorker  # deferred import avoids cycle
 
+        if self._thread is not None and self._thread.isRunning():
+            # Re-entry would orphan the in-flight worker and its process
+            # group; cancel()/kill() would only reach the newest worker.
+            return
         self._cancel_requested = False
         thread = QThread(self)
         worker = CliWorker()
@@ -285,7 +431,10 @@ class CommandRunner(QObject):
         if self._worker is not None:
             self._cancel_requested = True
             self._worker.cancel()
-            if not _SHUTTING_DOWN:
+            # Only emit when a run is actually in flight; otherwise handlers
+            # would clobber an already-finished UI state.
+            running = self._thread is not None and self._thread.isRunning()
+            if running and not _SHUTTING_DOWN:
                 self.cancelled.emit()
 
     def pause(self) -> None:
@@ -664,20 +813,20 @@ def winetricks_tooltip(status: dict[str, bool]) -> str:
         (label, status.get(key, False)) for key, label in tool_keys if key in status
     ]
     if tool_items:
-        rows.append("<b>Tools</b>")
+        rows.append(f"<b>{tr('Tools')}</b>")
         for label, ok in tool_items:
             color = OK_GREEN.name() if ok else STATUS_RED.name()
-            state = "installed" if ok else "missing"
+            state = tr("installed") if ok else tr("missing")
             rows.append(
                 f"<span style='color:{color}'>&#9679;</span> "
                 f"<span style='color:{color}'>{label} - {state}</span>"
             )
     # Runtimes section (winetricks verbs).
-    rows.append("<b>Runtimes</b>")
+    rows.append(f"<b>{tr('Runtimes')}</b>")
     for verb in WINETRICKS_VERBS:
         ok = status.get(verb, False)
         color = OK_GREEN.name() if ok else STATUS_RED.name()
-        state = "installed" if ok else "missing"
+        state = tr("installed") if ok else tr("missing")
         rows.append(
             f"<span style='color:{color}'>&#9679;</span> "
             f"<span style='color:{color}'>{verb} - {state}</span>"
@@ -685,11 +834,17 @@ def winetricks_tooltip(status: dict[str, bool]) -> str:
     return "<br>".join(rows)
 
 
-def dir_size(path: str | Path) -> int:
-    """Best-effort total size of a directory tree."""
+def dir_size(path: str | Path, *, max_entries: int = 200_000) -> int:
+    """Best-effort total size of a directory tree.
+
+    Stops after ``max_entries`` files so a huge or runaway tree cannot stall
+    the caller indefinitely (GAMMA installs hold 100k+ files).
+    """
     total = 0
     try:
-        for entry in Path(path).rglob("*"):
+        for count, entry in enumerate(Path(path).rglob("*")):
+            if count >= max_entries:
+                break
             if entry.is_file():
                 total += entry.stat().st_size
     except OSError:
@@ -812,8 +967,8 @@ class ProgressTable(QTableWidget):
             pct = self.item(row, 2)
             if op is None or pct is None:
                 continue
-            op.setText("Complete")
-            pct.setText("100.0%")
+            op.setText(tr("Complete"))
+            pct.setText(tr("100.0%"))
             op.setForeground(QColor(OK_GREEN.name()))
             pct.setForeground(QColor(OK_GREEN.name()))
 
@@ -897,22 +1052,29 @@ class ProgressArea(QWidget):
         self.status_label.setObjectName("info")
 
         self.log = OutputPane(self) if show_log else None
-        if self.log is not None and log_max_height is not None:
-            self.log.setMaximumHeight(log_max_height)
+        self.log_toggle: QPushButton | None = None
+        if self.log is not None:
+            if log_max_height is not None:
+                self.log.setMaximumHeight(log_max_height)
+            self.log.hide()
+            self.log_toggle = QPushButton(tr("Show"), self)
+            self.log_toggle.setObjectName("consoleToggle")
+            self.log_toggle.setFixedSize(60, 26)
+            self.log_toggle.clicked.connect(self._toggle_log)
 
-        self.pause_button = QPushButton("Pause", self)
+        self.pause_button = QPushButton(tr("Pause"), self)
         self.pause_button.setObjectName("secondary")
         self.pause_button.setFixedSize(100, 32)
         self.pause_button.setStyleSheet("padding: 0px;")
         self.pause_button.clicked.connect(self._toggle_pause)
         self.pause_button.hide()
 
-        self.cancel_button = QPushButton("Cancel", self)
+        self.cancel_button = QPushButton(tr("Cancel"), self)
         self.cancel_button.setObjectName("danger")
         self.cancel_button.setFixedSize(100, 32)
         self.cancel_button.setStyleSheet("padding: 0px;")
         self.cancel_button.hide()
-        self.cancel_button.setText("Cancel")
+        self.cancel_button.setText(tr("Cancel"))
 
         status_row = QHBoxLayout()
         status_row.addWidget(self.bar, 1)
@@ -927,13 +1089,38 @@ class ProgressArea(QWidget):
         if show_table:
             layout.addWidget(self.table, 3)
             if self.log is not None:
+                layout.addLayout(self._log_toggle_row())
                 layout.addWidget(self.log, 2)
         else:
             if self.log is not None:
+                layout.addLayout(self._log_toggle_row())
                 layout.addWidget(self.log, 2)
             else:
                 layout.addStretch(1)
         self.reset()
+
+    def _log_toggle_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.log_toggle)
+        return row
+
+    def _toggle_log(self) -> None:
+        if self.log is None or self.log_toggle is None:
+            return
+        if self.log.isVisible():
+            self.log.hide()
+            self.log_toggle.setText(tr("Show"))
+        else:
+            self.log.show()
+            self.log_toggle.setText(tr("Hide"))
+
+    def _show_log(self) -> None:
+        """Expand the log pane, e.g. when a run starts - collapsed by default."""
+        if self.log is None or self.log_toggle is None or self.log.isVisible():
+            return
+        self.log.show()
+        self.log_toggle.setText(tr("Hide"))
 
     def reset(self) -> None:
         self.bar.setRange(0, 1)
@@ -951,14 +1138,14 @@ class ProgressArea(QWidget):
         if self.log is not None:
             self.log.clear()
         self.pause_button.hide()
-        self.pause_button.setText("Pause")
+        self.pause_button.setText(tr("Pause"))
         self.cancel_button.hide()
 
     def set_runner(self, runner: CommandRunner | None) -> None:
         """Bind a CommandRunner so the pause button can control it."""
         self._runner = runner
         self._paused = False
-        self.pause_button.setText("Pause")
+        self.pause_button.setText(tr("Pause"))
 
     @property
     def is_paused(self) -> bool:
@@ -970,13 +1157,13 @@ class ProgressArea(QWidget):
         if self._paused:
             self._runner.resume()
             self._paused = False
-            self.pause_button.setText("Pause")
+            self.pause_button.setText(tr("Pause"))
             self.bar.setFormat(self._bar_percent_format)
             self.status_label.setText("")
         else:
             self._runner.pause()
             self._paused = True
-            self.pause_button.setText("Resume")
+            self.pause_button.setText(tr("Resume"))
             self.bar.setFormat("Paused")
 
     def on_line(self, line: str) -> None:
@@ -999,7 +1186,7 @@ class ProgressArea(QWidget):
                     self.bar.setRange(0, 1)
                     self.bar.setValue(1)
                     self.bar.setFormat("Skipped")
-                    self.status_label.setText(f"{event.name} - Skipped")
+                    self.status_label.setText(tr("{name} - Skipped", name=event.name))
                 else:
                     # Extract/Expand/Check MD5 report a numeric percentage
                     # for single-file installs; map each phase onto its fixed
@@ -1008,7 +1195,7 @@ class ProgressArea(QWidget):
                     self.bar.setRange(0, 100)
                     self.bar.setValue(pct)
                     self.bar.setFormat(f"{pct}%")
-                    self.status_label.setText(f"{event.name} - {event.operation}...")
+                    self.status_label.setText(tr("{name} - {operation}...", name=event.name, operation=event.operation))
             else:
                 self.status_label.setText(
                     f"{event.name} - {event.operation} - {event.percent:.1%}"
@@ -1054,15 +1241,16 @@ class ProgressArea(QWidget):
     def on_started(self) -> None:
         self.cancel_button.show()
         self.cancel_button.setEnabled(True)
-        self.cancel_button.setText("Cancel")
+        self.cancel_button.setText(tr("Cancel"))
         self.pause_button.show()
         self.pause_button.setEnabled(True)
-        self.pause_button.setText("Pause")
+        self.pause_button.setText(tr("Pause"))
         self._paused = False
         self.bar.setStyleSheet("")
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat("Starting...")
+        self._show_log()
 
     def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()
@@ -1074,13 +1262,13 @@ class ProgressArea(QWidget):
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
             self.bar.setFormat("Finished")
-            self.status_label.setText("Complete")
+            self.status_label.setText(tr("Complete"))
             if self.table is not None:
                 self.table.finish_all()
         else:
             self.bar.setFormat("Failed")
             self.bar.setValue(0)
-            self.status_label.setText("Failed")
+            self.status_label.setText(tr("Failed"))
         self._seen.clear()
         self._completed.clear()
         self._per_archive.clear()

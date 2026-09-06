@@ -10,7 +10,6 @@ the absolute path; otherwise ``sys.executable -m commander_gui`` is used.
 from __future__ import annotations
 
 import os
-import shlex
 import sys
 from pathlib import Path
 
@@ -24,18 +23,18 @@ def _autostart_dir() -> Path:
     return Path(base) / "autostart"
 
 
-def _exec_command() -> str | None:
-    """Return the Exec= value for the .desktop file, or None if undetermined."""
+def _exec_command() -> list[str] | None:
+    """Return the argv for the .desktop file's Exec= line, or None if undetermined."""
     appimage = os.environ.get("APPIMAGE")
     if appimage:
-        return appimage
+        return [appimage]
     # Frozen build (PyInstaller, etc.): use the executable directly.
     if getattr(sys, "frozen", False):
-        return sys.executable
+        return [sys.executable]
     # Source / venv install: invoke the package via the current interpreter.
     python = sys.executable
     if python and Path(python).is_file():
-        return f"{python} -m commander_gui"
+        return [python, "-m", "commander_gui"]
     return None
 
 
@@ -46,9 +45,14 @@ def _project_root() -> Path | None:
     return Path(__file__).resolve().parent.parent
 
 
-def _desktop_exec(command: str) -> str:
-    """Quote executable arguments using the desktop-entry syntax."""
-    parts = shlex.split(command)
+def _desktop_exec(parts: list[str]) -> str:
+    """Quote executable arguments using the desktop-entry syntax.
+
+    Takes an already-split argv list rather than a shell-style command
+    string - shlex.split()-ing a pre-assembled string here would mis-tokenize
+    any path containing a space (e.g. an AppImage under a directory with a
+    space in its name) into multiple bogus arguments.
+    """
     escaped: list[str] = []
     for part in parts:
         escaped_part = part.replace("%", "%%")
@@ -70,15 +74,25 @@ def is_autostart_enabled() -> bool:
     return autostart_desktop_path().is_file()
 
 
+_LAST_ERROR: str = ""
+
+
+def last_error() -> str:
+    """Human-readable reason for the most recent enable/disable failure."""
+    return _LAST_ERROR
+
+
 def enable_autostart() -> bool:
+    global _LAST_ERROR
     cmd = _exec_command()
     if not cmd:
+        _LAST_ERROR = "Could not determine the command to autostart."
         return False
     path = autostart_desktop_path()
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
-        "Name=STALKER GAMMA Commander\n"
+        "Name=STALKER COMMANDER\n"
         "Comment=Install, update and launch the STALKER Anomaly + GAMMA Modpack\n"
         f"Exec={_desktop_exec(cmd)}\n"
         "Icon=stalker-gamma-commander\n"
@@ -87,21 +101,29 @@ def enable_autostart() -> bool:
     )
     root = _project_root()
     if root is not None:
-        content += f'Path="{root}"\n'
+        # Desktop Entry "string" values are literal - unlike Exec=, Path=
+        # takes no quoting syntax, so quotes here would become part of the
+        # path itself and break lookup on some desktop environments.
+        content += f"Path={root}\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_text(path, content)
+        _LAST_ERROR = ""
         return True
-    except OSError:
+    except OSError as exc:
+        _LAST_ERROR = f"Could not write {path}: {exc}"
         return False
 
 
 def disable_autostart() -> bool:
+    global _LAST_ERROR
     path = autostart_desktop_path()
     if not path.exists():
         return True
     try:
         path.unlink()
+        _LAST_ERROR = ""
         return True
-    except OSError:
+    except OSError as exc:
+        _LAST_ERROR = f"Could not remove {path}: {exc}"
         return False

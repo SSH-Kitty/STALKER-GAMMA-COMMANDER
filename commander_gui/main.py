@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import sys
@@ -10,22 +11,31 @@ from pathlib import Path
 from PySide6.QtCore import (
     QLockFile,
     QtMsgType,
-    qCritical,
-    qDebug,
-    qInfo,
     qInstallMessageHandler,
-    qWarning,
 )
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import gui_settings
-from .config import cli_binary_path, settings_dir
+from .config import cli_binary_path, project_root, settings_dir
 from .fonts import load_bundled_font
+from .i18n import set_active_language
 from .themes import build_palette, build_stylesheet, set_active_theme
 from .ui.common import begin_shutdown, shutdown_active_runners
 from .ui.main_window import MainWindow
 
 _INSTANCE_LOCK: QLockFile | None = None
+
+
+def _set_linux_process_name() -> None:
+    """Set the process label used by Linux process monitors."""
+    if os.name != "posix":
+        return
+    try:
+        libc = ctypes.CDLL(None)
+        libc.prctl(15, b"STALKER COMMAND", 0, 0, 0)
+    except (AttributeError, OSError):
+        pass
 
 
 def _is_svg_noise(mode: QtMsgType, message: str | None) -> bool:
@@ -42,22 +52,39 @@ def _is_svg_noise(mode: QtMsgType, message: str | None) -> bool:
     return text.startswith("qt.svg:") or "Could not resolve property" in text
 
 
+def _is_portal_noise(mode: QtMsgType, message: str | None) -> bool:
+    """True for the harmless xdg-desktop-portal app-id registration warning.
+
+    Qt tries to register the app-id set via setDesktopFileName() with the
+    host's xdg-desktop-portal. That registration only succeeds when a
+    matching .desktop file is installed somewhere the portal's AppInfo
+    lookup can see it - running from a source checkout, or an AppImage
+    that was never integrated with a tool like appimaged/AppImageLauncher,
+    has no such file, so the portal call always fails here. Portal-backed
+    features (native file dialogs, etc.) still work without it; this only
+    means the app can't be identified to the portal by app ID.
+    """
+    if mode != QtMsgType.QtWarningMsg:
+        return False
+    text = message or ""
+    return "Failed to register with host portal" in text
+
+
+_PREVIOUS_QT_HANDLER = None
+
+
 def _quiet_qt_message_handler(mode: QtMsgType, context, message: str) -> None:
-    """Forward Qt messages to the default handler, skipping SVG noise."""
-    if _is_svg_noise(mode, message):
+    """Forward Qt messages to the previous handler, skipping known noise.
+
+    Qt may emit from any thread, so never uninstall/reinstall the global
+    handler here -- forward to the handler captured at install time instead.
+    """
+    if _is_svg_noise(mode, message) or _is_portal_noise(mode, message):
         return
-    qInstallMessageHandler(None)
-    try:
-        if mode == QtMsgType.QtDebugMsg:
-            qDebug(message)
-        elif mode == QtMsgType.QtInfoMsg:
-            qInfo(message)
-        elif mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
-            qCritical(message)
-        else:
-            qWarning(message)
-    finally:
-        qInstallMessageHandler(_quiet_qt_message_handler)
+    if _PREVIOUS_QT_HANDLER is not None:
+        _PREVIOUS_QT_HANDLER(mode, context, message)
+    else:
+        sys.stderr.write(message + "\n")
 
 
 def _acquire_instance_lock() -> QLockFile | None:
@@ -69,11 +96,17 @@ def _acquire_instance_lock() -> QLockFile | None:
 
 
 def main() -> int:
-    global _INSTANCE_LOCK
-    qInstallMessageHandler(_quiet_qt_message_handler)
+    global _INSTANCE_LOCK, _PREVIOUS_QT_HANDLER
+    _PREVIOUS_QT_HANDLER = qInstallMessageHandler(_quiet_qt_message_handler)
     app = QApplication(sys.argv)
-    app.setApplicationName("Stalker GAMMA GUI")
+    app.setApplicationName("STALKER COMMANDER")
+    app.setApplicationDisplayName("STALKER COMMANDER")
+    app.setDesktopFileName("stalker-gamma-commander")
     app.setOrganizationName("stalker-gamma")
+    icon = project_root() / "cli" / "stalker-gamma.png"
+    if icon.is_file():
+        app.setWindowIcon(QIcon(str(icon)))
+    _set_linux_process_name()
     app.setStyle("Fusion")
 
     try:
@@ -98,6 +131,7 @@ def main() -> int:
     except (TypeError, ValueError):
         font_size = 13
     font_family = _gui.get("font_family") or "Exo 2"
+    set_active_language(_gui.get("language") or "en")
     set_active_theme(theme)
     app.setPalette(build_palette(theme))
     app.setStyleSheet(

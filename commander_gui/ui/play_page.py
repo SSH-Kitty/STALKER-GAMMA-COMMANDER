@@ -38,6 +38,7 @@ from ..launcher import (
     DEFAULT_UMU_PREFIX,
     LaunchError,
     Mo2Executable,
+    ProcessGroupRegistry,
     available_commands,
     build_command,
     build_direct_command,
@@ -49,6 +50,7 @@ from ..launcher import (
     resolve_runner,
     runner_graphics_error,
     runner_prefix_error,
+    write_desktop_shortcut,
 )
 from ..proton_installer import fetch_ge_proton_releases, install_proton
 from .common import (
@@ -58,7 +60,11 @@ from .common import (
     gamma_installed,
     info_label,
     make_card,
+    mo2_pids,
+    mo2_running,
+    normalize_path,
     section_label,
+    tr,
     update_cache_label,
 )
 
@@ -104,6 +110,16 @@ class PlayPage(QWidget):
         self._install_busy = False
         self._proc = None
         self._launch_timer = None
+        self._monitoring_mo2 = False
+        self._mo2_seen = False
+        self._handoff_checks = 0
+        #: PIDs of MO2 processes already running before this launch started,
+        #: and the subset that belongs to this launch once detected - lets
+        #: handoff detection ignore an unrelated MO2 window the user already
+        #: had open (see mo2_pids() docstring).
+        self._pre_launch_mo2_pids: set[int] = set()
+        self._mo2_launch_pids: set[int] = set()
+        self._registry = ProcessGroupRegistry()
         self._launch_status_clear_timer = QTimer(self)
         self._launch_status_clear_timer.setSingleShot(True)
         self._launch_status_clear_timer.timeout.connect(self._clear_launch_status)
@@ -127,14 +143,12 @@ class PlayPage(QWidget):
         scroll.setWidget(content)
 
         # -- hero header ---------------------------------------------------
-        hero = section_label("PLAY STALKER GAMMA", level=1)
+        hero = section_label(tr("PLAY STALKER GAMMA"), level=1)
         hero.setWordWrap(True)
         hero.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(hero)
         subtitle = info_label(
-            "Launch GAMMA with Mod Organizer 2 (MO2), manage your mods in MO2, "
-            "or run STALKER Anomaly directly. Choose a target and runner, "
-            "then launch."
+            tr("Launch GAMMA with Mod Organizer 2 (MO2), manage your mods in MO2, or run STALKER Anomaly directly. Choose a target and runner, then launch.")
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(subtitle)
@@ -145,7 +159,7 @@ class PlayPage(QWidget):
 
         target_card, target_layout = make_card()
         target_layout.setSpacing(12)
-        target_layout.addWidget(section_label("Launch target", level=2))
+        target_layout.addWidget(section_label(tr("Launch target"), level=2))
         target_row = QHBoxLayout()
         self.target_combo = QComboBox()
         self.target_combo.setMinimumHeight(34)
@@ -159,13 +173,22 @@ class PlayPage(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         target_layout.addWidget(self.target_path)
+        self.shortcut_button = QPushButton(tr("Add shortcut to desktop"))
+        self.shortcut_button.setObjectName("secondary")
+        self.shortcut_button.setMinimumHeight(30)
+        self.shortcut_button.setToolTip(
+            tr("Create a desktop shortcut that launches the selected target with the currently selected runner.")
+        )
+        self.shortcut_button.setVisible(os.name != "nt")
+        self.shortcut_button.clicked.connect(self._add_desktop_shortcut)
+        target_layout.addWidget(self.shortcut_button)
         grid.addWidget(target_card, 1)
 
         runner_card, runner_layout = make_card()
         runner_layout.setSpacing(12)
-        runner_layout.addWidget(section_label("Runner", level=2))
+        runner_layout.addWidget(section_label(tr("Runner"), level=2))
         runner_row = QHBoxLayout()
-        runner_row.addWidget(QLabel("Runner:"))
+        runner_row.addWidget(QLabel(tr("Runner:")))
         self.runner_combo = QComboBox()
         self.runner_combo.currentIndexChanged.connect(self._on_runner_changed)
         runner_row.addWidget(self.runner_combo, 1)
@@ -177,7 +200,7 @@ class PlayPage(QWidget):
         runner_layout.addWidget(self.runner_hint)
 
         prefix_row = QHBoxLayout()
-        prefix_row.addWidget(QLabel("Runner prefix:"))
+        prefix_row.addWidget(QLabel(tr("Runner prefix:")))
         self.prefix_edit = QLineEdit()
         self.prefix_edit.setPlaceholderText(
             "Leave blank to use the runner's default prefix"
@@ -188,7 +211,7 @@ class PlayPage(QWidget):
 
         proton_row = QHBoxLayout()
         proton_row.setSpacing(8)
-        self.install_proton_button = QPushButton("Install GE-Proton")
+        self.install_proton_button = QPushButton(tr("Install GE-Proton"))
         self.install_proton_button.setObjectName("secondary")
         self.install_proton_button.setMinimumHeight(52)
         self.install_proton_button.setMinimumWidth(180)
@@ -219,7 +242,7 @@ class PlayPage(QWidget):
 
         cancel_row = QHBoxLayout()
         cancel_row.addStretch(1)
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = QPushButton(tr("Cancel"))
         self.cancel_button.setObjectName("danger")
         self.cancel_button.setMinimumHeight(40)
         self.cancel_button.setMinimumWidth(80)
@@ -238,10 +261,10 @@ class PlayPage(QWidget):
         root.addLayout(self.chips_row)
 
         # -- launch actions ---------------------------------------------------
-        self.launch_button = QPushButton("Launch Game")
+        self.launch_button = QPushButton(tr("Launch Game"))
         self.launch_button.setObjectName("hero")
         self.launch_button.setToolTip(
-            "Launch the selected target through Mod Organizer 2 with the GAMMA modlist and virtual file system."
+            tr("Launch the selected target through Mod Organizer 2 with the GAMMA modlist and virtual file system.")
         )
         self.launch_button.clicked.connect(self.launch_game)
         root.addWidget(self.launch_button)
@@ -258,17 +281,17 @@ class PlayPage(QWidget):
 
         secondary_row = QHBoxLayout()
         secondary_row.setSpacing(12)
-        self.open_mo2_button = QPushButton("Open MO2")
+        self.open_mo2_button = QPushButton(tr("Open MO2"))
         self.open_mo2_button.setObjectName("secondary")
         self.open_mo2_button.setToolTip(
-            "Open Mod Organizer 2 to manage the selected MO2 profile and run executables."
+            tr("Open Mod Organizer 2 to manage the selected MO2 profile and run executables.")
         )
         self.open_mo2_button.clicked.connect(self._open_mo2)
         secondary_row.addWidget(self.open_mo2_button, 1)
-        self.direct_button = QPushButton("Launch Anomaly")
+        self.direct_button = QPushButton(tr("Launch Anomaly"))
         self.direct_button.setObjectName("secondary")
         self.direct_button.setToolTip(
-            "Run the selected Anomaly executable without MO2 or its virtual mod list."
+            tr("Run the selected Anomaly executable without MO2 or its virtual mod list.")
         )
         self.direct_button.clicked.connect(self._launch_direct)
         secondary_row.addWidget(self.direct_button, 1)
@@ -276,7 +299,7 @@ class PlayPage(QWidget):
 
         # -- custom launch options -------------------------------------------
         options_card, options_layout = make_card()
-        options_layout.addWidget(section_label("Launch options", level=2))
+        options_layout.addWidget(section_label(tr("Launch options"), level=2))
         self.custom_options_edit = QLineEdit()
         self.custom_options_edit.setPlaceholderText(
             "Optional launch options, e.g. gamemoderun mangohud"
@@ -295,37 +318,37 @@ class PlayPage(QWidget):
         # -- folders card -----------------------------------------------------
         folders_card, folders_layout = make_card()
         folders_layout.setSpacing(8)
-        folders_layout.addWidget(section_label("Folders", level=2))
+        folders_layout.addWidget(section_label(tr("Folders"), level=2))
 
         anomaly_row = QHBoxLayout()
-        anomaly_row.addWidget(QLabel("Anomaly folder:"))
+        anomaly_row.addWidget(QLabel(tr("Anomaly folder:")))
         self.anomaly_edit = QLineEdit()
         self.anomaly_edit.setPlaceholderText("Enter or browse to a folder...")
         self.anomaly_edit.editingFinished.connect(self._persist_dirs)
         anomaly_row.addWidget(self.anomaly_edit, 1)
-        self.anomaly_browse = QPushButton("Browse...")
+        self.anomaly_browse = QPushButton(tr("Browse..."))
         self.anomaly_browse.clicked.connect(self._browse_anomaly)
         anomaly_row.addWidget(self.anomaly_browse)
         folders_layout.addLayout(anomaly_row)
 
         gamma_row = QHBoxLayout()
-        gamma_row.addWidget(QLabel("GAMMA folder:"))
+        gamma_row.addWidget(QLabel(tr("GAMMA folder:")))
         self.gamma_edit = QLineEdit()
         self.gamma_edit.setPlaceholderText("Enter or browse to a folder...")
         self.gamma_edit.editingFinished.connect(self._persist_dirs)
         gamma_row.addWidget(self.gamma_edit, 1)
-        self.gamma_browse = QPushButton("Browse...")
+        self.gamma_browse = QPushButton(tr("Browse..."))
         self.gamma_browse.clicked.connect(self._browse_gamma)
         gamma_row.addWidget(self.gamma_browse)
         folders_layout.addLayout(gamma_row)
 
         cache_row = QHBoxLayout()
-        cache_row.addWidget(QLabel("Cache folder:"))
+        cache_row.addWidget(QLabel(tr("Cache folder:")))
         self.cache_edit = QLineEdit()
         self.cache_edit.setPlaceholderText("Enter or browse to a folder...")
         self.cache_edit.editingFinished.connect(self._persist_dirs)
         cache_row.addWidget(self.cache_edit, 1)
-        self.cache_browse = QPushButton("Browse...")
+        self.cache_browse = QPushButton(tr("Browse..."))
         self.cache_browse.clicked.connect(self._browse_cache)
         cache_row.addWidget(self.cache_browse)
         folders_layout.addLayout(cache_row)
@@ -345,7 +368,7 @@ class PlayPage(QWidget):
         self.preview_label.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self.preview_label.setObjectName("mono")
         preview_row.addWidget(self.preview_label, 1)
-        self.copy_button = QPushButton("Copy launch command")
+        self.copy_button = QPushButton(tr("Copy launch command"))
         self.copy_button.clicked.connect(self._copy_command)
         preview_row.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignTop)
         preview_layout.addLayout(preview_row)
@@ -380,19 +403,24 @@ class PlayPage(QWidget):
         current = self.runner_combo.currentData()
         self.runner_combo.blockSignals(True)
         self.runner_combo.clear()
-        self.runner_combo.addItem("Auto-detect (latest GE-Proton)", "auto")
+        self.runner_combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
         extra_protons = find_extra_protons()
         self._proton_labels = [label for label, _ in extra_protons]
         self._installed_protons = extra_protons
         if extra_protons:
             self.runner_combo.insertSeparator(self.runner_combo.count())
             for label, path in extra_protons:
-                self.runner_combo.addItem(f"{label} (Installed)", f"umup:{path}")
+                self.runner_combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
         saved = gui_settings.load_gui_settings().get("runner", "auto")
         chosen = current
         if not chosen or self.runner_combo.findData(chosen) < 0:
             chosen = saved
-        if self.runner_combo.findData(chosen) < 0:
+        # QComboBox.findData(None) matches the separator item above (its
+        # itemData is also None), returning its index instead of -1 - so a
+        # falsy `chosen` must be caught explicitly, or a saved runner of
+        # None/"" would stick the selection on the separator instead of
+        # falling back to "auto".
+        if not chosen or self.runner_combo.findData(chosen) < 0:
             chosen = "auto"
         self.runner_combo.setCurrentIndex(self.runner_combo.findData(chosen))
         self.runner_combo.blockSignals(False)
@@ -423,17 +451,23 @@ class PlayPage(QWidget):
         if not selected and self._releases:
             selected = self._releases[0]["tag"]
         if selected and any(selected in label for label in installed):
-            self.install_proton_button.setText("GE-Proton installed ✓")
+            self.install_proton_button.setText(tr("GE-Proton installed ✓"))
             self.install_proton_button.setEnabled(False)
         elif selected:
-            self.install_proton_button.setText(f"Install {selected}")
+            self.install_proton_button.setText(tr("Install {selected}", selected=selected))
             self.install_proton_button.setEnabled(True)
         else:
-            self.install_proton_button.setText("Install GE-Proton")
+            self.install_proton_button.setText(tr("Install GE-Proton"))
             self.install_proton_button.setEnabled(False)
         self.install_proton_button.update()
 
     def _install_proton(self) -> None:
+        if self._install_busy or self._launching:
+            # An install/launch elsewhere already holds the busy flag; a
+            # Proton install finishing here would clear it out from under
+            # that operation via the unconditional set_install_busy(False)
+            # in _done/_fail below.
+            return
         version = self.proton_version_combo.currentData()
         if not version:
             return
@@ -449,10 +483,10 @@ class PlayPage(QWidget):
         )
         install_dir = install_dir / "compatibilitytools.d"
         self.install_proton_button.setEnabled(False)
-        self.install_proton_button.setText("Installing…")
+        self.install_proton_button.setText(tr("Installing…"))
         self.proton_progress.setValue(0)
         self.proton_progress.setVisible(True)
-        self.proton_status.setText("Preparing download…")
+        self.proton_status.setText(tr("Preparing download…"))
         self.proton_status.setVisible(True)
         self.cancel_button.setVisible(True)
         self.cancel_button.setEnabled(True)
@@ -486,9 +520,9 @@ class PlayPage(QWidget):
         def _done(result: object) -> None:
             self.window.set_install_busy(False)
             self.cancel_button.setVisible(False)
-            self.cancel_button.setText("Cancel")
+            self.cancel_button.setText(tr("Cancel"))
             self.proton_progress.setValue(100)
-            self.proton_status.setText(f"Installed {version} ✓")
+            self.proton_status.setText(tr("Installed {version} ✓", version=version))
             self._reload_runners()
             self._update_install_button()
             self._refresh_preview()
@@ -498,14 +532,14 @@ class PlayPage(QWidget):
         def _fail(err: str) -> None:
             self.window.set_install_busy(False)
             self.cancel_button.setVisible(False)
-            self.cancel_button.setText("Cancel")
+            self.cancel_button.setText(tr("Cancel"))
             if err == "Download cancelled":
-                self.proton_status.setText("Download cancelled")
-                self.install_proton_button.setText(f"Install {version}")
+                self.proton_status.setText(tr("Download cancelled"))
+                self.install_proton_button.setText(tr("Install {version}", version=version))
                 self.install_proton_button.setEnabled(True)
             else:
-                self.proton_status.setText(f"Error: {err}")
-                self.install_proton_button.setText("Retry install")
+                self.proton_status.setText(tr("Error: {err}", err=err))
+                self.install_proton_button.setText(tr("Retry install"))
                 self.install_proton_button.setEnabled(True)
             self._refresh_preview()
             self.launch_state_changed.emit(False)
@@ -520,7 +554,7 @@ class PlayPage(QWidget):
         if self._cancel_event:
             self._cancel_event.set()
         self.cancel_button.setEnabled(False)
-        self.cancel_button.setText("Cancelling…")
+        self.cancel_button.setText(tr("Cancelling…"))
 
     def _hide_proton_progress(self) -> None:
         self.proton_progress.setVisible(False)
@@ -626,13 +660,24 @@ class PlayPage(QWidget):
             return
         self._persisting = True
         try:
+            if self.window.install_busy or mo2_running():
+                QMessageBox.warning(
+                    self,
+                    tr("Busy"),
+                    tr("An install is running or the game is currently running. Folder changes cannot be saved right now."),
+                )
+                self._load_folders()
+                return
             self.window.refresh_settings()
             profile = self.window.settings.active_profile
             if profile is None:
                 return
-            anomaly = self.anomaly_edit.text().strip()
-            gamma = self.gamma_edit.text().strip()
-            cache = self.cache_edit.text().strip()
+            anomaly = normalize_path(self.anomaly_edit.text())
+            gamma = normalize_path(self.gamma_edit.text())
+            cache = normalize_path(self.cache_edit.text())
+            self.anomaly_edit.setText(anomaly)
+            self.gamma_edit.setText(gamma)
+            self.cache_edit.setText(cache)
             if (
                 anomaly == profile.anomaly
                 and gamma == profile.gamma
@@ -646,7 +691,7 @@ class PlayPage(QWidget):
                 self.window.settings.save()
             except OSError as exc:
                 QMessageBox.warning(
-                    self, "Save Failed", f"Could not write settings.json:\n{exc}"
+                    self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
                 )
                 return
             self.window.statusBar().showMessage(
@@ -678,6 +723,10 @@ class PlayPage(QWidget):
         kind = self.runner_combo.currentData() or "auto"
         # Expand for every runner: '~' is equally invalid as a Proton/umu prefix path.
         prefix = os.path.expanduser(self.prefix_edit.text().strip())
+        if prefix:
+            # A relative value would otherwise resolve against this process's
+            # unpredictable inherited cwd instead of a stable, obvious location.
+            prefix = str(Path(prefix).resolve())
         runner = resolve_runner(kind, prefix)
         if gui_settings.load_gui_settings().get("always_gamemoderun"):
             gamemoderun = available_commands().get("gamemoderun")
@@ -805,7 +854,7 @@ class PlayPage(QWidget):
         if mo2_ok:
             self.launch_button.setToolTip("")
             self.open_mo2_button.setToolTip("")
-        elif not gamma_installed(profile.gamma):
+        elif not gamma_installed(profile.gamma, profile.mo2_profile):
             tip = (
                 "Install GAMMA first - Mod Organizer launches require a "
                 "GAMMA installation."
@@ -865,7 +914,12 @@ class PlayPage(QWidget):
             QGuiApplication.clipboard().setText(text)
 
     def _save_state(self) -> None:
-        runner = self.runner_combo.currentData()
+        # currentData() is None on an empty/uninitialized combo (or if a
+        # future Qt/style quirk ever lands the current index on the
+        # separator); _runner() and _prefix_for() already fall back to
+        # "auto" the same way - persisting None here instead would write
+        # "runner": null and a "null" key into the prefixes map.
+        runner = self.runner_combo.currentData() or "auto"
         prefix = self.prefix_edit.text().strip()
         prefixes = dict(gui_settings.load_gui_settings().get("prefixes") or {})
         prefixes[runner] = prefix
@@ -887,19 +941,17 @@ class PlayPage(QWidget):
     def _update_runner_hint(self, kind: str | None) -> None:
         if not kind or kind == "auto":
             self.runner_hint.setText(
-                "Select a Proton-GE Runner or install a version from below."
+                tr("Select a Proton-GE Runner or install a version from below.")
             )
         elif kind.startswith("umup:"):
-            self.runner_hint.setText("GE-Proton — recommended for GAMMA.")
+            self.runner_hint.setText(tr("GE-Proton — recommended for GAMMA."))
         elif kind == "proton:stable":
             self.runner_hint.setText(
-                "Steam Proton Stable — may crash with MO2 (concrt140.dll). "
-                "Use GE-Proton instead if available."
+                tr("Steam Proton Stable — may crash with MO2 (concrt140.dll). Use GE-Proton instead if available.")
             )
         elif kind.startswith("proton:"):
             self.runner_hint.setText(
-                "Steam Proton — may crash with MO2 (concrt140.dll). "
-                "Use GE-Proton instead if available."
+                tr("Steam Proton — may crash with MO2 (concrt140.dll). Use GE-Proton instead if available.")
             )
         else:
             self.runner_hint.setText("")
@@ -910,43 +962,37 @@ class PlayPage(QWidget):
 
     def launch_game(self) -> None:
         """Launch the selected game target using the primary Play workflow."""
-        if self._install_busy:
+        # Claim the launch before resolving a runner. Resolution probes the
+        # filesystem and can take long enough for a second click to arrive.
+        if self._launching or self._install_busy:
             return
+        if not self._selected_target():
+            QMessageBox.warning(
+                self,
+                tr("No target selected"),
+                tr("Choose which game to run from the Target list before clicking Launch Game.\n\nIf the list is empty, make sure your active profile points to a GAMMA install and its ModOrganizer.ini is configured."),
+            )
+            return
+        self._set_launch_button_state(True)
         # Try MO2 first; fall back to direct launch if MO2 is unavailable.
         try:
             runner = self._runner()
             self._resolve_command(open_mo2=False, direct=False, runner=runner)
-            self._launch_via_mo2()
+            self._run(open_mo2=False, direct=False, runner=runner)
         except LaunchError as exc:
+            self._set_launch_button_state(False)
             answer = QMessageBox.question(
                 self,
-                "MO2 launch unavailable",
-                "Mod Organizer could not be prepared for this launch.\n\n"
-                f"Reason: {exc}\n\n"
-                "Launch Anomaly directly instead? Mods managed by MO2 will not "
-                "be active in a direct launch.",
+                tr("MO2 launch unavailable"),
+                tr("Mod Organizer could not be prepared for this launch.\n\nReason: {exc}\n\nLaunch Anomaly directly instead? Mods managed by MO2 will not be active in a direct launch.", exc=exc),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
                 self._launch_direct()
-
-    def _launch_via_mo2(self) -> None:
-        if self._launching:
-            return
-        target = self._selected_target()
-        if not target:
-            QMessageBox.warning(
-                self,
-                "No target selected",
-                "Choose which game to run from the Target list before clicking "
-                "Launch Game.\n\n"
-                "If the list is empty, make sure your active profile points to "
-                "a GAMMA install and its ModOrganizer.ini is configured.",
-            )
+        except Exception as exc:  # noqa: BLE001 - recover the launch controls
             self._set_launch_button_state(False)
-            return
-        self._set_launch_button_state(True)
-        self._run(open_mo2=False, direct=False)
+            self._set_result(f"Could not prepare launch: {exc}", error=True)
+            QMessageBox.warning(self, tr("Could not launch"), str(exc))
 
     def _open_mo2(self) -> None:
         if self._launching or self._install_busy:
@@ -967,14 +1013,15 @@ class PlayPage(QWidget):
         self._set_launch_button_state(True)
         self._run(open_mo2=False, direct=True)
 
-    def _run(self, *, open_mo2: bool, direct: bool) -> None:
+    def _run(self, *, open_mo2: bool, direct: bool, runner=None) -> None:
         """Launch the game through Mod Organizer 2 or directly."""
         self._launch_status_clear_timer.stop()
         log_path = logs_dir() / "launcher.log"
         # launch_detached raises LaunchError too (spawn failures); if that
         # escapes, _launching stays True and every launch button stays dead.
         try:
-            runner = self._runner()
+            if runner is None:
+                runner = self._runner()
             command, env, cwd = self._resolve_command(
                 open_mo2=open_mo2, direct=direct, runner=runner
             )
@@ -984,41 +1031,118 @@ class PlayPage(QWidget):
                 if direct
                 else ("Mod Organizer 2" if open_mo2 else "GAMMA")
             )
-            self._proc = launch_detached(command, env, cwd, log_path=log_path)
+            self._proc = launch_detached(
+                command, env, cwd, log_path=log_path, registry=self._registry
+            )
+            self._monitoring_mo2 = not direct and os.name != "nt"
+            self._mo2_seen = False
+            self._handoff_checks = 0
+            # Snapshot pre-existing MO2 processes so handoff detection can
+            # tell this launch's own instance apart from one the user
+            # already had open (see mo2_pids() docstring).
+            self._pre_launch_mo2_pids = mo2_pids() if self._monitoring_mo2 else set()
+            self._mo2_launch_pids = set()
         except LaunchError as exc:
-            self._set_result(f"Could not launch: {exc}", error=True)
-            QMessageBox.warning(self, "Could not launch", str(exc))
-            self._set_launch_button_state(False)
+            self._abort_launch(f"Could not launch: {exc}")
+            QMessageBox.warning(self, tr("Could not launch"), str(exc))
             return
         except Exception as exc:  # noqa: BLE001
-            self._set_result(f"Unexpected launch error: {exc}", error=True)
-            QMessageBox.warning(self, "Could not launch", str(exc))
-            self._set_launch_button_state(False)
+            self._abort_launch(f"Unexpected launch error: {exc}")
+            QMessageBox.warning(self, tr("Could not launch"), str(exc))
             return
-        # Use a repeating timer (1 s) to detect when the process exits,
+        # Use a repeating timer to detect fast failures without delaying recovery,
         # so buttons are re-enabled as soon as possible regardless of timing.
         self._launch_timer = QTimer(self)
-        self._launch_timer.setInterval(1000)
+        self._launch_timer.setInterval(250)
         self._launch_timer.timeout.connect(
             lambda: self._on_launch_check(label, command, log_path)
         )
         self._launch_timer.start()
         self._set_result(f"Launching {label}...")
 
-    def _on_launch_check(self, label: str, command: list[str], log_path: Path) -> None:
-        """Called every second -- if the process has exited, re-enable buttons."""
+    def _stop_launch_timer(self) -> None:
         timer = getattr(self, "_launch_timer", None)
-        if getattr(self, "_proc", None) is None:
-            if timer is not None:
-                timer.stop()
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._launch_timer = None
+
+    def _abort_launch(self, message: str) -> None:
+        """Kill any spawned wrapper, release the launch lock, and report."""
+        proc = self._proc
+        self._proc = None
+        if proc is not None:
+            # The launcher wrapper failed or the setup after spawn raised;
+            # terminate its process group so no orphaned Wine processes linger.
+            self._registry.cleanup(proc)
+        self._monitoring_mo2 = False
+        self._stop_launch_timer()
+        self._set_result(message, error=True)
+        self._set_launch_button_state(False)
+        # Recompute real availability instead of blindly re-enabling: the
+        # install this launched target depended on may have been broken by
+        # another page while the game was running.
+        self._refresh_preview()
+
+    def _finish_launch(self, message: str, *, error: bool = False) -> None:
+        """Release the launch lock, stop monitoring, and show a final status."""
+        self._monitoring_mo2 = False
+        self._stop_launch_timer()
+        self._set_launch_button_state(False)
+        self._refresh_preview()
+        self._set_result(message, error=error)
+        self._launch_status_clear_timer.start(3000)
+
+    def _on_launch_check(self, label: str, command: list[str], log_path: Path) -> None:
+        """Check the wrapper and, for MO2, the handoff process."""
+        proc = getattr(self, "_proc", None)
+        if proc is None:
+            if self._monitoring_mo2:
+                # umu/proton may be only a wrapper. Keep the lock while MO2
+                # appears, and allow a short startup window after wrapper exit.
+                # Tracking this launch's own MO2 PID(s) (rather than just
+                # "is any MO2 running") means a pre-existing MO2 window the
+                # user already had open cannot make the buttons stay
+                # disabled forever after this launch's instance closes.
+                if not self._mo2_seen:
+                    new_pids = mo2_pids() - self._pre_launch_mo2_pids
+                    if new_pids:
+                        self._mo2_seen = True
+                        self._mo2_launch_pids = new_pids
+                        self._handoff_checks = -1
+                        # Sub-second polling is only needed to catch the
+                        # handoff quickly; MO2 can stay open for hours after.
+                        self._launch_timer.setInterval(2000)
+                        self._set_result("MO2 is running...")
+                        return
+                    if self._handoff_checks < 10:
+                        self._handoff_checks += 1
+                        return
+                    self._finish_launch(
+                        f"{label} launcher exited before MO2 was detected.",
+                        error=True,
+                    )
+                    return
+                if not (mo2_pids() & self._mo2_launch_pids):
+                    self._finish_launch(f"{label} closed normally.")
+                    return
+                self._set_result("MO2 is running...")
+                return
+            self._stop_launch_timer()
             return
-        if self._proc.poll() is not None:
+        if proc.poll() is not None:
             # Process has exited -- re-enable buttons and stop timer
-            self._launch_timer.stop()
-            self._launch_timer.deleteLater()
-            self._launch_timer = None
+            proc_code = proc.returncode
+            self._proc = None
+            self._registry.discard(proc)
+            if proc_code == 0 and self._monitoring_mo2:
+                self._set_result("Launcher exited; waiting for MO2...")
+                return
+            self._monitoring_mo2 = False
+            self._stop_launch_timer()
             self._set_launch_button_state(False)
-            code = self._proc.returncode
+            self._refresh_preview()
+            code = proc_code
             if code == 0:
                 self._set_result(f"{label} closed normally.")
             else:
@@ -1036,7 +1160,7 @@ class PlayPage(QWidget):
                         "then refresh System Check. Also remove "
                         "PROTON_USE_WINED3D=1 from Custom Launch Options if present."
                     )
-                    QMessageBox.warning(self, "DXVK/Vulkan Problem", graphics_message)
+                    QMessageBox.warning(self, tr("DXVK/Vulkan Problem"), graphics_message)
                 elif runner_prefix_error(detail):
                     runner = self._runner()
                     compatibility_message = (
@@ -1064,11 +1188,11 @@ class PlayPage(QWidget):
                         )
                     QMessageBox.warning(
                         self,
-                        "Runner/Prefix Compatibility Problem",
+                        tr("Runner/Prefix Compatibility Problem"),
                         compatibility_message,
                     )
                 else:
-                    QMessageBox.warning(self, "Launch failed", msg)
+                    QMessageBox.warning(self, tr("Launch failed"), msg)
             self._launch_status_clear_timer.start(3000)
 
     def _log_tail(self, path: Path, limit: int = 12) -> str:
@@ -1089,11 +1213,41 @@ class PlayPage(QWidget):
     def _clear_launch_status(self) -> None:
         self.launch_live_status.clear()
 
+    def _add_desktop_shortcut(self) -> None:
+        """Write a .desktop shortcut for the current target + runner."""
+        if self._launching or self._install_busy:
+            return
+        target = self._selected_target()
+        if not target:
+            QMessageBox.warning(
+                self,
+                tr("No target selected"),
+                tr("Choose which game to run from the Target list before adding a desktop shortcut.\n\nIf the list is empty, make sure your active profile points to a GAMMA install and its ModOrganizer.ini is configured."),
+            )
+            return
+        try:
+            runner = self._runner()
+            command, env, cwd = self._resolve_command(
+                open_mo2=False, direct=False, runner=runner
+            )
+            icon = Path(__file__).resolve().parent.parent.parent / "cli" / "stalker-gamma.png"
+            path = write_desktop_shortcut(
+                target, command, env, cwd, icon=str(icon) if icon.is_file() else None
+            )
+        except (LaunchError, OSError) as exc:
+            QMessageBox.warning(self, tr("Shortcut failed"), str(exc))
+            return
+        self._set_result(f"Shortcut saved: {path}")
+        QMessageBox.information(
+            self, tr("Shortcut created"), tr("Desktop shortcut created:\n{path}", path=path)
+        )
+
     def _set_launch_button_state(self, launching: bool) -> None:
         self._launching = launching
         self.launch_button.setEnabled(not launching)
         self.open_mo2_button.setEnabled(not launching)
         self.direct_button.setEnabled(not launching)
+        self.shortcut_button.setEnabled(not launching)
         self.launch_state_changed.emit(launching)
 
     def on_busy_changed(self, busy: bool) -> None:
@@ -1103,5 +1257,10 @@ class PlayPage(QWidget):
             self.launch_button.setEnabled(False)
             self.open_mo2_button.setEnabled(False)
             self.direct_button.setEnabled(False)
+            self.shortcut_button.setEnabled(False)
+            self.install_proton_button.setEnabled(False)
+            self.proton_version_combo.setEnabled(False)
         else:
             self._refresh_preview()
+            self._update_install_button()
+            self.proton_version_combo.setEnabled(True)

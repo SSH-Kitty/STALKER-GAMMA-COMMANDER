@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=STALKER COMMANDER
+X-GNOME-Name=STALKER COMMANDER
+GenericName=STALKER GAMMA Mod Manager
+Comment=Install, update and launch the S.T.A.L.K.E.R. Anomaly + GAMMA mod pack
+Exec=stalker-gamma-commander %U
+Icon=stalker-gamma-commander
+StartupWMClass=stalker-gamma-commander
+Terminal=false
+Categories=Game;
+Keywords=stalker;anomaly;gamma;mods;modorganizer;

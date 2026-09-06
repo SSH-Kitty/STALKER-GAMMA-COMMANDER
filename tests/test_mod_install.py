@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from commander_gui.fomod import (
     FomodConfig,
@@ -14,6 +15,7 @@ from commander_gui.fomod import (
 )
 from commander_gui.mod_install import (
     ModInstallError,
+    _validate_archive_entries,
     default_mod_name,
     install_archive,
     sanitize_name,
@@ -21,6 +23,7 @@ from commander_gui.mod_install import (
 from commander_gui.modlist import (
     add_category,
     add_mod,
+    count_mods,
     flip_priority,
     grouped,
     move_mod,
@@ -29,6 +32,24 @@ from commander_gui.modlist import (
 
 
 class ModInstallTests(unittest.TestCase):
+    def test_count_mods_excludes_separators(self):
+        lines = ["+ModA", "-ModB", "-Weapons_separator", "+ModC"]
+        self.assertEqual(count_mods(lines), (2, 3))
+
+    def test_count_mods_empty_modlist(self):
+        self.assertEqual(count_mods([]), (0, 0))
+
+    def test_count_mods_agrees_with_grouped(self):
+        lines = ["+ModA", "-Weapons_separator", "+ModB", "-ModC"]
+        total_from_grouped = sum(len(mods) for _, mods in grouped(lines))
+        enabled_from_grouped = sum(
+            1
+            for _, mods in grouped(lines)
+            for status, _, _ in mods
+            if status == "Enabled"
+        )
+        self.assertEqual(count_mods(lines), (enabled_from_grouped, total_from_grouped))
+
     def test_sanitize_name_rejects_empty_and_path_parts(self):
         self.assertEqual(sanitize_name(" My Mod "), "My Mod")
         self.assertEqual(sanitize_name("folder/name"), "folder name")
@@ -79,12 +100,29 @@ class ModInstallTests(unittest.TestCase):
             ["+B", "+A", "+C"],
         )
 
-    def test_flip_priority_preserves_categories_and_statuses(self):
+    def test_flip_priority_reverses_categories_and_mods_together(self):
+        # A real flip must move whole categories end-to-end (not just
+        # shuffle the mods inside each one while every category stays put,
+        # which leaves the file in a mixed order that is neither the
+        # original nor a true reversal): the last category ("Empty") moves
+        # to the front, "Graphics" moves after it with its own mods
+        # reversed, and the leading uncategorized mod ends up last.
         lines = ["+A", "-Graphics_separator", "-B", "+C", "-Empty_separator"]
         self.assertEqual(
             flip_priority(lines),
-            ["+A", "-Graphics_separator", "+C", "-B", "-Empty_separator"],
+            ["-Empty_separator", "-Graphics_separator", "+C", "-B", "+A"],
         )
+
+    def test_flip_priority_preserves_statuses_within_a_category(self):
+        lines = ["-Graphics_separator", "-B", "+C"]
+        self.assertEqual(
+            flip_priority(lines),
+            ["-Graphics_separator", "+C", "-B"],
+        )
+
+    def test_flip_priority_without_categories_reverses_flat_list(self):
+        lines = ["+A", "+B", "+C"]
+        self.assertEqual(flip_priority(lines), ["+C", "+B", "+A"])
 
     def test_grouped_retains_empty_separator_categories(self):
         lines = ["-Audio_separator", "-Empty_separator"]
@@ -114,6 +152,50 @@ class ModInstallTests(unittest.TestCase):
                 (mods / installed / "gamedata/config.ltx").read_text(), "data"
             )
 
+    def _mock_listing_result(self, listing_body: str):
+        from subprocess import CompletedProcess
+
+        header = (
+            "----------\n"
+            "Path = /tmp/archive.7z\n"
+            "Type = 7z\n"
+            "Physical Size = 1\n"
+            "\n"
+        )
+        return CompletedProcess(
+            args=[], returncode=0, stdout=header + listing_body, stderr=""
+        )
+
+    def test_validate_archive_entries_rejects_path_traversal(self):
+        listing = "Path = ../../etc/cron.d/evil\nSize = 1\n"
+        with (
+            patch(
+                "commander_gui.mod_install.subprocess.run",
+                return_value=self._mock_listing_result(listing),
+            ),
+            self.assertRaises(ModInstallError),
+        ):
+            _validate_archive_entries(Path("/fake/7zz"), Path("/tmp/archive.7z"))
+
+    def test_validate_archive_entries_rejects_absolute_path(self):
+        listing = "Path = /etc/passwd\nSize = 1\n"
+        with (
+            patch(
+                "commander_gui.mod_install.subprocess.run",
+                return_value=self._mock_listing_result(listing),
+            ),
+            self.assertRaises(ModInstallError),
+        ):
+            _validate_archive_entries(Path("/fake/7zz"), Path("/tmp/archive.7z"))
+
+    def test_validate_archive_entries_allows_normal_entries(self):
+        listing = "Path = gamedata/config.ltx\nSize = 1\n\nPath = readme.txt\nSize = 1\n"
+        with patch(
+            "commander_gui.mod_install.subprocess.run",
+            return_value=self._mock_listing_result(listing),
+        ):
+            _validate_archive_entries(Path("/fake/7zz"), Path("/tmp/archive.7z"))
+
     def test_fomod_config_and_selected_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -140,6 +222,19 @@ class ModInstallTests(unittest.TestCase):
                 (destination / "gamedata/patch.txt").read_text(encoding="utf-8"),
                 "patched",
             )
+
+    def test_fomod_config_rejects_doctype_entity_expansion(self):
+        """A malicious/corrupted ModuleConfig.xml must not run entity expansion."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "ModuleConfig.xml"
+            config_path.write_text(
+                '<?xml version="1.0"?>\n'
+                "<!DOCTYPE config [ <!ENTITY x \"y\"> ]>\n"
+                "<config><moduleName>&x;</moduleName></config>",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ModInstallError):
+                parse_config(config_path)
 
     def test_fomod_standard_name_attributes_are_used(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -126,7 +126,7 @@ def analyze_launcher(arcname: str, where: str, lines: list[str]) -> list[Finding
                 "(routine messages collapsed).",
                 protonfixes_first_line,
                 detail=knowledge.PROTONFIXES_SUMMARY,
-                 suggestion="Informational — no action is required.",
+                suggestion="Informational — no action is required.",
             )
         )
     return findings
@@ -179,7 +179,7 @@ def _pressure_vessel_finding(factory: FindingFactory, line_no: int) -> Finding:
         knowledge.PRESSURE_VESSEL_TITLE,
         line_no,
         detail=knowledge.PRESSURE_VESSEL,
-         suggestion="Informational — no action is required.",
+        suggestion="Informational — no action is required.",
     )
 
 
