@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from PySide6.QtCore import QPointF, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QColor,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version_label__, gui_settings
+from ..i18n import set_active_language
 from ..settings import load_settings
 from ..themes import (
     active_theme_tokens,
@@ -33,6 +36,12 @@ from ..themes import (
     set_active_theme,
 )
 from .about_page import AboutPage
+from .common import (
+    count_active_mods,
+    resume_after_shutdown,
+    shutdown_active_runners,
+    tr,
+)
 from .dashboard import DashboardPage
 from .help_page import HelpPage
 from .install_page import InstallPage
@@ -138,7 +147,6 @@ class Backdrop(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("STALKER Anomaly + GAMMA COMMANDER")
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
         self.settings = load_settings()
@@ -147,6 +155,24 @@ class MainWindow(QMainWindow):
         self._settings_open = False
         self._last_tab_key = "dashboard"
         self._nav_refresh_serial = 0
+
+        self._build_ui()
+        self.tabs.setCurrentIndex(0)
+
+        start_page = gui_settings.load_gui_settings().get("start_page")
+        if start_page and start_page in self._page_index and start_page != "settings":
+            self.tabs.setCurrentIndex(self._page_index[start_page])
+
+    def _build_ui(self) -> None:
+        """(Re)build the header, nav tabs, and every page from scratch.
+
+        Called once from ``__init__``, and again from ``switch_language()``
+        so a language change takes effect immediately instead of requiring
+        a restart - every string here was set once at widget-construction
+        time from ``tr()``, so the only way to re-translate it is to
+        reconstruct the widgets that hold it.
+        """
+        self.setWindowTitle(tr("STALKER COMMANDER"))
 
         central = Backdrop(self)
         self.backdrop = central
@@ -167,11 +193,11 @@ class MainWindow(QMainWindow):
         wordmark_layout.setContentsMargins(0, 0, 0, 0)
         wordmark_layout.setSpacing(0)
 
-        wordmark = QLabel("COMMANDER")
+        wordmark = QLabel(tr("COMMANDER"))
         wordmark.setObjectName("wordmark")
         wordmark_layout.addWidget(wordmark)
 
-        byline = QLabel("by SSH-Kitty")
+        byline = QLabel(tr("by SSH-Kitty"))
         byline.setObjectName("byline")
         byline.setAlignment(Qt.AlignmentFlag.AlignRight)
         wordmark_layout.addWidget(byline)
@@ -188,13 +214,19 @@ class MainWindow(QMainWindow):
 
         header_layout.addStretch(1)
 
-        self._cog = QPushButton("\u2699")
+        self.mod_counter_label = QLabel()
+        self.mod_counter_label.setObjectName("modCounter")
+        self.mod_counter_label.hide()
+        header_layout.addWidget(self.mod_counter_label)
+
+        self._cog = QPushButton(tr("⚙"))
         self._cog.setObjectName("cogButton")
-        self._cog.setToolTip("Settings")
+        self._cog.setToolTip(tr("Settings"))
         self._cog.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cog.setFixedHeight(28)
         self._cog.clicked.connect(self.toggle_settings)
         header_layout.addWidget(self._cog)
+        self.update_mod_counter()
 
         self._page_index: dict[str, int] = {}
         self._pages: dict[str, QWidget] = {}
@@ -204,7 +236,11 @@ class MainWindow(QMainWindow):
             self._pages[key] = self._create_page(key)
             self._page_index[key] = self.stack.count()
             self.stack.addWidget(self._pages[key])
-            self.tabs.addTab(title)
+            # Translated here, not by wrapping NAV_ITEMS itself: NAV_ITEMS is
+            # a module-level constant evaluated at import time, before
+            # main.py ever calls set_active_language() - tr() would always
+            # resolve to English if baked in there instead of at display time.
+            self.tabs.addTab(tr(title))
 
         self._pages["settings"] = self._create_page("settings")
         self._page_index["settings"] = self.stack.count()
@@ -225,20 +261,12 @@ class MainWindow(QMainWindow):
         if self.width() < header_width:
             self.resize(header_width, self.height())
 
-        # Page constructors perform their initial refresh. Avoid immediately
-        # rebuilding the default page a second time during startup.
-        self.tabs.setCurrentIndex(0)
-
-        start_page = gui_settings.load_gui_settings().get("start_page")
-        if start_page and start_page in self._page_index and start_page != "settings":
-            self.tabs.setCurrentIndex(self._page_index[start_page])
-
         self.statusBar().showMessage(
             f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}"
         )
-        github_link = QPushButton("GitHub")
+        github_link = QPushButton(tr("GitHub"))
         github_link.setObjectName("githubLink")
-        github_link.setToolTip("Open SSH-Kitty on GitHub")
+        github_link.setToolTip(tr("Open SSH-Kitty on GitHub"))
         github_link.setFlat(True)
         github_link.setCursor(Qt.CursorShape.PointingHandCursor)
         github_link.clicked.connect(
@@ -249,30 +277,29 @@ class MainWindow(QMainWindow):
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().addPermanentWidget(github_link)
 
+    #: Page class for each nav key. A page opts into extra dispatch behavior
+    #: (see ``_schedule_page_refresh``) by defining the matching method, not
+    #: by main_window.py special-casing its key.
+    _PAGE_CLASSES: ClassVar[dict[str, type[QWidget]]] = {
+        "play": PlayPage,
+        "dashboard": DashboardPage,
+        "install": InstallPage,
+        "systemcheck": SystemCheckPage,
+        "update": UpdatePage,
+        "modmanager": ModManagerPage,
+        "profiles": ProfilesPage,
+        "utilities": UtilitiesPage,
+        "help": HelpPage,
+        "about": AboutPage,
+        "settings": SettingsPage,
+    }
+
     def _create_page(self, key: str) -> QWidget:
-        if key == "play":
-            return PlayPage(self)
-        if key == "dashboard":
-            return DashboardPage(self)
-        if key == "install":
-            return InstallPage(self)
-        if key == "systemcheck":
-            return SystemCheckPage(self)
-        if key == "update":
-            return UpdatePage(self)
-        if key == "modmanager":
-            return ModManagerPage(self)
-        if key == "profiles":
-            return ProfilesPage(self)
-        if key == "utilities":
-            return UtilitiesPage(self)
-        if key == "help":
-            return HelpPage(self)
-        if key == "about":
-            return AboutPage(self)
-        if key == "settings":
-            return SettingsPage(self)
-        raise ValueError(key)
+        try:
+            page_class = self._PAGE_CLASSES[key]
+        except KeyError:
+            raise ValueError(key) from None
+        return page_class(self)
 
     def _active_name(self) -> str:
         profile = self.settings.active_profile
@@ -288,9 +315,9 @@ class MainWindow(QMainWindow):
         self.tabs.style().polish(self.tabs)
         key = NAV_ITEMS[index][0]
         self.setWindowTitle(
-            "Install STALKER Anomaly + GAMMA"
+            "Install - STALKER COMMANDER"
             if key == "install"
-            else "STALKER Anomaly + GAMMA COMMANDER"
+            else "STALKER COMMANDER"
         )
         self.stack.setCurrentIndex(self._page_index[key])
         self._schedule_page_refresh(key)
@@ -309,7 +336,7 @@ class MainWindow(QMainWindow):
             page = self._pages[key]
             if hasattr(page, "refresh"):
                 page.refresh()
-            if key == "install" and hasattr(page, "enable_winetricks_status"):
+            if hasattr(page, "enable_winetricks_status"):
                 page.enable_winetricks_status()
 
         QTimer.singleShot(0, refresh)
@@ -345,7 +372,7 @@ class MainWindow(QMainWindow):
             return
         self._settings_open = True
         self._last_tab_key = NAV_ITEMS[self.tabs.currentIndex()][0]
-        self.setWindowTitle("Settings - STALKER Anomaly + GAMMA COMMANDER")
+        self.setWindowTitle(tr("Settings - STALKER COMMANDER"))
         self.tabs.setProperty("settingsMode", True)
         self.tabs.style().unpolish(self.tabs)
         self.tabs.style().polish(self.tabs)
@@ -382,6 +409,69 @@ class MainWindow(QMainWindow):
     def apply_font_family(self, family: str) -> None:
         gui_settings.save_gui_settings(font_family=family)
         self._apply_style()
+
+    def apply_language(self, code: str) -> None:
+        """Switch the UI language immediately, rebuilding every page.
+
+        Refused while ``install_busy`` (an install, update, verify, or
+        similar task is running): every page - and the background thread
+        driving that task, which the page's own widgets hold a reference
+        to - would be torn down and rebuilt, terminating or orphaning it.
+        """
+        if self.install_busy:
+            QMessageBox.warning(
+                self,
+                tr("Busy"),
+                tr("Cannot change the language while a background task is running. Wait for it to finish, then try again."),
+            )
+            settings_page = self._pages.get("settings")
+            if settings_page is not None and hasattr(settings_page, "refresh"):
+                # Revert the combo to the still-active language - it already
+                # shows the rejected selection from the signal that called us.
+                settings_page.refresh()
+            return
+        gui_settings.save_gui_settings(language=code)
+        set_active_language(code)
+        self.switch_language()
+
+    def switch_language(self) -> None:
+        """Tear down and rebuild the entire window in the newly active language.
+
+        Every label/button text in this app is a plain string set once at
+        widget-construction time from ``tr()`` - there is no live
+        re-translation of an existing widget, so the only way to apply a
+        language change is to reconstruct the widgets that hold it.
+        """
+        previous_key = (
+            self._last_tab_key
+            if self._settings_open
+            else NAV_ITEMS[self.tabs.currentIndex()][0]
+        )
+        was_settings_open = self._settings_open
+
+        # Stop every in-flight background task (page refresh polls,
+        # dependency checks, etc.) and suppress result delivery until the
+        # rebuild finishes, so a signal that arrives mid-teardown cannot
+        # touch a widget that is about to be destroyed. install_busy being
+        # False (checked by the caller) means nothing CLI-driving is
+        # running, so this only ever cancels quick, safe-to-abandon lookups.
+        shutdown_active_runners(timeout_ms=2000)
+
+        old_central = self.takeCentralWidget()
+        if old_central is not None:
+            old_central.setParent(None)
+            old_central.deleteLater()
+
+        self._settings_open = False
+        self._last_tab_key = "dashboard"
+        self._nav_refresh_serial = 0
+        self._build_ui()
+        resume_after_shutdown()
+
+        if previous_key in self._page_index:
+            self.tabs.setCurrentIndex(self._page_index[previous_key])
+        if was_settings_open:
+            self.open_settings()
 
     def _apply_style(self) -> None:
         state = gui_settings.load_gui_settings()
@@ -420,11 +510,8 @@ class MainWindow(QMainWindow):
         if self.install_busy:
             answer = QMessageBox.question(
                 self,
-                "Install Running",
-                "An installation, verification, update, or dependency "
-                "download is currently running. Are you sure you want to close?\n\n"
-                "This will terminate the running process and may leave the "
-                "prefix partially configured.",
+                tr("Install Running"),
+                tr("An installation, verification, update, or dependency download is currently running. Are you sure you want to close?\n\nThis will terminate the running process and may leave the prefix partially configured."),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -436,8 +523,27 @@ class MainWindow(QMainWindow):
         )
         event.accept()
 
+    def update_mod_counter(self) -> None:
+        """Refresh the topbar's always-visible active/total mod count."""
+        profile = self.settings.active_profile
+        counts = (
+            count_active_mods(profile.gamma, profile.mo2_profile)
+            if profile is not None
+            else None
+        )
+        if counts is None:
+            self.mod_counter_label.hide()
+            return
+        enabled, total = counts
+        self.mod_counter_label.setText(tr("{enabled} Mods", enabled=enabled))
+        self.mod_counter_label.setToolTip(
+            tr("{enabled} of {total} mods enabled in profile “{profile_name}”", enabled=enabled, total=total, profile_name=profile.profile_name)
+        )
+        self.mod_counter_label.show()
+
     def refresh_settings(self) -> None:
         self.settings = load_settings()
         self.statusBar().showMessage(
             f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}"
         )
+        self.update_mod_counter()

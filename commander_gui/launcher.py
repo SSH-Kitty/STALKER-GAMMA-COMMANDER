@@ -20,8 +20,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +51,28 @@ PREFERRED_TARGETS = ("Anomaly (DX11-AVX)", "Anomaly (DX11)", "Anomaly Launcher")
 
 class LaunchError(RuntimeError):
     """Raised when the launcher cannot be resolved or started."""
+
+
+_RUNNER_ENV_PREFIXES = ("WINE", "PROTON", "STEAM_COMPAT_")
+_RUNNER_ENV_NAMES = {
+    "PROTONPATH",
+    "SteamAppId",
+    "SteamGameId",
+}
+
+
+def runner_environment(values: dict[str, str] | None = None) -> dict[str, str]:
+    """Return an environment isolated from inherited Wine/Proton state."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not (
+            key in _RUNNER_ENV_NAMES
+            or any(key.upper().startswith(prefix) for prefix in _RUNNER_ENV_PREFIXES)
+        )
+    }
+    environment.update(values or {})
+    return environment
 
 
 RUNNER_PREFIX_ERROR_MARKERS = (
@@ -110,6 +134,84 @@ class Runner:
     env: dict[str, str] = field(default_factory=dict)
 
 
+class ProcessGroupRegistry:
+    """Track detached process groups owned by a caller."""
+
+    def __init__(self) -> None:
+        self._processes: dict[int, subprocess.Popen] = {}
+
+    def register(self, process: subprocess.Popen) -> subprocess.Popen:
+        """Register and return a process so registration can be chained."""
+        self._processes[process.pid] = process
+        return process
+
+    def discard(self, process: subprocess.Popen | int) -> None:
+        """Stop tracking a process without terminating it."""
+        pid = process if isinstance(process, int) else process.pid
+        self._processes.pop(pid, None)
+
+    def cleanup(self, process: subprocess.Popen | int) -> None:
+        """Terminate one owned process group and stop tracking it."""
+        pid = process if isinstance(process, int) else process.pid
+        tracked = self._processes.pop(pid, None)
+        if tracked is None and not isinstance(process, int):
+            tracked = process
+        _terminate_process_group(pid, tracked)
+
+    def cleanup_all(self) -> None:
+        """Terminate all owned process groups."""
+        for pid in tuple(self._processes):
+            self.cleanup(pid)
+
+
+def _terminate_process_group(
+    pid: int, process: subprocess.Popen | None = None
+) -> None:
+    """Terminate a detached process group, falling back to its process."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    if process is not None:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    if os.name == "nt":
+                        process.kill()
+                    else:
+                        os.killpg(pid, signal.SIGKILL)
+                except OSError:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+    elif os.name != "nt":
+        # No handle to wait on: give the group a short grace period and
+        # escalate to SIGKILL if the leader is still alive (wineserver and
+        # friends routinely ignore SIGTERM).
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.05)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def ensure_runner_prefix(runner: Runner) -> None:
     """Create and record a runner prefix, rejecting ownership conflicts."""
     raw = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
@@ -134,11 +236,13 @@ def ensure_runner_prefix(runner: Runner) -> None:
                 | getattr(os, "O_NONBLOCK", 0),
             )
             try:
-                with os.fdopen(fd, encoding="utf-8") as stream:
-                    saved_owner = stream.read().strip()
+                stream = os.fdopen(fd, encoding="utf-8")
             except BaseException:
+                # fdopen failed before taking ownership of the descriptor.
                 os.close(fd)
                 raise
+            with stream:
+                saved_owner = stream.read().strip()
             saved_kind = saved_owner.split(":", 1)[0] if saved_owner else ""
             if saved_kind and saved_kind != runner.kind:
                 raise LaunchError(
@@ -487,15 +591,18 @@ def _umu_proton_runner(proton_script: str, prefix: str = "") -> Runner:
     wrapper.append(avail["umu"])
     env = {"PROTONPATH": str(build_dir)}
     env["PROTON_USE_WINED3D"] = "0"
-    if prefix:
-        prefix_path = Path(prefix).expanduser()
-        try:
-            prefix_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise LaunchError(
-                f"Could not create Wine prefix {prefix_path}: {exc}"
-            ) from exc
-        env["WINEPREFIX"] = str(prefix_path)
+    # Always resolve to the same default (DEFAULT_UMU_PREFIX) that
+    # wine_prefix_for() reports to Winetricks - leaving WINEPREFIX unset here
+    # would let umu-run pick its own default, which need not match the
+    # prefix runtimes were actually installed into.
+    prefix_path = Path(prefix).expanduser() if prefix else DEFAULT_UMU_PREFIX
+    try:
+        prefix_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise LaunchError(
+            f"Could not create Wine prefix {prefix_path}: {exc}"
+        ) from exc
+    env["WINEPREFIX"] = str(prefix_path)
     return Runner("umu", proton.parent.name, wrapper, env)
 
 
@@ -504,9 +611,11 @@ def _wine_runner(wine_binary: str, prefix: str = "") -> Runner:
     wine = Path(wine_binary)
     if not wine.is_file():
         raise LaunchError(f"Wine not found at {wine_binary}")
-    env = {}
-    if prefix:
-        env["WINEPREFIX"] = str(Path(prefix).expanduser())
+    # Always resolve to the same default (DEFAULT_UMU_PREFIX) that
+    # wine_prefix_for() reports to Winetricks - a blank WINEPREFIX would let
+    # the real wine binary fall back to ~/.wine instead.
+    prefix_path = Path(prefix).expanduser() if prefix else DEFAULT_UMU_PREFIX
+    env = {"WINEPREFIX": str(prefix_path)}
     label = wine.parent.parent.name
     return Runner("wine", f"Wine ({label})", [str(wine)], env)
 
@@ -529,9 +638,9 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
             if avail.get("gamemoderun"):
                 wrapper.append(avail["gamemoderun"])
             wrapper.append(avail["umu"])
-            env = {}
-            if wine_prefix:
-                env["WINEPREFIX"] = wine_prefix
+            # Always resolve to the same default Winetricks assumes
+            # (wine_prefix_for) rather than leaving umu-run to pick its own.
+            env = {"WINEPREFIX": wine_prefix or str(DEFAULT_UMU_PREFIX)}
             proton_dir = _pick_umu_proton()
             if proton_dir:
                 env["PROTONPATH"] = proton_dir
@@ -550,9 +659,10 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
                 pass  # fall through to try wine
     if kind in ("auto", "wine"):
         if avail.get("wine"):
-            env = {}
-            if wine_prefix:
-                env["WINEPREFIX"] = wine_prefix
+            # Always resolve to the same default Winetricks assumes
+            # (wine_prefix_for) rather than letting plain wine fall back to
+            # ~/.wine.
+            env = {"WINEPREFIX": wine_prefix or str(DEFAULT_UMU_PREFIX)}
             return Runner("wine", "Wine", [avail["wine"]], env)
         if kind == "wine":
             raise LaunchError("wine not found on PATH.")
@@ -609,6 +719,81 @@ def build_direct_command(
     return [*runner.wrapper, *args], dict(runner.env), cwd
 
 
+def desktop_dir() -> Path:
+    """Return the user's desktop directory, honoring XDG user dirs."""
+    try:
+        out = subprocess.run(
+            ["xdg-user-dir", "DESKTOP"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    path = Path(out) if out else Path.home() / "Desktop"
+    if not path.is_dir():
+        raise LaunchError(f"Desktop directory not found: {path}")
+    return path
+
+
+def shortcut_slug(title: str) -> str:
+    """Return a filename-safe slug for a launch target title."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower()
+    return slug or "stalker-gamma"
+
+
+def _desktop_quote(value: str) -> str:
+    """Quote one argument per the freedesktop Exec key rules."""
+    # '%' starts a field code even inside quotes, so it must be doubled too.
+    return (
+        '"'
+        + value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("$", "\\$")
+        .replace("%", "%%")
+        + '"'
+    )
+
+
+def write_desktop_shortcut(
+    name: str,
+    command: list[str],
+    env: dict[str, str],
+    cwd: str,
+    icon: str | None = None,
+    directory: Path | None = None,
+) -> Path:
+    """Write a .desktop shortcut that launches ``command`` with ``env`` set.
+
+    Environment variables are inlined via ``env(1)`` because the Exec key has
+    no environment section. Returns the written path.
+    """
+    if not command:
+        raise LaunchError("No command specified for desktop shortcut")
+    directory = directory or desktop_dir()
+    argv = [_desktop_quote(arg) for arg in command]
+    if env:
+        pairs = [f"{key}={value}" for key, value in sorted(env.items())]
+        argv = ["env", *(_desktop_quote(pair) for pair in pairs), *argv]
+    lines = [
+        "[Desktop Entry]",
+        f"Name={name}",
+        "Type=Application",
+        "Exec=" + " ".join(argv),
+        f"Path={cwd}",
+        "Terminal=false",
+        "Categories=Game;",
+    ]
+    if icon:
+        lines.append(f"Icon={icon}")
+    path = directory / f"{shortcut_slug(name)}.desktop"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+    return path
+
+
 #: Roll launcher.log over once it passes this size; it is append-only and is
 #: read back tail-first to diagnose failed launches.
 MAX_LOG_BYTES = 1 << 20
@@ -628,6 +813,8 @@ def launch_detached(
     env: dict[str, str],
     cwd: str,
     log_path: str | Path | None = None,
+    *,
+    registry: ProcessGroupRegistry | None = None,
 ) -> subprocess.Popen:
     """Start a command detached from the GUI (survives GUI close).
 
@@ -636,14 +823,15 @@ def launch_detached(
     """
     if not command:
         raise LaunchError("No command specified")
-    full_env = dict(os.environ)
-    full_env.update(env)
+    full_env = runner_environment(env)
+    stripped: list[str] = []
     for key in list(full_env):
         upper = key.upper()
         if any(
             marker in upper for marker in ("TOKEN", "PASSWORD", "SECRET", "API_KEY")
         ):
             full_env.pop(key, None)
+            stripped.append(key)
     # The log handle is closed as soon as Popen returns: the child has its own
     # inherited descriptor, so keeping ours open only leaks one per launch.
     with ExitStack() as stack:
@@ -655,16 +843,32 @@ def launch_detached(
             stdout = stack.enter_context(
                 open(log_path, "a", encoding="utf-8", errors="replace")
             )
+            if stripped:
+                # Record which variables were scrubbed so a launch that fails
+                # because a runner needed one is diagnosable from the log.
+                stdout.write(
+                    "[commander] stripped environment variables: "
+                    + ", ".join(sorted(stripped))
+                    + "\n"
+                )
+                stdout.flush()
         try:
-            return subprocess.Popen(
+            process = subprocess.Popen(
                 command,
                 cwd=cwd,
                 env=full_env,
-                start_new_session=True,
+                start_new_session=os.name != "nt",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
+                stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=subprocess.STDOUT
                 if log_path is not None
                 else subprocess.DEVNULL,
             )
+            if registry is not None:
+                registry.register(process)
+            return process
         except OSError as exc:
             raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc

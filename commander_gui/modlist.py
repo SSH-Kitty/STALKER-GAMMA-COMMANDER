@@ -7,6 +7,7 @@ allowing per-mod status changes and deletion.
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 from .atomic import write_text
@@ -32,7 +33,17 @@ def read_lines(path: str | Path) -> list[str]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"File {path} doesn't exist")
-    return path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    try:
+        # Strict decode: silently replacing invalid bytes with U+FFFD would
+        # permanently corrupt a non-UTF-8 mod name (e.g. a legacy Latin-1
+        # modlist.txt) the moment this file is next saved.
+        return path.read_text(encoding="utf-8-sig").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"{path} is not valid UTF-8 ({exc}). Fix the file's encoding "
+            "before editing it here - saving over invalid characters would "
+            "corrupt mod names permanently."
+        ) from exc
 
 
 def entries(lines: list[str]) -> list[tuple[str, str]]:
@@ -91,6 +102,23 @@ def grouped(
     if mods or category != "Uncategorized":
         groups.append((category, mods))
     return groups
+
+
+def count_mods(lines: list[str]) -> tuple[int, int]:
+    """Return (enabled, total) counts of real mods, excluding separators.
+
+    Uses the same "is this a mod, or a category separator" rule as
+    grouped() (separator_name(name) is not None), so this always agrees
+    with what the Mod Manager tree displays.
+    """
+    total = enabled = 0
+    for status, name in entries(lines):
+        if separator_name(name) is not None:
+            continue
+        total += 1
+        if status == "Enabled":
+            enabled += 1
+    return enabled, total
 
 
 def move(lines: list[str], line_index: int, delta: int) -> list[str]:
@@ -504,16 +532,26 @@ def move_mod(
         else:
             insert_at = 0
     else:
+        # Append to the end of the *first* occurrence of target_category,
+        # consistent with reparent_into_category's "duplicate separators
+        # collapse to the first" rule - without that, a duplicate separator
+        # further down (MO2 can reintroduce one on an external rewrite)
+        # would silently pull newly-moved mods into a second, disconnected
+        # group instead of joining the mods already there.
         insert_at = 0 if target_category == "Uncategorized" else len(out)
         current_category = "Uncategorized"
+        seen_target_block = False
         for index, line in enumerate(out):
             info = _line_info(line)
             if info is None:
                 continue
             separator = separator_name(info[1])
             if separator is not None:
+                if current_category == target_category and seen_target_block:
+                    break
                 current_category = separator
                 if current_category == target_category:
+                    seen_target_block = True
                     insert_at = index + 1
             elif current_category == target_category:
                 insert_at = index + 1
@@ -522,20 +560,53 @@ def move_mod(
 
 
 def flip_priority(lines: list[str]) -> list[str]:
-    """Reverse the mod order in ``lines`` while preserving comments and separators.
+    """Reverse the entire mod load order in ``lines``, matching MO2 semantics.
 
-    In MO2 terms: mods that were at the top (lowest priority) move to the
-    bottom (highest priority) and vice versa.  Non-mod lines (comments, blanks,
-    separators) stay in their absolute positions; only the ``+Name``/``-Name``
-    entries are reversed relative to each other.
+    A category (a separator entry plus every line up to the next separator,
+    including any comments/blanks) is treated as one contiguous block.
+    Flipping reverses the order of these blocks *and* the mod entries within
+    each block, so the whole load order is inverted end-to-end.
+
+    Reversing only the mods inside each category while leaving the
+    categories themselves in place (an earlier version of this function)
+    left the file in a mixed order that was neither the original nor a
+    true reversal - the categories never actually flip position, so the
+    overall load order barely changes even though every individual mod
+    inside a category does.
+
+    A separator line always stays as the first line of its own block (its
+    category name does not change), and non-mod lines inside a block
+    (comments, blanks) keep their position relative to that block.
 
     The function returns a new list; the original is not modified.
     """
-    new_lines = list(lines)
-    for _, mods in reversed(grouped(lines)):
-        positions = [line_index for _, _, line_index in mods]
-        records = [lines[index] for index in positions]
-        for index, record in zip(positions, reversed(records)):
-            new_lines[index] = record
+    boundaries = [0]
+    for index, line in enumerate(lines):
+        if index == 0:
+            continue
+        info = _line_info(line)
+        if info is not None and separator_name(info[1]) is not None:
+            boundaries.append(index)
+    boundaries.append(len(lines))
 
+    blocks = [
+        lines[start:end] for start, end in pairwise(boundaries) if start != end
+    ]
+
+    def flip_block(block: list[str]) -> list[str]:
+        mod_positions = [
+            index
+            for index, line in enumerate(block)
+            if (info := _line_info(line)) is not None
+            and separator_name(info[1]) is None
+        ]
+        records = [block[index] for index in mod_positions]
+        new_block = list(block)
+        for index, record in zip(mod_positions, reversed(records)):
+            new_block[index] = record
+        return new_block
+
+    new_lines: list[str] = []
+    for block in reversed(blocks):
+        new_lines.extend(flip_block(block))
     return new_lines

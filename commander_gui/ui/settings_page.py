@@ -13,7 +13,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -22,13 +21,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import gui_settings
 from ..config import logs_dir
+from ..i18n import LANGUAGE_INFO
 from ..launcher import (
     LaunchError,
     build_runner_tool_command,
@@ -37,7 +36,14 @@ from ..launcher import (
     resolve_runner,
 )
 from ..themes import THEME_INFO, active_theme
-from .common import info_label, make_card, section_label
+from .common import (
+    NoWheelComboBox,
+    info_label,
+    make_card,
+    mo2_running,
+    section_label,
+    tr,
+)
 
 
 def _swatch(color: str) -> QFrame:
@@ -101,16 +107,15 @@ class SettingsPage(QWidget):
     # ------------------------------------------------------------------ cards
     def _launch_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Startup", level=2))
-        layout.addWidget(info_label("Choose the page COMMANDER opens when it starts."))
-        self._start_page_combo = QComboBox()
+        layout.addWidget(section_label(tr("Startup"), level=2))
+        layout.addWidget(info_label(tr("Choose the page COMMANDER opens when it starts.")))
+        self._start_page_combo = NoWheelComboBox()
         self._start_page_combo.currentIndexChanged.connect(self._on_start_page)
-        layout.addLayout(_option_row("Page on startup:", self._start_page_combo))
+        layout.addLayout(_option_row(tr("Page on startup:"), self._start_page_combo))
 
-        self._autostart_check = QCheckBox("Start COMMANDER when I log in")
+        self._autostart_check = QCheckBox(tr("Start COMMANDER when I log in"))
         self._autostart_check.setToolTip(
-            "Add COMMANDER to your desktop's autostart list so it starts "
-            "automatically when you log in."
+            tr("Add COMMANDER to your desktop's autostart list so it starts automatically when you log in.")
         )
         self._autostart_check.toggled.connect(self._on_autostart_toggled)
         layout.addWidget(self._autostart_check)
@@ -118,68 +123,72 @@ class SettingsPage(QWidget):
 
     def _launcher_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Runner", level=2))
+        layout.addWidget(section_label(tr("Runner"), level=2))
         layout.addWidget(
             info_label(
-                "Choose the runner used by default on the Play page. You can override it for each launch."
+                tr("Choose the runner used by default on the Play page. You can override it for each launch.")
             )
         )
-        self._runner_combo = QComboBox()
+        self._runner_combo = NoWheelComboBox()
         self._runner_combo.currentIndexChanged.connect(self._on_runner_changed)
-        layout.addLayout(_option_row("Default runner:", self._runner_combo))
+        layout.addLayout(_option_row(tr("Default runner:"), self._runner_combo))
 
-        self._gamemode_check = QCheckBox("Always use GameMode")
+        self._gamemode_check = QCheckBox(tr("Always use GameMode"))
         self._gamemode_check.setToolTip(
-            "Wrap every launch in gamemoderun (enables the Feral GameMode "
-            "CPU governor / scheduler optimisation), even for Proton."
+            tr("Wrap every launch in gamemoderun (enables the Feral GameMode CPU governor / scheduler optimisation), even for Proton.")
         )
         self._gamemode_check.toggled.connect(self._on_gamemode_toggled)
         layout.addWidget(self._gamemode_check)
         layout.addWidget(
             info_label(
-                "umu-run launches already use gamemoderun automatically when it is installed."
+                tr("umu-run launches already use gamemoderun automatically when it is installed.")
             )
         )
-        self._winecfg_button = QPushButton("Open Winecfg")
+        self._winecfg_button = QPushButton(tr("Open Winecfg"))
         self._winecfg_button.setObjectName("secondary")
         self._winecfg_button.setToolTip(
-            "Open Wine Configuration for the default runner and prefix."
+            tr("Open Wine Configuration for the default runner and prefix.")
         )
         self._winecfg_button.clicked.connect(self._open_winecfg)
         layout.addWidget(self._winecfg_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         display_row = QHBoxLayout()
-        display_row.addWidget(QLabel("MO2 Display Scale"))
-        self._display_scale_combo = QComboBox()
+        display_row.addWidget(QLabel(tr("MO2 Display Scale")))
+        self._display_scale_combo = NoWheelComboBox()
         for percent, dpi in ((100, 96), (125, 120), (150, 144), (175, 168), (200, 192)):
             self._display_scale_combo.addItem(f"{percent}% ({dpi} DPI)", dpi)
         self._display_scale_combo.currentIndexChanged.connect(
             self._on_display_scale_changed
         )
         display_row.addWidget(self._display_scale_combo, 1)
-        self._apply_display_scale_button = QPushButton("Apply")
+        self._apply_display_scale_button = QPushButton(tr("Apply"))
         self._apply_display_scale_button.setObjectName("secondary")
-        self._apply_display_scale_button.setFixedSize(64, 30)
+        # A fixed pixel width sized for the English text clips or overlaps
+        # longer translations (e.g. Polish "Zastosowano" for "Applied") -
+        # a minimum width still keeps the button a consistent size for the
+        # common case, but lets it grow for longer text instead of clipping.
+        self._apply_display_scale_button.setMinimumSize(64, 30)
+        self._apply_display_scale_button.setFixedHeight(30)
         self._apply_display_scale_button.setStyleSheet("padding: 0 6px;")
         self._apply_display_scale_button.clicked.connect(self._apply_display_scale)
         display_row.addWidget(self._apply_display_scale_button)
         layout.addLayout(display_row)
         layout.addWidget(
             info_label(
-                "125% is recommended for small MO2 text. Restart MO2 after applying."
+                tr("125% is recommended for small MO2 text. Restart MO2 after applying.")
             )
         )
         return card
 
     def _appearance_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Appearance", level=2))
+        layout.addWidget(section_label(tr("Appearance"), level=2))
         layout.addWidget(
             info_label(
-                "Set the interface font family and size. Changes apply immediately."
+                tr("Set the interface font family and size. Changes apply immediately.")
             )
         )
-        self._font_family_combo = QComboBox()
+        self._font_family_combo = NoWheelComboBox()
         for family in (
             "Exo 2",
             "Noto Sans",
@@ -190,20 +199,28 @@ class SettingsPage(QWidget):
         ):
             self._font_family_combo.addItem(family, family)
         self._font_family_combo.currentIndexChanged.connect(self._on_font_family)
-        layout.addLayout(_option_row("Font family:", self._font_family_combo))
-        self._font_spin = QSpinBox()
-        self._font_spin.setRange(9, 20)
-        self._font_spin.setSuffix(" px")
-        self._font_spin.valueChanged.connect(self._on_font_size)
-        layout.addLayout(_option_row("Interface font size:", self._font_spin))
+        layout.addLayout(_option_row(tr("Font family:"), self._font_family_combo))
+        self._font_size_combo = NoWheelComboBox()
+        for size in range(9, 23):
+            self._font_size_combo.addItem(f"{size} px", size)
+        self._font_size_combo.currentIndexChanged.connect(self._on_font_size)
+        layout.addLayout(_option_row(tr("Interface font size:"), self._font_size_combo))
+        self._language_combo = NoWheelComboBox()
+        for code, native, _english in LANGUAGE_INFO:
+            self._language_combo.addItem(native, code)
+        self._language_combo.currentIndexChanged.connect(self._on_language)
+        layout.addLayout(_option_row(tr("Language:"), self._language_combo))
+        layout.addWidget(
+            info_label(tr("Applies immediately, unless a background task is running."))
+        )
         return card
 
     def _themes_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Themes", level=2))
+        layout.addWidget(section_label(tr("Themes"), level=2))
         layout.addWidget(
             info_label(
-                "Choose a COMMANDER theme. The selection is saved and applied on every launch."
+                tr("Choose a COMMANDER theme. The selection is saved and applied on every launch.")
             )
         )
         self._group = QButtonGroup(self)
@@ -212,13 +229,13 @@ class SettingsPage(QWidget):
             row = QHBoxLayout()
             row.setSpacing(10)
 
-            radio = QRadioButton(label)
-            radio.setToolTip(description)
+            radio = QRadioButton(tr(label))
+            radio.setToolTip(tr(description))
             self._group.addButton(radio)
             self._radios[key] = radio
             row.addWidget(radio)
 
-            desc = QLabel(description)
+            desc = QLabel(tr(description))
             desc.setObjectName("info")
             desc.setWordWrap(True)
             row.addWidget(desc, 1)
@@ -236,13 +253,13 @@ class SettingsPage(QWidget):
 
     def _diagnostics_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Diagnostics", level=2))
+        layout.addWidget(section_label(tr("Diagnostics"), level=2))
         layout.addWidget(
             info_label(
-                "Export system information, settings, and launcher output for troubleshooting."
+                tr("Export system information, settings, and launcher output for troubleshooting.")
             )
         )
-        export_btn = QPushButton("Export diagnostics")
+        export_btn = QPushButton(tr("Export diagnostics"))
         export_btn.setObjectName("secondary")
         export_btn.clicked.connect(self._on_export_log)
         layout.addWidget(export_btn, 0, Qt.AlignmentFlag.AlignLeft)
@@ -255,7 +272,7 @@ class SettingsPage(QWidget):
             gui_settings.save_gui_settings(start_page=key)
 
     def _on_autostart_toggled(self, checked: bool) -> None:
-        from ..autostart import disable_autostart, enable_autostart
+        from ..autostart import disable_autostart, enable_autostart, last_error
 
         if checked:
             ok = enable_autostart()
@@ -266,6 +283,13 @@ class SettingsPage(QWidget):
             self._autostart_check.blockSignals(True)
             self._autostart_check.setChecked(not checked)
             self._autostart_check.blockSignals(False)
+            reason = last_error()
+            QMessageBox.warning(
+                self,
+                tr("Autostart"),
+                tr("Could not update the autostart entry.")
+                + (f"\n\n{reason}" if reason else ""),
+            )
 
     def _on_runner_changed(self, *_args) -> None:
         runner = self._runner_combo.currentData()
@@ -276,6 +300,14 @@ class SettingsPage(QWidget):
         gui_settings.save_gui_settings(always_gamemoderun=bool(checked))
 
     def _open_winecfg(self) -> None:
+        if mo2_running(force=True):
+            # The game holds the Wine prefix; winecfg must not touch it live.
+            QMessageBox.information(
+                self,
+                tr("Game Running"),
+                tr("Mod Organizer / the game is currently running.\n\nClose it before opening Winecfg."),
+            )
+            return
         state = gui_settings.load_gui_settings()
         kind = state.get("runner") or "auto"
         prefixes = state.get("prefixes") or {}
@@ -287,7 +319,7 @@ class SettingsPage(QWidget):
             command, env, cwd = build_runner_tool_command(runner, "winecfg", cwd=cwd)
             launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
         except (LaunchError, OSError) as exc:
-            QMessageBox.warning(self, "Could not open Winecfg", str(exc))
+            QMessageBox.warning(self, tr("Could not open Winecfg"), str(exc))
 
     def _on_display_scale_changed(self, index: int) -> None:
         if index >= 0:
@@ -298,6 +330,15 @@ class SettingsPage(QWidget):
     def _apply_display_scale(self) -> None:
         dpi = self._display_scale_combo.currentData()
         if not isinstance(dpi, int):
+            return
+        if mo2_running(force=True):
+            # The game holds the Wine prefix; writing to its registry live
+            # risks the same corruption already guarded against for winetricks.
+            QMessageBox.information(
+                self,
+                tr("Game Running"),
+                tr("Mod Organizer / the game is currently running.\n\nClose it before applying a display scale change."),
+            )
             return
         state = gui_settings.load_gui_settings()
         kind = state.get("runner") or "auto"
@@ -324,17 +365,24 @@ class SettingsPage(QWidget):
                 cwd,
             )
             launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
-            self._apply_display_scale_button.setText("Applied")
+            self._apply_display_scale_button.setText(tr("Applied"))
         except (LaunchError, OSError) as exc:
-            QMessageBox.warning(self, "Could not apply display scale", str(exc))
+            QMessageBox.warning(self, tr("Could not apply display scale"), str(exc))
 
-    def _on_font_size(self, value: int) -> None:
-        self.window.apply_font_size(value)
+    def _on_font_size(self, *_args) -> None:
+        size = self._font_size_combo.currentData()
+        if size:
+            self.window.apply_font_size(size)
 
     def _on_font_family(self, *_args) -> None:
         family = self._font_family_combo.currentData()
         if family:
             self.window.apply_font_family(family)
+
+    def _on_language(self, *_args) -> None:
+        code = self._language_combo.currentData()
+        if code:
+            self.window.apply_language(code)
 
     def _on_toggled(self, button: QRadioButton, checked: bool) -> None:
         if not checked:
@@ -350,9 +398,9 @@ class SettingsPage(QWidget):
 
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Diagnostics",
+            tr("Export Diagnostics"),
             "commander-diagnostics.txt",
-            "Text Files (*.txt);;All Files (*)",
+            tr("Text Files (*.txt);;All Files (*)"),
         )
         if not path:
             return
@@ -360,14 +408,14 @@ class SettingsPage(QWidget):
             export_diagnostics(Path(path))
             QMessageBox.information(
                 self,
-                "Export Complete",
-                f"Diagnostics exported to:\n{path}",
+                tr("Export Complete"),
+                tr("Diagnostics exported to:\n{path}", path=path),
             )
         except (OSError, ValueError) as exc:
             QMessageBox.critical(
                 self,
-                "Export Failed",
-                f"Could not export diagnostics:\n{exc}",
+                tr("Export Failed"),
+                tr("Could not export diagnostics:\n{exc}", exc=exc),
             )
 
     # ---------------------------------------------------------------- refresh
@@ -381,7 +429,7 @@ class SettingsPage(QWidget):
         saved_start = state.get("start_page") or "dashboard"
         start_index = 0
         for index, (key, title) in enumerate(NAV_ITEMS):
-            self._start_page_combo.addItem(title, key)
+            self._start_page_combo.addItem(tr(title), key)
             if key == saved_start:
                 start_index = index
         self._start_page_combo.setCurrentIndex(start_index)
@@ -389,12 +437,12 @@ class SettingsPage(QWidget):
 
         self._runner_combo.blockSignals(True)
         self._runner_combo.clear()
-        self._runner_combo.addItem("Auto-detect (latest GE-Proton)", "auto")
+        self._runner_combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
         extra_protons = find_extra_protons()
         if extra_protons:
             self._runner_combo.insertSeparator(self._runner_combo.count())
             for label, path in extra_protons:
-                self._runner_combo.addItem(f"{label} (Installed)", f"umup:{path}")
+                self._runner_combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
         saved_runner = state.get("runner") or "auto"
         runner_index = self._runner_combo.findData(saved_runner)
         if runner_index < 0:
@@ -402,15 +450,22 @@ class SettingsPage(QWidget):
         self._runner_combo.setCurrentIndex(max(runner_index, 0))
         self._runner_combo.blockSignals(False)
 
-        self._font_spin.blockSignals(True)
-        self._font_spin.setValue(int(state.get("font_size") or 13))
-        self._font_spin.blockSignals(False)
+        self._font_size_combo.blockSignals(True)
+        font_size_index = self._font_size_combo.findData(int(state.get("font_size") or 13))
+        self._font_size_combo.setCurrentIndex(max(font_size_index, 0))
+        self._font_size_combo.blockSignals(False)
 
         saved_font_family = state.get("font_family") or "Exo 2"
         family_index = self._font_family_combo.findData(saved_font_family)
         self._font_family_combo.blockSignals(True)
         self._font_family_combo.setCurrentIndex(max(family_index, 0))
         self._font_family_combo.blockSignals(False)
+
+        saved_language = state.get("language") or "en"
+        language_index = self._language_combo.findData(saved_language)
+        self._language_combo.blockSignals(True)
+        self._language_combo.setCurrentIndex(max(language_index, 0))
+        self._language_combo.blockSignals(False)
 
         self._gamemode_check.blockSignals(True)
         self._gamemode_check.setChecked(bool(state.get("always_gamemoderun")))
@@ -421,7 +476,7 @@ class SettingsPage(QWidget):
         self._display_scale_combo.blockSignals(True)
         self._display_scale_combo.setCurrentIndex(max(scale_index, 0))
         self._display_scale_combo.blockSignals(False)
-        self._apply_display_scale_button.setText("Apply")
+        self._apply_display_scale_button.setText(tr("Apply"))
 
         from ..autostart import is_autostart_enabled
 

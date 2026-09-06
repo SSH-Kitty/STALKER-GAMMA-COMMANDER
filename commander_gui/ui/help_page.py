@@ -26,6 +26,7 @@ from .common import (
     info_label,
     make_card,
     section_label,
+    tr,
 )
 
 
@@ -58,14 +59,12 @@ class HelpPage(QWidget):
         root.setSpacing(14)
         scroll.setWidget(content)
 
-        _title = section_label("HELP", level=1)
+        _title = section_label(tr("HELP"), level=1)
         _title.setWordWrap(True)
         _title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(_title)
         _sub = info_label(
-            "This guide explains each COMMANDER page. A default profile is "
-            "created automatically; select an installation directory, install "
-            "Anomaly and GAMMA, pick a GE-Proton runner, then launch through MO2."
+            tr("This guide explains each COMMANDER page. A default profile is created automatically; select an installation directory, install Anomaly and GAMMA, pick a GE-Proton runner, then launch through MO2.")
         )
         _sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(_sub)
@@ -77,17 +76,16 @@ class HelpPage(QWidget):
 
         config_card, config = make_card()
         root.addWidget(config_card)
-        config.addWidget(section_label("Configuration", level=2))
+        config.addWidget(section_label(tr("Configuration"), level=2))
         config.addWidget(
             info_label(
-                "COMMANDER respects XDG_CONFIG_HOME; the paths below assume the "
-                "default location."
+                tr("COMMANDER respects XDG_CONFIG_HOME; the paths below assume the default location.")
             )
         )
         for label, value in (
             (
                 "settings.json",
-                (
+                tr(
                     "~/.config/stalker-gamma/settings.json — shared with the CLI: "
                     "profiles, install paths, MO2 profile, download threads, repo "
                     "URLs and branches"
@@ -95,25 +93,25 @@ class HelpPage(QWidget):
             ),
             (
                 "gui-settings.json",
-                (
+                tr(
                     "~/.config/stalker-gamma/gui-settings.json — GUI only: selected "
                     "runner, per-runner prefixes, last launch target"
                 ),
             ),
             (
                 "logs",
-                (
+                tr(
                     "~/.config/stalker-gamma/logs/ — CLI logs plus launcher.log "
                     "(rotates at 1 MB)"
                 ),
             ),
             (
-                "Integrity baseline",
-                "<gamma>/gamma-md5.txt — MD5 baseline for integrity checking",
+                tr("Integrity baseline"),
+                tr("<gamma>/gamma-md5.txt — MD5 baseline for integrity checking"),
             ),
             (
-                "Modlist backup",
-                (
+                tr("Modlist backup"),
+                tr(
                     "<gamma>/profiles/<profile>/modlist.txt.gammagui.bak — pre-edit "
                     "modlist backup"
                 ),
@@ -122,22 +120,20 @@ class HelpPage(QWidget):
             config.addLayout(_kv_row(label, value))
         config.addWidget(
             info_label(
-                "settings.json is written atomically, and any keys a newer CLI "
-                "adds that this GUI does not understand are preserved verbatim on "
-                "save — editing profiles here never clobbers CLI-only settings."
+                tr("settings.json is written atomically, and any keys a newer CLI adds that this GUI does not understand are preserved verbatim on save — editing profiles here never clobbers CLI-only settings.")
             )
         )
         for label, value in (
             (
                 "STALKER_GAMMA_CLI",
-                (
+                tr(
                     "Absolute path to a different stalker-gamma binary to drive "
                     "instead of the bundled one"
                 ),
             ),
             (
                 "XDG_CONFIG_HOME",
-                "Relocates the config and log directory",
+                tr("Relocates the config and log directory"),
             ),
         ):
             config.addLayout(_kv_row(label, value))
@@ -149,24 +145,24 @@ class HelpPage(QWidget):
 
     def _quickstart_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("First run", level=2))
+        layout.addWidget(section_label(tr("First run"), level=2))
         steps = [
             (
                 "01",
-                "Select an installation directory",
-                (
+                tr("Select an installation directory"),
+                tr(
                     "A default profile is created automatically. On Install, "
                     "select a base directory under Installation Directory and "
                     "click Create folders - the tool creates the anomaly, "
                     "gamma, and cache folders and sets them on your profile."
                 ),
                 "install",
-                "Open Install",
+                tr("Open Install"),
             ),
             (
                 "02",
-                "Install STALKER Anomaly then GAMMA",
-                (
+                tr("Install STALKER Anomaly then GAMMA"),
+                tr(
                     "On Install, select Install GAMMA. Anomaly is installed "
                     "first when it is missing. Expect a large download (~150 "
                     "GB, or ~100 GB with Minimal). Use Updates for addon "
@@ -174,30 +170,30 @@ class HelpPage(QWidget):
                     "files."
                 ),
                 "install",
-                "Open Install",
+                tr("Open Install"),
             ),
             (
                 "03",
-                "Install dependencies",
-                (
+                tr("Install dependencies"),
+                tr(
                     "Use Install Dependencies. It installs umu-run and "
                     "protontricks first, then the Visual C++ and DirectX "
                     "runtimes MO2 needs (concrt140.dll)."
                 ),
                 "install",
-                "Open Install Dependencies",
+                tr("Open Install Dependencies"),
             ),
             (
                 "04",
-                "Launch the game",
-                (
+                tr("Launch the game"),
+                tr(
                     "On Play, pick a GE-Proton runner (Auto-detect selects the "
                     "latest GE-Proton) and a launch target, then choose Launch "
                     "Game, Open MO2, or Launch Anomaly. The game starts "
                     "detached, so closing COMMANDER will not kill your session."
                 ),
                 "play",
-                "Open Play",
+                tr("Open Play"),
             ),
         ]
         for number, title, text, page, button_text in steps:
@@ -223,7 +219,7 @@ class HelpPage(QWidget):
 
     def _snapshot_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Current configuration", level=2))
+        layout.addWidget(section_label(tr("Current configuration"), level=2))
         self.snapshot_status = info_label("")
         self.snapshot_status.setObjectName("accent")
         layout.addWidget(self.snapshot_status)
@@ -234,19 +230,18 @@ class HelpPage(QWidget):
 
     def _guide_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Page guide", level=2))
+        layout.addWidget(section_label(tr("Page guide"), level=2))
         layout.addWidget(
             info_label(
-                "Every page in this application, what it does, and where to find "
-                "it. The details match the project README."
+                tr("Every page in this application, what it does, and where to find it. The details match the project README.")
             )
         )
         grid = QGridLayout()
         grid.setSpacing(16)
         features = [
             (
-                "Dashboard",
-                (
+                tr("Dashboard"),
+                tr(
                     "The landing page. Active profile summary, install status for "
                     "Anomaly and GAMMA, dependency status, storage "
                     "usage across your folders, a background update check, and "
@@ -256,98 +251,98 @@ class HelpPage(QWidget):
                 "dashboard",
             ),
             (
-                "Play",
-                (
+                tr("Play"),
+                tr(
                     "Launches the selected executable through ModOrganizer.exe "
                     "run -e so the MO2 virtual file system is active and every "
                     "GAMMA mod is loaded."
                 ),
                 [
-                    "Auto-detect (latest GE-Proton) or an installed GE-Proton build",
-                    "Per-runner prefixes, live command preview with a copy button",
-                    "Detached launch, with launcher.log diagnostics",
+                    tr("Auto-detect (latest GE-Proton) or an installed GE-Proton build"),
+                    tr("Per-runner prefixes, live command preview with a copy button"),
+                    tr("Detached launch, with launcher.log diagnostics"),
                 ],
                 "play",
             ),
             (
-                "System Check",
-                (
+                tr("System Check"),
+                tr(
                     "Check whether Linux has the dependencies, runners, Proton "
                     "builds, prefixes, and graphics support needed to install and "
                     "run S.T.A.L.K.E.R. G.A.M.M.A."
                 ),
                 [
-                    "Commands are shown for manual installation only",
-                    "Copy package commands and refresh checks after installing",
-                    "Separate runner and prefix checks help prevent Proton mismatches",
+                    tr("Commands are shown for manual installation only"),
+                    tr("Copy package commands and refresh checks after installing"),
+                    tr("Separate runner and prefix checks help prevent Proton mismatches"),
                 ],
                 "systemcheck",
             ),
             (
-                "Install",
-                (
+                tr("Install"),
+                tr(
                     "Full Anomaly and GAMMA installation with a live per-addon "
                     "progress table, an overall completion bar and clean "
                     "cancellation."
                 ),
                 [
-                    "Minimal mode deletes archives after extract (~50 GB saved)",
-                    "Preserve user.ltx and MCM settings across a reinstall",
-                    "Dependencies panel + Verify Integrity",
+                    tr("Minimal mode deletes archives after extract (~50 GB saved)"),
+                    tr("Preserve user.ltx and MCM settings across a reinstall"),
+                    tr("Dependencies panel + Verify Integrity"),
                 ],
                 "install",
             ),
             (
-                "Updates",
-                (
+                tr("Updates"),
+                tr(
                     "Check for addon changes, review the parsed diff (Added / "
                     "Modified / Removed, including archive-name changes), then "
                     "apply through the same live progress UI."
                 ),
                 [
-                    "Holds the global install lock",
-                    "Never runs concurrently with an install",
+                    tr("Holds the global install lock"),
+                    tr("Never runs concurrently with an install"),
                 ],
                 "update",
             ),
             (
-                "Mod Manager",
-                (
+                tr("Mod Manager"),
+                tr(
                     "Direct, careful editing of the MO2 profile's modlist.txt — "
                     "mods grouped by the _separator category entries GAMMA "
                     "ships, with search."
                 ),
                 [
-                    "Backup taken before the first edit (modlist.txt.gammagui.bak)",
-                    "Atomic writes — a crash cannot truncate your load order",
-                    "Edits blocked while Mod Organizer is running",
+                    tr("Backup taken before the first edit (modlist.txt.gammagui.bak)"),
+                    tr("Atomic writes — a crash cannot truncate your load order"),
+                    tr("Edits blocked while Mod Organizer is running"),
                 ],
                 "modmanager",
             ),
             (
-                "Profiles",
-                (
+                tr("Profiles"),
+                tr(
                     "Create, edit, activate and delete CLI profiles. Creation, "
                     "activation and deletion are delegated to the CLI so its side "
                     "effects (MO2 selected_profile, modlist download) happen "
                     "exactly as intended."
                 ),
                 [
-                    "Advanced fields expose every repo URL and branch the CLI supports",
+                    tr("Advanced fields expose every repo URL and branch the CLI supports"),
                 ],
                 "profiles",
             ),
             (
-                "Utilities",
-                (
+                tr("Utilities"),
+                tr(
                     "Preview cache cleanup, clean the download cache, clear "
                     "shader cache, remove ReShade, fix GOG installation, and "
                     "create Log Dump."
                 ),
                 [
-                    "Fresh Reset wipes both folders and reinstalls from scratch",
-                    "Full Uninstall removes the install folders, keeps your prefix",
-                    "Both guarded with explicit warnings and path checks",
+                    tr("Fresh Reset wipes both folders and reinstalls from scratch"),
+                    tr("Full Uninstall removes the install folders, keeps your prefix"),
+                    tr("Both guarded with explicit warnings and path checks"),
                 ],
                 "utilities",
             ),
@@ -358,7 +353,7 @@ class HelpPage(QWidget):
             card_layout.addWidget(info_label(description))
             if bullets:
                 card_layout.addWidget(_bullets(bullets))
-            button = QPushButton(f"Open {title}")
+            button = QPushButton(tr("Open {title}", title=title))
             button.setObjectName("secondary")
             button.clicked.connect(
                 lambda _checked=False, key=page: self.window.set_page(key)
@@ -370,26 +365,26 @@ class HelpPage(QWidget):
 
     def _troubleshooting_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label("Troubleshooting", level=2))
+        layout.addWidget(section_label(tr("Troubleshooting"), level=2))
         rows = [
             (
-                "CLI not found on startup",
-                (
+                tr("CLI not found on startup"),
+                tr(
                     "The bundled binary is missing or not executable. Run chmod +x "
                     "cli/usr/bin/stalker-gamma, or set STALKER_GAMMA_CLI to an "
                     "executable elsewhere."
                 ),
             ),
             (
-                "MO2 exits immediately or mentions concrt140.dll",
-                (
+                tr("MO2 exits immediately or mentions concrt140.dll"),
+                tr(
                     "Install the required runtimes into the active "
                     "runner prefix from Install → Install Dependencies."
                 ),
             ),
             (
-                "Wine client error: version mismatch",
-                (
+                tr("Wine client error: version mismatch"),
+                tr(
                     "This prefix was created by a different runner version. "
                     "Select the original GE-Proton build or configure a separate "
                     "prefix for the new runner. Close MO2 and the game before "
@@ -397,8 +392,8 @@ class HelpPage(QWidget):
                 ),
             ),
             (
-                "Play page has no launch targets",
-                (
+                tr("Play page has no launch targets"),
+                tr(
                     "The active profile may point to the wrong GAMMA folder, GAMMA "
                     "may not be installed, or ModOrganizer.ini may not contain a "
                     "parseable executable. If available, AnomalyLauncher.exe is "
@@ -406,75 +401,76 @@ class HelpPage(QWidget):
                 ),
             ),
             (
-                "Mod Manager edits are disabled",
-                (
+                tr("Mod Manager edits are disabled"),
+                tr(
                     "MO2 is running. Close it first because MO2 rewrites modlist.txt "
                     "when it exits and could discard your edits."
                 ),
             ),
             (
-                "Install folders look wrong / files are in odd places",
-                (
+                tr("Install folders look wrong / files are in odd places"),
+                tr(
                     "Profile paths are relative to the directory where COMMANDER "
                     "was started. Set absolute paths on the Profiles page."
                 ),
             ),
             (
-                "Everything shows No active profile",
-                "Create and activate a profile on the Profiles page.",
+                tr("Everything shows No active profile"),
+                tr("Create and activate a profile on the Profiles page."),
             ),
             (
-                "Could not load the xcb platform plugin",
-                (
+                tr("Could not load the xcb platform plugin"),
+                tr(
                     "Install libxcb-cursor0 / xcb-util-cursor (see the README "
                     "requirements section)."
                 ),
             ),
             (
-                "Launch fails or exits immediately",
-                (
+                tr("Launch fails or exits immediately"),
+                tr(
                     "Check launcher.log, the selected target, runner, prefix, and "
                     "required dependencies. The Play page reports the exit code "
                     "and recent launcher output."
                 ),
             ),
             (
-                "No runner detected or umu-run is missing",
-                (
+                tr("No runner detected or umu-run is missing"),
+                tr(
                     "Ensure umu-run is installed and at least one GE-Proton "
                     "build is available. Auto-detect selects the latest "
                     "GE-Proton."
                 ),
             ),
             (
-                "Dependency installation fails",
-                (
+                tr("Dependency installation fails"),
+                tr(
                     "Install Wine and Winetricks. If protontricks is missing, "
                     "COMMANDER can install it with pipx or user-level pip; PEP 668 "
                     "systems should use pipx. Keep MO2 and the game closed."
                 ),
             ),
             (
-                "Settings or autostart changes do not take effect",
-                (
+                tr("Settings or autostart changes do not take effect"),
+                tr(
                     "GUI settings follow XDG_CONFIG_HOME. Autostart uses the "
                     "stalker-gamma-commander.desktop file under the autostart "
                     "directory; recreate it from Settings if it was removed."
                 ),
             ),
             (
-                "An installation move was interrupted",
-                (
+                tr("An installation move was interrupted"),
+                tr(
                     "Restart COMMANDER and review the orphan-folder prompt before "
                     "removing anything. Verify the listed destination first."
                 ),
             ),
             (
-                "Need diagnostics for a bug report",
-                (
+                tr("Need diagnostics for a bug report"),
+                tr(
                     "Use Settings → Export diagnostics for a report, or Utilities "
                     "→ Create Log Dump to bundle the logs into one zip, then open "
-                    f"it in {assistant_token()} to check the errors and warnings."
+                    "it in {assistant} to check the errors and warnings.",
+                    assistant=assistant_token(),
                 ),
             ),
         ]
@@ -482,15 +478,13 @@ class HelpPage(QWidget):
             layout.addLayout(_kv_row(symptom, fix))
         layout.addWidget(
             info_label(
-                f"Launch logs are written to {logs_dir() / 'launcher.log'}. The "
-                "Dashboard page has a button to open the logs folder; on "
-                "Utilities, Create Log Dump bundles them into one archive."
+                tr("Launch logs are written to {arg}. The Dashboard page has a button to open the logs folder; on Utilities, Create Log Dump bundles them into one archive.", arg=logs_dir() / 'launcher.log')
             )
         )
         return card
 
     def _set_snapshot_value(self, label: str, value: str) -> None:
-        self.snapshot_values.addLayout(_kv_row(label, value or "Not configured"))
+        self.snapshot_values.addLayout(_kv_row(label, value or tr("Not configured")))
 
     def refresh(self) -> None:
         self.window.refresh_settings()
@@ -499,20 +493,20 @@ class HelpPage(QWidget):
 
         profile = self.settings.active_profile
         if profile is None:
-            self.snapshot_status.setText("No active profile. Start on Profiles.")
-            self._set_snapshot_value("Profile", "Not configured")
+            self.snapshot_status.setText(tr("No active profile. Start on Profiles."))
+            self._set_snapshot_value(tr("Profile"), tr("Not configured"))
             self._set_snapshot_value(
-                "Runner", load_gui_settings().get("runner", "auto")
+                tr("Runner"), load_gui_settings().get("runner", "auto")
             )
             return
 
         gui = load_gui_settings()
-        self.snapshot_status.setText(f"Active profile: {profile.profile_name}")
+        self.snapshot_status.setText(tr("Active profile: {profile_name}", profile_name=profile.profile_name))
         self._set_snapshot_value("Anomaly", profile.anomaly)
         self._set_snapshot_value("GAMMA", profile.gamma)
-        self._set_snapshot_value("Cache", profile.cache)
-        self._set_snapshot_value("MO2 profile", profile.mo2_profile)
-        self._set_snapshot_value("Download threads", str(profile.download_threads))
-        self._set_snapshot_value("Runner", gui.get("runner", "auto"))
-        self._set_snapshot_value("Prefix", gui.get("wine_prefix", "Not configured"))
-        self._set_snapshot_value("Launch target", gui.get("target", "Auto"))
+        self._set_snapshot_value(tr("Cache"), profile.cache)
+        self._set_snapshot_value(tr("MO2 profile"), profile.mo2_profile)
+        self._set_snapshot_value(tr("Download threads"), str(profile.download_threads))
+        self._set_snapshot_value(tr("Runner"), gui.get("runner", "auto"))
+        self._set_snapshot_value(tr("Prefix"), gui.get("wine_prefix", tr("Not configured")))
+        self._set_snapshot_value(tr("Launch target"), gui.get("target", tr("Auto")))

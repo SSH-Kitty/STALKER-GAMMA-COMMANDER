@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .config import cli_binary_path
+from .launcher import _terminate_process_group as _terminate_group
 
 if os.name == "nt":
     _CANCEL_SIGNAL = signal.CTRL_BREAK_EVENT
@@ -165,16 +166,28 @@ class CliWorker(QObject):
                 pass
         threading.Thread(
             target=self._force_kill_after_cancel,
-            args=(pid,),
+            args=(proc,),
             daemon=True,
         ).start()
 
-    def _force_kill_after_cancel(self, pid: int) -> None:
+    def _force_kill_after_cancel(self, proc: subprocess.Popen) -> None:
         time.sleep(3)
-        proc = self._process
-        if proc is None or proc.pid != pid or proc.poll() is not None:
+        # Identity check on the captured Popen object, not just its pid: if
+        # this worker was reused for a new run() within the 3s window, a
+        # pid-only match could hit a different, unrelated process if the OS
+        # happened to recycle the same pid.
+        if self._process is not proc or proc.poll() is not None:
             return
-        self.kill()
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     def pause(self) -> None:
         """SIGSTOP the child process group to freeze it in place."""
@@ -182,10 +195,7 @@ class CliWorker(QObject):
         if proc is None or proc.poll() is not None or os.name == "nt":
             return
         try:
-            if os.name != "nt":
-                os.killpg(proc.pid, signal.SIGSTOP)
-            else:
-                os.kill(proc.pid, signal.SIGSTOP)
+            os.killpg(proc.pid, signal.SIGSTOP)
         except OSError:
             pass
 
@@ -195,10 +205,7 @@ class CliWorker(QObject):
         if proc is None or proc.poll() is not None or os.name == "nt":
             return
         try:
-            if os.name != "nt":
-                os.killpg(proc.pid, signal.SIGCONT)
-            else:
-                os.kill(proc.pid, signal.SIGCONT)
+            os.killpg(proc.pid, signal.SIGCONT)
         except OSError:
             pass
 
@@ -231,6 +238,11 @@ def _as_text(value: str | bytes | None) -> str:
     return value
 
 
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop a timed-out command and its descendants where the platform allows."""
+    _terminate_group(proc.pid, proc)
+
+
 def run_sync(
     args: list[str],
     cwd: str | Path | None = None,
@@ -238,25 +250,38 @@ def run_sync(
 ) -> tuple[int, str]:
     """Run a quick CLI command synchronously, returning (exit code, combined output)."""
     cmd = [str(cli_binary_path()), *args]
+    proc: subprocess.Popen[str] | None = None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd) if cwd else None,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            check=False,
+            start_new_session=os.name != "nt",
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
         )
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        output = _bounded_output(_as_text(exc.stdout) + _as_text(exc.stderr))
+        if proc is not None:
+            _terminate_process_group(proc)
+            try:
+                # The group should be dead after termination, but an
+                # unkillable/signal-ignoring child must not hang the caller.
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = exc.stdout, exc.stderr
+        else:
+            stdout, stderr = exc.stdout, exc.stderr
+        output = _bounded_output(_as_text(stdout) + _as_text(stderr))
         return TIMEOUT_RC, f"{output}\n[timed out after {timeout}s]"
     except OSError as exc:
         return SPAWN_FAILED_RC, f"Failed to start {cmd[0]!r}: {exc}"
-    return proc.returncode, _bounded_output(
-        (proc.stdout or "") + "\n" + (proc.stderr or "")
-    )
+    return proc.returncode, _bounded_output(stdout + "\n" + stderr)
 
 
 def cli_command(

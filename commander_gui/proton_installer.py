@@ -138,11 +138,22 @@ def install_proton(
         # --- download tarball ---
         req = urllib.request.Request(tar_url, headers={"User-Agent": _USER_AGENT})
         with urllib.request.urlopen(req, timeout=600) as resp:
-            total = int(resp.headers.get("Content-Length", 0)) or 1
-            if total > _MAX_ARCHIVE_BYTES:
+            try:
+                header_value = resp.headers.get("Content-Length")
+                total = int(header_value) if header_value is not None else None
+            except (TypeError, ValueError):
+                total = None
+            if total is not None and total > _MAX_ARCHIVE_BYTES:
                 raise ValueError("Proton archive exceeds the allowed download size")
-            if shutil.disk_usage(install_dir).free < total * 2:
+            # A missing/malformed header must not silently skip the preflight
+            # check - assume the worst case (the allowed cap) instead so a
+            # near-full disk still fails fast rather than mid-download.
+            space_check_total = total if total is not None else _MAX_ARCHIVE_BYTES
+            if shutil.disk_usage(install_dir).free < space_check_total * 2:
                 raise ValueError("Not enough free disk space for the Proton archive")
+            # Progress falls back to indeterminate (total=1) only for the
+            # callback, independent of the checks above.
+            total = total or 1
             downloaded = 0
             with open(tar_path, "wb") as f:
                 while True:
@@ -196,11 +207,19 @@ def install_proton(
             check_cancelled()
             os.replace(installed_staged, destination)
             installed_by_us = True
-            check_cancelled()
+            # No check_cancelled() here: once the rename above has
+            # succeeded, the install is committed. The single cleanup path
+            # for a cancellation that lands after that point is the
+            # unconditional check below, against `installed` (the same
+            # path as `destination`) - raising here instead would skip
+            # that cleanup and leave a fully-installed build behind while
+            # still reporting cancellation, permanently blocking a retry
+            # with "Proton build already exists".
         finally:
+            # A cancel between os.replace() and here is handled once, below,
+            # by the unconditional post-`with` check against `installed`
+            # (the same path as `destination`) - no need to also clean up here.
             shutil.rmtree(staging, ignore_errors=True)
-            if installed_by_us and cancel_event and cancel_event.is_set():
-                shutil.rmtree(destination, ignore_errors=True)
 
     # --- locate installed dir ---
     # The top-level dir inside the tarball is the asset name minus .tar.gz

@@ -106,9 +106,12 @@ def analyze_vcredist(arcname: str, where: str, lines: list[str]) -> list[Finding
             (f"A runtime installer exited with Windows error code {code}.", "error"),
         )
         severity = Severity.ERROR if level == "error" else Severity.INFO
-        suggestion = knowledge.VCREDIST_REBOOT
         if level == "error":
             suggestion = knowledge.VCREDIST_FAILED
+        elif code == 1638:
+            suggestion = knowledge.VCREDIST_DUPLICATE
+        else:
+            suggestion = knowledge.VCREDIST_REBOOT
         findings.append(
             factory.make(
                 severity,

@@ -31,13 +31,21 @@ from ..cli_runner import cli_binary_path
 from ..dependencies import (
     configured_tool,
     detect_distro_id,
+    detect_gpu_vendors,
     detect_package_manager,
     install_command,
+    vulkan32_driver_command,
+    vulkan_driver_command,
 )
 from ..gui_settings import configured_wine_prefix
 from ..launcher import find_extra_protons
 from ..settings import load_settings
-from ..winetricks import WINETRICKS_VERBS, check_winetricks_status, winetricks_binary
+from ..winetricks import (
+    WINETRICKS_VERBS,
+    check_winetricks_status,
+    umu_install_command,
+    winetricks_binary,
+)
 from .common import (
     BackgroundTask,
     anomaly_installed,
@@ -46,10 +54,14 @@ from .common import (
     info_label,
     make_card,
     section_label,
+    tr,
+    winetricks_tooltip,
 )
 
 
-def _manual_command(tool: str, manager: str | None) -> str:
+def _manual_command(
+    tool: str, manager: str | None, vendors: list[str] | None = None
+) -> str:
     if tool == "Steam":
         return install_command("steam")
     if tool in {"Wine", "Winetricks"}:
@@ -57,29 +69,85 @@ def _manual_command(tool: str, manager: str | None) -> str:
     if tool == "Protontricks":
         return install_command("pipx") + " && pipx install protontricks"
     if tool == "Vulkan":
-        commands = {
-            "apt": "sudo apt install mesa-vulkan-drivers",
-            "dnf": "sudo dnf install mesa-vulkan-drivers",
-            "pacman": "sudo pacman -S vulkan-radeon",
-            "zypper": "sudo zypper install Mesa-vulkan-drivers",
-            "apk": "sudo apk add mesa-vulkan-lavapipe vulkan-tools",
-            "xbps": "sudo xbps-install -S Vulkan-Headers vulkan-loader",
-            "emerge": "sudo emerge media-libs/vulkan-loader",
-            "eopkg": "sudo eopkg install vulkan-tools",
-            "nix": "Install vulkan-loader and vulkan-tools from nixpkgs",
-        }
-        return commands.get(manager or "", "Install your GPU vendor's Vulkan drivers")
+        return vulkan_driver_command(manager, vendors or [])
+    if tool == "Vulkan32":
+        return vulkan32_driver_command(manager, vendors or [])
     if tool == "umu-run":
+        # Reuses the same command the in-app installer runs, rather than a
+        # second hand-written copy that can silently drift out of sync with
+        # the release archive's actual layout (it previously did, and both
+        # copies extracted the wrong tar member as a result).
+        command = umu_install_command()
+        if not command:
+            return (
+                "Install curl, then re-check - umu-run can be installed "
+                "automatically from Play or Install."
+            )
         return (
-            "Install umu-launcher from https://github.com/Open-Wine-Components/umu-launcher "
-            "or run: mkdir -p ~/.local/bin && curl -sL "
-            '"https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar" '
-            "| tar -xOf - umu-run > ~/.local/bin/umu-run && chmod +x ~/.local/bin/umu-run"
+            "Install umu-launcher from "
+            "https://github.com/Open-Wine-Components/umu-launcher or run:\n"
+            + command[-1]
         )
     return ""
 
 
-def _check_tool(label: str, command: str, manager: str | None) -> dict[str, str]:
+#: 32-bit Vulkan loader location by package manager. Distros disagree on
+#: which physical path is the 32-bit one - on Arch (pacman) /usr/lib is the
+#: 64-bit path and /usr/lib32 is the 32-bit compat path, while on
+#: Fedora/openSUSE (dnf/zypper) it is the other way around (/usr/lib is
+#: 32-bit, /usr/lib64 is 64-bit) - so the check must be distro-aware rather
+#: than probing every path, which would false-positive on Arch by finding
+#: the 64-bit library at /usr/lib/libvulkan.so.1.
+_VULKAN32_PATHS: dict[str, tuple[str, ...]] = {
+    "pacman": ("/usr/lib32/libvulkan.so.1",),
+    "apt": (
+        "/usr/lib/i386-linux-gnu/libvulkan.so.1",
+        "/lib/i386-linux-gnu/libvulkan.so.1",
+    ),
+    "dnf": ("/usr/lib/libvulkan.so.1",),
+    "zypper": ("/usr/lib/libvulkan.so.1",),
+}
+
+
+def _check_vulkan32(manager: str | None, vendors: list[str]) -> dict[str, str]:
+    """Check for a 32-bit Vulkan loader (needed by the 32-bit game/MO2)."""
+    candidates = _VULKAN32_PATHS.get(manager or "", ())
+    found = any(Path(p).is_file() for p in candidates)
+    return {
+        "label": "32-bit Vulkan",
+        "state": "ready" if found else "missing",
+        "detail": (
+            tr("32-bit Vulkan loader detected.")
+            if found
+            else tr(
+                "No 32-bit Vulkan loader found - DXVK/vkd3d need it for "
+                "the (32-bit) game and MO2."
+            )
+        ),
+        "command": _manual_command("Vulkan32", manager, vendors),
+    }
+
+
+#: One-line "why this matters" clause shown alongside a missing tool, so the
+#: row explains itself instead of just naming a binary that was not found.
+_TOOL_WHY: dict[str, str] = {
+    "Steam": "used to discover Steam library folders and Proton builds.",
+    "Wine": "runs the Windows game and Mod Organizer directly (umu-run or "
+    "Steam Proton also work instead).",
+    "umu-run": "the recommended way to run the game and Mod Organizer "
+    "through Proton.",
+    "Winetricks": "installs the Visual C++/DirectX runtimes Mod Organizer "
+    "and the game need.",
+    "Protontricks": "runs Winetricks against a Steam Proton prefix "
+    "specifically.",
+    "Vulkan": "confirms your graphics driver supports Vulkan, which DXVK/"
+    "vkd3d (DirectX-over-Vulkan) needs to run the game.",
+}
+
+
+def _check_tool(
+    label: str, command: str, manager: str | None, vendors: list[str] | None = None
+) -> dict[str, str]:
     found = configured_tool(command) or shutil.which(command)
     # Validate umu-run actually runs — PATH may point to a broken Lutris stub.
     if found and command == "umu-run":
@@ -94,11 +162,18 @@ def _check_tool(label: str, command: str, manager: str | None) -> dict[str, str]
                 found = None
         except (OSError, subprocess.TimeoutExpired):
             found = None
+    why = _TOOL_WHY.get(label, "")
+    if why:
+        missing_detail = tr(
+            "{command} was not found on PATH. {why}", command=command, why=tr(why)
+        )
+    else:
+        missing_detail = tr("{command} was not found on PATH.", command=command)
     return {
         "label": label,
         "state": "ready" if found else "missing",
-        "detail": found or f"{command} was not found on PATH.",
-        "command": _manual_command(label, manager),
+        "detail": found or missing_detail,
+        "command": _manual_command(label, manager, vendors),
         "detected": found,
         "override_key": command,
         "manager": "" if found else (manager or ""),
@@ -111,20 +186,91 @@ def _short_proton_name(label: str) -> str:
     return f"GE-Proton {ver}" if ver else "GE-Proton Unknown"
 
 
-def _winetricks_checks(status: dict[str, bool], binary: str) -> list[dict[str, str]]:
-    """Build readiness rows for each runtime verb in the active prefix."""
+#: Plain-language names for the Winetricks verb codenames. The codename
+#: itself is not hidden - it stays visible in this row's tooltip - just
+#: demoted from the primary label, where "d3dcompiler_43" reads as pure
+#: jargon to anyone who is not already a Winetricks user.
+_VERB_LABELS: dict[str, str] = {
+    "d3dcompiler_43": "DirectX Shader Compiler (legacy)",
+    "d3dcompiler_47": "DirectX Shader Compiler",
+    "d3dx10": "DirectX 10 Extensions",
+    "d3dx11_43": "DirectX 11 Extensions",
+    "d3dx9": "DirectX 9 Extensions",
+    "quartz": "DirectShow Multimedia (Quartz)",
+    "dx8vb": "DirectX 8 Visual Basic Runtime",
+    "vcrun2022": "Visual C++ Runtime 2022",
+}
+
+
+def _winetricks_checks(
+    status: dict[str, bool],
+    binary: str,
+    extra_tools: list[tuple[str, str, bool, str]],
+) -> list[dict[str, str]]:
+    """Build one summarized readiness row for the active prefix's runtimes.
+
+    Eight separate rows, one per Winetricks verb codename, read as a wall of
+    jargon with no sense of overall readiness at a glance. This collapses
+    them into a single row; the same tooltip already used for this elsewhere
+    (Dashboard, Install page) gives the per-item breakdown on hover.
+
+    ``extra_tools`` is ``(tooltip_key, display_label, installed, manual_command)``
+    for Wine, Protontricks and umu-run - folded into this row's count and
+    copy-paste command so it reports the same "X/Y dependencies installed"
+    total as the Dashboard, even though each of the three also has its own
+    row further up this page.
+    """
+    if not binary:
+        return [
+            {
+                "label": "Runtime libraries",
+                "state": "missing",
+                "detail": tr(
+                    "Winetricks is not installed, so these cannot be "
+                    "checked yet - see the Winetricks row above."
+                ),
+                "command": "",
+            }
+        ]
+    installed = sum(1 for verb in WINETRICKS_VERBS if status.get(verb, False))
+    installed += sum(1 for _key, _label, ok, _cmd in extra_tools if ok)
+    total = len(WINETRICKS_VERBS) + len(extra_tools)
+    missing_verbs = [verb for verb in WINETRICKS_VERBS if not status.get(verb, False)]
+    missing_tools = [label for _key, label, ok, _cmd in extra_tools if not ok]
+    missing_names = [
+        tr(_VERB_LABELS.get(verb, verb)) for verb in missing_verbs
+    ] + missing_tools
+    # Winetricks verbs are idempotent, so that line is always offered; the
+    # Wine/Protontricks/umu-run install commands can need sudo or overwrite
+    # an existing binary, so only add those lines when actually missing.
+    commands = [f"{binary} -q {' '.join(WINETRICKS_VERBS)}"]
+    commands.extend(cmd for _key, _label, ok, cmd in extra_tools if not ok and cmd)
+    tooltip_status = dict(status)
+    for key, _label, ok, _cmd in extra_tools:
+        tooltip_status[key] = ok
     return [
         {
-            "label": verb,
-            "state": "ready" if status.get(verb, False) else "missing",
+            "label": "Runtime libraries",
+            "state": "ready" if not missing_names else "missing",
             "detail": (
-                "Installed in the active Wine/Proton prefix."
-                if status.get(verb, False)
-                else "Not installed in the active Wine/Proton prefix."
+                tr(
+                    "{installed}/{total} runtime libraries installed - the "
+                    "Visual C++ and DirectX runtimes Mod Organizer and the "
+                    "game need.",
+                    installed=installed,
+                    total=total,
+                )
+                if not missing_names
+                else tr(
+                    "{installed}/{total} runtime libraries installed. Missing: {missing}",
+                    installed=installed,
+                    total=total,
+                    missing=", ".join(missing_names),
+                )
             ),
-            "command": f"{binary or 'winetricks'} -q {verb}",
+            "command": "\n".join(commands),
+            "tooltip": winetricks_tooltip(tooltip_status),
         }
-        for verb in WINETRICKS_VERBS
     ]
 
 
@@ -136,19 +282,19 @@ def _installation_checks() -> list[dict[str, str]]:
             {
                 "label": "Active profile",
                 "state": "missing",
-                "detail": "Create or activate a profile before installing GAMMA.",
+                "detail": tr("Create or activate a profile before installing GAMMA."),
                 "command": "",
             },
             {
                 "label": "Anomaly installation",
                 "state": "missing",
-                "detail": "No active profile provides an Anomaly folder.",
+                "detail": tr("No active profile provides an Anomaly folder."),
                 "command": "",
             },
             {
                 "label": "GAMMA modpack",
                 "state": "missing",
-                "detail": "No active profile provides a GAMMA folder.",
+                "detail": tr("No active profile provides a GAMMA folder."),
                 "command": "",
             },
         ]
@@ -163,19 +309,19 @@ def _installation_checks() -> list[dict[str, str]]:
             "label": "Anomaly installation",
             "state": "ready" if anomaly_installed(profile.anomaly) else "missing",
             "detail": (
-                f"Installed at {profile.anomaly}."
+                tr("Installed at {path}.", path=profile.anomaly)
                 if anomaly_installed(profile.anomaly)
-                else f"Not installed at {profile.anomaly}."
+                else tr("Not installed at {path}.", path=profile.anomaly)
             ),
             "command": "",
         },
         {
             "label": "GAMMA modpack",
-            "state": "ready" if gamma_installed(profile.gamma) else "missing",
+            "state": "ready" if gamma_installed(profile.gamma, profile.mo2_profile) else "missing",
             "detail": (
-                f"Installed at {profile.gamma}."
-                if gamma_installed(profile.gamma)
-                else f"Not installed at {profile.gamma}."
+                tr("Installed at {path}.", path=profile.gamma)
+                if gamma_installed(profile.gamma, profile.mo2_profile)
+                else tr("Not installed at {path}.", path=profile.gamma)
             ),
             "command": "",
         },
@@ -184,6 +330,7 @@ def _installation_checks() -> list[dict[str, str]]:
 
 def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     manager = detect_package_manager()
+    vendors = detect_gpu_vendors()
     checks: list[dict[str, str]] = []
     checks.extend(_installation_checks())
     binary = cli_binary_path()
@@ -201,7 +348,7 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
         {
             "label": "Linux system",
             "state": "ready",
-            "detail": f"{detect_distro_id() or 'Unknown distribution'} / {platform.machine()}",
+            "detail": f"{detect_distro_id() or tr('Unknown distribution')} / {platform.machine()}",
             "command": "",
         }
     )
@@ -212,9 +359,48 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             _check_tool("umu-run", "umu-run", manager),
             _check_tool("Winetricks", "winetricks", manager),
             _check_tool("Protontricks", "protontricks", manager),
-            _check_tool("Vulkan", "vulkaninfo", manager),
+            _check_tool("Vulkan", "vulkaninfo", manager, vendors),
+            _check_vulkan32(manager, vendors),
         ]
     )
+    by_label = {check["label"]: check for check in checks}
+    # vulkaninfo on PATH does not prove a working driver; ask it for the GPU.
+    vulkan = by_label["Vulkan"]
+    if vulkan["state"] == "ready":
+        try:
+            result = subprocess.run(
+                [vulkan["detected"], "--summary"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            gpu = next(
+                (
+                    line.split("=", 1)[1].strip()
+                    for line in result.stdout.splitlines()
+                    if "deviceName" in line and "=" in line
+                ),
+                "",
+            )
+            if result.returncode == 0 and gpu:
+                vulkan["detail"] = f"{vulkan['detected']} — {gpu}"
+            elif result.returncode != 0:
+                vulkan["state"] = "missing"
+                vulkan["detail"] = tr(
+                    "vulkaninfo failed to query a Vulkan device; check your "
+                    "GPU drivers."
+                )
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # keep PATH-based result
+    # Readiness only needs one working runner backend; Wine alone is not
+    # required when umu-run or Steam is available.
+    runner_checks = [by_label[name] for name in ("Steam", "Wine", "umu-run")]
+    runner_found = any(check["state"] == "ready" for check in runner_checks)
+    for check in runner_checks:
+        if check["state"] != "ready" and runner_found:
+            check["state"] = "optional"
+            check["detail"] += " " + tr("Another runner is available.")
     try:
         prefix = configured_wine_prefix()
         winetricks = winetricks_binary()
@@ -222,7 +408,37 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     except (OSError, RuntimeError, ValueError):
         winetricks = ""
         runtime_status = {verb: False for verb in WINETRICKS_VERBS}
-    checks.extend(_winetricks_checks(runtime_status, winetricks))
+    if not winetricks and not (
+        configured_tool("winetricks") or shutil.which("winetricks")
+    ):
+        # Winetricks itself is missing: skip per-verb rows, the tool row
+        # already explains what to install.
+        runtime_status = {}
+    # Ground truth for "is it actually present", independent of the "state"
+    # field above (which the runner-fallback loop just downgraded to
+    # "optional" for Wine/umu-run when another runner covers for them).
+    umu_script = umu_install_command()
+    extra_tools = [
+        (
+            "wine",
+            "Wine",
+            bool(by_label["Wine"].get("detected")),
+            by_label["Wine"].get("command", ""),
+        ),
+        (
+            "protontricks",
+            "Protontricks",
+            bool(by_label["Protontricks"].get("detected")),
+            by_label["Protontricks"].get("command", ""),
+        ),
+        (
+            "umu",
+            "umu-run",
+            bool(by_label["umu-run"].get("detected")),
+            umu_script[-1] if umu_script else "",
+        ),
+    ]
+    checks.extend(_winetricks_checks(runtime_status, winetricks, extra_tools))
     try:
         extra_protons = find_extra_protons()
     except (OSError, RuntimeError):
@@ -245,24 +461,30 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
                 break
     if extra_protons:
         detected_overrides["umu_proton"] = str(Path(extra_protons[0][1]).parent)
-    ge_builds = [(_short_proton_name(label), "ready") for label, _path in extra_protons]
+    ge_builds = [
+        (_short_proton_name(label), "ready", str(path))
+        for label, path in extra_protons
+    ]
     checks.append(
         {
             "label": "Proton Builds",
             "state": "ready" if ge_builds else "optional",
-            "detail": f"{len(ge_builds)} GE-Proton build(s) detected."
+            "detail": tr("{count} GE-Proton build(s) detected.", count=len(ge_builds))
             if ge_builds
-            else "No GE-Proton builds detected.",
+            else tr("No GE-Proton builds detected."),
             "command": "",
             "builds": ge_builds,
         }
     )
+    protontricks = by_label["Protontricks"]
+    if protontricks["state"] != "ready":
+        protontricks["state"] = "optional"
     gamemode_found = configured_tool("gamemoderun") or shutil.which("gamemoderun")
     checks.append(
         {
             "label": "GameMode",
             "state": "ready" if gamemode_found else "optional",
-            "detail": "Optional performance helper.",
+            "detail": tr("Optional performance helper."),
             "command": "" if gamemode_found else install_command("gamemode"),
             "manager": "" if gamemode_found else (manager or ""),
         }
@@ -272,7 +494,7 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
         {
             "label": "MangoHud",
             "state": "ready" if mangohud_found else "optional",
-            "detail": "Optional performance overlay.",
+            "detail": tr("Optional performance overlay."),
             "command": "" if mangohud_found else install_command("mangohud"),
             "manager": "" if mangohud_found else (manager or ""),
         }
@@ -287,7 +509,9 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             dir_path = saved_overrides.get("steam_root", "")
             if dir_path and not Path(dir_path).is_dir():
                 check["state"] = "missing"
-                check["detail"] = f"Steam library override is invalid: {dir_path}"
+                check["detail"] = tr(
+                    "Steam library override is invalid: {path}", path=dir_path
+                )
                 check["command"] = ""
         if key == "umu_proton" or (
             key == "umu-run" and "umu_proton" in saved_overrides
@@ -295,7 +519,9 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             dir_path = saved_overrides.get("umu_proton", "")
             if dir_path and not Path(dir_path).is_dir():
                 check["state"] = "missing"
-                check["detail"] = f"GE-Proton override path is invalid: {dir_path}"
+                check["detail"] = tr(
+                    "GE-Proton override path is invalid: {path}", path=dir_path
+                )
                 check["command"] = ""
         # File overrides (umu-run, winetricks, protontricks, vulkaninfo)
         if (
@@ -306,9 +532,17 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             file_path = saved_overrides[key]
             if not Path(file_path).is_file() or not os.access(file_path, os.X_OK):
                 check["state"] = "missing"
-                check["detail"] = f"Override path is not executable: {file_path}"
+                check["detail"] = tr(
+                    "Override path is not executable: {path}", path=file_path
+                )
                 check["command"] = ""
-    required_missing = any(item["state"] == "missing" for item in checks)
+    # Installation-state rows (profile/folders) do not gate system readiness:
+    # this page checks the system, not whether the game is installed yet.
+    _non_blocking = {"Active profile", "Anomaly installation", "GAMMA modpack"}
+    required_missing = any(
+        item["state"] == "missing" and item["label"] not in _non_blocking
+        for item in checks
+    )
     return checks, not required_missing, detected_overrides
 
 
@@ -330,6 +564,7 @@ class SystemCheckPage(QWidget):
         self._pending_error: str | None = None
         self._pending_timer: QTimer | None = None
         self._refresh_start: float = 0.0
+        self._last_check_ts: float = 0.0
         self._min_check_seconds: float = 2.0
 
         outer = QVBoxLayout(self)
@@ -346,17 +581,16 @@ class SystemCheckPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label("SYSTEM CHECK", level=1)
+        title = section_label(tr("SYSTEM CHECK"), level=1)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
         subtitle = info_label(
-            "Verify that all required tools, runners, and dependencies are "
-            "installed before setting up the game."
+            tr("Verify that all required tools, runners, and dependencies are installed before setting up the game.")
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(subtitle)
 
-        self.summary = QLabel("Checking system readiness...")
+        self.summary = QLabel(tr("Checking system readiness..."))
         self.summary.setObjectName("accent")
         self.summary.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(self.summary)
@@ -372,14 +606,14 @@ class SystemCheckPage(QWidget):
 
         header = QHBoxLayout()
         header.setSpacing(10)
-        header.addWidget(section_label("Readiness Checks", level=2), 1)
+        header.addWidget(section_label(tr("Readiness Checks"), level=2), 1)
         self.last_checked_label = QLabel()
         self.last_checked_label.setObjectName("accent")
         self.last_checked_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         header.addWidget(self.last_checked_label)
-        self.refresh_button = QPushButton("Refresh Checks")
+        self.refresh_button = QPushButton(tr("Refresh Checks"))
         self.refresh_button.setObjectName("primary")
         self.refresh_button.clicked.connect(self.refresh)
         header.addWidget(self.refresh_button)
@@ -391,7 +625,7 @@ class SystemCheckPage(QWidget):
         for section_title in (
             "System",
             "Required Tools",
-            "Dependencies",
+            "Runtime Libraries",
             "Proton Builds",
             "Optional Enhancements",
         ):
@@ -400,7 +634,7 @@ class SystemCheckPage(QWidget):
             section_layout = QVBoxLayout(section)
             section_layout.setContentsMargins(12, 10, 12, 10)
             section_layout.setSpacing(8)
-            heading = QLabel(section_title)
+            heading = QLabel(tr(section_title))
             heading.setObjectName("section3")
             heading.setProperty("class", "greenHeading")
             section_layout.addWidget(heading)
@@ -415,11 +649,10 @@ class SystemCheckPage(QWidget):
 
         override_card, override_layout = make_card()
         override_card.setObjectName("systemCheckCard")
-        override_layout.addWidget(section_label("Manual Overrides", level=2))
+        override_layout.addWidget(section_label(tr("Manual Overrides"), level=2))
         override_layout.addWidget(
             info_label(
-                "Point COMMANDER to tools or Proton builds installed outside the "
-                "normal search paths. Overrides are saved for future launches."
+                tr("Point COMMANDER to tools or Proton builds installed outside the normal search paths. Overrides are saved for future launches.")
             )
         )
         for key, label, directory in (
@@ -442,9 +675,31 @@ class SystemCheckPage(QWidget):
         """Pre-populate every section with a single CHECKING... placeholder."""
         for title, layout in self._sections.items():
             clear_layout(layout)
-            self._add_row(layout, title, "Scanning...", "checking", "")
+            self._add_row(layout, title, tr("Scanning..."), "checking", "")
+
+    def showEvent(self, event) -> None:
+        """Re-run checks when revisiting the page if the last run is stale."""
+        super().showEvent(event)
+        last = getattr(self, "_last_check_ts", 0.0)
+        if self._task is None and time.monotonic() - last > 60:
+            self.refresh()
 
     def refresh(self) -> None:
+        if os.name == "nt":
+            self.summary.setText(
+                tr("System check is only relevant on Linux; this Windows install runs the game natively.")
+            )
+            for layout in self._sections.values():
+                clear_layout(layout)
+            self._add_row(
+                next(iter(self._sections.values())),
+                "Windows",
+                tr("No Wine/Proton tooling required."),
+                "ready",
+                "",
+            )
+            self.refresh_button.setEnabled(False)
+            return
         if self._task is not None:
             return
         if self._pending_timer is not None:
@@ -454,11 +709,11 @@ class SystemCheckPage(QWidget):
         self._pending_error = None
         self._refresh_start = time.monotonic()
         self.refresh_button.setEnabled(False)
-        self.refresh_button.setText("Checking...")
+        self.refresh_button.setText(tr("Checking..."))
         self.checking_bar.show()
-        self.summary.setText("Checking system readiness...")
+        self.summary.setText(tr("Checking system readiness..."))
         for lbl in self._status_labels.values():
-            lbl.setText("CHECKING...")
+            lbl.setText(tr("Checking..."))
             lbl.setObjectName("statusChecking")
             lbl.style().unpolish(lbl)
             lbl.style().polish(lbl)
@@ -473,7 +728,9 @@ class SystemCheckPage(QWidget):
     ) -> None:
         self._task = None
         elapsed = time.monotonic() - self._refresh_start
-        if elapsed < self._min_check_seconds:
+        # The artificial minimum only applies once results are on screen; the
+        # first load already shows "Scanning..." placeholders.
+        if self._last_check_ts and elapsed < self._min_check_seconds:
             self._pending_result = result
             delay_ms = int((self._min_check_seconds - elapsed) * 1000)
             self._pending_timer = QTimer(self)
@@ -491,7 +748,7 @@ class SystemCheckPage(QWidget):
         if result is None:
             return
         self.refresh_button.setEnabled(True)
-        self.refresh_button.setText("Refresh Checks")
+        self.refresh_button.setText(tr("Refresh Checks"))
         self.checking_bar.hide()
         self._status_labels.clear()
         checks, ready, self._detected_overrides = result
@@ -527,12 +784,13 @@ class SystemCheckPage(QWidget):
                         "Winetricks",
                         "Protontricks",
                         "Vulkan",
+                        "32-bit Vulkan",
                     )
                 ],
             )
             self._update_section(
-                "Dependencies",
-                [by_label.get(verb, _missing) for verb in WINETRICKS_VERBS],
+                "Runtime Libraries",
+                [by_label.get("Runtime libraries", _missing)],
             )
             self._update_section(
                 "Proton Builds",
@@ -543,18 +801,20 @@ class SystemCheckPage(QWidget):
                 [by_label.get(label, _missing) for label in ("GameMode", "MangoHud")],
             )
         except (KeyError, TypeError, ValueError) as exc:
-            self.summary.setText(f"System check display failed: {exc}")
+            self.summary.setText(tr("System check display failed: {exc}", exc=exc))
             self.last_checked_label.setText(
-                f"Last checked: {datetime.now(tz=timezone.utc).astimezone().strftime('%H:%M:%S')}"
+                tr("Last checked: {arg}", arg=datetime.now(tz=timezone.utc).astimezone().strftime('%H:%M:%S'))
             )
+            return
         self.summary.setText(
-            "System ready for installation."
+            tr("System ready for installation.")
             if ready
-            else "Install the missing requirements, then refresh checks."
+            else tr("Install the missing requirements, then refresh checks.")
         )
         self.last_checked_label.setText(
-            f"Last checked: {datetime.now(tz=timezone.utc).astimezone().strftime('%H:%M:%S')}"
+            tr("Last checked: {arg}", arg=datetime.now(tz=timezone.utc).astimezone().strftime('%H:%M:%S'))
         )
+        self._last_check_ts = time.monotonic()
         self._refresh_override_values()
 
     def _update_section(self, title: str, checks: list[dict[str, object]]) -> None:
@@ -563,13 +823,13 @@ class SystemCheckPage(QWidget):
         for check in checks:
             if "builds" in check:
                 builds = check["builds"] or []
-                for name, state in builds:
-                    self._add_row(layout, name, "", state, "")
+                for name, state, *rest in builds:
+                    self._add_row(layout, name, rest[0] if rest else "", state, "")
                 if not builds:
                     self._add_row(
                         layout,
-                        "Proton build",
-                        "No compatible build detected.",
+                        tr("Proton build"),
+                        tr("No compatible build detected."),
                         "missing",
                         "",
                     )
@@ -581,6 +841,7 @@ class SystemCheckPage(QWidget):
                 str(check["state"]),
                 str(check["command"]),
                 str(check.get("manager", "")),
+                str(check.get("tooltip", "")),
             )
 
     def _add_row(
@@ -591,17 +852,32 @@ class SystemCheckPage(QWidget):
         state_text: str,
         command: str,
         manager: str = "",
+        tooltip: str = "",
     ) -> None:
         row = QGridLayout()
         row.setColumnStretch(1, 1)
-        label = QLabel(label_text)
+        label = QLabel(tr(label_text))
         detail = QLabel(detail_text)
         detail.setWordWrap(True)
+        detail.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        if tooltip:
+            # Per-item breakdown (e.g. which Winetricks verb is missing) one
+            # hover away, instead of either hiding it or spelling out every
+            # item in the always-visible row.
+            label.setToolTip(tooltip)
+            detail.setToolTip(tooltip)
+        # "Installed"/"Missing" reads plainer than "READY"/"NOT READY" for a
+        # row that is really just reporting whether one tool or file is
+        # present - "ready" invites "ready for what?" without more context.
+        # The page's overall readiness verdict is a separate plain sentence
+        # (self.summary), not one of these per-row badges.
         status_text = {
-            "ready": "READY",
-            "optional": "OPTIONAL",
-            "checking": "CHECKING...",
-        }.get(state_text, "NOT READY")
+            "ready": tr("Installed"),
+            "optional": tr("Optional"),
+            "checking": tr("Checking..."),
+        }.get(state_text, tr("Missing"))
         status_object = {
             "ready": "statusReady",
             "optional": "statusOptional",
@@ -612,29 +888,31 @@ class SystemCheckPage(QWidget):
         self._status_labels[label_text] = state
         row.addWidget(label, 0, 0)
         row.addWidget(detail, 0, 1)
-        row.addWidget(state, 0, 2, Qt.AlignmentFlag.AlignRight)
         if command:
-            sep = QLabel("|")
+            copy_button = QPushButton(tr("Copy install command"))
+            copy_button.setObjectName("copyCommand")
+            copy_button.clicked.connect(
+                lambda _checked=False, value=command, btn=copy_button: (
+                    QGuiApplication.clipboard().setText(value),
+                    btn.setText(tr("Copied!")),
+                    QTimer.singleShot(1500, lambda b=btn: b.setText(tr("Copy install command"))),
+                )
+            )
+            row.addWidget(copy_button, 0, 2)
+            sep = QLabel(tr("|"))
             sep.setObjectName("accent")
             sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
             row.addWidget(sep, 0, 3)
-            copy_button = QPushButton("Copy install command")
-            copy_button.setObjectName("copyCommand")
-            copy_button.clicked.connect(
-                lambda _checked=False, value=command: (
-                    QGuiApplication.clipboard().setText(value)
-                )
-            )
-            row.addWidget(copy_button, 0, 4)
+        row.addWidget(state, 0, 4, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(row)
 
     def _add_override_row(
         self, layout: QVBoxLayout, key: str, label: str, directory: bool
     ) -> None:
         row = QHBoxLayout()
-        row.addWidget(QLabel(label))
+        row.addWidget(QLabel(tr(label)))
         edit = QLineEdit()
-        edit.setPlaceholderText("Automatic detection")
+        edit.setPlaceholderText(tr("Automatic detection"))
         saved = gui_settings.load_gui_settings().get("tool_overrides") or {}
         edit.setText(saved.get(key, ""))
         edit.editingFinished.connect(
@@ -642,7 +920,7 @@ class SystemCheckPage(QWidget):
         )
         self._override_edits[key] = edit
         row.addWidget(edit, 1)
-        automatic = QCheckBox("Detect automatically")
+        automatic = QCheckBox(tr("Detect automatically"))
         has_override = bool(saved.get(key))
         automatic.blockSignals(True)
         automatic.setChecked(not has_override)
@@ -652,7 +930,7 @@ class SystemCheckPage(QWidget):
         )
         self._override_checks[key] = automatic
         row.addWidget(automatic)
-        browse = QPushButton("Browse")
+        browse = QPushButton(tr("Browse..."))
         browse.setObjectName("secondary")
         browse.clicked.connect(
             lambda _checked=False, key=key, edit=edit, directory=directory: (
@@ -668,7 +946,7 @@ class SystemCheckPage(QWidget):
         saved = gui_settings.load_gui_settings().get("tool_overrides") or {}
         for key, edit in self._override_edits.items():
             manual = saved.get(key, "")
-            has_manual = key in saved
+            has_manual = bool(manual)
             detected = self._detected_overrides.get(key) or ""
             edit.blockSignals(True)
             edit.setText(manual or detected)
@@ -694,7 +972,9 @@ class SystemCheckPage(QWidget):
             if value and value != "Not detected":
                 overrides[key] = value
             else:
-                overrides[key] = ""
+                # Empty means "no override" everywhere; a stored "" would be
+                # treated as manual by `key in saved` but automatic by bool().
+                overrides.pop(key, None)
                 edit.clear()
         gui_settings.save_gui_settings(tool_overrides=overrides)
         self._set_override_controls(key, automatic)
@@ -702,10 +982,11 @@ class SystemCheckPage(QWidget):
 
     def _browse_override(self, key: str, edit: QLineEdit, directory: bool) -> None:
         start = edit.text() or str(Path.home())
+        title = tr("Select folder") if directory else tr("Select file")
         if directory:
-            path = QFileDialog.getExistingDirectory(self, f"Select {key}", start)
+            path = QFileDialog.getExistingDirectory(self, title, start)
         else:
-            path, _ = QFileDialog.getOpenFileName(self, f"Select {key}", start)
+            path, _ = QFileDialog.getOpenFileName(self, title, start)
         if path:
             edit.setText(path)
             self._persist_override(key, edit)
@@ -719,11 +1000,7 @@ class SystemCheckPage(QWidget):
         if value:
             overrides[key] = value
         else:
-            cb = self._override_checks.get(key)
-            if cb is not None and not cb.isChecked():
-                overrides[key] = ""
-            else:
-                overrides.pop(key, None)
+            overrides.pop(key, None)
         gui_settings.save_gui_settings(tool_overrides=overrides)
         self.refresh()
 
@@ -748,16 +1025,16 @@ class SystemCheckPage(QWidget):
         if message is None:
             return
         self.refresh_button.setEnabled(True)
-        self.refresh_button.setText("Refresh Checks")
+        self.refresh_button.setText(tr("Refresh Checks"))
         self.checking_bar.hide()
-        for lbl in self._status_labels.values():
-            lbl.setText("NOT READY")
-            lbl.setObjectName("statusNotReady")
-            lbl.style().unpolish(lbl)
-            lbl.style().polish(lbl)
-            lbl.update()
         self._status_labels.clear()
-        self.summary.setText(f"System check failed: {message}")
+        # Replace stale rows with a single error row so old results are not
+        # shown alongside the failure message.
+        for layout in self._sections.values():
+            clear_layout(layout)
+        first_section = next(iter(self._sections.values()))
+        self._add_row(first_section, "System check", message, "missing", "")
+        self.summary.setText(tr("System check failed: {message}", message=message))
         self.last_checked_label.setText(
-            f"Last checked: {datetime.now(tz=timezone.utc).astimezone().strftime('%H:%M:%S')}"
+            tr("Last checked: {arg}", arg=datetime.now(tz=timezone.utc).astimezone().strftime('%H:%M:%S'))
         )

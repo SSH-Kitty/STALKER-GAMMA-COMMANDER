@@ -6,6 +6,7 @@ import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+from xml.parsers import expat
 
 from .mod_install import ModInstallError
 
@@ -53,11 +54,39 @@ def _named(element: ET.Element, child: str, default: str) -> str:
     return element.attrib.get("name", "").strip() or _text(element.find(child), default)
 
 
+def _reject_doctype(*_args: object, **_kwargs: object) -> None:
+    raise ET.ParseError("DOCTYPE declarations are not allowed in a FOMOD ModuleConfig.xml")
+
+
+def _parse_untrusted_xml(path: Path) -> ET.Element:
+    """Parse a mod-archive-supplied XML file without expanding DTD entities.
+
+    ``ModuleConfig.xml`` comes from a third-party mod archive - untrusted
+    input. Plain ``ET.parse`` has no protection against a "billion laughs"
+    style entity-expansion bomb in a malicious or corrupted archive, which
+    can freeze or OOM the GUI thread. Parsing directly through ``expat``
+    (rather than ``ET.XMLParser``, whose internal parser handle is not a
+    stable public attribute across Python versions) disables parameter
+    entities and refuses any DOCTYPE outright - real FOMOD configs never
+    have one, so this rejects only malicious/malformed input.
+    """
+    builder = ET.TreeBuilder()
+    parser = expat.ParserCreate()
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartDoctypeDeclHandler = _reject_doctype
+    parser.StartElementHandler = builder.start
+    parser.EndElementHandler = builder.end
+    parser.CharacterDataHandler = builder.data
+    with open(path, "rb") as handle:
+        parser.ParseFile(handle)
+    return builder.close()
+
+
 def parse_config(path: Path) -> FomodConfig:
     """Parse the common ModuleConfig.xml subset used by most FOMODs."""
     try:
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError) as exc:
+        root = _parse_untrusted_xml(path)
+    except (OSError, ET.ParseError, expat.ExpatError) as exc:
         raise ModInstallError(f"Could not read FOMOD configuration: {exc}") from exc
     module = root.find("moduleName")
     author = root.find("author")
@@ -174,7 +203,13 @@ def apply_options(
                         current = current / component
                         if current.is_symlink():
                             raise ModInstallError("FOMOD destination contains a symlink")
-                        current.mkdir(exist_ok=True)
+                        try:
+                            current.mkdir(exist_ok=True)
+                        except FileExistsError as exc:
+                            raise ModInstallError(
+                                f"FOMOD destination path component '{component}' "
+                                "already exists as a file"
+                            ) from exc
                         if current.is_symlink():
                             raise ModInstallError("FOMOD destination contains a symlink")
                     target = target.resolve()

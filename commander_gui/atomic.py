@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -32,6 +33,15 @@ def write_text(path: Path, text: str) -> None:
                 dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
             )
             temporary_path = Path(temporary)
+            try:
+                # mkstemp creates 0o600; keep the replaced file's permissions
+                # so shared files (e.g. the autostart .desktop) stay readable.
+                os.chmod(
+                    temporary_path,
+                    stat.S_IMODE(path.stat().st_mode),
+                )
+            except OSError:
+                pass
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(text)
                 stream.flush()

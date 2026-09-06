@@ -12,6 +12,9 @@ import shutil
 
 from .atomic import write_text
 from .config import gui_settings_path
+from .i18n import LANGUAGE_INFO
+
+_allowed_languages = {code for code, _native, _english in LANGUAGE_INFO}
 
 _DEFAULTS = {
     "runner": "auto",  # "auto" | "umu" | "wine" | "proton:<path-to-proton>"
@@ -19,6 +22,7 @@ _DEFAULTS = {
     "prefixes": {},  # per-runner prefix, keyed by the runner data value
     "target": "",  # last selected launch target title
     "theme": "gamma",  # key into themes.THEMES
+    "language": "en",  # key into i18n.LANGUAGE_INFO
     "start_page": "dashboard",  # nav page shown on launch (key into main_window.NAV_ITEMS)
     "font_size": 13,  # base UI font size in px; scales every QSS font
     "font_family": "Exo 2",  # UI font family; applied via QSS font-family
@@ -80,6 +84,8 @@ def load_gui_settings() -> dict:
         "dusk",
     }:
         data["theme"] = "gamma"
+    if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
+        data["language"] = "en"
     if data.get("start_page") not in {
         "dashboard",
         "systemcheck",
@@ -97,7 +103,7 @@ def load_gui_settings() -> dict:
         font_size = int(data.get("font_size", 13))
     except (TypeError, ValueError):
         font_size = 13
-    data["font_size"] = min(20, max(9, font_size))
+    data["font_size"] = min(22, max(9, font_size))
     for key in ("window_width", "window_height"):
         try:
             size = int(data.get(key, _DEFAULTS[key]))

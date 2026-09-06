@@ -233,6 +233,7 @@ def _zip_paths(mime: QMimeData) -> list[Path]:
 def severity_chip(severity: Severity) -> QLabel:
     """Small coloured pill showing the severity label."""
     chip = QLabel(SEVERITY_LABEL[severity])
+    chip.setTextFormat(Qt.TextFormat.PlainText)
     chip.setObjectName("chip")
     color = SEVERITY_COLOR[severity]
     chip.setStyleSheet(
@@ -277,21 +278,25 @@ class DetailPane(QWidget):
         self.chip = severity_chip(Severity.INFO)
         top.addWidget(self.chip)
         self.category_label = QLabel()
+        self.category_label.setTextFormat(Qt.TextFormat.PlainText)
         self.category_label.setObjectName("dim")
         top.addWidget(self.category_label)
         top.addStretch(1)
         layout.addLayout(top)
 
         self.title_label = QLabel("Select a finding to see details")
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setObjectName("detailTitle")
         self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
 
         self.where_label = QLabel("")
+        self.where_label.setTextFormat(Qt.TextFormat.PlainText)
         self.where_label.setObjectName("dim")
         layout.addWidget(self.where_label)
 
         self.detail_label = QLabel("")
+        self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
         self.detail_label.setWordWrap(True)
         self.detail_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -305,6 +310,7 @@ class DetailPane(QWidget):
         how = QLabel("How to fix it")
         how.setObjectName("suggestionHow")
         self.suggestion_label = QLabel("")
+        self.suggestion_label.setTextFormat(Qt.TextFormat.PlainText)
         self.suggestion_label.setObjectName("suggestionText")
         self.suggestion_label.setWordWrap(True)
         self.suggestion_label.setTextInteractionFlags(

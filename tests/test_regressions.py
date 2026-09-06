@@ -1,16 +1,19 @@
 import hashlib
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from commander_gui import gui_settings
+from commander_gui import assistant_launcher, autostart, gui_settings, network
 from commander_gui.assistant_launcher import assistant_command, launch_assistant
 from commander_gui.atomic import write_text
 from commander_gui.dependencies import (
@@ -22,6 +25,9 @@ from commander_gui.diagnostics import _redact
 from commander_gui.integrity import scan_mods_md5, verify_cache_archives
 from commander_gui.launcher import (
     LaunchError,
+    ProcessGroupRegistry,
+    Runner,
+    build_command,
     launch_detached,
     resolve_runner,
     wine_prefix_for,
@@ -39,7 +45,11 @@ from commander_gui.modlist import (
     set_status_at,
 )
 from commander_gui.network import read_response_bytes
-from commander_gui.proton_installer import _safe_extract, fetch_ge_proton_releases
+from commander_gui.proton_installer import (
+    _safe_extract,
+    fetch_ge_proton_releases,
+    install_proton,
+)
 from commander_gui.repair import ModPackRecord
 from commander_gui.settings import CliProfile, CliSettings, cli_ok, load_settings
 from commander_gui.ui import common
@@ -47,7 +57,9 @@ from commander_gui.ui.common import (
     BackgroundTask,
     StreamTask,
     aggregate_progress_value,
+    count_active_mods,
     display_state,
+    normalize_path,
     progress_value,
     single_file_progress,
 )
@@ -70,7 +82,12 @@ from commander_gui.ui.utilities_page import (
     _safe_wipe_path,
     _save_moved_profile,
 )
-from commander_gui.updates import diff_records, local_modpack_records, remote_version
+from commander_gui.updates import (
+    diff_records,
+    latest_version_human,
+    local_modpack_records,
+    remote_version,
+)
 from commander_gui.user_mods import (
     add_user_mod,
     read_user_mods,
@@ -425,6 +442,256 @@ class RegressionTests(unittest.TestCase):
                 # Verify _finish_install was called (which handles staging cleanup)
                 mock_finish.assert_called_once()
 
+    def test_on_profiles_loaded_matches_active_profile_case_insensitively(self):
+        """A CLI/settings.json case mismatch must not select the wrong profile.
+
+        Every read/write on this page targets whatever profile_combo shows;
+        if it silently lands on the wrong one (e.g. MO2's own "Default"
+        profile instead of the real active one), installs go into a
+        completely different modlist.txt than every other page - and the
+        topbar mod counter, which resolves the profile case-insensitively -
+        reads from.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from PySide6.QtWidgets import QApplication, QComboBox, QLabel
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.profile_combo = QComboBox()
+        page.selected_label = QLabel()
+        page.count_label = QLabel()
+        page.window = MagicMock()
+        page._profiles_task = MagicMock()
+        page._profiles_generation = 1
+        page._pending_refresh = False
+        page.window.settings.active_profile = CliProfile(mo2_profile="G.A.M.M.A")
+
+        result = (["Default", "g.a.m.m.a"], "g.a.m.m.a")
+        with patch.object(page, "_load_mods"):
+            page._on_profiles_loaded(result, page._profiles_task, 1)
+
+        self.assertEqual(page.profile_combo.currentText(), "g.a.m.m.a")
+
+    def test_on_profiles_loaded_prefers_mo2_selected_profile_over_stale_config(self):
+        """MO2's actual selected profile wins over a stale CliProfile field.
+
+        A user who creates/switches to a custom profile directly in MO2
+        (e.g. "Solo Profile") without also updating it on the Profiles page
+        must still have Mod Manager follow what MO2 is really using - not
+        silently keep reading/writing the old configured profile's
+        modlist.txt while the game itself runs a different one.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from PySide6.QtWidgets import QApplication, QComboBox, QLabel
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.profile_combo = QComboBox()
+        page.selected_label = QLabel()
+        page.count_label = QLabel()
+        page.window = MagicMock()
+        page._profiles_task = MagicMock()
+        page._profiles_generation = 1
+        page._pending_refresh = False
+        page.window.settings.active_profile = CliProfile(mo2_profile="G.A.M.M.A")
+
+        result = (["G.A.M.M.A", "Solo Profile"], "Solo Profile")
+        with patch.object(page, "_load_mods"):
+            page._on_profiles_loaded(result, page._profiles_task, 1)
+
+        self.assertEqual(page.profile_combo.currentText(), "Solo Profile")
+
+    def test_on_profiles_loaded_falls_back_to_configured_profile_with_no_mo2_selection(
+        self,
+    ):
+        """No MO2 selection yet (e.g. before first launch) still resolves."""
+        from unittest.mock import MagicMock, patch
+
+        from PySide6.QtWidgets import QApplication, QComboBox, QLabel
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.profile_combo = QComboBox()
+        page.selected_label = QLabel()
+        page.count_label = QLabel()
+        page.window = MagicMock()
+        page._profiles_task = MagicMock()
+        page._profiles_generation = 1
+        page._pending_refresh = False
+        page.window.settings.active_profile = CliProfile(mo2_profile="G.A.M.M.A")
+
+        result = (["G.A.M.M.A", "Solo Profile"], "")
+        with patch.object(page, "_load_mods"):
+            page._on_profiles_loaded(result, page._profiles_task, 1)
+
+        self.assertEqual(page.profile_combo.currentText(), "G.A.M.M.A")
+
+    def test_successful_install_records_name_for_tree_focus(self):
+        """A successful install must remember the mod name for _finish_install
+        to scroll to - new mods land disabled at the end of the file
+        (see modlist.add_mod), easy to miss on a real-sized modlist."""
+        import tempfile
+        from unittest.mock import MagicMock, patch
+
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gamma_dir = Path(tmpdir) / "gamma"
+            mods_dir = gamma_dir / "mods"
+            mods_dir.mkdir(parents=True)
+            new_mod = mods_dir / "Terrain Textures Redone"
+            new_mod.mkdir()
+
+            profile = CliProfile(
+                active=True,
+                profile_name="test",
+                anomaly="/tmp/anomaly",
+                gamma=str(gamma_dir),
+                cache="/tmp/cache",
+            )
+
+            QApplication.instance() or QApplication([])
+            page = ModManagerPage.__new__(ModManagerPage)
+            page.window = MagicMock()
+            page.window.settings = MagicMock()
+            page.window.settings.active_profile = profile
+            page.window.statusBar.return_value.showMessage = MagicMock()
+            page._install_staging = None
+            page._lines = ["+ExistingMod"]
+            page._just_installed_name = None
+            page.profile_combo = MagicMock()
+            page.profile_combo.currentText.return_value = "G.A.M.M.A"
+
+            with (
+                patch.object(page, "_write_lines", return_value=True),
+                patch("commander_gui.ui.mod_manager_page.add_user_mod"),
+                patch.object(page, "_finish_install") as mock_finish,
+            ):
+                page._on_mod_moved(new_mod)
+
+            self.assertEqual(page._just_installed_name, "Terrain Textures Redone")
+            mock_finish.assert_called_once()
+
+    def test_finish_install_focuses_and_clears_pending_name(self):
+        from unittest.mock import MagicMock, patch
+
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.window = MagicMock()
+        page.window.install_operation = "mod_install"
+        page._install_staging = None
+        page._just_installed_name = "Terrain Textures Redone"
+        page.install_progress = MagicMock()
+        page.search = MagicMock()
+        page.search.text.return_value = ""
+
+        with (
+            patch.object(page, "_update_guard"),
+            patch.object(page, "_load_mods"),
+            patch.object(page, "_focus_mod_in_tree") as mock_focus,
+        ):
+            page._finish_install()
+
+        mock_focus.assert_called_once_with("Terrain Textures Redone")
+        self.assertIsNone(page._just_installed_name)
+        page.search.clear.assert_not_called()
+
+    def test_finish_install_clears_a_leftover_search_before_focusing(self):
+        """A stale search term must not leave the just-installed mod hidden.
+
+        _apply_filter() hides tree items that don't match the search box;
+        scrollToItem()/setCurrentItem() on a hidden item is a silent no-op,
+        so the search has to be cleared before focusing the new mod, or the
+        "look, here's your mod" behavior does nothing visible.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.window = MagicMock()
+        page.window.install_operation = "mod_install"
+        page._install_staging = None
+        page._just_installed_name = "Terrain Textures Redone"
+        page.install_progress = MagicMock()
+        page.search = MagicMock()
+        page.search.text.return_value = "some old search"
+
+        with (
+            patch.object(page, "_update_guard"),
+            patch.object(page, "_load_mods"),
+            patch.object(page, "_focus_mod_in_tree") as mock_focus,
+        ):
+            page._finish_install()
+
+        page.search.clear.assert_called_once()
+        mock_focus.assert_called_once_with("Terrain Textures Redone")
+
+    def test_focus_mod_in_tree_selects_matching_item(self):
+        from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
+
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.tree = QTreeWidget()
+        header = QTreeWidgetItem(["Extra Mods"])
+        page.tree.addTopLevelItem(header)
+        child = QTreeWidgetItem(["Terrain Textures Redone"])
+        header.addChild(child)
+        other = QTreeWidgetItem(["Unrelated Mod"])
+        header.addChild(other)
+
+        page._focus_mod_in_tree("Terrain Textures Redone")
+
+        self.assertIs(page.tree.currentItem(), child)
+
+    def test_focus_mod_in_tree_does_not_unhide_a_search_filtered_item(self):
+        """Demonstrates why _finish_install() must clear the search first.
+
+        _apply_filter() hides non-matching items with setHidden(True).
+        _focus_mod_in_tree() makes the item Qt's "current" item regardless,
+        but does not un-hide it - so without clearing the search first, the
+        newly-installed mod is selected yet still invisible to the user.
+        """
+        from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
+
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.tree = QTreeWidget()
+        header = QTreeWidgetItem(["Extra Mods"])
+        page.tree.addTopLevelItem(header)
+        child = QTreeWidgetItem(["Terrain Textures Redone"])
+        header.addChild(child)
+        child.setHidden(True)  # as _apply_filter() would leave it
+
+        page._focus_mod_in_tree("Terrain Textures Redone")
+
+        self.assertTrue(child.isHidden())
+
     def test_log_dump_archives_logs_and_skips_noise(self):
         import zipfile
         from datetime import datetime, timezone
@@ -454,7 +721,7 @@ class RegressionTests(unittest.TestCase):
                 per_file_cap=50,
             )
 
-            self.assertEqual(target.name, "commander-log-dump-20260823-1437.zip")
+            self.assertEqual(target.name, "commander-log-dump-20260823-143700.zip")
             with zipfile.ZipFile(target) as zf:
                 names = set(zf.namelist())
                 manifest = zf.read("MANIFEST.txt").decode()
@@ -487,8 +754,8 @@ class RegressionTests(unittest.TestCase):
                 {"commander": src},
                 now=datetime(2026, 8, 23, 14, 37, tzinfo=timezone.utc),
             )
-        self.assertEqual(first.name, "commander-log-dump-20260823-1437.zip")
-        self.assertEqual(second.name, "commander-log-dump-20260823-1437-2.zip")
+        self.assertEqual(first.name, "commander-log-dump-20260823-143700.zip")
+        self.assertEqual(second.name, "commander-log-dump-20260823-143700-2.zip")
 
     def test_gui_settings_normalizes_corrupt_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -535,6 +802,65 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "old")
             self.assertEqual(list(path.parent.glob(".state.json.*.tmp")), [])
 
+    def test_atomic_write_preserves_existing_file_permissions(self):
+        import stat as _stat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shared.json"
+            path.write_text("old", encoding="utf-8")
+            os.chmod(path, 0o644)
+            write_text(path, "new")
+            mode = _stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, 0o644)
+            self.assertEqual(path.read_text(encoding="utf-8"), "new")
+
+    def test_load_settings_treats_non_list_profiles_as_corruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            # A hand-edited file where Profiles is an object must not silently
+            # wipe the user's profiles.
+            path.write_text('{"Profiles": {"oops": true}}', encoding="utf-8")
+            settings = load_settings(path)
+            self.assertEqual(len(settings.profiles), 1)  # fresh default
+            backups = list(Path(tmp).glob("settings.json.corrupt*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("oops", backups[0].read_text(encoding="utf-8"))
+
+    def test_load_settings_repeat_corruption_keeps_earlier_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text("{bad json", encoding="utf-8")
+            load_settings(path)
+            first = Path(tmp) / "settings.json.corrupt"
+            self.assertTrue(first.exists())
+            first.write_text("ORIGINAL CORRUPT", encoding="utf-8")
+            # Corrupt again; the existing backup must not be overwritten.
+            path.write_text("{worse json", encoding="utf-8")
+            load_settings(path)
+            self.assertEqual(first.read_text(encoding="utf-8"), "ORIGINAL CORRUPT")
+            extra = list(Path(tmp).glob("settings.json.corrupt.2*"))
+            self.assertEqual(len(extra), 1)
+
+    def test_delete_mod_and_archive_deletes_archive_through_symlinked_downloads(self):
+        from commander_gui.repair import ModPackRecord, delete_mod_and_archive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "gamma"
+            cache = Path(tmp) / "cache"
+            record = ModPackRecord(
+                1, "Broken Mod", "", "https://example.com/dl", "", "broken.zip", "", ""
+            )
+            folder = record.folder_name  # "1- Broken Mod"
+            (base / "mods" / folder).mkdir(parents=True)
+            cache.mkdir()
+            (cache / "broken.zip").write_bytes(b"zip")
+            (base / "downloads").symlink_to(cache, target_is_directory=True)
+            removed = delete_mod_and_archive(base, folder, record)
+            self.assertFalse((base / "mods" / folder).exists())
+            self.assertFalse((cache / "broken.zip").exists())
+            self.assertEqual(len(removed), 2)
+
+
     def test_diagnostics_redacts_sensitive_values(self):
         text = '{"ApiToken": "secret", "ProfileName": "gamma"}'
         redacted = _redact(text)
@@ -565,6 +891,563 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(LaunchError):
             launch_detached([], {}, "")
 
+    @patch("commander_gui.launcher.subprocess.Popen")
+    def test_launch_detached_removes_secrets_from_child_environment(self, popen):
+        popen.return_value = Mock()
+        with patch.dict(
+            "os.environ",
+            {
+                "COMMANDER_TOKEN": "inherited",
+                "WINEPREFIX": "/stale/prefix",
+                "PROTONPATH": "/stale/proton",
+                "SteamGameId": "stale",
+                "Visible": "base",
+            },
+            clear=True,
+        ):
+            launch_detached(
+                ["not-a-real-launch"],
+                {"API_KEY": "supplied", "Visible": "override"},
+                ".",
+            )
+
+        child_env = popen.call_args.kwargs["env"]
+        self.assertNotIn("COMMANDER_TOKEN", child_env)
+        self.assertNotIn("WINEPREFIX", child_env)
+        self.assertNotIn("PROTONPATH", child_env)
+        self.assertNotIn("SteamGameId", child_env)
+        self.assertNotIn("API_KEY", child_env)
+        self.assertEqual(child_env["Visible"], "override")
+        self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    @patch("commander_gui.assistant_launcher.subprocess.Popen")
+    def test_assistant_launch_uses_devnull_stdin_and_rejects_duplicate(self, popen):
+        process = Mock()
+        process.poll.return_value = None
+        popen.return_value = process
+        assistant_launcher._assistant_processes.clear()
+        try:
+            with patch.object(
+                assistant_launcher,
+                "assistant_command",
+                return_value=(["assistant-test"], Path(".")),
+            ):
+                self.assertIs(launch_assistant(), process)
+                self.assertIs(assistant_launcher.active_assistant_process(), process)
+                with self.assertRaises(assistant_launcher.AssistantLaunchError):
+                    launch_assistant()
+
+            self.assertEqual(popen.call_count, 1)
+            self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        finally:
+            assistant_launcher._assistant_processes.clear()
+
+    def test_assistant_process_reaping_removes_completed_handles(self):
+        active = Mock()
+        active.poll.return_value = None
+        completed = Mock()
+        completed.poll.return_value = 0
+        assistant_launcher._assistant_processes[:] = [active, completed]
+
+        self.assertEqual(assistant_launcher.reap_assistant_processes(), [completed])
+        self.assertEqual(assistant_launcher._assistant_processes, [active])
+        assistant_launcher._assistant_processes.clear()
+
+    @patch("commander_gui.launcher._terminate_process_group")
+    def test_process_registry_cleanup_removes_handles(self, terminate_group):
+        process = Mock()
+        process.pid = 4321
+        registry = ProcessGroupRegistry()
+        registry.register(process)
+
+        registry.cleanup_all()
+
+        terminate_group.assert_called_once_with(4321, process)
+
+    def test_play_page_launch_guards_do_not_start_duplicate_actions(self):
+        from commander_gui.ui.play_page import PlayPage
+
+        page = PlayPage.__new__(PlayPage)
+        page._launching = True
+        page._install_busy = False
+        page._run = Mock()
+
+        page.launch_game()
+        page._open_mo2()
+        page._launch_direct()
+
+        page._run.assert_not_called()
+    def _make_play_page_stub(self):
+        from commander_gui.ui.play_page import PlayPage
+
+        page = PlayPage.__new__(PlayPage)
+        page._launching = True
+        page._install_busy = False
+        page._proc = None
+        page._launch_timer = None
+        page._monitoring_mo2 = True
+        page._mo2_seen = False
+        page._handoff_checks = 0
+        page._pre_launch_mo2_pids = set()
+        page._mo2_launch_pids = set()
+        page._registry = ProcessGroupRegistry()
+        page._set_result = Mock()
+        page._set_launch_button_state = Mock(
+            side_effect=lambda launching: setattr(page, "_launching", launching)
+        )
+        page._launch_status_clear_timer = Mock()
+        page._launch_timer = Mock()
+        page._refresh_preview = Mock()
+        return page
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={111})
+    def test_mo2_handoff_detects_running_mo2(self, _mo2_pids):
+        page = self._make_play_page_stub()
+
+        page._on_launch_check("GAMMA", ["umu-run", "mo2"], Path("/tmp/launcher.log"))
+
+        self.assertTrue(page._mo2_seen)
+        self.assertEqual(page._mo2_launch_pids, {111})
+        self.assertEqual(page._handoff_checks, -1)
+        page._set_result.assert_called_with("MO2 is running...")
+        page._set_launch_button_state.assert_not_called()
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value=set())
+    def test_mo2_handoff_waits_during_startup_window(self, _mo2_pids):
+        page = self._make_play_page_stub()
+
+        for _ in range(10):
+            page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
+
+        self.assertTrue(page._monitoring_mo2)
+        self.assertEqual(page._handoff_checks, 10)
+        page._set_launch_button_state.assert_not_called()
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value=set())
+    def test_mo2_handoff_errors_when_mo2_never_appears(self, _mo2_pids):
+        page = self._make_play_page_stub()
+        page._handoff_checks = 10
+
+        page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
+
+        self.assertFalse(page._monitoring_mo2)
+        self.assertFalse(page._launching)
+        page._set_result.assert_called_with(
+            "GAMMA launcher exited before MO2 was detected.", error=True
+        )
+        page._launch_status_clear_timer.start.assert_called_once_with(3000)
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value=set())
+    def test_mo2_handoff_reports_normal_close_after_mo2_exits(self, _mo2_pids):
+        page = self._make_play_page_stub()
+        page._mo2_seen = True
+        page._mo2_launch_pids = {111}
+
+        page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
+
+        self.assertFalse(page._monitoring_mo2)
+        self.assertFalse(page._launching)
+        page._set_result.assert_called_with("GAMMA closed normally.", error=False)
+        page._launch_status_clear_timer.start.assert_called_once_with(3000)
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={111, 222})
+    def test_mo2_handoff_ignores_a_pre_existing_unrelated_mo2_window(
+        self, _mo2_pids
+    ):
+        """A stale MO2 window open before launch must not block detection."""
+        page = self._make_play_page_stub()
+        page._pre_launch_mo2_pids = {222}
+
+        page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
+
+        self.assertTrue(page._mo2_seen)
+        self.assertEqual(page._mo2_launch_pids, {111})
+
+    @patch("commander_gui.ui.play_page.mo2_pids", return_value={222})
+    def test_mo2_handoff_survives_closing_only_the_launched_instance(
+        self, _mo2_pids
+    ):
+        """Closing this launch's MO2 finishes even if a stale one lingers."""
+        page = self._make_play_page_stub()
+        page._mo2_seen = True
+        page._mo2_launch_pids = {111}
+        page._pre_launch_mo2_pids = {222}
+
+        page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
+
+        self.assertFalse(page._monitoring_mo2)
+        page._set_result.assert_called_with("GAMMA closed normally.", error=False)
+
+    @patch("commander_gui.ui.play_page.mo2_running", return_value=False)
+    def test_launch_wrapper_success_keeps_monitoring_for_mo2(self, _mo2_running):
+        page = self._make_play_page_stub()
+        process = Mock()
+        process.poll.return_value = 0
+        process.returncode = 0
+        process.pid = 4321
+        page._proc = process
+        page._registry.register(process)
+
+        page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
+
+        self.assertIsNone(page._proc)
+        self.assertTrue(page._monitoring_mo2)
+        self.assertNotIn(process.pid, page._registry._processes)
+        page._set_result.assert_called_with("Launcher exited; waiting for MO2...")
+        page._set_launch_button_state.assert_not_called()
+
+    def test_launch_wrapper_failure_discards_registry_and_reports(self):
+        page = self._make_play_page_stub()
+        page._monitoring_mo2 = False
+        process = Mock()
+        process.poll.return_value = 1
+        process.returncode = 1
+        process.pid = 4322
+        page._proc = process
+        page._registry.register(process)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "launcher.log"
+            log_path.write_text("boom\n", encoding="utf-8")
+            with patch("commander_gui.ui.play_page.QMessageBox.warning") as warning:
+                page._on_launch_check("GAMMA", ["umu-run"], log_path)
+
+        self.assertIsNone(page._proc)
+        self.assertNotIn(process.pid, page._registry._processes)
+        self.assertFalse(page._launching)
+        warning.assert_called_once()
+        result = page._set_result.call_args.args[0]
+        self.assertIn("exited with an error (code 1)", result)
+        self.assertIn("boom", result)
+        page._launch_status_clear_timer.start.assert_called_once_with(3000)
+
+    def test_abort_launch_cleans_spawned_process_group(self):
+        page = self._make_play_page_stub()
+        process = Mock()
+        process.pid = 9876
+        process.poll.return_value = None
+        page._proc = process
+        page._registry.register(process)
+
+        with patch("commander_gui.launcher._terminate_process_group") as terminate:
+            page._abort_launch("Unexpected launch error: boom")
+
+        terminate.assert_called_once()
+        self.assertEqual(terminate.call_args.args[0], process.pid)
+        self.assertIsNone(page._proc)
+        self.assertFalse(page._launching)
+        self.assertFalse(page._monitoring_mo2)
+        self.assertNotIn(process.pid, page._registry._processes)
+        page._set_result.assert_called_with(
+            "Unexpected launch error: boom", error=True
+        )
+
+    def test_play_page_persist_dirs_expands_tilde(self):
+        from commander_gui.ui.play_page import PlayPage
+
+        page = PlayPage.__new__(PlayPage)
+        page._persisting = False
+        page.window = Mock()
+        page.window.install_busy = False
+        profile = CliProfile(anomaly="old-a", gamma="old-g", cache="old-c")
+        page.window.settings = Mock(active_profile=profile, save=Mock())
+        page.window.statusBar.return_value.showMessage = Mock()
+        page.anomaly_edit = Mock(text=Mock(return_value="~/anomaly"))
+        page.gamma_edit = Mock(text=Mock(return_value="~/gamma"))
+        page.cache_edit = Mock(text=Mock(return_value="~/cache"))
+        page._reload_targets = Mock()
+        page._refresh_preview = Mock()
+        page._update_cache_info = Mock()
+
+        with patch("commander_gui.ui.play_page.mo2_running", return_value=False):
+            page._persist_dirs()
+
+        self.assertNotIn("~", profile.anomaly)
+        self.assertTrue(Path(profile.anomaly).is_absolute())
+        page.anomaly_edit.setText.assert_called_with(profile.anomaly)
+
+    def test_play_page_persist_dirs_refuses_while_busy(self):
+        from commander_gui.ui.play_page import PlayPage
+
+        page = PlayPage.__new__(PlayPage)
+        page._persisting = False
+        page.window = Mock()
+        page.window.install_busy = True
+        page._load_folders = Mock()
+
+        with patch("commander_gui.ui.play_page.QMessageBox.warning") as warning:
+            page._persist_dirs()
+
+        warning.assert_called_once()
+        page._load_folders.assert_called_once()
+        page.window.settings.save.assert_not_called()
+
+    def test_cancel_full_install_rechecks_after_dialog_to_avoid_crash(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        from commander_gui.ui.install_page import InstallPage
+
+        page = InstallPage.__new__(InstallPage)
+        runner = Mock()
+        runner.is_running.return_value = True
+        page._runner = runner
+        page.full_progress = Mock()
+        page.full_progress.is_paused = False
+
+        def _answer_yes(*_args, **_kwargs):
+            # Simulate the install finishing (clearing the runner) while the
+            # confirm dialog was open - must not crash on the stale runner.
+            page._runner = None
+            return QMessageBox.StandardButton.Yes
+
+        with patch(
+            "commander_gui.ui.install_page.QMessageBox.question",
+            side_effect=_answer_yes,
+        ):
+            page._cancel_full_install()
+
+        runner.resume.assert_not_called()
+        runner.cancel.assert_not_called()
+
+    def test_cancel_winetricks_rechecks_after_dialog_to_avoid_crash(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        from commander_gui.ui.install_page import InstallPage
+
+        page = InstallPage.__new__(InstallPage)
+        runner = Mock()
+        runner.is_running.return_value = True
+        page._wt_runner = runner
+        page.wt_progress = Mock()
+
+        def _answer_yes(*_args, **_kwargs):
+            page._wt_runner = None
+            return QMessageBox.StandardButton.Yes
+
+        with patch(
+            "commander_gui.ui.install_page.QMessageBox.question",
+            side_effect=_answer_yes,
+        ):
+            page._cancel_winetricks()
+
+        runner.cancel.assert_not_called()
+
+    def test_start_full_install_creates_anomaly_folder_too(self):
+        """Install GAMMA directly on a brand-new profile must not fail for a
+        missing Anomaly folder - _start_anomaly_install already creates it,
+        full-install must do the same since it installs Anomaly first too."""
+        import tempfile
+
+        from PySide6.QtWidgets import QMessageBox
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.install_page import InstallPage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            profile = CliProfile(
+                active=True,
+                profile_name="test",
+                anomaly=str(base / "anomaly"),
+                gamma=str(base / "gamma"),
+                cache=str(base / "cache"),
+            )
+            page = InstallPage.__new__(InstallPage)
+            page._runner = None
+            page.window = Mock()
+            page.window.install_busy = False
+            page.window.settings = Mock(active_profile=profile)
+            page.checkboxes = {
+                "minimal": Mock(isChecked=Mock(return_value=False)),
+                "preserve_user": Mock(isChecked=Mock(return_value=False)),
+                "preserve_mcm": Mock(isChecked=Mock(return_value=False)),
+            }
+            page._resume_state = None
+            page.full_progress = Mock()
+            page.install_button = Mock()
+            page.anomaly_button = Mock()
+            page._checked_archives = set()
+            page._cache_timer = Mock()
+
+            with (
+                patch(
+                    "commander_gui.ui.install_page.QMessageBox.question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ),
+                patch(
+                    "commander_gui.ui.install_page.cli_command",
+                    return_value=["stalker-gamma", "full-install"],
+                ),
+                patch("commander_gui.ui.install_page.CommandRunner") as runner_cls,
+            ):
+                runner_cls.return_value = Mock()
+                page._start_full_install()
+
+            self.assertTrue((base / "anomaly").is_dir())
+            self.assertTrue((base / "gamma").is_dir())
+            self.assertTrue((base / "cache").is_dir())
+
+    def test_confirm_install_gamma_dialog_notes_resume_state(self):
+        """The confirm dialog must say upfront if this run resumes a prior
+        interrupted install, not only as a status-bar toast afterward."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.install_page import InstallPage
+
+        page = InstallPage.__new__(InstallPage)
+        page._runner = None
+        page.window = Mock()
+        page.window.install_busy = False
+        page.window.settings = Mock(
+            active_profile=CliProfile(
+                anomaly="/nonexistent/anomaly", gamma="/g", cache="/c"
+            )
+        )
+        page.checkboxes = {
+            "minimal": Mock(isChecked=Mock(return_value=False))
+        }
+        page._resume_state = {"profile": "test"}
+
+        with patch(
+            "commander_gui.ui.install_page.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ) as mock_question:
+            page._start_full_install()
+
+        dialog_text = mock_question.call_args[0][2]
+        self.assertIn("Resuming a previously interrupted", dialog_text)
+
+    def test_on_winetricks_line_suppresses_noise_from_visible_log(self):
+        """A noise line must not reach the console, not just skip %-parsing."""
+        from commander_gui.ui.install_page import InstallPage
+
+        page = InstallPage.__new__(InstallPage)
+        page.wt_progress = Mock()
+        page._wt_stage = "verbs"
+        page._wt_completed_verbs = set()
+        page._wt_last_pct = -1
+
+        page._on_winetricks_line("Using winetricks 20240105 - sha256sum: abc123")
+        page.wt_progress.on_line.assert_not_called()
+
+        page._on_winetricks_line("Executing w_do_call vcrun2022")
+        page.wt_progress.on_line.assert_called_once()
+
+    @patch("commander_gui.cli_runner.subprocess.Popen")
+    def test_cli_worker_clears_process_handle_and_uses_process_group(self, popen):
+        from commander_gui.cli_runner import CliWorker
+
+        process = Mock()
+        process.stdout = iter(["line\n"])
+        process.returncode = 0
+        process.poll.return_value = 0
+        popen.return_value = process
+        worker = CliWorker()
+        finished = []
+        worker.finished.connect(lambda rc, output: finished.append((rc, output)))
+        worker.setup(["not-a-real-cli"])
+        worker.run()
+
+        self.assertIsNone(worker._process)
+        self.assertEqual(finished, [(0, "line")])
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(kwargs["start_new_session"], os.name != "nt")
+        self.assertEqual(
+            kwargs["creationflags"],
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            if os.name == "nt"
+            else 0,
+        )
+
+    @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
+    @patch("commander_gui.cli_runner._terminate_process_group")
+    @patch("commander_gui.cli_runner.subprocess.Popen")
+    def test_run_sync_timeout_terminates_group_and_returns_result(
+        self, popen, terminate_group, _binary
+    ):
+        from commander_gui.cli_runner import TIMEOUT_RC, run_sync
+
+        process = Mock()
+        process.pid = 1234
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(
+                ["/cli/stalker-gamma", "status"],
+                2,
+                output=b"partial output",
+                stderr=b"diagnostic",
+            ),
+            ("partial output", "diagnostic"),
+        ]
+        popen.return_value = process
+        rc, output = run_sync(["status"], timeout=2)
+
+        self.assertEqual(rc, TIMEOUT_RC)
+        self.assertIn("partial outputdiagnostic", output)
+        self.assertIn("timed out after 2s", output)
+        terminate_group.assert_called_once_with(process)
+        self.assertEqual(popen.call_args.args[0], ["/cli/stalker-gamma", "status"])
+
+    @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
+    @patch("commander_gui.cli_runner.subprocess.Popen")
+    def test_run_sync_timeout_before_spawn_uses_exception_output(self, popen, _binary):
+        from commander_gui.cli_runner import TIMEOUT_RC, run_sync
+
+        popen.side_effect = subprocess.TimeoutExpired(
+            ["/cli/stalker-gamma", "status"],
+            2,
+            output=b"partial output",
+            stderr=b"diagnostic",
+        )
+        rc, output = run_sync(["status"], timeout=2)
+
+        self.assertEqual(rc, TIMEOUT_RC)
+        self.assertIn("partial outputdiagnostic", output)
+        self.assertIn("timed out after 2s", output)
+
+    @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
+    def test_cli_command_constructs_base_and_progress_arguments(self, _binary):
+        from commander_gui.cli_runner import cli_command
+
+        self.assertEqual(
+            cli_command(["install", "--profile", "gamma"], progress_interval_ms=200),
+            [
+                "/cli/stalker-gamma",
+                "install",
+                "--profile",
+                "gamma",
+                "--progress-update-interval-ms",
+                "200",
+            ],
+        )
+
+    def test_build_command_constructs_runner_profile_and_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            (gamma / "ModOrganizer.exe").touch()
+            (gamma / "profiles" / "GAMMA").mkdir(parents=True)
+            command, env, cwd = build_command(
+                str(gamma),
+                Runner("wine", "Test Wine", ["wine"], {"WINEPREFIX": "/prefix"}),
+                profile="GAMMA",
+                target="Anomaly (DX11)",
+            )
+
+        self.assertEqual(
+            command,
+            [
+                "wine",
+                str(gamma / "ModOrganizer.exe"),
+                "-p",
+                "GAMMA",
+                "run",
+                "-e",
+                "Anomaly (DX11)",
+            ],
+        )
+        self.assertEqual(env, {"WINEPREFIX": "/prefix"})
+        self.assertEqual(cwd, str(gamma))
+
     def test_svg_noise_detector_suppresses_renderer_warnings(self):
         from PySide6.QtCore import QtMsgType
 
@@ -583,6 +1466,26 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertFalse(_is_svg_noise(QtMsgType.QtWarningMsg, "normal warning"))
         self.assertFalse(_is_svg_noise(QtMsgType.QtInfoMsg, "qt.svg: info passes"))
+
+    def test_portal_noise_detector_suppresses_appid_registration_warning(self):
+        from PySide6.QtCore import QtMsgType
+
+        from commander_gui.main import _is_portal_noise
+
+        self.assertTrue(
+            _is_portal_noise(
+                QtMsgType.QtWarningMsg,
+                'Failed to register with host portal QDBusError('
+                '"org.freedesktop.portal.Error.Failed", "Could not register '
+                'app ID: App info not found for \'stalker-gamma-commander\'")',
+            )
+        )
+        self.assertFalse(_is_portal_noise(QtMsgType.QtWarningMsg, "normal warning"))
+        self.assertFalse(
+            _is_portal_noise(
+                QtMsgType.QtInfoMsg, "Failed to register with host portal"
+            )
+        )
 
     def test_modlist_status_ignores_stale_index(self):
         lines = ["+First"]
@@ -900,6 +1803,84 @@ class RegressionTests(unittest.TestCase):
             reparent_into_category(["-Extra Mods_separator"], ["A"], category="a/b")
 
 
+class ModCounterTests(unittest.TestCase):
+    def _make_gamma(
+        self,
+        tmpdir,
+        profile_folder: str = "G.A.M.M.A",
+        modlist_text: str = "+ModA\n-ModB\n",
+    ) -> Path:
+        gamma_dir = Path(tmpdir) / "gamma"
+        gamma_dir.mkdir(parents=True, exist_ok=True)
+        for marker in ("ModOrganizer.exe", "ModOrganizer.ini"):
+            (gamma_dir / marker).touch()
+        profile_dir = gamma_dir / "profiles" / profile_folder
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "modlist.txt").write_text(modlist_text, encoding="utf-8")
+        return gamma_dir
+
+    def test_counts_enabled_and_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_dir = self._make_gamma(tmp)
+            self.assertEqual(count_active_mods(str(gamma_dir), "G.A.M.M.A"), (1, 2))
+
+    def test_case_insensitive_profile_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_dir = self._make_gamma(tmp, profile_folder="G.A.M.M.A")
+            self.assertEqual(count_active_mods(str(gamma_dir), "g.a.m.m.a"), (1, 2))
+
+    def test_missing_gamma_install_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(
+                count_active_mods(str(Path(tmp) / "nope"), "G.A.M.M.A")
+            )
+
+    def test_missing_profile_folder_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_dir = self._make_gamma(tmp, profile_folder="OtherProfile")
+            self.assertIsNone(count_active_mods(str(gamma_dir), "G.A.M.M.A"))
+
+    def test_missing_modlist_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_dir = self._make_gamma(tmp)
+            (gamma_dir / "profiles" / "G.A.M.M.A" / "modlist.txt").unlink()
+            self.assertIsNone(count_active_mods(str(gamma_dir), "G.A.M.M.A"))
+
+    def test_main_window_update_mod_counter_shows_and_hides_label(self):
+        from PySide6.QtWidgets import QApplication, QLabel
+
+        from commander_gui.ui.main_window import MainWindow
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma_dir = self._make_gamma(tmp)
+            profile = CliProfile(
+                active=True,
+                profile_name="Test",
+                gamma=str(gamma_dir),
+                mo2_profile="G.A.M.M.A",
+            )
+            window = MainWindow.__new__(MainWindow)
+            window.settings = CliSettings(profiles=[profile])
+            window.mod_counter_label = QLabel()
+
+            window.update_mod_counter()
+            self.assertTrue(window.mod_counter_label.isVisible())
+            self.assertEqual(window.mod_counter_label.text(), "1 Mods")
+
+            # Simulate an in-page edit rewriting modlist.txt, then re-check.
+            (gamma_dir / "profiles" / "G.A.M.M.A" / "modlist.txt").write_text(
+                "+ModA\n+ModB\n", encoding="utf-8"
+            )
+            window.update_mod_counter()
+            self.assertEqual(window.mod_counter_label.text(), "2 Mods")
+
+            # No active profile -> hidden, not crashed.
+            window.settings = CliSettings(profiles=[])
+            window.update_mod_counter()
+            self.assertFalse(window.mod_counter_label.isVisible())
+
+
 class UserModsTrackerTests(unittest.TestCase):
     def _modlist(self, tmp: Path) -> Path:
         path = tmp / "modlist.txt"
@@ -1124,6 +2105,21 @@ class UserModsTrackerTests(unittest.TestCase):
         target = Path.home()
         self.assertFalse(_safe_wipe_path(str(target), target))
 
+    def test_wipe_guard_rejects_subdirectories_of_system_roots(self):
+        for raw in ("/etc/NetworkManager", "/var/lib/anything", "/run/user/1000"):
+            target = Path(raw)
+            self.assertFalse(
+                _safe_wipe_path(raw, target), f"{raw} should be rejected"
+            )
+
+    def test_wipe_guard_rejects_home_parent_exactly(self):
+        home_parent = str(Path.home().parent)
+        self.assertFalse(_safe_wipe_path(home_parent, Path(home_parent)))
+
+    def test_wipe_guard_allows_nested_path_under_own_home(self):
+        target = Path.home() / "Games" / "anomaly" / "gamma"
+        self.assertTrue(_safe_wipe_path(str(target), target))
+
     def test_network_reads_are_bounded(self):
         class Response:
             def __init__(self, data):
@@ -1137,6 +2133,24 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(read_response_bytes(Response(b"safe"), 4), b"safe")
         with self.assertRaises(ValueError):
             read_response_bytes(Response(b"too large"), 4)
+
+    def test_network_urlopen_rejects_non_http_schemes(self):
+        # A profile's editable mod_list_url/mod_pack_maker_url must never be
+        # able to make the GUI read an arbitrary local file.
+        with self.assertRaises(ValueError):
+            network.urlopen("file:///etc/passwd", timeout=1)
+        with self.assertRaises(ValueError):
+            network.urlopen(
+                urllib.request.Request("file:///etc/passwd"), timeout=1
+            )
+
+    def test_network_urlopen_allows_http_and_https(self):
+        with patch("commander_gui.network.urllib.request.urlopen") as urlopen:
+            network.urlopen("https://example.com/x", timeout=1)
+            network.urlopen(
+                urllib.request.Request("http://example.com/x"), timeout=1
+            )
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_remote_version_returns_none_for_oversized_response(self):
         profile = CliProfile()
@@ -1153,6 +2167,60 @@ class UserModsTrackerTests(unittest.TestCase):
         ):
             self.assertIsNone(remote_version(CliProfile()))
 
+    def test_desktop_exec_keeps_a_spaced_path_as_one_argument(self):
+        """Regression test: a path with a space must stay one Exec= token.
+
+        _desktop_exec() used to shlex.split() an already-assembled path
+        string as if it were a shell command line, which mis-tokenized any
+        path containing a space into multiple bogus arguments.
+        """
+        exec_line = autostart._desktop_exec(["/home/John Doe/App.AppImage"])
+        self.assertEqual(exec_line, '"/home/John Doe/App.AppImage"')
+
+    def test_latest_version_human_falls_back_to_readme_on_format_mismatch(self):
+        """Regression test: the README fallback must actually run.
+
+        Previously the loop broke on the first *non-empty* fetch regardless
+        of whether it matched either version regex, so a Patchnotes.md that
+        fetched successfully but didn't match the expected heading format
+        silently returned None instead of falling back to README.md.
+        """
+        responses = {
+            "Patchnotes.md": "# Some unrelated heading with no version",
+            "README.md": "badge gamma-v0.9.5 badge",
+        }
+
+        class FakeResponse:
+            def __init__(self, text: str):
+                self._data = text.encode()
+                self.headers = {"Content-Length": str(len(self._data))}
+
+            def read(self, size: int = -1) -> bytes:
+                if size < 0 or size >= len(self._data):
+                    chunk, self._data = self._data, b""
+                    return chunk
+                chunk, self._data = self._data[:size], self._data[size:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            for filename, body in responses.items():
+                if url.endswith(filename):
+                    return FakeResponse(body)
+            raise AssertionError(f"unexpected url requested: {url}")
+
+        with patch(
+            "commander_gui.updates.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            self.assertEqual(latest_version_human(CliProfile()), "0.9.5")
+
     def test_proton_archive_rejects_special_members(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "special.tar.gz"
@@ -1168,6 +2236,96 @@ class UserModsTrackerTests(unittest.TestCase):
                 ValueError, "special file"
             ):
                 _safe_extract(tf, destination)
+
+    def test_install_proton_cancel_after_replace_cleans_up(self):
+        """A cancel signaled right after the rename must not orphan the build.
+
+        Regression test for a bug where a premature check_cancelled() call
+        right after os.replace() raised out of the function before the
+        single intended cleanup path (the post-`with` check) could run,
+        leaving the build fully installed while reporting cancellation -
+        which then permanently broke reinstall with "already exists".
+        """
+        dir_name = "GE-Proton99-1"
+        tar_name = f"{dir_name}.tar.gz"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            install_dir = Path(tmp) / "compatibilitytools.d"
+            install_dir.mkdir()
+
+            tar_path = Path(tmp) / tar_name
+            with tarfile.open(tar_path, "w:gz") as tf:
+                dir_info = tarfile.TarInfo(f"{dir_name}/")
+                dir_info.type = tarfile.DIRTYPE
+                tf.addfile(dir_info)
+                data = b"hello"
+                file_info = tarfile.TarInfo(f"{dir_name}/file.txt")
+                file_info.size = len(data)
+                tf.addfile(file_info, io.BytesIO(data))
+
+            tar_bytes = tar_path.read_bytes()
+            checksum_hex = hashlib.sha512(tar_bytes).hexdigest()
+            tar_url = f"https://example.invalid/{tar_name}"
+            sum_url = f"https://example.invalid/{tar_name}.sha512sum"
+
+            class FakeResponse:
+                def __init__(self, data: bytes, headers: dict | None = None):
+                    self._data = data
+                    self.headers = headers or {}
+
+                def read(self, size: int = -1) -> bytes:
+                    if size < 0 or size >= len(self._data):
+                        chunk, self._data = self._data, b""
+                        return chunk
+                    chunk, self._data = self._data[:size], self._data[size:]
+                    return chunk
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc_info):
+                    return False
+
+            def fake_urlopen(request, timeout=None):
+                url = request.full_url
+                if url == tar_url:
+                    return FakeResponse(
+                        tar_bytes, {"Content-Length": str(len(tar_bytes))}
+                    )
+                if url == sum_url:
+                    return FakeResponse(checksum_hex.encode())
+                raise AssertionError(f"unexpected url requested: {url}")
+
+            cancel_event = threading.Event()
+            real_replace = os.replace
+
+            def fake_replace(src, dst):
+                # Simulate cancellation landing exactly after the rename
+                # that commits the install succeeds.
+                real_replace(src, dst)
+                cancel_event.set()
+
+            with (
+                patch(
+                    "commander_gui.proton_installer._find_assets",
+                    return_value=(tar_url, sum_url),
+                ),
+                patch(
+                    "commander_gui.proton_installer.urllib.request.urlopen",
+                    side_effect=fake_urlopen,
+                ),
+                patch(
+                    "commander_gui.proton_installer.os.replace",
+                    side_effect=fake_replace,
+                ),
+                self.assertRaisesRegex(ValueError, "cancelled"),
+            ):
+                install_proton(dir_name, install_dir, cancel_event=cancel_event)
+
+            # The single cleanup path must have removed the fully-installed
+            # build rather than leaving it orphaned - otherwise a retry
+            # would permanently fail with "Proton build already exists".
+            self.assertFalse((install_dir / dir_name).exists())
 
     def test_proton_release_list_includes_legacy_version_nine(self):
         releases = [
@@ -1230,14 +2388,46 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(_dependencies_progress("future", 25), 25)
 
     def test_system_check_lists_every_winetricks_dependency(self):
-        checks = _winetricks_checks(
-            {verb: verb in {"quartz", "dx8vb"} for verb in WINETRICKS_VERBS},
-            "/usr/bin/winetricks",
-        )
-        by_label = {check["label"]: check for check in checks}
-        self.assertEqual(set(by_label), set(WINETRICKS_VERBS))
-        self.assertEqual(by_label["quartz"]["state"], "ready")
-        self.assertEqual(by_label["dx8vb"]["state"], "ready")
+        # The page shows one collapsed "Runtime libraries" row (not one row
+        # per verb codename) with the per-verb breakdown in its tooltip.
+        # Wine/Protontricks/umu-run are folded into the same row's count
+        # (matching the Dashboard's "X/Y dependencies installed" scope),
+        # even though each also has its own row further up the page.
+        status = {verb: verb in {"quartz", "dx8vb"} for verb in WINETRICKS_VERBS}
+        extra_tools = [
+            ("wine", "Wine", True, "sudo pacman -S wine"),
+            (
+                "protontricks",
+                "Protontricks",
+                False,
+                "sudo pacman -S pipx && pipx install protontricks",
+            ),
+            ("umu", "umu-run", False, "curl -fL ... -o umu-run"),
+        ]
+        checks = _winetricks_checks(status, "/usr/bin/winetricks", extra_tools)
+        self.assertEqual(len(checks), 1)
+        row = checks[0]
+        self.assertEqual(row["label"], "Runtime libraries")
+        self.assertEqual(row["state"], "missing")
+        # 2 verbs + Wine installed, out of 8 verbs + 3 tools = 11 total.
+        self.assertIn("3/11 runtime libraries installed", row["detail"])
+        # Missing verbs are named by their human label, not the raw codename.
+        self.assertIn("Visual C++ Runtime 2022", row["detail"])
+        self.assertIn("Protontricks", row["detail"])
+        self.assertNotIn("quartz", row["detail"])
+        # A copy-command button is always offered, not just when something
+        # is missing (re-running winetricks verbs is a harmless no-op) - and
+        # now includes the missing tools' install commands too, but not an
+        # already-installed tool's (Wine's), since that could need sudo for
+        # no reason.
+        self.assertIn("winetricks -q", row["command"])
+        self.assertIn("pipx install protontricks", row["command"])
+        self.assertIn("curl -fL", row["command"])
+        self.assertNotIn("sudo pacman -S wine", row["command"])
+        # The raw verb codenames (and full per-verb state) are still
+        # available via the tooltip.
+        self.assertIn("quartz", row["tooltip"])
+        self.assertIn("dx8vb", row["tooltip"])
 
     def test_system_check_reports_installation_state(self):
         profile = CliProfile(
@@ -1263,6 +2453,30 @@ class UserModsTrackerTests(unittest.TestCase):
             load_settings_mock.return_value.active_profile = None
             checks = _installation_checks()
         self.assertTrue(all(check["state"] == "missing" for check in checks))
+
+    def test_gamma_installed_uses_the_profiles_own_mo2_profile_name(self):
+        # A profile whose MO2 profile folder isn't literally "G.A.M.M.A"
+        # must not be reported as not installed just because of that name.
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            (gamma / "ModOrganizer.exe").write_text("")
+            (gamma / "ModOrganizer.ini").write_text("")
+            (gamma / "profiles" / "MyCustomProfile").mkdir(parents=True)
+            self.assertTrue(common.gamma_installed(str(gamma), "MyCustomProfile"))
+            # The default fallback must still work when no name is given.
+            self.assertFalse(common.gamma_installed(str(gamma)))
+            (gamma / "profiles" / "G.A.M.M.A").mkdir()
+            self.assertTrue(common.gamma_installed(str(gamma)))
+
+    def test_normalize_path_expands_tilde_and_resolves_relative(self):
+        home = str(Path.home())
+        self.assertEqual(normalize_path("~"), home)
+        self.assertTrue(normalize_path("~/Games/Anomaly").startswith(home))
+        self.assertNotIn("~", normalize_path("~/Games/Anomaly"))
+        # A relative path must resolve to an absolute one, not stay relative.
+        self.assertTrue(Path(normalize_path("relative/anomaly")).is_absolute())
+        # Blank input stays blank rather than resolving to the cwd.
+        self.assertEqual(normalize_path("   "), "")
 
     def test_required_tools_keep_copyable_install_commands_when_ready(self):
         with (
@@ -1476,6 +2690,19 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(cmd[0], "bash")
         self.assertIn("umu-launcher-1.4.4-zipapp.tar", cmd[2])
         self.assertIn("~/.local/bin/umu-run", cmd[2])
+
+    def test_umu_install_command_is_atomic_and_time_bounded(self):
+        with patch(
+            "commander_gui.winetricks.shutil.which", return_value="/usr/bin/curl"
+        ):
+            script = umu_install_command()[2]
+        # Stalled downloads must not hang forever.
+        self.assertIn("--max-time 600", script)
+        # Extract to a temp file and atomically move into place so a
+        # truncated transfer never leaves a broken umu-run behind.
+        self.assertIn("mktemp", script)
+        self.assertIn("mv -f", script)
+        self.assertNotIn("| tar -xOf - umu-run > ~/.local/bin/umu-run", script)
 
     def test_umu_install_command_returns_empty_without_curl(self):
         with patch("commander_gui.winetricks.shutil.which", return_value=None):

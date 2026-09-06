@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -136,6 +137,15 @@ class CliSettings:
         write_text(path, json.dumps(data, indent=2) + "\n")
 
 
+def _corrupt_backup_path(path: Path) -> Path:
+    """Backup name for a corrupt settings file, never overwriting an older one."""
+    backup = path.with_name(path.name + ".corrupt")
+    if not backup.exists():
+        return backup
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    return path.with_name(f"{path.name}.corrupt.{stamp}")
+
+
 def _reset_settings(path: Path, backup: Path) -> CliSettings:
     try:
         path.replace(backup)
@@ -159,12 +169,18 @@ def load_settings(path: Path | None = None) -> CliSettings:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         # Back up corrupt file and start fresh.
-        return _reset_settings(path, path.with_name(path.name + ".corrupt"))
+        return _reset_settings(path, _corrupt_backup_path(path))
     if not isinstance(data, dict):
-        return _reset_settings(path, path.with_name(path.name + ".corrupt"))
+        return _reset_settings(path, _corrupt_backup_path(path))
+    profiles_raw = data.get("Profiles", [])
+    if not isinstance(profiles_raw, list):
+        # A hand-edited or CLI-corrupted file (e.g. Profiles as an object)
+        # must be treated as corruption -- silently dropping every profile
+        # would overwrite the user's configuration on the next save.
+        return _reset_settings(path, _corrupt_backup_path(path))
     settings = CliSettings()
     settings.profiles = [
-        CliProfile.from_dict(p) for p in data.get("Profiles", []) if isinstance(p, dict)
+        CliProfile.from_dict(p) for p in profiles_raw if isinstance(p, dict)
     ]
     settings.extra = {k: v for k, v in data.items() if k != "Profiles"}
     if not settings.profiles:

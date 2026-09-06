@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -40,12 +41,19 @@ from .common import (
     info_label,
     make_card,
     section_label,
+    tr,
 )
 
 _STATUS_COLORS = {
     "Added": OK_GREEN.name(),
     "Modified": ACCENT.name(),
     "Removed": WARN.name(),
+}
+
+_STATUS_ICONS = {
+    "Added": "+",
+    "Modified": "~",
+    "Removed": "-",
 }
 
 
@@ -73,61 +81,74 @@ class UpdatePage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label("UPDATES", level=1)
+        title = section_label(tr("UPDATES"), level=1)
         title.setWordWrap(True)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
         subtitle = info_label(
-            "Check the installed GAMMA version and addon list against the latest available data, then apply any changes."
+            tr("Check the installed GAMMA version and addon list against the latest available data, then apply any changes.")
         )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(subtitle)
 
-        # ---------- status card ----------
-        card, layout = make_card()
-        root.addWidget(card)
-        layout.addWidget(section_label("Update status"))
+        # ---------- version status card ----------
+        status_card, status_layout = make_card()
+        root.addWidget(status_card)
+        status_layout.addWidget(section_label(tr("Version status"), level=2))
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(6)
-        grid.addWidget(info_label("Installed GAMMA version:"), 0, 0)
-        self.installed_value = QLabel("-")
+        version_grid = QGridLayout()
+        version_grid.setHorizontalSpacing(16)
+        version_grid.setVerticalSpacing(6)
+        version_grid.addWidget(info_label(tr("Installed GAMMA version:")), 0, 0)
+        self.installed_value = QLabel(tr("-"))
         self.installed_value.setObjectName("mono")
-        grid.addWidget(self.installed_value, 0, 1)
-        grid.addWidget(info_label("Latest GAMMA version:"), 1, 0)
-        self.latest_value = QLabel("-")
+        version_grid.addWidget(self.installed_value, 0, 1)
+        version_grid.addWidget(info_label(tr("Latest GAMMA version:")), 1, 0)
+        self.latest_value = QLabel(tr("-"))
         self.latest_value.setObjectName("mono")
-        grid.addWidget(self.latest_value, 1, 1)
-        grid.setColumnStretch(2, 1)
-        layout.addLayout(grid)
+        version_grid.addWidget(self.latest_value, 1, 1)
+        version_grid.setColumnStretch(2, 1)
+        status_layout.addLayout(version_grid)
 
-        self.status_label = QLabel(
-            "Open this page to check the active GAMMA installation."
+        self.status_label = info_label(
+            tr("Open this page to check the active GAMMA installation.")
         )
-        self.status_label.setObjectName("dim")
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        status_layout.addWidget(self.status_label)
 
-        row = QHBoxLayout()
-        self.check_button = QPushButton("Check for updates")
+        check_row = QHBoxLayout()
+        self.check_button = QPushButton(tr("Check for updates"))
         self.check_button.setObjectName("primary")
         self.check_button.clicked.connect(self._check)
-        row.addWidget(self.check_button)
-        row.addStretch(1)
-        layout.addLayout(row)
+        check_row.addWidget(self.check_button)
+        check_row.addStretch(1)
+        status_layout.addLayout(check_row)
 
         # ---------- updates card ----------
         updates_card, updates_layout = make_card()
         root.addWidget(updates_card)
-        updates_layout.addWidget(section_label("Available addon changes"))
-        self.no_updates_label = info_label("No addon changes. GAMMA is up to date.")
+
+        updates_header = QHBoxLayout()
+        updates_header.addWidget(section_label(tr("Available addon changes")), 1)
+        self.count_summary = QLabel("")
+        self.count_summary.setTextFormat(Qt.TextFormat.RichText)
+        updates_header.addWidget(self.count_summary)
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["All", "Added", "Modified", "Removed"])
+        self.filter_combo.setMinimumWidth(110)
+        self.filter_combo.currentTextChanged.connect(self._apply_filter)
+        self.filter_combo.setVisible(False)
+        updates_header.addWidget(self.filter_combo)
+        updates_layout.addLayout(updates_header)
+
+        self.no_updates_label = info_label(tr("No addon changes. GAMMA is up to date."))
         self.no_updates_label.setObjectName("accent")
         updates_layout.addWidget(self.no_updates_label)
 
         self.table = QTableWidget(0, 3, self)
-        self.table.setHorizontalHeaderLabels(["Status", "Addon", "Archive change"])
+        self.table.setHorizontalHeaderLabels(["", "Addon", "Archive change"])
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -142,26 +163,29 @@ class UpdatePage(QWidget):
         # ---------- apply card ----------
         apply_card, apply_layout = make_card()
         root.addWidget(apply_card)
-        apply_layout.addWidget(section_label("Update options"))
-        self.minimal_cb = QCheckBox("Minimal (delete archives after extraction)")
-        self.preserve_user_cb = QCheckBox("Keep user.ltx settings")
+        apply_layout.addWidget(section_label(tr("Update options")))
+        options_row = QHBoxLayout()
+        options_row.setSpacing(18)
+        self.minimal_cb = QCheckBox(tr("Minimal (delete archives after extraction)"))
+        self.preserve_user_cb = QCheckBox(tr("Keep user.ltx settings"))
         self.preserve_user_cb.setToolTip(
-            "Keep your existing user.ltx (game options) across the update. "
-            "If unchecked, controls, keybindings and mod-specific settings will be reset."
+            tr("Keep your existing user.ltx (game options) across the update. If unchecked, controls, keybindings and mod-specific settings will be reset.")
         )
-        self.preserve_mcm_cb = QCheckBox("Keep MCM settings")
+        self.preserve_mcm_cb = QCheckBox(tr("Keep MCM settings"))
         self.preserve_mcm_cb.setToolTip(
-            "Keep your Mod Configuration Menu (MCM) settings across the update. "
-            "If unchecked, all mod configurations (axr_options.ltx) will be lost."
+            tr("Keep your Mod Configuration Menu (MCM) settings across the update. If unchecked, all mod configurations (axr_options.ltx) will be lost.")
         )
         self.preserve_user_cb.setChecked(True)
         self.preserve_mcm_cb.setChecked(True)
         for cb in (self.minimal_cb, self.preserve_user_cb, self.preserve_mcm_cb):
-            apply_layout.addWidget(cb)
+            options_row.addWidget(cb)
+        options_row.addStretch(1)
+        apply_layout.addLayout(options_row)
 
-        self.apply_button = QPushButton("Apply updates")
-        self.apply_button.setObjectName("primary")
+        self.apply_button = QPushButton(tr("Apply updates"))
+        self.apply_button.setObjectName("hero")
         self.apply_button.setEnabled(False)
+        self.apply_button.setMinimumHeight(44)
         self.apply_button.clicked.connect(self._apply)
         apply_layout.addWidget(self.apply_button)
 
@@ -219,24 +243,53 @@ class UpdatePage(QWidget):
         has_diffs = bool(self._diffs)
         self.no_updates_label.setVisible(not has_diffs)
         self.table.setVisible(has_diffs)
+        self.filter_combo.setVisible(has_diffs)
+
+        # Plain text change-count summary, colored per kind (no badge chrome).
+        counts = {"Added": 0, "Modified": 0, "Removed": 0}
+        for diff in self._diffs:
+            if diff.status in counts:
+                counts[diff.status] += 1
+        parts = [
+            f"<span style='color:{_STATUS_COLORS[kind]}; font-weight:bold;'>"
+            f"{count} {kind.lower()}</span>"
+            for kind, count in counts.items()
+            if count
+        ]
+        self.count_summary.setText("  ".join(parts))
+        self.count_summary.setVisible(has_diffs and bool(parts))
+        self._apply_filter()
 
         text, kind = status_summary(status)
         self._set_status(text, kind)
         self._update_button_states()
 
+    def _apply_filter(self) -> None:
+        selected = self.filter_combo.currentText()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            status = item.data(Qt.ItemDataRole.UserRole) if item else ""
+            self.table.setRowHidden(
+                row, selected != "All" and status != selected
+            )
+
     def _add_diff_row(self, diff: UpdateDiff) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        status_item = QTableWidgetItem(diff.status)
+        icon = _STATUS_ICONS.get(diff.status, "?")
+        status_item = QTableWidgetItem(f"{icon} {diff.status}")
         status_item.setForeground(
             QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY.name()))
         )
+        status_item.setData(Qt.ItemDataRole.UserRole, diff.status)
         parts = diff.text.split(" -> ")
         name = parts[0].strip()
         change = " -> ".join(p.strip() for p in parts[1:]) if len(parts) > 1 else ""
+        change_item = QTableWidgetItem(change)
+        change_item.setForeground(QColor(LIGHT_GREY.name()))
         self.table.setItem(row, 0, status_item)
         self.table.setItem(row, 1, QTableWidgetItem(name))
-        self.table.setItem(row, 2, QTableWidgetItem(change))
+        self.table.setItem(row, 2, change_item)
 
     # ----- check -----
     def _check(self) -> None:
@@ -262,7 +315,7 @@ class UpdatePage(QWidget):
             profile.gamma,
             profile.cache,
         )
-        self.check_button.setText("Checking...")
+        self.check_button.setText(tr("Checking..."))
         self._update_button_states()
         self._set_status("Checking the active GAMMA installation...", "dim")
         task = BackgroundTask(check_updates, profile, parent=self)
@@ -286,7 +339,7 @@ class UpdatePage(QWidget):
             return
         self._check_task = None
         self._checking = False
-        self.check_button.setText("Check for updates")
+        self.check_button.setText(tr("Check for updates"))
         current = self.window.settings.active_profile
         if (
             generation != self._check_generation
@@ -305,7 +358,7 @@ class UpdatePage(QWidget):
             return
         self._check_task = None
         self._checking = False
-        self.check_button.setText("Check for updates")
+        self.check_button.setText(tr("Check for updates"))
         if generation != self._check_generation:
             self._update_button_states()
             return
@@ -319,18 +372,17 @@ class UpdatePage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(
                 self,
-                "Busy",
-                "An installation is already running. Wait for it to finish.",
+                tr("Busy"),
+                tr("An installation is already running. Wait for it to finish."),
             )
             return
         if not self._diffs:
-            QMessageBox.information(self, "No Updates", "No updates to apply.")
+            QMessageBox.information(self, tr("No Updates"), tr("No updates to apply."))
             return
         answer = QMessageBox.question(
             self,
-            "Confirm Update",
-            f"Apply {len(self._diffs)} update(s)? This will download and re-extract "
-            "the updated addons.",
+            tr("Confirm Update"),
+            tr("Apply {arg} update(s)? This will download and re-extract the updated addons.", arg=len(self._diffs)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -346,7 +398,7 @@ class UpdatePage(QWidget):
 
         self._applying = True
         # Holds the global lock for the duration: this writes the install tree.
-        self.window.set_install_busy(True)
+        self.window.set_install_busy(True, "gamma")
         self.apply_progress.reset()
         self._apply_runner = CommandRunner(
             cli_command(args, progress_interval_ms=200), parent=self
