@@ -32,7 +32,7 @@ The landing page. Shows the active profile, install status for Anomaly and GAMMA
 ### Install
 Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent) and an overall completion bar. Pick a base folder and hit **Create folders** to auto-generate the Anomaly/GAMMA/cache layout.
 
-<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/b246956d-f400-41dc-8bd5-d66245e59b2e" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/65c1f778-3710-4a4c-a470-c90a2a348ff4" />
 
 - If a download is interrupted, the next launch offers **Resume GAMMA Installation** — cached archives are hash-verified and reused, only missing or changed ones are re-downloaded.
 - **Minimal mode** deletes addon archives after extraction to save ~50 GB of disk space.
@@ -42,7 +42,7 @@ Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table
 ### Play
 Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's executable without the MO2 virtual file system. Targets are read straight from `ModOrganizer.ini`, with `AnomalyLauncher.exe` used as a fallback if none are found.
 
-<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/c8b9db12-f630-4bc6-90fd-2d994616db36" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/e7c28fe5-88da-46bc-abb9-348e972b4023" />
 
 - **Auto runner detection** — the newest installed GE-Proton build is picked automatically and launched through `umu-run`.
 - **Built-in GE-Proton installer** — browse recent GE-Proton releases, download with a progress bar and cancel support, and COMMANDER verifies the SHA-512 checksum and installs it into `compatibilitytools.d` for you. No manual downloading or extracting.
@@ -59,7 +59,7 @@ Applying updates reuses the same live progress UI as a fresh install, respects t
 ### Mod Manager
 Direct, careful editing of the active MO2 profile's `modlist.txt` — search, enable/disable, delete and reorder mods, grouped by the `_separator` categories GAMMA ships.
 
-<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/a0ccfe1a-5a25-42a7-a7c3-55af4c105773" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/27c92076-3860-4762-91f2-435a91fe1e9e" />
 
 - **Drag-and-drop reordering** with multi-selection support, plus Move Up/Down and **Flip Priority** to reverse the entire load order in one click.
 - Create new categories, install a local ZIP/7Z/RAR/FOMOD mod archive straight into the modlist, and use the active profile as MO2's selected profile without opening MO2.
@@ -74,6 +74,11 @@ If a broken mod matches an entry in the official GAMMA mod list, COMMANDER can *
 ### Profiles
 Create, edit, activate and delete CLI profiles — each with its own Anomaly, GAMMA, cache, MO2 profile, download-thread and repository settings. Creation, activation and deletion are delegated to `stalker-gamma config` so its side effects (MO2's `selected_profile`, modlist downloads) happen exactly as the CLI intends. Advanced fields expose every repo URL and branch the CLI supports, for anyone using a fork or mirror.
 
+### System Check
+Checks every dependency GAMMA and MO2 need in one place: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the 32-bit loader), each individual Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a copyable install command for your distro, and manual overrides let you point COMMANDER at tools installed in non-standard locations.
+
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/55aa2e70-9940-476d-9526-d53611718e2d" />
+
 ### Utilities
 A toolbox for maintenance and recovery:
 
@@ -87,17 +92,15 @@ A toolbox for maintenance and recovery:
 - **Fresh Reset**, **GAMMA Reset** and **Full Uninstall** — guarded destructive actions that show exactly what will be deleted and what's kept (your Wine prefix always survives) before doing anything.
 - Opens the bundled **COMMANDER ASSISTANT** log analyzer directly from the page.
 
+<img width="1178" height="735" alt="image" src="https://github.com/user-attachments/assets/05d47787-1d36-4ade-9b49-dedf7da53b17" />
+
+
 ### Settings
 - **10 languages** — English, French, Spanish, German, Romanian, Polish, Russian, Ukrainian, Portuguese and Turkish. Switch anytime; it applies instantly with no restart, unless a background task is running.
 - **5 themes** — GAMMA, Dusk, Midnight, Terminal and Black, each with its own color palette.
 - Interface font family (6 options) and size (9–22 px), both applied live.
 - Startup page, default runner, an "Always use GameMode" toggle, an Open Winecfg shortcut, and MO2 Display Scale presets (100–200%) for readable text in Mod Organizer.
 - Desktop autostart, launching COMMANDER automatically on login.
-
-### System Check
-Checks every dependency GAMMA and MO2 need in one place: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the 32-bit loader), each individual Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a copyable install command for your distro, and manual overrides let you point COMMANDER at tools installed in non-standard locations.
-
-<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/55aa2e70-9940-476d-9526-d53611718e2d" />
 
 ---
 
@@ -148,7 +151,6 @@ Use **Updates** for addon updates afterward, and **Verify Integrity** if somethi
 
 Licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE). This project bundles and drives `stalker-gamma-cli`, which is GPL-3.0, so this front-end is GPL-3.0 as well.
 
-- Copyright for the underlying CLI installer logic: **FaithBeam**
-- Copyright for this Python/Qt graphical interface: **SSH-Kitty**
+- Copyright for Python/Qt graphical interface: **SSH-Kitty**
 
 *Not affiliated with GSC Game World or the GAMMA development team.*
