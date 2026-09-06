@@ -54,6 +54,8 @@ Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's execut
 ### Updates
 Compares your installed GAMMA version and addon list against the latest official data — without hitting the rate-limited GitHub REST API — and shows exactly what changed: Added, Modified, Removed, and archive-name changes.
 
+<img width="1550" height="1042" alt="image" src="https://github.com/user-attachments/assets/d9aa93db-efdb-461a-a51c-6c30f8c3483b" />
+
 Applying updates reuses the same live progress UI as a fresh install, respects the Minimal/preserve-settings options, and holds the global install lock so it can never run alongside another install.
 
 ### Mod Manager
