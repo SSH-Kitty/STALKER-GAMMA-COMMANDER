@@ -12,7 +12,7 @@
 
 </div>
 
-<img width="1235" height="993" alt="Dashboard" src="https://github.com/user-attachments/assets/34a95fd4-7f86-461c-a8de-db0c7e75101a" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/e06df21c-ccb7-4541-8a01-76a07bc7ae1d" />
 
 ## What this is
 
@@ -32,7 +32,7 @@ The landing page. Shows the active profile, install status for Anomaly and GAMMA
 ### Install
 Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent) and an overall completion bar. Pick a base folder and hit **Create folders** to auto-generate the Anomaly/GAMMA/cache layout.
 
-<img width="1184" height="1088" alt="Install" src="https://github.com/user-attachments/assets/653778d2-049d-4b84-b780-c3141c33ffab" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/b246956d-f400-41dc-8bd5-d66245e59b2e" />
 
 - If a download is interrupted, the next launch offers **Resume GAMMA Installation** — cached archives are hash-verified and reused, only missing or changed ones are re-downloaded.
 - **Minimal mode** deletes addon archives after extraction to save ~50 GB of disk space.
@@ -42,7 +42,7 @@ Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table
 ### Play
 Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's executable without the MO2 virtual file system. Targets are read straight from `ModOrganizer.ini`, with `AnomalyLauncher.exe` used as a fallback if none are found.
 
-<img width="1234" height="949" alt="Play" src="https://github.com/user-attachments/assets/a64d8611-e23a-4b76-ae1a-ec465223489c" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/c8b9db12-f630-4bc6-90fd-2d994616db36" />
 
 - **Auto runner detection** — the newest installed GE-Proton build is picked automatically and launched through `umu-run`.
 - **Built-in GE-Proton installer** — browse recent GE-Proton releases, download with a progress bar and cancel support, and COMMANDER verifies the SHA-512 checksum and installs it into `compatibilitytools.d` for you. No manual downloading or extracting.
@@ -54,14 +54,12 @@ Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's execut
 ### Updates
 Compares your installed GAMMA version and addon list against the latest official data — without hitting the rate-limited GitHub REST API — and shows exactly what changed: Added, Modified, Removed, and archive-name changes.
 
-<img width="1183" height="583" alt="Updates" src="https://github.com/user-attachments/assets/8547ab1f-2660-4df8-997c-9957447dca81" />
-
 Applying updates reuses the same live progress UI as a fresh install, respects the Minimal/preserve-settings options, and holds the global install lock so it can never run alongside another install.
 
 ### Mod Manager
 Direct, careful editing of the active MO2 profile's `modlist.txt` — search, enable/disable, delete and reorder mods, grouped by the `_separator` categories GAMMA ships.
 
-<img width="1198" height="892" alt="Mod Manager" src="https://github.com/user-attachments/assets/6f2367b1-fa7f-4e01-8b0f-6f851d038fd1" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/a0ccfe1a-5a25-42a7-a7c3-55af4c105773" />
 
 - **Drag-and-drop reordering** with multi-selection support, plus Move Up/Down and **Flip Priority** to reverse the entire load order in one click.
 - Create new categories, install a local ZIP/7Z/RAR/FOMOD mod archive straight into the modlist, and use the active profile as MO2's selected profile without opening MO2.
@@ -79,7 +77,7 @@ Create, edit, activate and delete CLI profiles — each with its own Anomaly, GA
 ### Utilities
 A toolbox for maintenance and recovery:
 
-<img width="1178" height="616" alt="Utilities" src="https://github.com/user-attachments/assets/7f5e790e-f532-4f1c-97f9-b249eb2b5e63" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/244e4dec-eefa-45ea-9111-d10d947f8ffc" />
 
 - **Cache cleanup** — preview which archives are out of date and how much space they'll free, then clean them.
 - **Clear shader cache** and **Remove ReShade** for a clean slate after driver or mod changes.
@@ -99,7 +97,7 @@ A toolbox for maintenance and recovery:
 ### System Check
 Checks every dependency GAMMA and MO2 need in one place: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the 32-bit loader), each individual Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a copyable install command for your distro, and manual overrides let you point COMMANDER at tools installed in non-standard locations.
 
-<img width="1161" height="537" alt="System Check" src="https://github.com/user-attachments/assets/d55c673f-6139-48f7-9eff-190737d7dd64" />
+<img width="1551" height="1044" alt="image" src="https://github.com/user-attachments/assets/55aa2e70-9940-476d-9526-d53611718e2d" />
 
 ---
 
