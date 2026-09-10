@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from PySide6.QtCore import QPointF, Qt, QTimer, QUrl
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    QUrl,
+    QVariantAnimation,
+)
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
+    QFont,
     QLinearGradient,
     QPainter,
     QPen,
@@ -15,6 +24,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -27,9 +37,11 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version_label__, gui_settings
-from ..i18n import set_active_language
+from ..i18n import LANGUAGE_INFO, active_language, set_active_language
 from ..settings import load_settings
 from ..themes import (
+    THEME_INFO,
+    active_theme,
     active_theme_tokens,
     build_palette,
     build_stylesheet,
@@ -37,7 +49,9 @@ from ..themes import (
 )
 from .about_page import AboutPage
 from .common import (
+    NoWheelComboBox,
     count_active_mods,
+    mo2_running,
     resume_after_shutdown,
     shutdown_active_runners,
     tr,
@@ -70,23 +84,118 @@ NAV_ITEMS = [
 _SEPARATOR_AFTER = {1, 4, 7}
 
 
+#: Text grows to this fraction of its normal size while a tab is hovered.
+_HOVER_SCALE = 1.12
+_HOVER_ANIM_MS = 150
+
+
 class NavTabBar(QTabBar):
-    """QTabBar subclass that draws thin vertical separators between tab groups."""
+    """QTabBar subclass with hand-drawn tabs: hover-scaled text, the
+    selected-tab underline, and thin vertical separators between tab groups.
+
+    Text/underline/separator colors used to come entirely from the
+    #navtabs/#navtabs::tab QSS rules via the normal super().paintEvent()
+    path. Qt style sheets can't animate a property like font-size between
+    states (a :hover rule only ever snaps instantly), so growing the text
+    smoothly on hover means taking over painting instead. #navtabs::tab's
+    background is already transparent and border none - the only two things
+    actually drawn are the text color and the selected-tab underline, and
+    both reduce to simple rules reproduced exactly below: accent_strong
+    whenever a tab is hovered, or selected while not in Settings mode;
+    text_nav otherwise, with the underline shown under that same
+    selected-and-not-in-Settings-mode condition.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
+        self._hovered_index = -1
+        self._hover_scale: dict[int, float] = {}
+        self._hover_anims: dict[int, QVariantAnimation] = {}
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        index = self.tabAt(event.pos())
+        if index == self._hovered_index:
+            return
+        previous = self._hovered_index
+        self._hovered_index = index
+        if previous >= 0:
+            self._animate_tab_scale(previous, 1.0)
+        if index >= 0:
+            self._animate_tab_scale(index, _HOVER_SCALE)
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        if self._hovered_index >= 0:
+            self._animate_tab_scale(self._hovered_index, 1.0)
+            self._hovered_index = -1
+
+    def _animate_tab_scale(self, index: int, target: float) -> None:
+        anim = self._hover_anims.get(index)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(
+                lambda value, i=index: self._on_scale_changed(i, value)
+            )
+            self._hover_anims[index] = anim
+        anim.stop()
+        anim.setStartValue(self._hover_scale.get(index, 1.0))
+        anim.setEndValue(target)
+        anim.setDuration(_HOVER_ANIM_MS)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.start()
+
+    def _on_scale_changed(self, index: int, value: float) -> None:
+        self._hover_scale[index] = value
+        self.update()
+
+    def _scaled_font(self, scale: float) -> QFont:
+        font = QFont(self.font())
+        pixel_size = self.font().pixelSize()
+        if pixel_size > 0:
+            font.setPixelSize(max(1, round(pixel_size * scale)))
+        else:
+            font.setPointSizeF(max(1.0, self.font().pointSizeF() * scale))
+        return font
 
     def paintEvent(self, _event) -> None:
-        super().paintEvent(_event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        tokens = active_theme_tokens()
+        accent = QColor(tokens["accent_strong"])
+        text_nav = QColor(tokens["text_nav"])
+        settings_mode = bool(self.property("settingsMode"))
+        current = self.currentIndex()
+
+        for i in range(self.count()):
+            rect = self.tabRect(i)
+            is_selected = i == current
+            is_hovered = i == self._hovered_index
+            active = is_hovered or (is_selected and not settings_mode)
+
+            painter.setFont(self._scaled_font(self._hover_scale.get(i, 1.0)))
+            painter.setPen(accent if active else text_nav)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.tabText(i))
+
+            if is_selected and not settings_mode:
+                pen = QPen(accent)
+                pen.setWidth(2)
+                painter.setPen(pen)
+                painter.drawLine(
+                    QPointF(rect.left(), rect.bottom() - 1),
+                    QPointF(rect.right(), rect.bottom() - 1),
+                )
 
         if self.count() < 2:
             return
 
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
         # Use the active theme accent so separators stay green in GAMMA,
         # teal in Midnight, amber in Dusk, and match the other theme accents.
-        accent = QColor(active_theme_tokens()["accent_strong"])
-        accent.setAlpha(150)
-        pen = QPen(accent)
+        separator_color = QColor(tokens["accent_strong"])
+        separator_color.setAlpha(150)
+        pen = QPen(separator_color)
         pen.setWidth(1)
         painter.setPen(pen)
 
@@ -156,6 +265,10 @@ class MainWindow(QMainWindow):
         self._last_tab_key = "dashboard"
         self._nav_refresh_serial = 0
 
+        # Built before _build_ui(): constructing pages there (e.g. the
+        # Dashboard) can trigger refresh_settings() -> _refresh_status_bar()
+        # immediately, which needs these widgets to already exist.
+        self._build_status_bar()
         self._build_ui()
         self.tabs.setCurrentIndex(0)
 
@@ -246,6 +359,27 @@ class MainWindow(QMainWindow):
         self._page_index["settings"] = self.stack.count()
         self.stack.addWidget(self._pages["settings"])
 
+        # A quick fade whenever the visible page changes. Hooking
+        # currentChanged (emitted for every setCurrentIndex() call
+        # regardless of caller) covers nav-tab switches and opening/closing
+        # Settings alike, without needing to touch each call site.
+        # Page content is deliberately semi-transparent (Backdrop's glow is
+        # meant to bleed through, per its own docstring) - dropping this
+        # effect's opacity all the way to 0 doesn't just fade the page, it
+        # also fades away that dimming layer itself, briefly exposing the
+        # raw, undimmed backdrop glow underneath (most visible as a flash
+        # in its brightest spot, the top-left glow). Keeping the floor high
+        # (0.9) keeps a perceptible fade without ever un-dimming the glow
+        # enough for that to be noticeable.
+        self._stack_opacity = QGraphicsOpacityEffect(self.stack)
+        self.stack.setGraphicsEffect(self._stack_opacity)
+        self._stack_fade = QPropertyAnimation(self._stack_opacity, b"opacity", self)
+        self._stack_fade.setDuration(400)
+        self._stack_fade.setStartValue(0.9)
+        self._stack_fade.setEndValue(1.0)
+        self._stack_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self.stack.currentChanged.connect(self._on_stack_page_changed)
+
         self.tabs.currentChanged.connect(self._on_nav)
         self.tabs.tabBarClicked.connect(self._on_tab_clicked)
         layout.addWidget(header)
@@ -261,9 +395,66 @@ class MainWindow(QMainWindow):
         if self.width() < header_width:
             self.resize(header_width, self.height())
 
-        self.statusBar().showMessage(
-            f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}"
+    def _build_status_bar(self) -> None:
+        """Build the persistent status bar contents exactly once.
+
+        Must NOT be called from ``_build_ui()``: that method also runs on
+        every ``switch_language()`` rebuild, and ``QStatusBar.addPermanentWidget``
+        is not idempotent - nothing removes a previously-added widget, so
+        calling this from there would stack a duplicate GitHub button (and
+        duplicate Language/Theme combos) on every language switch. Text and
+        combo selections are kept current afterward via ``_refresh_status_bar()``
+        instead of rebuilding any of this.
+        """
+        # Kept compact and font-size-independent from the rest of the app
+        # (unlike the themed QComboBox elsewhere, which is deliberately
+        # roomier for normal clicking) - this bar was a single thin row of
+        # plain text before the Language/Theme combos existed, and the
+        # combo boxes' usual padding/min-height from the shared stylesheet
+        # would otherwise make the whole bar noticeably taller.
+        # border/background use the dynamic palette() QSS functions rather
+        # than a hardcoded color so the boxed look stays correct across
+        # every theme without needing theme tokens imported here.
+        _STATUS_LABEL_STYLE = "font-size: 12px;"
+        _STATUS_COMBO_STYLE = (
+            "QComboBox {"
+            "  font-size: 12px;"
+            "  padding: 1px 6px;"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 3px;"
+            "  background: palette(button);"
+            "}"
+            "QComboBox::drop-down { border: none; width: 16px; }"
         )
+
+        self._status_info_label = QLabel()
+        self._status_info_label.setStyleSheet(_STATUS_LABEL_STYLE)
+        self.statusBar().addWidget(self._status_info_label)
+
+        self._status_language_combo = NoWheelComboBox()
+        self._status_language_combo.setStyleSheet(_STATUS_COMBO_STYLE)
+        self._status_language_combo.setFixedHeight(21)
+        for code, native, _english in LANGUAGE_INFO:
+            self._status_language_combo.addItem(native, code)
+        self._status_language_combo.currentIndexChanged.connect(
+            self._on_status_language
+        )
+        self.statusBar().addWidget(self._status_language_combo)
+
+        self._status_theme_label = QLabel()
+        self._status_theme_label.setStyleSheet(_STATUS_LABEL_STYLE)
+        self.statusBar().addWidget(self._status_theme_label)
+
+        self._status_theme_combo = NoWheelComboBox()
+        self._status_theme_combo.setStyleSheet(_STATUS_COMBO_STYLE)
+        self._status_theme_combo.setFixedHeight(21)
+        for key, label, _description, _swatches in THEME_INFO:
+            self._status_theme_combo.addItem(label, key)
+        self._status_theme_combo.currentIndexChanged.connect(self._on_status_theme)
+        self.statusBar().addWidget(self._status_theme_combo)
+
+        self._refresh_status_bar()
+
         github_link = QPushButton(tr("GitHub"))
         github_link.setObjectName("githubLink")
         github_link.setToolTip(tr("Open SSH-Kitty on GitHub"))
@@ -276,6 +467,38 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().addPermanentWidget(github_link)
+
+    def _refresh_status_bar(self) -> None:
+        """Re-render status bar text and re-select the combos' current items.
+
+        Called after anything that could change the active profile, language
+        or theme. The status bar is built once and never torn down (unlike
+        page content, which switch_language() rebuilds from scratch), so its
+        tr()-wrapped text needs this explicit refresh to pick up a language
+        change instead of getting it "for free" via reconstruction.
+        """
+        self._status_info_label.setText(
+            f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}   |   {tr('Language:')}"
+        )
+        self._status_theme_label.setText(f"   |   {tr('Theme:')}")
+        lang_index = self._status_language_combo.findData(active_language())
+        self._status_language_combo.blockSignals(True)
+        self._status_language_combo.setCurrentIndex(max(lang_index, 0))
+        self._status_language_combo.blockSignals(False)
+        theme_index = self._status_theme_combo.findData(active_theme())
+        self._status_theme_combo.blockSignals(True)
+        self._status_theme_combo.setCurrentIndex(max(theme_index, 0))
+        self._status_theme_combo.blockSignals(False)
+
+    def _on_status_language(self, *_args) -> None:
+        code = self._status_language_combo.currentData()
+        if code:
+            self.apply_language(code)
+
+    def _on_status_theme(self, *_args) -> None:
+        key = self._status_theme_combo.currentData()
+        if key:
+            self.apply_theme(key)
 
     #: Page class for each nav key. A page opts into extra dispatch behavior
     #: (see ``_schedule_page_refresh``) by defining the matching method, not
@@ -304,6 +527,10 @@ class MainWindow(QMainWindow):
     def _active_name(self) -> str:
         profile = self.settings.active_profile
         return profile.profile_name if profile else "(none)"
+
+    def _on_stack_page_changed(self, _index: int) -> None:
+        self._stack_fade.stop()
+        self._stack_fade.start()
 
     def _on_nav(self, index: int) -> None:
         if not (0 <= index < len(NAV_ITEMS)):
@@ -398,7 +625,45 @@ class MainWindow(QMainWindow):
         else:
             self.open_settings()
 
+    def _reject_language_or_theme_change(self, busy_message: str) -> bool:
+        """Show why a language/theme change is refused and revert both pickers.
+
+        Returns True if the change was refused (caller should stop), False
+        if it's safe to proceed. Shared by apply_theme() and apply_language()
+        since both are blocked by the same two conditions: a background task
+        (install_busy) or the game/Mod Organizer currently running (same
+        mo2_running() check the Launch Game button itself uses) - changing
+        either while the game is running is refused even though nothing
+        about apply_theme() itself is unsafe then, to keep the two pickers'
+        behavior consistent and predictable for the user.
+        """
+        if self.install_busy:
+            QMessageBox.warning(self, tr("Busy"), busy_message)
+        elif mo2_running():
+            QMessageBox.warning(
+                self,
+                tr("Busy"),
+                tr(
+                    "Mod Organizer / the game is currently running.\n\nClose it before running this action."
+                ),
+            )
+        else:
+            return False
+        settings_page = self._pages.get("settings")
+        if settings_page is not None and hasattr(settings_page, "refresh"):
+            # Revert both pickers to the still-active value - each already
+            # shows the rejected selection from the signal that called us.
+            settings_page.refresh()
+        self._refresh_status_bar()
+        return True
+
     def apply_theme(self, name: str) -> None:
+        if self._reject_language_or_theme_change(
+            tr(
+                "Cannot change the theme while a background task is running. Wait for it to finish, then try again."
+            )
+        ):
+            return
         gui_settings.save_gui_settings(theme=name)
         self._apply_style()
 
@@ -417,18 +682,15 @@ class MainWindow(QMainWindow):
         similar task is running): every page - and the background thread
         driving that task, which the page's own widgets hold a reference
         to - would be torn down and rebuilt, terminating or orphaning it.
+        Also refused while the game/Mod Organizer is running, the same
+        ``mo2_running()`` check the Launch Game button itself uses - it
+        becomes available again once the game quits.
         """
-        if self.install_busy:
-            QMessageBox.warning(
-                self,
-                tr("Busy"),
-                tr("Cannot change the language while a background task is running. Wait for it to finish, then try again."),
+        if self._reject_language_or_theme_change(
+            tr(
+                "Cannot change the language while a background task is running. Wait for it to finish, then try again."
             )
-            settings_page = self._pages.get("settings")
-            if settings_page is not None and hasattr(settings_page, "refresh"):
-                # Revert the combo to the still-active language - it already
-                # shows the rejected selection from the signal that called us.
-                settings_page.refresh()
+        ):
             return
         gui_settings.save_gui_settings(language=code)
         set_active_language(code)
@@ -467,6 +729,7 @@ class MainWindow(QMainWindow):
         self._nav_refresh_serial = 0
         self._build_ui()
         resume_after_shutdown()
+        self._refresh_status_bar()
 
         if previous_key in self._page_index:
             self.tabs.setCurrentIndex(self._page_index[previous_key])
@@ -543,7 +806,5 @@ class MainWindow(QMainWindow):
 
     def refresh_settings(self) -> None:
         self.settings = load_settings()
-        self.statusBar().showMessage(
-            f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}"
-        )
+        self._refresh_status_bar()
         self.update_mod_counter()

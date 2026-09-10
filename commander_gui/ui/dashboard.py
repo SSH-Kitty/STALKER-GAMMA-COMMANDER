@@ -20,6 +20,7 @@ from ..settings import CliSettings
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
 from ..winetricks import WINETRICKS_VERBS, check_winetricks_full_status
 from .common import (
+    OK_GREEN,
     BackgroundTask,
     InstallStatusRow,
     anomaly_installed,
@@ -29,6 +30,7 @@ from .common import (
     gamma_installed,
     human_size,
     info_label,
+    install_hover_grow_text,
     make_card,
     mo2_running,
     open_in_file_manager,
@@ -342,7 +344,7 @@ class DashboardPage(QWidget):
             bar_label = QLabel(tr("{key}: {arg}", key=key, arg=human_size(value)))
             layout.addWidget(bar_label)
         total_label = QLabel(tr("Total: {arg}", arg=human_size(total)))
-        total_label.setObjectName("accent")
+        total_label.setStyleSheet(f"color: {OK_GREEN.name()};")
         layout.addWidget(total_label)
         if unavailable is not None:
             status_label = info_label(tr("Storage usage unavailable: {unavailable}", unavailable=unavailable))
@@ -468,9 +470,15 @@ class DashboardPage(QWidget):
             layout.addLayout(grid)
 
         status_label = info_label(status_text)
-        status_label.setObjectName(status_kind)
-        status_label.style().unpolish(status_label)
-        status_label.style().polish(status_label)
+        if status_kind == "accent":
+            # "Up to date" is a positive/ready result, same as the Installed
+            # status dot elsewhere on this page - use the same fixed green
+            # rather than the theme's accent color so the two always match.
+            status_label.setStyleSheet(f"color: {OK_GREEN.name()};")
+        else:
+            status_label.setObjectName(status_kind)
+            status_label.style().unpolish(status_label)
+            status_label.style().polish(status_label)
         layout.addWidget(status_label)
 
         row = QHBoxLayout()
@@ -500,6 +508,7 @@ class DashboardPage(QWidget):
             play = QPushButton(tr("Play GAMMA"))
             play.setObjectName("primary")
             self._play_button = play
+            install_hover_grow_text(play, "accent_text")
             play.clicked.connect(self._play_gamma)
             layout.addWidget(play)
             QTimer.singleShot(0, self._bind_play_state)

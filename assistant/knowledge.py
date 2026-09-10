@@ -178,7 +178,7 @@ DEPENDENCY_MISSING = (
 )
 
 NO_ACTIVE_PROFILE = (
-    "Create and activate a profile on COMMANDER's Profiles page before you "
+    "Create and activate a profile on COMMANDER's Profiles page before "
     "installing or updating."
 )
 

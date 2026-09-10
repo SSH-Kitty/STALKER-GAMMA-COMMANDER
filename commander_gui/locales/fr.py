@@ -669,6 +669,7 @@ TRANSLATIONS: dict[str, str] = {
     "Unknown distribution": "Distribution inconnue",
     "Update available ({installed} → {latest})": "Mise à jour disponible ({installed} → {latest})",
     "Update check failed: {message}": "La vérification des mises à jour a échoué : {message}",
+    "Archive updated": "Archive mise à jour",
     "Winetricks is not installed, so these cannot be checked yet - see the Winetricks row above.": "Winetricks n'est pas installé, donc cela ne peut pas encore être vérifié - voir la ligne Winetricks ci-dessus.",
     "installed": "installé",
     "missing": "manquant",
@@ -719,11 +720,12 @@ TRANSLATIONS: dict[str, str] = {
     "Font family:": "Police :",
     "Interface font size:": "Taille de police de l'interface :",
     "Language:": "Langue :",
+    "Theme:": "Thème :",
     "Page on startup:": "Page au démarrage :",
     "Text Files (*.txt);;All Files (*)": "Fichiers texte (*.txt);;Tous les fichiers (*)",
     "{label} (Installed)": "{label} (installée)",
     # Theme picker (settings_page.py, THEME_INFO from themes.py) - the theme
-    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal) are
+    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal, Reactor) are
     # kept as stylized names, like other proper nouns; only the descriptive
     # sentence per theme is translated.
     "The default look: deep green-black with a radiation-green glow.": "L'apparence par défaut : un noir verdâtre profond avec une lueur verte radioactive.",
@@ -731,9 +733,11 @@ TRANSLATIONS: dict[str, str] = {
     "Warm charcoal and amber with orange sunset accents.": "Anthracite chaud et ambre, avec des touches orangées de coucher de soleil.",
     "Cool slate blues and greys with a teal accent.": "Bleus et gris ardoise froids, avec une touche turquoise.",
     "Retro CRT: pure black with neon green phosphor text.": "Style CRT rétro : noir pur avec un texte phosphorescent vert néon.",
+    "Deep black with a glowing reactor-coolant teal accent.": "Noir profond avec un accent turquoise lumineux, semblable au liquide de refroidissement d'un réacteur.",
     # Verify Integrity temporarily disabled (install_page.py) - see
     # VERIFY_INTEGRITY_DISABLED.
     "Verify Integrity is currently under maintenance": "Verify Integrity est actuellement en maintenance",
     "Cannot change the language while a background task is running. Wait for it to finish, then try again.": "Impossible de changer de langue pendant qu'une tâche est en cours. Attends qu'elle se termine, puis réessaie.",
+    "Cannot change the theme while a background task is running. Wait for it to finish, then try again.": "Impossible de changer de thème pendant qu'une tâche est en cours. Attends qu'elle se termine, puis réessaie.",
     "Applies immediately, unless a background task is running.": "S'applique immédiatement, sauf si une tâche est en cours.",
 }

@@ -1468,7 +1468,10 @@ class InstallPage(QWidget):
             f"Anomaly re-check: {counts['OK']} OK, {counts['CORRUPT']} CORRUPT, "
             f"{counts['NOT FOUND']} NOT FOUND"
         )
-        self._conclude_after_repairs()
+        # Route through the pipeline, not straight to the verdict: a pending
+        # GAMMA repair (both Anomaly and GAMMA needed fixing) must still run
+        # here, or it's silently skipped and reported as "no issues found".
+        self._advance_repair_pipeline()
 
     def _conclude_after_repairs(self) -> None:
         counts = self._verify_counts

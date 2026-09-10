@@ -1,6 +1,6 @@
 # Maintainer: SSH-Kitty
 pkgname=stalker-gamma-commander
-pkgver=1.2.7
+pkgver=1.2.8
 pkgrel=1
 pkgdesc="Graphical installer/manager for S.T.A.L.K.E.R. Anomaly + GAMMA on Linux"
 arch=('x86_64')

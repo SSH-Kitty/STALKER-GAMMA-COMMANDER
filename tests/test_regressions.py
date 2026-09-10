@@ -41,7 +41,6 @@ from commander_gui.modlist import (
     rename_mod,
     reorder_mods,
     reorder_to_original,
-    reparent_into_category,
     set_status_at,
 )
 from commander_gui.network import read_response_bytes
@@ -87,14 +86,6 @@ from commander_gui.updates import (
     latest_version_human,
     local_modpack_records,
     remote_version,
-)
-from commander_gui.user_mods import (
-    add_user_mod,
-    read_user_mods,
-    remove_user_mods,
-    rename_user_mod,
-    tracker_path,
-    write_user_mods,
 )
 from commander_gui.winetricks import (
     WINETRICKS_VERBS,
@@ -578,7 +569,6 @@ class RegressionTests(unittest.TestCase):
 
             with (
                 patch.object(page, "_write_lines", return_value=True),
-                patch("commander_gui.ui.mod_manager_page.add_user_mod"),
                 patch.object(page, "_finish_install") as mock_finish,
             ):
                 page._on_mod_moved(new_mod)
@@ -1507,30 +1497,41 @@ class RegressionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     add_category([], name)
 
-    def test_add_mod_creates_extra_mods_separator(self):
+    def test_add_mod_lands_uncategorized_at_the_top_by_default(self):
+        # No default category anymore: a fresh install lands at the very
+        # top of the list, in no category - matching real MO2's landing
+        # spot for a new mod (see modlist._top_insertion_index()).
+        self.assertEqual(add_mod([], "NewMod"), ["-NewMod"])
         self.assertEqual(
-            add_mod([], "NewMod"),
-            ["-Extra Mods_separator", "-NewMod"],
+            add_mod(["-Audio_separator", "+Music"], "NewMod"),
+            ["-NewMod", "-Audio_separator", "+Music"],
         )
 
     def test_add_mod_creates_named_category_and_places_mod(self):
+        # A category's members sit immediately above its own separator
+        # (see grouped()), so "Music" is Audio's member here, not "NewMod"
+        # unless it's explicitly requested - which inserts it as the new
+        # last member, right before the separator.
         self.assertEqual(
-            add_mod(["-Audio_separator", "+Music"], "NewMod", category="Audio"),
-            ["-Audio_separator", "+Music", "-NewMod"],
+            add_mod(["+Music", "-Audio_separator"], "NewMod", category="Audio"),
+            ["+Music", "-NewMod", "-Audio_separator"],
         )
 
     def test_add_mod_appends_to_end_of_existing_category(self):
-        lines = ["-Extra Mods_separator", "+Mix", "-Audio_separator", "+Music"]
+        lines = ["+Old1", "+Old2", "-Audio_separator"]
         self.assertEqual(
-            add_mod(lines, "NewMod"),
-            ["-Extra Mods_separator", "+Mix", "-NewMod", "-Audio_separator", "+Music"],
+            add_mod(lines, "NewMod", category="Audio"),
+            ["+Old1", "+Old2", "-NewMod", "-Audio_separator"],
         )
 
     def test_add_mod_reuses_existing_extra_mods_separator(self):
+        # Finding a category's separator (see _category_separator_index())
+        # doesn't care about its enabled/disabled prefix, so an existing
+        # "+Extra Mods_separator" is reused as-is, not duplicated.
         lines = ["+Visual_separator", "+Shaders", "+Extra Mods_separator"]
         self.assertEqual(
-            add_mod(lines, "NewMod"),
-            ["+Visual_separator", "+Shaders", "+Extra Mods_separator", "-NewMod"],
+            add_mod(lines, "NewMod", category="Extra Mods"),
+            ["+Visual_separator", "+Shaders", "-NewMod", "+Extra Mods_separator"],
         )
 
     def test_rename_mod_changes_display_name_only(self):
@@ -1676,132 +1677,6 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             add_category([], "+Category")
 
-    def test_reparent_places_stray_mod_into_extra_mods(self):
-        lines = [
-            "+1- Audio_separator",
-            "+KVMA HD 2.10",
-            "+Terrain Textures Redone",
-        ]
-        result = reparent_into_category(lines, ["KVMA HD 2.10"])
-        self.assertEqual(
-            result,
-            [
-                "+1- Audio_separator",
-                "+Terrain Textures Redone",
-                "-Extra Mods_separator",
-                "+KVMA HD 2.10",
-            ],
-        )
-
-    def test_reparent_moves_multiple_mods_keeping_order_and_status(self):
-        lines = [
-            "-Audio_separator",
-            "+SFX",
-            "-KVMA HD 2.10",
-            "+Gameplay_separator",
-            "+Gameplay Mod",
-            "-Terrain Textures Redone",
-        ]
-        result = reparent_into_category(
-            lines, ["KVMA HD 2.10", "Terrain Textures Redone"]
-        )
-        self.assertEqual(
-            result,
-            [
-                "-Audio_separator",
-                "+SFX",
-                "+Gameplay_separator",
-                "+Gameplay Mod",
-                "-Extra Mods_separator",
-                "-KVMA HD 2.10",
-                "-Terrain Textures Redone",
-            ],
-        )
-
-    def test_reparent_no_change_when_already_grouped(self):
-        lines = [
-            "-Audio_separator",
-            "+SFX",
-            "-Extra Mods_separator",
-            "-KVMA HD 2.10",
-            "-Terrain Textures Redone",
-        ]
-        self.assertIsNone(reparent_into_category(lines, ["KVMA HD 2.10"]))
-
-    def test_reparent_leaves_in_place_entries_and_appends_stray(self):
-        lines = [
-            "-Audio_separator",
-            "+SFX",
-            "+KVMA HD 2.10",
-            "-Extra Mods_separator",
-            "-Terrain Textures Redone",
-        ]
-        result = reparent_into_category(
-            lines, ["KVMA HD 2.10", "Terrain Textures Redone"]
-        )
-        self.assertEqual(
-            result,
-            [
-                "-Audio_separator",
-                "+SFX",
-                "-Extra Mods_separator",
-                "-Terrain Textures Redone",
-                "+KVMA HD 2.10",
-            ],
-        )
-
-    def test_reparent_collapses_duplicate_separators(self):
-        lines = [
-            "-Extra Mods_separator",
-            "+Mod A",
-            "-Extra Mods_separator",
-            "+Mod B",
-        ]
-        result = reparent_into_category(lines, ["Mod A", "Mod B"])
-        self.assertEqual(
-            result,
-            ["-Extra Mods_separator", "+Mod A", "+Mod B"],
-        )
-
-    def test_reparent_ignores_unknown_and_separator_labels(self):
-        lines = ["-Audio_separator", "+SFX", "+Real Mod"]
-        result = reparent_into_category(
-            lines, ["Missing Mod", "Audio_separator", "Real Mod"]
-        )
-        self.assertEqual(
-            result,
-            ["-Audio_separator", "+SFX", "-Extra Mods_separator", "+Real Mod"],
-        )
-
-    def test_reparent_moves_mod_back_after_add_mod_bug_scenario(self):
-        # State reported by the user: an external rewrite stranded KVMA just
-        # below the Audio separator, then a fresh install created a NEW Extra
-        # Mods category at the end for the second mod.
-        lines = [
-            "+1- Audio_separator",
-            "+KVMA HD 2.10",
-            "-Extra Mods_separator",
-            "-Terrain Textures Redone",
-        ]
-        result = reparent_into_category(
-            lines, ["KVMA HD 2.10", "Terrain Textures Redone"]
-        )
-        grouped = {}
-        current = "Uncategorized"
-        for line in result:
-            if "_separator" in line:
-                current = line.lstrip("+-").removesuffix("_separator")
-                grouped.setdefault(current, [])
-            elif line[:1] in "+-":
-                grouped.setdefault(current, []).append(line[1:])
-        self.assertNotIn("KVMA HD 2.10", grouped.get("1- Audio", []))
-        self.assertIn("KVMA HD 2.10", grouped["Extra Mods"])
-        self.assertIn("Terrain Textures Redone", grouped["Extra Mods"])
-
-    def test_reparent_requires_valid_category(self):
-        with self.assertRaises(ValueError):
-            reparent_into_category(["-Extra Mods_separator"], ["A"], category="a/b")
-
 
 class ModCounterTests(unittest.TestCase):
     def _make_gamma(
@@ -1880,57 +1755,38 @@ class ModCounterTests(unittest.TestCase):
             window.update_mod_counter()
             self.assertFalse(window.mod_counter_label.isVisible())
 
+    def test_switch_language_does_not_duplicate_status_bar_widgets(self):
+        """Regression test for a status bar widget-duplication bug.
+
+        The status bar (GitHub link button, Language/Theme combos) used to be
+        built inside _build_ui(), which also runs on every switch_language()
+        rebuild. QStatusBar.addPermanentWidget()/addWidget() are not
+        idempotent - nothing removed the previous widgets first - so
+        repeated language switches stacked duplicate GitHub buttons (and
+        would have duplicated the Language/Theme combos too). Status bar
+        construction now happens exactly once, from __init__.
+        """
+        from PySide6.QtWidgets import QApplication, QPushButton
+
+        from commander_gui.ui.main_window import MainWindow
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            window = MainWindow()
+            window.switch_language()
+            window.switch_language()
+            github_buttons = [
+                b
+                for b in window.statusBar().findChildren(QPushButton)
+                if b.text() == "GitHub"
+            ]
+            self.assertEqual(len(github_buttons), 1)
+
 
 class UserModsTrackerTests(unittest.TestCase):
-    def _modlist(self, tmp: Path) -> Path:
-        path = tmp / "modlist.txt"
-        path.write_text("-Mod A\n+Mod B\n", encoding="utf-8")
-        return path
-
-    def test_tracker_path_sits_next_to_modlist(self):
-        self.assertEqual(
-            str(tracker_path("/x/modlist.txt")),
-            "/x/modlist.txt.gammagui.mods.json",
-        )
-
-    def test_read_returns_empty_for_missing_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(read_user_mods(Path(tmp) / "modlist.txt"), [])
-
-    def test_add_then_read_round_trips(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            modlist = self._modlist(Path(tmp))
-            add_user_mod(modlist, "Mod A")
-            add_user_mod(modlist, "Mod A")
-            add_user_mod(modlist, "Mod B")
-            self.assertEqual(read_user_mods(modlist), ["Mod A", "Mod B"])
-
-    def test_remove_drops_only_asked_names(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            modlist = self._modlist(Path(tmp))
-            write_user_mods(modlist, ["Mod A", "Mod B", "Mod C"])
-            remove_user_mods(modlist, ["Mod B"])
-            self.assertEqual(read_user_mods(modlist), ["Mod A", "Mod C"])
-
-    def test_rename_updates_tracked_name(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            modlist = self._modlist(Path(tmp))
-            write_user_mods(modlist, ["Mod A", "Mod B"])
-            rename_user_mod(modlist, "Mod A", "Renamed A")
-            self.assertEqual(read_user_mods(modlist), ["Renamed A", "Mod B"])
-
-    def test_corrupt_tracker_recovers_as_empty(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            modlist = self._modlist(Path(tmp))
-            tracker_path(modlist).write_text("{not json", encoding="utf-8")
-            self.assertEqual(read_user_mods(modlist), [])
-
-    def test_non_list_payload_recovers_as_empty(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            modlist = self._modlist(Path(tmp))
-            tracker_path(modlist).write_text('{"user_mods": "nope"}', encoding="utf-8")
-            self.assertEqual(read_user_mods(modlist), [])
-
     def test_build_command_rejects_missing_profile(self):
         from commander_gui.launcher import Runner, build_command
 
@@ -2349,6 +2205,39 @@ class UserModsTrackerTests(unittest.TestCase):
         remote = {"Addon": ModPackRecord(1, "Addon", "", "link", "", "new.zip", "", "")}
         diffs = diff_records(local, remote)
         self.assertEqual([diff.status for diff in diffs], ["Modified"])
+        # Archive-only change (no version label on either side): the cell
+        # shows the filename change, not a hash.
+        self.assertEqual(diffs[0].detail, "old.zip → new.zip")
+
+    def test_update_diff_shows_version_bump_over_hash(self):
+        # A version/patch label on the remote record is the most readable
+        # signal a general user can get, so it wins even though the zip
+        # name and hash also changed here.
+        local = {
+            "Addon": ModPackRecord(1, "Addon", "1.0", "link", "", "old.zip", "aaa", "")
+        }
+        remote = {
+            "Addon": ModPackRecord(1, "Addon", "1.1", "link", "", "new.zip", "bbb", "")
+        }
+        diffs = diff_records(local, remote)
+        self.assertEqual(diffs[0].detail, "1.0 → 1.1")
+        self.assertIn("aaa", diffs[0].detail_tooltip)
+        self.assertIn("bbb", diffs[0].detail_tooltip)
+
+    def test_update_diff_falls_back_to_archive_updated_for_hash_only_change(self):
+        # Same filename, same version label, but a different archive hash
+        # (a repack) - still a real change, just with nothing readable to
+        # show beyond a generic label; the hash moves to the tooltip.
+        local = {
+            "Addon": ModPackRecord(1, "Addon", "1.0", "link", "", "same.zip", "aaa", "")
+        }
+        remote = {
+            "Addon": ModPackRecord(1, "Addon", "1.0", "link", "", "same.zip", "bbb", "")
+        }
+        diffs = diff_records(local, remote)
+        self.assertEqual(diffs[0].detail, "Archive updated")
+        self.assertIn("aaa", diffs[0].detail_tooltip)
+        self.assertIn("bbb", diffs[0].detail_tooltip)
 
     def test_winetricks_includes_extra_media_verbs(self):
         self.assertIn("quartz", WINETRICKS_VERBS)

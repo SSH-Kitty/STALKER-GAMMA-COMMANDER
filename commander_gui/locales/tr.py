@@ -669,6 +669,7 @@ TRANSLATIONS: dict[str, str] = {
     "Unknown distribution": "Bilinmeyen dağıtım",
     "Update available ({installed} → {latest})": "Güncelleme mevcut ({installed} → {latest})",
     "Update check failed: {message}": "Güncelleme denetimi başarısız: {message}",
+    "Archive updated": "Arşiv güncellendi",
     "Winetricks is not installed, so these cannot be checked yet - see the Winetricks row above.": "Winetricks kurulu değil, bu yüzden bunlar henüz denetlenemiyor - yukarıdaki Winetricks satırına bakın.",
     "installed": "kurulu",
     "missing": "eksik",
@@ -719,11 +720,12 @@ TRANSLATIONS: dict[str, str] = {
     "Font family:": "Yazı tipi ailesi:",
     "Interface font size:": "Arayüz yazı tipi boyutu:",
     "Language:": "Dil:",
+    "Theme:": "Tema:",
     "Page on startup:": "Başlangıç sayfası:",
     "Text Files (*.txt);;All Files (*)": "Metin Dosyaları (*.txt);;Tüm Dosyalar (*)",
     "{label} (Installed)": "{label} (Kurulu)",
     # Theme picker (settings_page.py, THEME_INFO from themes.py) - the theme
-    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal) are
+    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal, Reactor) are
     # kept as stylized names, like other proper nouns; only the descriptive
     # sentence per theme is translated.
     "The default look: deep green-black with a radiation-green glow.": "Varsayılan görünüm: radyasyon yeşili parıltıyla koyu yeşil-siyah.",
@@ -731,9 +733,11 @@ TRANSLATIONS: dict[str, str] = {
     "Warm charcoal and amber with orange sunset accents.": "Turuncu gün batımı vurgularıyla sıcak kömür rengi ve kehribar.",
     "Cool slate blues and greys with a teal accent.": "Camgöbeği vurgulu soğuk arduvaz mavileri ve grileri.",
     "Retro CRT: pure black with neon green phosphor text.": "Retro CRT: neon yeşili fosfor yazılı saf siyah.",
+    "Deep black with a glowing reactor-coolant teal accent.": "Reaktör soğutucusunu andıran parlak turkuaz bir vurguyla derin siyah.",
     # Verify Integrity temporarily disabled (install_page.py) - see
     # VERIFY_INTEGRITY_DISABLED.
     "Verify Integrity is currently under maintenance": "Verify Integrity şu anda bakımda",
     "Cannot change the language while a background task is running. Wait for it to finish, then try again.": "Bir arka plan görevi çalışırken dil değiştirilemez. Bitmesini bekleyin, sonra tekrar deneyin.",
+    "Cannot change the theme while a background task is running. Wait for it to finish, then try again.": "Bir arka plan görevi çalışırken tema değiştirilemez. Bitmesini bekleyin, sonra tekrar deneyin.",
     "Applies immediately, unless a background task is running.": "Bir arka plan görevi çalışmıyorsa hemen uygulanır.",
 }

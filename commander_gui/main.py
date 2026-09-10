@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QEasingCurve,
     QLockFile,
+    QPropertyAnimation,
     QtMsgType,
     qInstallMessageHandler,
 )
@@ -52,6 +54,22 @@ def _is_svg_noise(mode: QtMsgType, message: str | None) -> bool:
     return text.startswith("qt.svg:") or "Could not resolve property" in text
 
 
+def _is_window_opacity_noise(mode: QtMsgType, message: str | None) -> bool:
+    """True for the harmless "does not support setting window opacity" warning.
+
+    Emitted by the startup fade-in (``main()``'s ``window.setWindowOpacity()``
+    animation) on any window manager/QPA backend without compositing support
+    - the property is still tracked and animated internally, it just has no
+    visible effect there. That's a harmless no-op, but the animation ticks
+    ~60 times a second while it runs, so left unfiltered this one warning
+    floods the console on every single launch.
+    """
+    if mode != QtMsgType.QtWarningMsg:
+        return False
+    text = message or ""
+    return "does not support setting window opacity" in text
+
+
 def _is_portal_noise(mode: QtMsgType, message: str | None) -> bool:
     """True for the harmless xdg-desktop-portal app-id registration warning.
 
@@ -79,7 +97,11 @@ def _quiet_qt_message_handler(mode: QtMsgType, context, message: str) -> None:
     Qt may emit from any thread, so never uninstall/reinstall the global
     handler here -- forward to the handler captured at install time instead.
     """
-    if _is_svg_noise(mode, message) or _is_portal_noise(mode, message):
+    if (
+        _is_svg_noise(mode, message)
+        or _is_portal_noise(mode, message)
+        or _is_window_opacity_noise(mode, message)
+    ):
         return
     if _PREVIOUS_QT_HANDLER is not None:
         _PREVIOUS_QT_HANDLER(mode, context, message)
@@ -230,7 +252,17 @@ def main() -> int:
 
     app.aboutToQuit.connect(_shutdown)
     window = MainWindow()
+    window.setWindowOpacity(0.0)
     window.show()
+    startup_fade = QPropertyAnimation(window, b"windowOpacity")
+    startup_fade.setDuration(250)
+    startup_fade.setStartValue(0.0)
+    startup_fade.setEndValue(1.0)
+    startup_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+    startup_fade.start()
+    # Kept alive on the window itself - nothing else references it, and
+    # Python would otherwise garbage-collect it mid-animation.
+    window._startup_fade = startup_fade
     return app.exec()
 
 

@@ -60,15 +60,32 @@ class ModInstallTests(unittest.TestCase):
 
     def test_add_mod_appends_disabled_entry(self):
         lines = ["# GAMMA", "+Existing"]
-        # Newly installed mods are grouped under an "Extra Mods" separator
-        # appended at the end of modlist.txt (= bottom of MO2 left pane). The
-        # mod starts disabled so it cannot alter a working GAMMA setup.
+        # Newly installed mods land at the very top of the list (after any
+        # leading comment line), with no category - matching real MO2's
+        # landing spot for a fresh install. The mod starts disabled so it
+        # cannot alter a working GAMMA setup.
         self.assertEqual(
             add_mod(lines, "New Mod"),
-            ["# GAMMA", "+Existing", "-Extra Mods_separator", "-New Mod"],
+            ["# GAMMA", "-New Mod", "+Existing"],
         )
         with self.assertRaises(ValueError):
             add_mod(lines, "Existing")
+
+    def test_add_mod_with_explicit_category_inserts_before_its_separator(self):
+        # A category's members sit immediately above its separator, not
+        # below (see grouped()), so an explicit-category add lands there.
+        lines = ["+B", "-Graphics_separator"]
+        self.assertEqual(
+            add_mod(lines, "New Mod", category="Graphics"),
+            ["+B", "-New Mod", "-Graphics_separator"],
+        )
+
+    def test_add_mod_with_new_category_appends_mod_then_separator(self):
+        lines = ["+A"]
+        self.assertEqual(
+            add_mod(lines, "New Mod", category="Extras"),
+            ["+A", "-New Mod", "-Extras_separator"],
+        )
 
     def test_reorder_mods_moves_down_without_skipping_target(self):
         lines = ["# GAMMA", "+A", "-B", "+C"]
@@ -78,11 +95,14 @@ class ModInstallTests(unittest.TestCase):
         )
 
     def test_move_mod_preserves_status_and_can_target_empty_category(self):
-        lines = ["+A", "-Graphics_separator", "+B", "-Empty_separator"]
+        # A category's members are the mod lines immediately above its own
+        # separator (see grouped()), so two adjacent separators with
+        # nothing between them is what makes "Empty" genuinely empty here.
+        lines = ["+A", "-Graphics_separator", "-Empty_separator", "+B"]
         moved = move_mod(lines, "A", category="Empty")
         self.assertEqual(
             moved,
-            ["-Graphics_separator", "+B", "-Empty_separator", "+A"],
+            ["-Graphics_separator", "+A", "-Empty_separator", "+B"],
         )
 
     def test_move_mod_crosses_categories_freely(self):
@@ -101,23 +121,28 @@ class ModInstallTests(unittest.TestCase):
         )
 
     def test_flip_priority_reverses_categories_and_mods_together(self):
-        # A real flip must move whole categories end-to-end (not just
-        # shuffle the mods inside each one while every category stays put,
-        # which leaves the file in a mixed order that is neither the
-        # original nor a true reversal): the last category ("Empty") moves
-        # to the front, "Graphics" moves after it with its own mods
-        # reversed, and the leading uncategorized mod ends up last.
+        # A real flip must move whole blocks end-to-end (not just shuffle
+        # the mods inside each one while every block stays put, which
+        # leaves the file in a mixed order that is neither the original
+        # nor a true reversal). A block is a separator plus the mod lines
+        # immediately above it (see grouped()); the "Empty" block (B, C,
+        # then its separator) moves to the front with its own mods
+        # reversed, and the "Graphics" block (A, then its separator) moves
+        # after it.
         lines = ["+A", "-Graphics_separator", "-B", "+C", "-Empty_separator"]
         self.assertEqual(
             flip_priority(lines),
-            ["-Empty_separator", "-Graphics_separator", "+C", "-B", "+A"],
+            ["+C", "-B", "-Empty_separator", "+A", "-Graphics_separator"],
         )
 
     def test_flip_priority_preserves_statuses_within_a_category(self):
-        lines = ["-Graphics_separator", "-B", "+C"]
+        # B and C sit above Graphics_separator, so they're Graphics's real
+        # members (see grouped()); Empty_separator's own block is just
+        # itself, with no members, so it's unaffected by the mod reversal.
+        lines = ["-Empty_separator", "-B", "+C", "-Graphics_separator"]
         self.assertEqual(
             flip_priority(lines),
-            ["-Graphics_separator", "+C", "-B"],
+            ["+C", "-B", "-Graphics_separator", "-Empty_separator"],
         )
 
     def test_flip_priority_without_categories_reverses_flat_list(self):
@@ -130,6 +155,65 @@ class ModInstallTests(unittest.TestCase):
             [(name, mods) for name, mods in grouped(lines)],
             [("Audio", []), ("Empty", [])],
         )
+
+    def test_grouped_separator_claims_mods_above_it_not_below(self):
+        # Shaped like GAMMA's real modlist.txt: mods immediately above a
+        # separator are its members (audio/voice mods before "Audio"),
+        # mods below belong to whatever separator comes next (weapon mods
+        # falling after "Audio" are not audio). This is the exact off-by-one
+        # the bug report described ("1- Audio shows no mods").
+        lines = [
+            "-Weapons_separator",
+            "+Voiced Actor",
+            "+Ambient Music Pack",
+            "-Audio_separator",
+            "+Weapon Pack",
+        ]
+        self.assertEqual(
+            [(name, [entry[1] for entry in mods]) for name, mods in grouped(lines)],
+            [
+                ("Weapons", []),
+                ("Audio", ["Voiced Actor", "Ambient Music Pack"]),
+                ("Uncategorized", ["Weapon Pack"]),
+            ],
+        )
+
+    def test_mods_before_first_separator_are_always_uncategorized(self):
+        # Deliberate carve-out: even though the general rule is "a
+        # separator claims the mods above it", the very first separator in
+        # the file never claims what precedes it - that run is always
+        # Uncategorized. This is what makes a freshly-installed mod
+        # (inserted at file-top by add_mod()) land uncategorized instead of
+        # silently acquiring whatever category happens to be first.
+        lines = ["+New Mod", "+Old Audio Mod", "-Audio_separator"]
+        self.assertEqual(
+            [(name, [entry[1] for entry in mods]) for name, mods in grouped(lines)],
+            [
+                ("Uncategorized", ["New Mod", "Old Audio Mod"]),
+                ("Audio", []),
+            ],
+        )
+
+    def test_move_to_category_survives_a_reload(self):
+        # The bug report's core complaint: a mod moved into a category must
+        # stay there. modlist.py no longer has any mechanism that
+        # re-parents mods back into a fixed bucket on the next read, so a
+        # move committed to `lines` is permanent - re-reading (simulated
+        # here by just calling grouped() again on the saved result, the
+        # same way the UI re-derives its tree on every reload) must keep
+        # showing the mod under its new category.
+        # "Audio" must not be the file's first separator here, or the
+        # top-of-file carve-out (see test above) would force the mod back
+        # to Uncategorized regardless of where move_mod() puts it.
+        lines = add_mod(["-Weapons_separator", "-Audio_separator"], "New Mod")
+        moved = move_mod(lines, "New Mod", category="Audio")
+        categories = {name: [entry[1] for entry in mods] for name, mods in grouped(moved)}
+        self.assertEqual(categories["Audio"], ["New Mod"])
+        # Re-deriving the tree again (as a reload would) is idempotent.
+        reloaded_categories = {
+            name: [entry[1] for entry in mods] for name, mods in grouped(moved)
+        }
+        self.assertEqual(reloaded_categories, categories)
 
     def test_add_category_rejects_duplicates(self):
         lines = ["-Audio_separator"]

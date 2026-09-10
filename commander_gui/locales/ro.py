@@ -669,6 +669,7 @@ TRANSLATIONS: dict[str, str] = {
     "Unknown distribution": "Distribuție necunoscută",
     "Update available ({installed} → {latest})": "Actualizare disponibilă ({installed} → {latest})",
     "Update check failed: {message}": "Verificarea actualizărilor a eșuat: {message}",
+    "Archive updated": "Arhivă actualizată",
     "Winetricks is not installed, so these cannot be checked yet - see the Winetricks row above.": "Winetricks nu este instalat, deci acestea nu pot fi verificate încă - vezi rândul Winetricks de mai sus.",
     "installed": "instalat",
     "missing": "lipsă",
@@ -719,11 +720,12 @@ TRANSLATIONS: dict[str, str] = {
     "Font family:": "Familia fontului:",
     "Interface font size:": "Dimensiune font interfață:",
     "Language:": "Limbă:",
+    "Theme:": "Temă:",
     "Page on startup:": "Pagină la pornire:",
     "Text Files (*.txt);;All Files (*)": "Fișiere text (*.txt);;Toate fișierele (*)",
     "{label} (Installed)": "{label} (instalat)",
     # Theme picker (settings_page.py, THEME_INFO from themes.py) - the theme
-    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal) are
+    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal, Reactor) are
     # kept as stylized names, like other proper nouns; only the descriptive
     # sentence per theme is translated.
     "The default look: deep green-black with a radiation-green glow.": "Aspectul implicit: verde-negru intens cu o strălucire verde radioactivă.",
@@ -731,9 +733,11 @@ TRANSLATIONS: dict[str, str] = {
     "Warm charcoal and amber with orange sunset accents.": "Cărbune cald și chihlimbar, cu accente portocalii de amurg.",
     "Cool slate blues and greys with a teal accent.": "Albastru-gri rece, cu un accent turcoaz.",
     "Retro CRT: pure black with neon green phosphor text.": "Stil CRT retro: negru pur cu text verde fosforescent.",
+    "Deep black with a glowing reactor-coolant teal accent.": "Negru profund cu un accent turcoaz strălucitor, ca lichidul de răcire al unui reactor.",
     # Verify Integrity temporarily disabled (install_page.py) - see
     # VERIFY_INTEGRITY_DISABLED.
     "Verify Integrity is currently under maintenance": "Verify Integrity este momentan în mentenanță",
     "Cannot change the language while a background task is running. Wait for it to finish, then try again.": "Limba nu poate fi schimbată cât timp rulează o sarcină în fundal. Așteaptă să se termine, apoi încearcă din nou.",
+    "Cannot change the theme while a background task is running. Wait for it to finish, then try again.": "Tema nu poate fi schimbată cât timp rulează o sarcină în fundal. Așteaptă să se termine, apoi încearcă din nou.",
     "Applies immediately, unless a background task is running.": "Se aplică imediat, cu excepția cazului în care rulează o sarcină în fundal.",
 }
