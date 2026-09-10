@@ -29,3 +29,7 @@ dist/
 *.tmp
 
 *.kate-swp
+
+# The bundled CLI writes here (settings.json, logs/) when run from the repo
+# root without an XDG_CONFIG_HOME override - never a real project file.
+/stalker-gamma/

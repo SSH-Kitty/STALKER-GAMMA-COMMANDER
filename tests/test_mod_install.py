@@ -28,6 +28,7 @@ from commander_gui.modlist import (
     grouped,
     move_mod,
     reorder_mods,
+    seed_new_mo2_profile,
 )
 
 
@@ -149,6 +150,22 @@ class ModInstallTests(unittest.TestCase):
         lines = ["+A", "+B", "+C"]
         self.assertEqual(flip_priority(lines), ["+C", "+B", "+A"])
 
+    def test_flip_priority_keeps_the_new_first_categorys_own_members(self):
+        # Regression: whichever category was LAST in the original file
+        # becomes FIRST after a flip. A category that becomes first must
+        # keep showing its own real members, not lose them to a phantom
+        # "Uncategorized" bucket the way the old top-of-file carve-out did
+        # (reproduced on a real GAMMA modlist.txt: after flipping, "1- Audio"
+        # - the file's actual last category - became first and showed 0
+        # members, with its 18 real mods dumped into "Uncategorized" ahead
+        # of it instead).
+        lines = ["+X", "-Visual_separator", "+Y", "+Z", "-Audio_separator"]
+        flipped = flip_priority(lines)
+        self.assertEqual(
+            [(name, [entry[1] for entry in mods]) for name, mods in grouped(flipped)],
+            [("Audio", ["Z", "Y"]), ("Visual", ["X"])],
+        )
+
     def test_grouped_retains_empty_separator_categories(self):
         lines = ["-Audio_separator", "-Empty_separator"]
         self.assertEqual(
@@ -178,20 +195,20 @@ class ModInstallTests(unittest.TestCase):
             ],
         )
 
-    def test_mods_before_first_separator_are_always_uncategorized(self):
-        # Deliberate carve-out: even though the general rule is "a
-        # separator claims the mods above it", the very first separator in
-        # the file never claims what precedes it - that run is always
-        # Uncategorized. This is what makes a freshly-installed mod
-        # (inserted at file-top by add_mod()) land uncategorized instead of
-        # silently acquiring whatever category happens to be first.
+    def test_mods_before_the_first_separator_belong_to_it_too(self):
+        # The rule ("a separator claims the mods above it") applies
+        # uniformly, including to the very first separator in the file -
+        # no special case exempts it. An earlier version carved out an
+        # exception here so a freshly-installed mod would always render as
+        # "Uncategorized", but that broke as soon as anything reordered the
+        # file (Flip Priority moves whichever category was last to the
+        # front, and the carve-out then stripped that real category's
+        # members into a phantom Uncategorized bucket instead of showing
+        # them under its own name at the top - see flip_priority() tests).
         lines = ["+New Mod", "+Old Audio Mod", "-Audio_separator"]
         self.assertEqual(
             [(name, [entry[1] for entry in mods]) for name, mods in grouped(lines)],
-            [
-                ("Uncategorized", ["New Mod", "Old Audio Mod"]),
-                ("Audio", []),
-            ],
+            [("Audio", ["New Mod", "Old Audio Mod"])],
         )
 
     def test_move_to_category_survives_a_reload(self):
@@ -202,9 +219,6 @@ class ModInstallTests(unittest.TestCase):
         # here by just calling grouped() again on the saved result, the
         # same way the UI re-derives its tree on every reload) must keep
         # showing the mod under its new category.
-        # "Audio" must not be the file's first separator here, or the
-        # top-of-file carve-out (see test above) would force the mod back
-        # to Uncategorized regardless of where move_mod() puts it.
         lines = add_mod(["-Weapons_separator", "-Audio_separator"], "New Mod")
         moved = move_mod(lines, "New Mod", category="Audio")
         categories = {name: [entry[1] for entry in mods] for name, mods in grouped(moved)}
@@ -214,6 +228,45 @@ class ModInstallTests(unittest.TestCase):
             name: [entry[1] for entry in mods] for name, mods in grouped(moved)
         }
         self.assertEqual(reloaded_categories, categories)
+
+    def test_seed_new_mo2_profile_copies_the_default_modlist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            source = gamma / "profiles" / "G.A.M.M.A"
+            source.mkdir(parents=True)
+            (source / "modlist.txt").write_text("+Real Mod\n-Audio_separator\n")
+
+            self.assertTrue(seed_new_mo2_profile(gamma, "NewProfile"))
+
+            destination = gamma / "profiles" / "NewProfile" / "modlist.txt"
+            self.assertEqual(
+                destination.read_text().splitlines(),
+                ["+Real Mod", "-Audio_separator"],
+            )
+
+    def test_seed_new_mo2_profile_never_overwrites_an_existing_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            source = gamma / "profiles" / "G.A.M.M.A"
+            source.mkdir(parents=True)
+            (source / "modlist.txt").write_text("+Real Mod\n")
+            destination_dir = gamma / "profiles" / "AlreadyThere"
+            destination_dir.mkdir(parents=True)
+            (destination_dir / "modlist.txt").write_text("+Custom Mod\n")
+
+            self.assertFalse(seed_new_mo2_profile(gamma, "AlreadyThere"))
+
+            self.assertEqual(
+                (destination_dir / "modlist.txt").read_text(), "+Custom Mod\n"
+            )
+
+    def test_seed_new_mo2_profile_does_nothing_without_a_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            self.assertFalse(seed_new_mo2_profile(gamma, "NewProfile"))
+            self.assertFalse(
+                (gamma / "profiles" / "NewProfile" / "modlist.txt").exists()
+            )
 
     def test_add_category_rejects_duplicates(self):
         lines = ["-Audio_separator"]

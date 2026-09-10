@@ -85,18 +85,20 @@ def _category_labels(lines: list[str]) -> list[str | None]:
     content (SFX, voice lines, ambient music, radio), while nothing
     follows it (end of file). The mods after "G.A.M.M.A. Audio_separator"
     (an earlier one) are weapon mods, not audio - only the mods *before*
-    it are audio/voice-themed. A separator labels what precedes it.
-
-    Mods before the very first separator in the whole file are always
-    "Uncategorized", never swept into that first separator's name - a
-    deliberate carve-out so a freshly installed mod (inserted at the top
-    of the file, see add_mod()) reliably lands uncategorized rather than
-    acquiring whatever the first existing category happens to be named,
-    matching real MO2's landing spot for a new install.
+    it are audio/voice-themed. A separator labels what precedes it. This
+    rule applies uniformly, including to the very first separator in the
+    file: an earlier version special-cased it to always read "Uncategorized"
+    so a freshly installed mod (inserted at file-top) would reliably show
+    as uncategorized, but that special case broke as soon as any operation
+    reordered the file - flip_priority() naturally moves whichever category
+    was last to the front, and the special case then stripped that (real,
+    populated) category's members into a phantom "Uncategorized" bucket.
+    Mods genuinely have no category only when nothing ever closes them
+    (trailing content after the last separator, or a file with no
+    separators at all) - handled below, not here.
     """
     labels: list[str | None] = [None] * len(lines)
     pending: list[int] = []
-    seen_separator = False
     for idx, line in enumerate(lines):
         info = _line_info(line)
         if info is None:
@@ -105,13 +107,10 @@ def _category_labels(lines: list[str]) -> list[str | None]:
         cat = separator_name(name)
         if cat is not None:
             # This separator closes the batch collected since the last one
-            # (or file start) - it's the one that NAMES that batch, not
-            # whatever separator came before it.
-            label = cat if seen_separator else "Uncategorized"
+            # (or file start) - it's the one that NAMES that batch.
             for pending_idx in pending:
-                labels[pending_idx] = label
+                labels[pending_idx] = cat
             pending = []
-            seen_separator = True
         else:
             pending.append(idx)
     # Trailing mods with no closing separator (or no separators at all).
@@ -133,7 +132,6 @@ def grouped(
     """
     groups: list[tuple[str, list[tuple[str, str, int]]]] = []
     pending: list[tuple[str, str, int]] = []
-    seen_separator = False
     for idx, line in enumerate(lines):
         info = _line_info(line)
         if info is None:
@@ -141,19 +139,9 @@ def grouped(
         status, name = info
         cat = separator_name(name)
         if cat is not None:
-            if not seen_separator:
-                # The very first separator's own members always go to
-                # Uncategorized instead (see _category_labels()) - but the
-                # separator/category itself still exists and is retained,
-                # just empty, so it still shows up (and can be moved into).
-                if pending:
-                    groups.append(("Uncategorized", pending))
-                groups.append((cat, []))
-                seen_separator = True
-            else:
-                # This separator closes the batch collected since the
-                # previous one - it's the one that NAMES that batch.
-                groups.append((cat, pending))
+            # This separator closes the batch collected since the previous
+            # one (or file start) - it's the one that NAMES that batch.
+            groups.append((cat, pending))
             pending = []
         else:
             pending.append((status, name, idx))
@@ -287,15 +275,50 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
     write_text(path, "\n".join(lines) + "\n")
 
 
+def seed_new_mo2_profile(
+    gamma_dir: str | Path, mo2_profile: str, source_profile: str = "G.A.M.M.A"
+) -> bool:
+    """Copy an existing MO2 profile's modlist.txt into a brand-new one.
+
+    Real Mod Organizer 2's own "New Profile" dialog offers to copy the load
+    order from an existing profile. Nothing in COMMANDER or the bundled CLI
+    does this for a COMMANDER profile created with a not-yet-existing MO2
+    profile name (``config create`` only writes settings.json - confirmed by
+    running it directly, it never touches the gamma folder), so a fresh
+    profile's Mod Manager would otherwise start out completely empty instead
+    of showing the pack's default mod selection.
+
+    Never overwrites: does nothing if *mo2_profile* already has its own
+    modlist.txt (an existing profile, or one a previous call already
+    seeded), or if *source_profile* has none to copy (nothing installed at
+    *gamma_dir* yet - a subsequent Full Install creates its own profile from
+    scratch). Returns whether a file was actually copied.
+    """
+    base = Path(gamma_dir)
+    source = base / "profiles" / source_profile / "modlist.txt"
+    destination = base / "profiles" / mo2_profile / "modlist.txt"
+    if destination.exists() or not source.is_file():
+        return False
+    try:
+        lines = read_lines(source)
+    except (OSError, ValueError):
+        return False
+    save_lines(destination, lines)
+    return True
+
+
 def _top_insertion_index(lines: list[str]) -> int:
-    """Return the insertion index for a genuinely top-of-list, uncategorized mod.
+    """Return the insertion index for a genuinely top-of-list mod.
 
     Skips any leading comment/blank lines (e.g. MO2's own "automatically
     generated by Mod Organizer" header) so those stay first, but otherwise
-    lands before all real content - including before the file's first
-    separator, so the inserted mod falls in the "Uncategorized" zone (see
-    _category_labels()) rather than being swept into whatever category
-    happens to be first.
+    lands before all real content - matching where a freshly installed mod
+    actually lands in real MO2's load order (top of the list, highest
+    priority). It may still show grouped under whatever category is first
+    in the file (see _category_labels()) rather than as "Uncategorized" -
+    there is no special zone exempting file-top content from that rule, so
+    the result stays correct under any later reordering (e.g. Flip
+    Priority) instead of only looking right until the file changes shape.
     """
     index = 0
     while index < len(lines) and _line_info(lines[index]) is None:
@@ -316,10 +339,13 @@ def add_mod(
     working GAMMA setup.  The caller can enable the entry after reviewing it.
 
     With no *category* (the default), the mod is inserted at the very top
-    of the list, before any existing separator - the "Uncategorized" zone
-    (see _category_labels()) - matching where a freshly installed mod
-    actually lands in real MO2: top of the left pane, in no category, and
-    freely movable into a real category afterward.
+    of the list - matching where a freshly installed mod actually lands in
+    real MO2: top of the left pane, highest priority, freely movable into
+    any category afterward. It may show grouped under whatever category is
+    first in the file rather than as "Uncategorized" (see
+    _category_labels()) - there is no separate zone for this, so the
+    result stays correct even after the file is later reordered (e.g. by
+    Flip Priority).
 
     With an explicit *category*, the mod is added as a member of that
     category: a category's members sit immediately above its separator
