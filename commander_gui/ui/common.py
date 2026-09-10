@@ -8,8 +8,16 @@ import subprocess
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    Qt,
+    QThread,
+    QVariantAnimation,
+    Signal,
+)
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -738,6 +746,87 @@ def make_card(
     layout.setContentsMargins(16, 16, 16, 16)
     layout.setSpacing(10)
     return frame, layout
+
+
+def install_hover_grow_text(
+    button: QPushButton,
+    color_token: str,
+    *,
+    scale: float = 1.12,
+    duration: int = 150,
+) -> None:
+    """Grow a button's label text on hover, purely decorative.
+
+    Used for the Dashboard's "Play GAMMA" and Play page's "Launch Game"
+    buttons - matches the same hover-grow treatment already applied to the
+    nav tabs, without touching either button's own click handling, enabled
+    state, or styling at rest.
+
+    The label is drawn by an overlay QLabel positioned over the button (the
+    button's own text is cleared) rather than by growing the button's own
+    font directly. Both of these buttons have a Minimum/Fixed size policy
+    from their layout (one stretches to fill a card's width, matching
+    QPushButton's default), and growing a widget's real font changes its
+    size hint - risking a small layout shift in either direction as the
+    animation plays. Painting the bigger text on a same-size overlay avoids
+    that entirely: the button's own geometry, background and border (and
+    its QSS :hover background-color change) are completely unaffected.
+    """
+    from ..themes import active_theme_tokens
+
+    text = button.text()
+    button.setText("")
+
+    overlay = QLabel(text, button)
+    overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    overlay.setGeometry(button.rect())
+
+    base_font = QFont(button.font())
+    state = {"scale": 1.0}
+
+    def apply_scale(value: float) -> None:
+        state["scale"] = value
+        font = QFont(base_font)
+        pixel_size = base_font.pixelSize()
+        if pixel_size > 0:
+            font.setPixelSize(max(1, round(pixel_size * value)))
+        else:
+            font.setPointSizeF(max(1.0, base_font.pointSizeF() * value))
+        overlay.setFont(font)
+        color = active_theme_tokens().get(color_token, "#ffffff")
+        overlay.setStyleSheet(f"background: transparent; border: none; color: {color};")
+
+    apply_scale(1.0)
+
+    anim = QVariantAnimation(button)
+    anim.valueChanged.connect(apply_scale)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def start(target: float) -> None:
+        anim.stop()
+        anim.setDuration(duration)
+        anim.setStartValue(state["scale"])
+        anim.setEndValue(target)
+        anim.start()
+
+    class _HoverGrowFilter(QObject):
+        def eventFilter(self, _obj: QObject, event) -> bool:
+            if event.type() == QEvent.Type.Enter:
+                start(scale)
+            elif event.type() == QEvent.Type.Leave:
+                start(1.0)
+            elif event.type() == QEvent.Type.Resize:
+                overlay.setGeometry(button.rect())
+            return False
+
+    hover_filter = _HoverGrowFilter(button)
+    button.installEventFilter(hover_filter)
+    # Keep every piece alive for the button's lifetime - nothing else
+    # references them, and Python would otherwise garbage-collect them.
+    button._hover_grow_overlay = overlay
+    button._hover_grow_filter = hover_filter
+    button._hover_grow_anim = anim
 
 
 def clear_layout(layout) -> None:

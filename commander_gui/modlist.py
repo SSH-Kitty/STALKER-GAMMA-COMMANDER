@@ -74,19 +74,66 @@ def separator_name(name: str) -> str | None:
     return None
 
 
+def _category_labels(lines: list[str]) -> list[str | None]:
+    """Return each line's category label (``None`` for non-mod lines).
+
+    A separator names the run of mod lines immediately ABOVE it, back to
+    the previous separator or the start of the file - matching real MO2 -
+    not the run below it. This was verified against GAMMA's actual
+    official modlist.txt: the mods sitting immediately before
+    "1- Audio_separator" (the file's last separator) are literally audio
+    content (SFX, voice lines, ambient music, radio), while nothing
+    follows it (end of file). The mods after "G.A.M.M.A. Audio_separator"
+    (an earlier one) are weapon mods, not audio - only the mods *before*
+    it are audio/voice-themed. A separator labels what precedes it.
+
+    Mods before the very first separator in the whole file are always
+    "Uncategorized", never swept into that first separator's name - a
+    deliberate carve-out so a freshly installed mod (inserted at the top
+    of the file, see add_mod()) reliably lands uncategorized rather than
+    acquiring whatever the first existing category happens to be named,
+    matching real MO2's landing spot for a new install.
+    """
+    labels: list[str | None] = [None] * len(lines)
+    pending: list[int] = []
+    seen_separator = False
+    for idx, line in enumerate(lines):
+        info = _line_info(line)
+        if info is None:
+            continue
+        _status, name = info
+        cat = separator_name(name)
+        if cat is not None:
+            # This separator closes the batch collected since the last one
+            # (or file start) - it's the one that NAMES that batch, not
+            # whatever separator came before it.
+            label = cat if seen_separator else "Uncategorized"
+            for pending_idx in pending:
+                labels[pending_idx] = label
+            pending = []
+            seen_separator = True
+        else:
+            pending.append(idx)
+    # Trailing mods with no closing separator (or no separators at all).
+    for pending_idx in pending:
+        labels[pending_idx] = "Uncategorized"
+    return labels
+
+
 def grouped(
     lines: list[str],
 ) -> list[tuple[str, list[tuple[str, str, int]]]]:
     """Group mod lines into categories in file order.
 
     MO2 separators (entries whose names end in ``_separator``) delimit the
-    categories; mods before the first separator land in ``Uncategorized``.
-    Each mod is ``(status, name, line_index)`` so edits/reorders can target the
-    exact line in the file. Empty separator groups are retained.
+    categories - see ``_category_labels()`` for the exact rule this
+    follows. Each mod is ``(status, name, line_index)`` so edits/reorders
+    can target the exact line in the file. Empty separator groups are
+    retained; empty "Uncategorized" runs are not.
     """
     groups: list[tuple[str, list[tuple[str, str, int]]]] = []
-    category = "Uncategorized"
-    mods: list[tuple[str, str, int]] = []
+    pending: list[tuple[str, str, int]] = []
+    seen_separator = False
     for idx, line in enumerate(lines):
         info = _line_info(line)
         if info is None:
@@ -94,13 +141,25 @@ def grouped(
         status, name = info
         cat = separator_name(name)
         if cat is not None:
-            if mods or category != "Uncategorized":
-                groups.append((category, mods))
-            category, mods = cat, []
+            if not seen_separator:
+                # The very first separator's own members always go to
+                # Uncategorized instead (see _category_labels()) - but the
+                # separator/category itself still exists and is retained,
+                # just empty, so it still shows up (and can be moved into).
+                if pending:
+                    groups.append(("Uncategorized", pending))
+                groups.append((cat, []))
+                seen_separator = True
+            else:
+                # This separator closes the batch collected since the
+                # previous one - it's the one that NAMES that batch.
+                groups.append((cat, pending))
+            pending = []
         else:
-            mods.append((status, name, idx))
-    if mods or category != "Uncategorized":
-        groups.append((category, mods))
+            pending.append((status, name, idx))
+    # Trailing mods with no closing separator (or no separators at all).
+    if pending:
+        groups.append(("Uncategorized", pending))
     return groups
 
 
@@ -228,25 +287,46 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
     write_text(path, "\n".join(lines) + "\n")
 
 
+def _top_insertion_index(lines: list[str]) -> int:
+    """Return the insertion index for a genuinely top-of-list, uncategorized mod.
+
+    Skips any leading comment/blank lines (e.g. MO2's own "automatically
+    generated by Mod Organizer" header) so those stay first, but otherwise
+    lands before all real content - including before the file's first
+    separator, so the inserted mod falls in the "Uncategorized" zone (see
+    _category_labels()) rather than being swept into whatever category
+    happens to be first.
+    """
+    index = 0
+    while index < len(lines) and _line_info(lines[index]) is None:
+        index += 1
+    return index
+
+
 def add_mod(
     lines: list[str],
     name: str,
     *,
     enabled: bool = False,
-    category: str = "Extra Mods",
+    category: str | None = None,
 ) -> list[str]:
-    """Add a newly installed mod to the MO2 list, inside *category*.
+    """Add a newly installed mod to the MO2 list.
 
     New user-installed mods start disabled so they cannot unexpectedly alter a
     working GAMMA setup.  The caller can enable the entry after reviewing it.
 
-    The mod is placed inside the separator category named *category*.  If that
-    category does not exist yet, a new separator is appended to the end of the
-    list with the mod right after it.  This keeps newly installed mods grouped
-    together instead of dropping them into whichever category is last.
+    With no *category* (the default), the mod is inserted at the very top
+    of the list, before any existing separator - the "Uncategorized" zone
+    (see _category_labels()) - matching where a freshly installed mod
+    actually lands in real MO2: top of the left pane, in no category, and
+    freely movable into a real category afterward.
 
-    MO2 stores the list in display order, so the new mod appears at the bottom
-    of the left pane (highest priority) inside its category.
+    With an explicit *category*, the mod is added as a member of that
+    category: a category's members sit immediately above its separator
+    (not below - see grouped()), so the mod is inserted right before the
+    separator, making it that category's last/highest-priority member. If
+    the category doesn't exist yet, it's created by appending the mod
+    followed by a new separator to the end of the list.
     """
     if not _valid_name(name):
         raise ValueError("Mod names cannot contain path separators or control characters")
@@ -255,26 +335,24 @@ def add_mod(
         raise ValueError("A mod name cannot end in '_separator'")
     if any(mod_name == name for _, mod_name in entries(lines)):
         raise ValueError(f"Mod {name!r} is already in the modlist")
+    line = ("+" if enabled else "-") + name
+    out = list(lines)
+    if category is None:
+        out.insert(_top_insertion_index(out), line)
+        return out
     clean_category = category.strip()
     if not _valid_name(clean_category):
         raise ValueError("Category names cannot contain path separators or control characters")
     separator = f"{clean_category}_separator"
-    out = list(lines)
     sep_idx = _category_separator_index(out, clean_category)
-    line = ("+" if enabled else "-") + name
     if sep_idx is not None:
-        # Category exists: insert after its separator, before the next one.
-        insert_at = sep_idx + 1
-        while insert_at < len(out):
-            info = _line_info(out[insert_at])
-            if info is not None and separator_name(info[1]) is not None:
-                break
-            insert_at += 1
-        out.insert(insert_at, line)
+        # Category exists: insert as its last member, right before its
+        # separator (members sit above their separator, not below).
+        out.insert(sep_idx, line)
         return out
-    # Category missing: append the separator entry, then the mod.
-    out.append(f"-{separator}")
+    # Category missing: append the mod, then a new separator to close it.
     out.append(line)
+    out.append(f"-{separator}")
     return out
 
 
@@ -287,100 +365,6 @@ def _category_separator_index(lines: list[str], category: str) -> int | None:
         if separator_name(info[1]) == category:
             return index
     return None
-
-
-def reparent_into_category(
-    lines: list[str],
-    names: list[str],
-    category: str = "Extra Mods",
-) -> list[str] | None:
-    """Move the listed mod entries together into *category*.
-
-    Entries are relocated so that they all live under a single separator for
-    *category*: the separator is created at the end of the list when missing,
-    and duplicate separators for the category are collapsed into the first.
-    Each mod keeps its enabled/disabled status and the relocations happen in
-    the order the mods appear in *lines*.  Entries already inside the category
-    are left untouched.
-
-    Returns the new line list when anything changed, or ``None`` when the
-    entries are already grouped correctly.
-    """
-    clean_category = category.strip()
-    if not clean_category or not _valid_name(clean_category):
-        raise ValueError("Category names cannot contain path separators or control characters")
-    wanted = {
-        name
-        for name in names
-        if _valid_name(name) and name[:1] not in "+-" and not name.endswith("_separator")
-    }
-    if not wanted:
-        return None
-    separator = f"{clean_category}_separator"
-
-    # Map each mod line to the category it currently belongs to.
-    category_of: dict[int, str] = {}
-    current = "Uncategorized"
-    for index, line in enumerate(lines):
-        info = _line_info(line)
-        if info is None:
-            continue
-        cat = separator_name(info[1])
-        if cat is not None:
-            current = cat
-        category_of[index] = current
-
-    moving = [
-        (index, line)
-        for index, line in enumerate(lines)
-        if (info := _line_info(line)) is not None
-        and info[1] in wanted
-        and category_of.get(index) != clean_category
-    ]
-    if not moving:
-        dupes = sum(
-            1
-            for line in lines
-            if (info := _line_info(line)) is not None
-            and separator_name(info[1]) == clean_category
-        )
-        if dupes <= 1:
-            return None
-
-    out = list(lines)
-    for index, _line in reversed(moving):
-        out.pop(index)
-
-    # Collapse duplicate category separators into the first occurrence.
-    seps = [
-        index
-        for index, line in enumerate(out)
-        if (info := _line_info(line)) is not None
-        and separator_name(info[1]) == clean_category
-    ]
-    for index in reversed(seps[1:]):
-        out.pop(index)
-
-    sep_idx = None
-    for index, line in enumerate(out):
-        info = _line_info(line)
-        if info is not None and separator_name(info[1]) == clean_category:
-            sep_idx = index
-            break
-    if sep_idx is None:
-        out.append(f"-{separator}")
-        sep_idx = len(out) - 1
-
-    insert_at = sep_idx + 1
-    while insert_at < len(out):
-        info = _line_info(out[insert_at])
-        if info is not None and separator_name(info[1]) is not None:
-            break
-        insert_at += 1
-    for _index, line in moving:
-        out.insert(insert_at, line)
-        insert_at += 1
-    return out
 
 
 def install_conflict(lines: list[str], mods_dir: str | Path, name: str) -> str | None:
@@ -453,15 +437,14 @@ def reorder_mods(lines: list[str], from_idx: int, to_idx: int) -> list[str]:
 
 
 def _category_at(lines: list[str], line_index: int) -> str:
-    """Return the separator category containing a raw line index."""
-    category = "Uncategorized"
-    for index, line in enumerate(lines):
-        if index > line_index:
-            break
-        info = _line_info(line)
-        if info is not None:
-            category = separator_name(info[1]) or category
-    return category
+    """Return the category containing a raw mod line index.
+
+    Uses the same rule as grouped()/_category_labels(): a category's
+    members are the mod lines immediately above its separator, not below.
+    """
+    if not 0 <= line_index < len(lines):
+        return "Uncategorized"
+    return _category_labels(lines)[line_index] or "Uncategorized"
 
 
 def move_mod(
@@ -513,48 +496,20 @@ def move_mod(
         insert_at = target_idx - int(source_idx < target_idx)
         if not before:
             insert_at += 1
-    elif at_start and target_category != "Uncategorized":
-        # Insert at the start of the target category (right after its separator).
-        sep_pos = None
-        current_category = "Uncategorized"
-        for index, line in enumerate(out):
-            info = _line_info(line)
-            if info is None:
-                continue
-            separator = separator_name(info[1])
-            if separator is not None:
-                current_category = separator
-            if current_category == target_category:
-                sep_pos = index
-                break
-        if sep_pos is not None:
-            insert_at = sep_pos + 1
-        else:
-            insert_at = 0
     else:
-        # Append to the end of the *first* occurrence of target_category,
-        # consistent with reparent_into_category's "duplicate separators
-        # collapse to the first" rule - without that, a duplicate separator
-        # further down (MO2 can reintroduce one on an external rewrite)
-        # would silently pull newly-moved mods into a second, disconnected
-        # group instead of joining the mods already there.
-        insert_at = 0 if target_category == "Uncategorized" else len(out)
-        current_category = "Uncategorized"
-        seen_target_block = False
-        for index, line in enumerate(out):
-            info = _line_info(line)
-            if info is None:
-                continue
-            separator = separator_name(info[1])
-            if separator is not None:
-                if current_category == target_category and seen_target_block:
-                    break
-                current_category = separator
-                if current_category == target_category:
-                    seen_target_block = True
-                    insert_at = index + 1
-            elif current_category == target_category:
-                insert_at = index + 1
+        # A category's members sit immediately above its separator, not
+        # below (see grouped()) - "start of category" is the first such
+        # member's position, "end of category" is right before its
+        # separator (i.e. right after the last member).
+        labels = _category_labels(out)
+        members = [i for i, label in enumerate(labels) if label == target_category]
+        if members:
+            insert_at = members[0] if at_start else members[-1] + 1
+        elif target_category == "Uncategorized":
+            insert_at = _top_insertion_index(out)
+        else:
+            sep_idx = _category_separator_index(out, target_category)
+            insert_at = sep_idx if sep_idx is not None else len(out)
     out.insert(min(insert_at, len(out)), mod_line)
     return out
 
@@ -574,20 +529,21 @@ def flip_priority(lines: list[str]) -> list[str]:
     overall load order barely changes even though every individual mod
     inside a category does.
 
-    A separator line always stays as the first line of its own block (its
-    category name does not change), and non-mod lines inside a block
-    (comments, blanks) keep their position relative to that block.
+    A separator line always stays as the LAST line of its own block (its
+    category name does not change) - a category's members sit immediately
+    above its separator, not below (see grouped()) - and non-mod lines
+    inside a block (comments, blanks) keep their position relative to that
+    block.
 
     The function returns a new list; the original is not modified.
     """
     boundaries = [0]
     for index, line in enumerate(lines):
-        if index == 0:
-            continue
         info = _line_info(line)
         if info is not None and separator_name(info[1]) is not None:
-            boundaries.append(index)
-    boundaries.append(len(lines))
+            boundaries.append(index + 1)
+    if boundaries[-1] != len(lines):
+        boundaries.append(len(lines))
 
     blocks = [
         lines[start:end] for start, end in pairwise(boundaries) if start != end

@@ -45,6 +45,12 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         "Retro CRT: pure black with neon green phosphor text.",
         ("#000000", "#33ff66", "#33cc55"),
     ),
+    (
+        "reactor",
+        "Reactor",
+        "Deep black with a glowing reactor-coolant teal accent.",
+        ("#010a0a", "#006868", "#cdeaea"),
+    ),
 ]
 
 _ACTIVE: str = "gamma"
@@ -146,12 +152,12 @@ QWidget#panelTransparent {
     font-size: 17px;
     font-weight: bold;
     letter-spacing: 2px;
-    color: $accent;
+    color: $accent_strong;
 }
 #byline {
     font-size: 11px;
     letter-spacing: 1px;
-    color: $accent;
+    color: $accent_strong;
     padding-right: 3px;
 }
 #navtabs {
@@ -165,10 +171,10 @@ QWidget#panelTransparent {
     border-bottom: 2px solid transparent;
 }
 #navtabs::tab:hover {
-    color: $accent;
+    color: $accent_strong;
 }
 #navtabs::tab:selected {
-    color: $accent;
+    color: $accent_strong;
     border-bottom: 2px solid $accent_strong;
 }
 #navtabs[settingsMode="true"]::tab:selected {
@@ -176,7 +182,7 @@ QWidget#panelTransparent {
     border-bottom: 2px solid transparent;
 }
 #navtabs[settingsMode="true"]::tab:hover {
-    color: $accent;
+    color: $accent_strong;
 }
 #cogButton {
     background: transparent;
@@ -186,10 +192,10 @@ QWidget#panelTransparent {
     padding: 0 10px;
 }
 #cogButton:hover {
-    color: $accent;
+    color: $accent_strong;
 }
 #cogButton[active="true"] {
-    color: $accent;
+    color: $accent_strong;
 }
 #card {
     background-color: $card;
@@ -264,7 +270,7 @@ QLabel#section3 {
     background-color: $danger_bg;
 }
 #statusOptional {
-    color: $accent_text;
+    color: $warn_text;
     background-color: $warn;
 }
 #statusChecking {
@@ -279,7 +285,7 @@ QLabel#section3 {
 #modCounter {
     font-size: 20px;
     font-weight: bold;
-    color: $accent;
+    color: $accent_strong;
 }
 #section2 {
     font-size: 15px;
@@ -293,7 +299,7 @@ QLabel#section3 {
     color: $text_dim;
 }
 #accent {
-    color: $accent;
+    color: $accent_strong;
 }
 #warn {
     color: $warn;
@@ -368,7 +374,7 @@ QPushButton#hero {
     border: 1px solid $hero_border;
     border-radius: 10px;
     padding: 16px 28px;
-    color: $accent_text;
+    color: $hero_text;
     font-size: 17px;
     font-weight: bold;
 }
@@ -628,6 +634,7 @@ THEMES: dict[str, dict[str, str]] = {
         "accent": "#9fe96f",
         "accent_strong": "#8fe45c",
         "accent_text": "#0c130a",
+        "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
         "primary": "#5fb548",
         "primary_hover": "#6fc95a",
@@ -639,6 +646,7 @@ THEMES: dict[str, dict[str, str]] = {
         "hero_hover1": "#58b843",
         "hero_hover2": "#7ad964",
         "hero_border": "#9fe96f",
+        "hero_text": "#0c130a",
         "secondary_hover_border": "#6fc95a",
         "selection": "#5fb548",
         "selection_text": "#0c130a",
@@ -707,6 +715,7 @@ THEMES: dict[str, dict[str, str]] = {
         "accent": "#6fd3a8",
         "accent_strong": "#5ec99b",
         "accent_text": "#0b1511",
+        "warn_text": "#0b1511",
         "accent_section": "#7fceab",
         "primary": "#3f9d7a",
         "primary_hover": "#4bb38c",
@@ -718,6 +727,7 @@ THEMES: dict[str, dict[str, str]] = {
         "hero_hover1": "#379977",
         "hero_hover2": "#57bf97",
         "hero_border": "#6fd3a8",
+        "hero_text": "#0b1511",
         "secondary_hover_border": "#4bb38c",
         "selection": "#3f9d7a",
         "selection_text": "#0b1511",
@@ -786,6 +796,7 @@ THEMES: dict[str, dict[str, str]] = {
         "accent": "#33ff66",
         "accent_strong": "#2ee75c",
         "accent_text": "#001a05",
+        "warn_text": "#001a05",
         "accent_section": "#33dd55",
         "primary": "#1f8a3a",
         "primary_hover": "#26a346",
@@ -797,6 +808,7 @@ THEMES: dict[str, dict[str, str]] = {
         "hero_hover1": "#1bb844",
         "hero_hover2": "#30dd5a",
         "hero_border": "#33ff66",
+        "hero_text": "#001a05",
         "secondary_hover_border": "#26c94e",
         "selection": "#1f8a3a",
         "selection_text": "#001a05",
@@ -865,6 +877,7 @@ THEMES: dict[str, dict[str, str]] = {
         "accent": "#9fe96f",
         "accent_strong": "#8fe45c",
         "accent_text": "#0c130a",
+        "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
         "primary": "#5fb548",
         "primary_hover": "#6fc95a",
@@ -876,6 +889,7 @@ THEMES: dict[str, dict[str, str]] = {
         "hero_hover1": "#58b843",
         "hero_hover2": "#7ad964",
         "hero_border": "#9fe96f",
+        "hero_text": "#0c130a",
         "secondary_hover_border": "#6fc95a",
         "selection": "#5fb548",
         "selection_text": "#0c130a",
@@ -944,6 +958,7 @@ THEMES: dict[str, dict[str, str]] = {
         "accent": "#ff9f45",
         "accent_strong": "#ff8f2e",
         "accent_text": "#2a1600",
+        "warn_text": "#2a1600",
         "accent_section": "#f0a75f",
         "primary": "#c8721e",
         "primary_hover": "#dd8530",
@@ -955,6 +970,7 @@ THEMES: dict[str, dict[str, str]] = {
         "hero_hover1": "#ea8a2c",
         "hero_hover2": "#ffb061",
         "hero_border": "#ffb061",
+        "hero_text": "#2a1600",
         "secondary_hover_border": "#ff9f45",
         "selection": "#c8721e",
         "selection_text": "#2a1600",
@@ -991,5 +1007,86 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_button_text": "#f5e8d4",
         "pal_highlight": "#c8721e",
         "pal_highlighted_text": "#2a1600",
+    },
+    "reactor": {
+        "font_size": "13px",
+        "bg": "#010a0a",
+        "page": "rgba(1, 10, 10, 185)",
+        "topbar": "rgba(0, 6, 6, 245)",
+        "card": "#061616",
+        "input": "#020f0f",
+        "mono": "#010808",
+        "btn": "#0a2020",
+        "btn_hover": "#0f2e2e",
+        "btn_pressed": "#071818",
+        "btn_disabled": "#081717",
+        "chip": "#081a1a",
+        "border": "#0f3232",
+        "border_strong": "#184c4c",
+        "border_input": "#123d3d",
+        "border_secondary": "#1c5252",
+        "gridline": "#0c2828",
+        "text": "#cdeaea",
+        "text_bright": "#e8fbfb",
+        "text_btn": "#d8f3f3",
+        "text_btn_hover": "#c2e9e9",
+        "text_nav": "#568c8c",
+        "text_info": "#6ba3a3",
+        "text_dim": "#4a7a7a",
+        "text_mono": "#aed9d9",
+        "text_disabled": "#385e5e",
+        "text_tertiary_hover": "#9fe2e2",
+        "accent": "#006868",
+        "accent_strong": "#00a3a3",
+        "accent_text": "#eafcfc",
+        "warn_text": "#001515",
+        "accent_section": "#3aabab",
+        "primary": "#047777",
+        "primary_hover": "#0a9494",
+        "primary_disabled_bg": "#123c3c",
+        "primary_disabled_border": "#1f5555",
+        "primary_disabled_text": "#4d8080",
+        "hero1": "#036363",
+        "hero2": "#0aa3a3",
+        "hero_hover1": "#057676",
+        "hero_hover2": "#14bcbc",
+        "hero_border": "#00c2c2",
+        "hero_text": "#ffffff",
+        "secondary_hover_border": "#0a9494",
+        "selection": "#047777",
+        "selection_text": "#eafcfc",
+        "focus": "#00a3a3",
+        "chip_ok": "#00a3a3",
+        "chip_ok_border": "#1f5c5c",
+        "checking_bg": "#122a2a",
+        "warn": "#d9a04c",
+        "danger_bg": "#6e2f2a",
+        "danger_border": "#b0554f",
+        "danger_text": "#ffe6dd",
+        "danger_hover": "#b84940",
+        "danger_disabled_bg": "#2c1b1a",
+        "danger_disabled_border": "#4d302d",
+        "danger_disabled_text": "#7a635e",
+        "link": "#8fe0e0",
+        "link_hover": "#ffffff",
+        "back_base_a": "#020f0f",
+        "back_base_b": "#000505",
+        "back_glow1_rgb": "0, 168, 168",
+        "back_glow1_a": "55",
+        "back_glow1b_rgb": "0, 104, 104",
+        "back_glow1b_a": "35",
+        "back_glow1c_rgb": "0, 50, 50",
+        "back_glow1c_a": "16",
+        "back_glow2_rgb": "10, 90, 90",
+        "back_glow2_a": "42",
+        "pal_window": "#010a0a",
+        "pal_window_text": "#cdeaea",
+        "pal_base": "#020f0f",
+        "pal_alternate": "#061616",
+        "pal_text": "#cdeaea",
+        "pal_button": "#0a2020",
+        "pal_button_text": "#d8f3f3",
+        "pal_highlight": "#047777",
+        "pal_highlighted_text": "#eafcfc",
     },
 }

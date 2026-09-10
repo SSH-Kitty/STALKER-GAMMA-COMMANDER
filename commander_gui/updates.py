@@ -260,14 +260,28 @@ def diff_records(
         remote_hash = (remote_record.md5_mod_db or "").lower()
         archive_changed = local_record.zip_name != remote_record.zip_name
         hash_changed = local_hash != remote_hash and (local_hash or remote_hash)
-        if archive_changed or hash_changed:
-            diffs.append(
-                UpdateDiff(
-                    "Modified",
-                    f"{local_record.folder_name} -> {local_hash or '(none)'} -> "
-                    f"{remote_hash or '(none)'}",
-                )
+        if not (archive_changed or hash_changed):
+            continue
+        local_patch = (local_record.patch or "").strip()
+        remote_patch = (remote_record.patch or "").strip()
+        if remote_patch and local_patch != remote_patch:
+            detail = tr("{old} → {new}", old=local_patch or "?", new=remote_patch)
+        elif archive_changed:
+            detail = tr(
+                "{old} → {new}",
+                old=local_record.zip_name or "?",
+                new=remote_record.zip_name or "?",
             )
+        else:
+            detail = tr("Archive updated")
+        tooltip = tr(
+            "MD5: {old} → {new}",
+            old=local_hash or "(none)",
+            new=remote_hash or "(none)",
+        )
+        diffs.append(
+            UpdateDiff("Modified", local_record.folder_name, detail, tooltip)
+        )
     return diffs
 
 

@@ -355,8 +355,13 @@ class ProfilesPage(QWidget):
 
     # ----- button state -----
     def _update_save_button(self) -> None:
-        name = self.name_edit.text().strip()
-        editing = any(p.profile_name == name for p in self.settings.profiles)
+        # Must mirror _save_or_create()'s own dispatch: whether the click
+        # saves the profile the form was loaded from (rename included) or
+        # creates a new one depends on _form_state, not on whether the
+        # currently typed name happens to collide with some other profile.
+        editing = bool(self._form_state) and any(
+            p.profile_name == self._form_state for p in self.settings.profiles
+        )
         if editing:
             self.save_button.setText(tr("Save Changes"))
             self.save_button.setToolTip(tr("Save changes to the selected profile."))

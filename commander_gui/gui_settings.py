@@ -13,8 +13,10 @@ import shutil
 from .atomic import write_text
 from .config import gui_settings_path
 from .i18n import LANGUAGE_INFO
+from .themes import THEME_INFO
 
 _allowed_languages = {code for code, _native, _english in LANGUAGE_INFO}
+_allowed_themes = {key for key, _label, _description, _swatches in THEME_INFO}
 
 _DEFAULTS = {
     "runner": "auto",  # "auto" | "umu" | "wine" | "proton:<path-to-proton>"
@@ -76,13 +78,7 @@ def load_gui_settings() -> dict:
     for key in ("wine_prefix", "target", "custom_launch_options"):
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
-    if not isinstance(data.get("theme"), str) or data["theme"] not in {
-        "gamma",
-        "midnight",
-        "terminal",
-        "black",
-        "dusk",
-    }:
+    if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:
         data["theme"] = "gamma"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
         data["language"] = "en"

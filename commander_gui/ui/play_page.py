@@ -59,6 +59,7 @@ from .common import (
     BackgroundTask,
     gamma_installed,
     info_label,
+    install_hover_grow_text,
     make_card,
     mo2_pids,
     mo2_running,
@@ -266,6 +267,7 @@ class PlayPage(QWidget):
         self.launch_button.setToolTip(
             tr("Launch the selected target through Mod Organizer 2 with the GAMMA modlist and virtual file system.")
         )
+        install_hover_grow_text(self.launch_button, "hero_text")
         self.launch_button.clicked.connect(self.launch_game)
         root.addWidget(self.launch_button)
 
@@ -1031,16 +1033,21 @@ class PlayPage(QWidget):
                 if direct
                 else ("Mod Organizer 2" if open_mo2 else "GAMMA")
             )
+            monitoring_mo2 = not direct and os.name != "nt"
+            # Snapshot pre-existing MO2 processes before spawning so handoff
+            # detection can tell this launch's own instance apart from one
+            # the user already had open (see mo2_pids() docstring) - taken
+            # after launch_detached() a fast wrapper could already have
+            # started MO2, making its pid look pre-existing and breaking
+            # handoff detection.
+            pre_launch_mo2_pids = mo2_pids() if monitoring_mo2 else set()
             self._proc = launch_detached(
                 command, env, cwd, log_path=log_path, registry=self._registry
             )
-            self._monitoring_mo2 = not direct and os.name != "nt"
+            self._monitoring_mo2 = monitoring_mo2
             self._mo2_seen = False
             self._handoff_checks = 0
-            # Snapshot pre-existing MO2 processes so handoff detection can
-            # tell this launch's own instance apart from one the user
-            # already had open (see mo2_pids() docstring).
-            self._pre_launch_mo2_pids = mo2_pids() if self._monitoring_mo2 else set()
+            self._pre_launch_mo2_pids = pre_launch_mo2_pids
             self._mo2_launch_pids = set()
         except LaunchError as exc:
             self._abort_launch(f"Could not launch: {exc}")

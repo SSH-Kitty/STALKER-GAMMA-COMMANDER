@@ -62,7 +62,6 @@ from ..modlist import (
     add_category,
     add_mod,
     delete_at,
-    entries,
     flip_priority,
     grouped,
     install_conflict,
@@ -71,15 +70,8 @@ from ..modlist import (
     read_lines,
     rename_mod,
     reorder_to_original,
-    reparent_into_category,
     save_lines,
     set_status_at,
-)
-from ..user_mods import (
-    add_user_mod,
-    read_user_mods,
-    remove_user_mods,
-    rename_user_mod,
 )
 from .common import (
     ACCENT,
@@ -437,8 +429,9 @@ class ModManagerPage(QWidget):
         self._pending_refresh = False
         self._load_failed = False
         #: Name of the mod just installed, so the rebuilt tree can scroll to
-        #: and select it - new mods land disabled at the end of the file
-        #: (see add_mod()), easy to miss on a real GAMMA-sized modlist.
+        #: and select it - new mods land disabled at the top of the list,
+        #: uncategorized (see add_mod()), so this also confirms to the user
+        #: which entry is the one they just installed.
         self._just_installed_name: str | None = None
 
         outer = QVBoxLayout(self)
@@ -817,12 +810,7 @@ class ModManagerPage(QWidget):
         try:
             path = self._modlist_path(mo2_profile)
             self._lines = read_lines(path)
-            if self._restore_extra_mods_placement(path):
-                self.backup_status.setText(
-                    tr("Moved Commander-installed mod(s) back into Extra Mods")
-                )
-            else:
-                self.backup_status.setText(self._backup_status_text(path))
+            self.backup_status.setText(self._backup_status_text(path))
             self._populate_tree()
             self._update_count()
         except Exception as exc:  # noqa: BLE001
@@ -839,35 +827,6 @@ class ModManagerPage(QWidget):
             self._update_guard()
             return
         self._load_failed = False
-
-    def _restore_extra_mods_placement(self, path: Path) -> bool:
-        """Regroup Commander-installed mods under the Extra Mods category.
-
-        GAMMA/MO2 can rewrite modlist.txt outside the app, dropping the Extra
-        Mods separator and stranding previously installed mods in whichever
-        category the rewrite left them in.  Re-parent those entries back into
-        a single Extra Mods category and prune tracker names that are no
-        longer in the list.  This only writes while MO2 is not running.
-
-        Returns ``True`` when a repair write was performed.
-        """
-        tracked = read_user_mods(path)
-        if not tracked:
-            return False
-        try:
-            healed = reparent_into_category(self._lines, tracked)
-        except ValueError:
-            healed = None
-        healed_write = (
-            healed is not None
-            and not self._mo2_running()
-            and self._write_lines(healed, quiet=True)
-        )
-        present = {name for _, name in entries(self._lines)}
-        stale = [name for name in tracked if name not in present]
-        if stale:
-            remove_user_mods(path, stale)
-        return healed_write
 
     def _backup_status_text(self, modlist: Path) -> str:
         bak = self._backup_path(modlist)
@@ -1051,7 +1010,7 @@ class ModManagerPage(QWidget):
                     shutil.copy2(path, self._timestamped_backup_path(path))
             save_lines(path, new_lines)
             self._lines = new_lines
-            self._backup_status_text(path)
+            self.backup_status.setText(self._backup_status_text(path))
             self._prune_backups(path)
             self._update_guard()
             return True
@@ -1339,14 +1298,10 @@ class ModManagerPage(QWidget):
             self._finish_install()
             return
         if self._write_lines(new_lines, internal=True):
-            try:
-                add_user_mod(self._modlist_path(self.profile_combo.currentText()), destination.name)
-            except OSError:
-                pass
             self._just_installed_name = destination.name
             self.window.statusBar().showMessage(
-                f"Installed '{destination.name}' - added disabled under "
-                "'Extra Mods'. Enable it in the list below.",
+                f"Installed '{destination.name}' - added disabled at the "
+                "top of the list, uncategorized. Enable it below.",
                 8000,
             )
             self._finish_install()
@@ -1430,9 +1385,9 @@ class ModManagerPage(QWidget):
         """Scroll to, select, and briefly highlight a mod by name.
 
         Used right after install: a newly-added mod lands disabled at the
-        end of the file (see add_mod()), which on a real GAMMA-sized
-        modlist is off-screen at the very bottom with no visual cue - easy
-        to mistake for "it didn't work".
+        top of the list, uncategorized (see add_mod()) - it's on-screen
+        right away, but this still gives it a clear visual cue so it's not
+        mistaken for "it didn't work" among everything else at the top.
         """
         for i in range(self.tree.topLevelItemCount()):
             header = self.tree.topLevelItem(i)
@@ -1520,12 +1475,6 @@ class ModManagerPage(QWidget):
             new_lines = delete_at(new_lines, idx)
         if not self._write_lines(new_lines):
             return
-        try:
-            remove_user_mods(
-                self._modlist_path(self.profile_combo.currentText()), names
-            )
-        except OSError:
-            pass
         self._load_mods()
 
     def _delete_mod_folders(self, names: list[str]) -> bool:
@@ -1623,7 +1572,11 @@ class ModManagerPage(QWidget):
 
         category_actions: dict = {}
         category_menu = menu.addMenu("Move to Category")
-        categories = [name for name, _ in grouped(self._lines)]
+        # dict.fromkeys(): grouped() can legitimately emit "Uncategorized"
+        # twice (a leading run before the first separator and a trailing run
+        # after the last one) - without deduping, that would show up as two
+        # identical "Uncategorized" entries in this menu.
+        categories = list(dict.fromkeys(name for name, _ in grouped(self._lines)))
         current = item.parent().text(0)
         for cat in categories:
             if cat == current:
@@ -1688,14 +1641,6 @@ class ModManagerPage(QWidget):
         if new_lines == self._lines:
             return
         if self._write_lines(new_lines):
-            try:
-                rename_user_mod(
-                    self._modlist_path(self.profile_combo.currentText()),
-                    old_name,
-                    new_name,
-                )
-            except OSError:
-                pass
             self._load_mods()
             self._select_mod_names([new_name])
 

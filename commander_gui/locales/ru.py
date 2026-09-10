@@ -669,6 +669,7 @@ TRANSLATIONS: dict[str, str] = {
     "Unknown distribution": "Неизвестный дистрибутив",
     "Update available ({installed} → {latest})": "Доступно обновление ({installed} → {latest})",
     "Update check failed: {message}": "Проверка обновлений завершилась ошибкой: {message}",
+    "Archive updated": "Архив обновлён",
     "Winetricks is not installed, so these cannot be checked yet - see the Winetricks row above.": "Winetricks не установлен, поэтому проверить это пока нельзя - см. строку Winetricks выше.",
     "installed": "установлено",
     "missing": "отсутствует",
@@ -719,11 +720,12 @@ TRANSLATIONS: dict[str, str] = {
     "Font family:": "Шрифт:",
     "Interface font size:": "Размер шрифта интерфейса:",
     "Language:": "Язык:",
+    "Theme:": "Тема:",
     "Page on startup:": "Страница при запуске:",
     "Text Files (*.txt);;All Files (*)": "Текстовые файлы (*.txt);;Все файлы (*)",
     "{label} (Installed)": "{label} (установлено)",
     # Theme picker (settings_page.py, THEME_INFO from themes.py) - the theme
-    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal) are
+    # names themselves (GAMMA, GAMMA Black, Dusk, Midnight, Terminal, Reactor) are
     # kept as stylized names, like other proper nouns; only the descriptive
     # sentence per theme is translated.
     "The default look: deep green-black with a radiation-green glow.": "Вид по умолчанию: тёмно-зелёно-чёрный с радиоактивным зелёным свечением.",
@@ -731,9 +733,11 @@ TRANSLATIONS: dict[str, str] = {
     "Warm charcoal and amber with orange sunset accents.": "Тёплый угольно-серый и янтарный с оранжевыми акцентами заката.",
     "Cool slate blues and greys with a teal accent.": "Холодные серо-синие тона с бирюзовым акцентом.",
     "Retro CRT: pure black with neon green phosphor text.": "Ретро-стиль ЭЛТ: чистый чёрный с неоново-зелёным фосфорным текстом.",
+    "Deep black with a glowing reactor-coolant teal accent.": "Глубокий чёрный с ярким бирюзовым акцентом, похожим на реакторный теплоноситель.",
     # Verify Integrity temporarily disabled (install_page.py) - see
     # VERIFY_INTEGRITY_DISABLED.
     "Verify Integrity is currently under maintenance": "Verify Integrity сейчас на техническом обслуживании",
     "Cannot change the language while a background task is running. Wait for it to finish, then try again.": "Нельзя сменить язык, пока выполняется фоновая задача. Дождитесь её завершения и попробуйте снова.",
+    "Cannot change the theme while a background task is running. Wait for it to finish, then try again.": "Нельзя сменить тему, пока выполняется фоновая задача. Дождитесь её завершения и попробуйте снова.",
     "Applies immediately, unless a background task is running.": "Применяется сразу, если только не выполняется фоновая задача.",
 }

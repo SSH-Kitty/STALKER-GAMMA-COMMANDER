@@ -142,6 +142,8 @@ def parse_prune_archive(line: str) -> PruneArchive | None:
 class UpdateDiff:
     status: str  # Modified / Added / Removed
     text: str
+    detail: str = ""  # human-readable "Archive change" cell text (Modified only)
+    detail_tooltip: str = ""  # raw technical detail shown on hover, if any
 
 
 def parse_update_diff(line: str) -> UpdateDiff | None:

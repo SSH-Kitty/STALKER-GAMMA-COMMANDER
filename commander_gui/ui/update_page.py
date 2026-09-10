@@ -282,13 +282,12 @@ class UpdatePage(QWidget):
             QColor(_STATUS_COLORS.get(diff.status, LIGHT_GREY.name()))
         )
         status_item.setData(Qt.ItemDataRole.UserRole, diff.status)
-        parts = diff.text.split(" -> ")
-        name = parts[0].strip()
-        change = " -> ".join(p.strip() for p in parts[1:]) if len(parts) > 1 else ""
-        change_item = QTableWidgetItem(change)
+        change_item = QTableWidgetItem(diff.detail)
         change_item.setForeground(QColor(LIGHT_GREY.name()))
+        if diff.detail_tooltip:
+            change_item.setToolTip(diff.detail_tooltip)
         self.table.setItem(row, 0, status_item)
-        self.table.setItem(row, 1, QTableWidgetItem(name))
+        self.table.setItem(row, 1, QTableWidgetItem(diff.text))
         self.table.setItem(row, 2, change_item)
 
     # ----- check -----
@@ -297,13 +296,13 @@ class UpdatePage(QWidget):
             return
         if self.window.install_busy:
             self._set_status(
-                "An installation is running. The update check is paused.", "warn"
+                tr("An installation is running. The update check is paused."), "warn"
             )
             return
         profile = self.window.settings.active_profile
         if profile is None:
             self._set_status(
-                "No active profile. Create or activate one on the Profiles page.",
+                tr("No active profile. Create or activate one on the Profiles page."),
                 "warn",
             )
             return
@@ -317,7 +316,9 @@ class UpdatePage(QWidget):
         )
         self.check_button.setText(tr("Checking..."))
         self._update_button_states()
-        self._set_status("Checking the active GAMMA installation...", "dim")
+        self._set_status(
+            tr("Checking the active GAMMA installation for updates..."), "dim"
+        )
         task = BackgroundTask(check_updates, profile, parent=self)
         task.result.connect(
             lambda status, task=task, generation=generation, profile_id=profile_id: (
@@ -362,7 +363,7 @@ class UpdatePage(QWidget):
         if generation != self._check_generation:
             self._update_button_states()
             return
-        self._set_status(f"Update check failed: {message}", "warn")
+        self._set_status(tr("Update check failed: {message}", message=message), "warn")
         self._update_button_states()
 
     # ----- apply -----
@@ -428,7 +429,7 @@ class UpdatePage(QWidget):
             self.table.setRowCount(0)
             self.no_updates_label.setVisible(True)
             self.table.setVisible(False)
-            self._set_status("Updates applied - re-check to confirm", "dim")
+            self._set_status(tr("Updates applied - re-check to confirm"), "dim")
         self.window.set_install_busy(False)
         self._update_button_states()
 
