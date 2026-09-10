@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..modlist import seed_new_mo2_profile
 from ..settings import CliProfile, cli_ok, run_config_command
 from .common import (
     BackgroundTask,
@@ -437,8 +438,19 @@ class ProfilesPage(QWidget):
     def _new_profile(self) -> None:
         if self._busy_guard():
             return
+        # Preserve the paths already on screen: creating a new profile is
+        # commonly done to add another MO2 profile on top of an existing
+        # install (see seed_new_mo2_profile()), so resetting them to
+        # CliProfile()'s placeholder defaults would make the shared install
+        # paths the user just had visible seem to "disappear".
+        anomaly = self.anomaly_edit.text()
+        gamma = self.gamma_edit.text()
+        cache = self.cache_edit.text()
         self._form_state = ""
         self._load_form(CliProfile())
+        self.anomaly_edit.setText(anomaly)
+        self.gamma_edit.setText(gamma)
+        self.cache_edit.setText(cache)
         # An empty name field: "New" must never prefill a default name that
         # could collide with an existing profile.
         self.name_edit.clear()
@@ -521,6 +533,13 @@ class ProfilesPage(QWidget):
                 self, tr("Create Failed"), tr("The CLI did not create the profile.")
             )
             return
+        try:
+            seed_new_mo2_profile(profile.gamma, profile.mo2_profile)
+        except OSError:
+            # Best-effort: the profile itself was created successfully above,
+            # so a failure here (e.g. a read-only gamma folder) must not be
+            # reported as the create having failed.
+            pass
         self.refresh()
         QMessageBox.information(
             self, tr("Created"), tr("Profile '{profile_name}' created and activated.", profile_name=profile.profile_name)

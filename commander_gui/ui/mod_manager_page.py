@@ -429,9 +429,9 @@ class ModManagerPage(QWidget):
         self._pending_refresh = False
         self._load_failed = False
         #: Name of the mod just installed, so the rebuilt tree can scroll to
-        #: and select it - new mods land disabled at the top of the list,
-        #: uncategorized (see add_mod()), so this also confirms to the user
-        #: which entry is the one they just installed.
+        #: and select it - new mods land disabled at the top of the list
+        #: (see add_mod()), so this also confirms to the user which entry
+        #: is the one they just installed.
         self._just_installed_name: str | None = None
 
         outer = QVBoxLayout(self)
@@ -1301,7 +1301,7 @@ class ModManagerPage(QWidget):
             self._just_installed_name = destination.name
             self.window.statusBar().showMessage(
                 f"Installed '{destination.name}' - added disabled at the "
-                "top of the list, uncategorized. Enable it below.",
+                "top of the list. Enable it below.",
                 8000,
             )
             self._finish_install()
@@ -1385,9 +1385,9 @@ class ModManagerPage(QWidget):
         """Scroll to, select, and briefly highlight a mod by name.
 
         Used right after install: a newly-added mod lands disabled at the
-        top of the list, uncategorized (see add_mod()) - it's on-screen
-        right away, but this still gives it a clear visual cue so it's not
-        mistaken for "it didn't work" among everything else at the top.
+        top of the list (see add_mod()) - it's on-screen right away, but
+        this still gives it a clear visual cue so it's not mistaken for
+        "it didn't work" among everything else at the top.
         """
         for i in range(self.tree.topLevelItemCount()):
             header = self.tree.topLevelItem(i)
@@ -1572,10 +1572,9 @@ class ModManagerPage(QWidget):
 
         category_actions: dict = {}
         category_menu = menu.addMenu("Move to Category")
-        # dict.fromkeys(): grouped() can legitimately emit "Uncategorized"
-        # twice (a leading run before the first separator and a trailing run
-        # after the last one) - without deduping, that would show up as two
-        # identical "Uncategorized" entries in this menu.
+        # dict.fromkeys(): category names should already be unique, but
+        # deduping here is a harmless guard against a duplicate menu entry
+        # if that ever stops being true.
         categories = list(dict.fromkeys(name for name, _ in grouped(self._lines)))
         current = item.parent().text(0)
         for cat in categories:
