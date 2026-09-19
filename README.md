@@ -48,15 +48,17 @@ Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's execut
 - **Built-in GE-Proton installer** — browse recent GE-Proton releases, download with a progress bar and cancel support, and COMMANDER verifies the SHA-512 checksum and installs it into `compatibilitytools.d` for you. No manual downloading or extracting.
 - **Per-runner prefixes** — each runner remembers its own Wine prefix, so switching runners never corrupts a prefix built by a different version.
 - A live command preview with a copy button, a custom launch options field (supports env vars like `PROTON_USE_WINED3D=1`), and status chips showing installed GE-Proton builds, GameMode and MangoHud.
-- The game launches **detached** — closing COMMANDER doesn't kill your session — with output captured to a rotating `launcher.log`. Failed launches are diagnosed automatically: a DXVK/Vulkan problem, a runner/prefix mismatch, or the classic `concrt140.dll` error are called out by name instead of surfacing a raw Wine crash.
+- The game launches **detached** — closing COMMANDER doesn't kill your session — with output captured to a rotating `launcher.log`. Failed launches are diagnosed automatically: a DXVK/Vulkan problem, a runner/prefix mismatch, or the classic `concrt140.dll` error are called out by name instead of surfacing a raw Wine crash, with a one-click option to bundle a bug report on the spot.
 - One-click **desktop shortcuts** that launch a specific target with the currently selected runner.
+- **Total playtime** is tracked per profile and shown on the Dashboard.
+- Optional **Discord Rich Presence** ("Playing S.T.A.L.K.E.R. GAMMA") — off by default; enable it in Settings with your own free Discord Application Client ID.
 
 ### Updates
 Compares your installed GAMMA version and addon list against the latest official data — without hitting the rate-limited GitHub REST API — and shows exactly what changed: Added, Modified, Removed, and archive-name changes.
 
 <img width="1550" height="1042" alt="image" src="https://github.com/user-attachments/assets/d9aa93db-efdb-461a-a51c-6c30f8c3483b" />
 
-Applying updates reuses the same live progress UI as a fresh install, respects the Minimal/preserve-settings options, and holds the global install lock so it can never run alongside another install.
+Applying updates reuses the same live progress UI as a fresh install, respects the Minimal/preserve-settings options, and holds the global install lock so it can never run alongside another install. A **background check runs at most once a day** even if you never open this page, with a desktop notification if one is found. If an update doesn't go well, **Undo Last Update** restores the `modlist.txt` snapshot taken right before it was applied.
 
 ### Mod Manager
 Direct, careful editing of the active MO2 profile's `modlist.txt` — search, enable/disable, delete and reorder mods, grouped by the `_separator` categories GAMMA ships.
@@ -67,14 +69,18 @@ Direct, careful editing of the active MO2 profile's `modlist.txt` — search, en
 - Create new categories, install a local ZIP/7Z/RAR/FOMOD mod archive straight into the modlist, and use the active profile as MO2's selected profile without opening MO2.
 - **A backup is taken automatically before your first edit** (`modlist.txt.gammagui.bak`) and can be restored from the UI, alongside a **Restore Original Order** option.
 - **Writes are atomic** — a crash or full disk cannot truncate your load order — and **edits are blocked while Mod Organizer is running**, since MO2 rewrites the file on exit and would silently discard them.
+- **Check for File Conflicts** scans every enabled mod's files for ones shared by more than one mod, so you can see what the current load order is actually overriding.
+- Press **Ctrl+F** anywhere in the app to jump straight to this page's search box.
 
 ### Verify Integrity & Repair
 Runs three passes: an Anomaly file check, a GAMMA presence check (every enabled mod must exist on disk), and a full MD5 scan of every file under `gamma/mods` against a saved baseline. Anything missing, corrupted or changed is reported.
 
-If a broken mod matches an entry in the official GAMMA mod list, COMMANDER can **repair it automatically**: the mod folder and its cached archive are deleted, then it's redownloaded and MD5-verified against the official checksum. Your own added mods and files are never touched, and anything with no known download source is reported instead of silently deleted.
+If a broken mod matches an entry in the official GAMMA mod list, COMMANDER can **repair it automatically and non-destructively**: the mod folder and its cached archive are set aside (not deleted), then it's redownloaded and MD5-verified against the official checksum. If the reinstall fails or is cancelled, the set-aside copies are restored automatically — nothing is permanently lost until a repair is confirmed successful. Your own added mods and files are never touched, and anything with no known download source is reported instead of touched.
 
 ### Profiles
 Create, edit, activate and delete CLI profiles — each with its own Anomaly, GAMMA, cache, MO2 profile, download-thread and repository settings. Creation, activation and deletion are delegated to `stalker-gamma config` so its side effects (MO2's `selected_profile`, modlist downloads) happen exactly as the CLI intends. Advanced fields expose every repo URL and branch the CLI supports, for anyone using a fork or mirror.
+
+- **Export/Import Profile** saves a profile's portable settings (and its `modlist.txt`, if installed) to a file you can back up or hand to a friend — install folders are always chosen fresh on import, since they're specific to each machine.
 
 ### System Check
 Checks every dependency GAMMA and MO2 need in one place: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the 32-bit loader), each individual Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a copyable install command for your distro, and manual overrides let you point COMMANDER at tools installed in non-standard locations.
@@ -119,6 +125,16 @@ chmod +x STALKER-GAMMA-COMMANDER-*-x86_64.AppImage
 
 Python, Qt and the CLI are all bundled inside. For a menu entry and icon, use [Gear Lever](https://github.com/mijorus/gearlever) or [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher).
 
+### Arch Linux
+
+A `PKGBUILD` is provided under [`packaging/aur/`](packaging/aur/):
+
+```bash
+git clone https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER.git
+cd STALKER-GAMMA-COMMANDER/packaging/aur
+makepkg -si
+```
+
 ### From source
 
 ```bash
@@ -139,6 +155,15 @@ cd STALKER-GAMMA-COMMANDER
 4. **Play** → pick a runner and launch target, then **Launch Game**.
 
 Use **Updates** for addon updates afterward, and **Verify Integrity** if something seems broken.
+
+---
+
+## Contributing a translation
+
+Adding a new language is copy-and-fill-in, no code changes needed: start
+from [`commander_gui/locales/template.py`](commander_gui/locales/template.py),
+which lists every translatable string in the app. See the instructions
+in that file's header for the exact steps.
 
 ---
 

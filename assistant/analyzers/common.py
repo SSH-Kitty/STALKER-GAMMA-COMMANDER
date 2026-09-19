@@ -39,6 +39,7 @@ class FindingFactory:
         suggestion: str = "",
         excerpt_text: str = "",
         technical: str = "",
+        dedup_key: str | None = None,
     ) -> Finding:
         return Finding(
             severity=severity,
@@ -51,6 +52,7 @@ class FindingFactory:
             suggestion=suggestion,
             excerpt=excerpt_text,
             technical=technical,
+            dedup_key=dedup_key,
         )
 
 

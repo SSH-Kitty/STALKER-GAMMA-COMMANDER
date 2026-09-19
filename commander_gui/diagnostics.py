@@ -21,12 +21,21 @@ _MAX_DIAGNOSTIC_FILE_BYTES = 1_000_000
 _SENSITIVE_VALUE_RE = re.compile(
     r'(?i)("[^"]*(?:token|password|passwd|secret|credential|api[_-]?key)[^"]*"\s*:\s*)"[^"]*"'
 )
+#: A plain `\b` word-boundary fails immediately before the keyword whenever
+#: it's preceded by another word character - and `_` counts as one, so
+#: `\btoken\b` never matches the "token" in `GITHUB_TOKEN=...` (extremely
+#: common env-var/config convention). `(?:^|(?<=[^A-Za-z]))` instead only
+#: requires the preceding character to not be a letter (start-of-string,
+#: underscore, digit, punctuation all count), which still excludes false
+#: positives like "tokenizer" while actually catching the underscore-joined
+#: convention this is meant to guard against.
+_KEY_START = r"(?:^|(?<=[^A-Za-z]))"
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:token|password|passwd|secret|credential|api[_-]?key)\b\s*[:=]\s*)"
+    r"(?i)" + _KEY_START + r"((?:token|password|passwd|secret|credential|api[_-]?key)\b\s*[:=]\s*)"
     r'''("[^"]*"|'[^']*')'''
 )
 _SENSITIVE_ASSIGNMENT_UNQUOTED_RE = re.compile(
-    r"(?i)(\b(?:token|password|passwd|secret|credential|api[_-]?key)\b\s*[:=]\s*)"
+    r"(?i)" + _KEY_START + r"((?:token|password|passwd|secret|credential|api[_-]?key)\b\s*[:=]\s*)"
     r"[^\s,;&]+"
 )
 _AUTH_HEADER_RE = re.compile(
@@ -85,6 +94,14 @@ def _cli_version() -> str:
             [str(cli), "--version"],
             capture_output=True,
             text=True,
+            # Without an explicit errors= the locale codec decodes strictly,
+            # so a CLI binary that emits one non-UTF-8 byte raises
+            # UnicodeDecodeError - which is a ValueError, not an OSError, so
+            # it escapes the handler below and aborts the whole diagnostics
+            # export (and the log dump built on top of it) in a background
+            # thread. Matches how every other subprocess here decodes.
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             check=False,
         )
@@ -122,6 +139,9 @@ def collect_diagnostics() -> str:
             _redact(_read_file(gui_settings_path())),
         ),
         _section("Launcher Log", _redact(_read_file(logs_dir() / "launcher.log"))),
+        _section(
+            "COMMANDER App Log", _redact(_read_file(logs_dir() / "commander.log"))
+        ),
     ]
     return "\n".join(sections)
 

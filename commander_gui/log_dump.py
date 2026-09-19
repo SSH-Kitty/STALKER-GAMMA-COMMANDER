@@ -202,7 +202,18 @@ def build_log_dump(
                         continue
                     included += 1
                     total_bytes += size
-                    manifest_lines.append(f"[ok] {arcname} ({size} bytes)")
+                    # A crash dump is binary process memory - the same
+                    # regex redaction that scrubs .log/.crash text would
+                    # just corrupt it (and likely miss embedded secrets
+                    # anyway), so it's bundled raw. Flagging that plainly
+                    # in the manifest matters: unlike every other file
+                    # here, this one was never scanned at all.
+                    tag = (
+                        "ok, NOT REDACTED - raw memory dump"
+                        if file_path.suffix.lower() in {".dmp", ".mdmp"}
+                        else "ok"
+                    )
+                    manifest_lines.append(f"[{tag}] {arcname} ({size} bytes)")
             for name, text in sorted((extra_texts or {}).items()):
                 safe_name = _safe_archive_part(name)
                 from .diagnostics import _redact

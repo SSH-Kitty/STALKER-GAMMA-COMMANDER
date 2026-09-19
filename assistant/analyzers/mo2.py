@@ -36,6 +36,7 @@ def analyze_mo2_interface(arcname: str, where: str, lines: list[str]) -> list[Fi
                     "this appeared; restarting MO2 often clears transient "
                     "errors.",
                     excerpt_text=excerpt(lines, index),
+                    dedup_key=f"error:{message}",
                 )
             )
         elif level == "W" and message.lower() not in knowledge.BENIGN_MO2_WARNINGS:
@@ -50,6 +51,7 @@ def analyze_mo2_interface(arcname: str, where: str, lines: list[str]) -> list[Fi
                     suggestion="Watch whether it repeats; single warnings are "
                     "often non-critical.",
                     excerpt_text=excerpt(lines, index),
+                    dedup_key=f"warning:{message}",
                 )
             )
     if not findings:

@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .i18n import tr
-from .network import read_response_bytes, urlopen
+from .network import read_response_bytes
+from .network import urlopen_with_retry as urlopen
 from .parsers import UpdateDiff
 from .repair import USER_AGENT, ModPackRecord, parse_modpack_records
 
@@ -38,6 +40,11 @@ _PATCHNOTES_VERSION_RE = re.compile(
     r"^#\s*\*\*GAMMA\s+(?P<version>[0-9]+(?:\.[0-9]+)+)\*\*"
 )
 _README_VERSION_RE = re.compile(r"gamma-v(?P<version>[0-9]+(?:\.[0-9]+)+)")
+#: A release's own heading in Patchnotes.md - always a level-1 Markdown
+#: heading ("# **GAMMA 0.9.5**", "# **...0.9.4 Patch Notes**", ...); the
+#: exact wording has drifted across releases, so this only anchors on
+#: the "# " marker itself, not any particular phrasing.
+_RELEASE_HEADING_RE = re.compile(r"^#[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 
 
 @dataclass
@@ -49,6 +56,9 @@ class UpdateStatus:
     #: Human-readable GAMMA version (e.g. "0.9.5") for each build number.
     installed_human: str | None = None
     latest_human: str | None = None
+    #: Full Patchnotes.md body for the latest release, or None if it
+    #: couldn't be fetched - see fetch_latest_patchnotes().
+    patchnotes: str | None = None
     diffs: list[UpdateDiff] = field(default_factory=list)
     error: str | None = None
 
@@ -115,17 +125,43 @@ def installed_version(gamma_dir: str | None) -> str | None:
     return version or None
 
 
+def _repo_owner_and_name(profile) -> tuple[str, str]:
+    repo_url = (getattr(profile, "stalker_gamma_repo_url", "") or "").strip()
+    # str.split("/") always returns at least one (possibly empty) element,
+    # even for "" - so `len(parts) >= 1` can never actually be False and the
+    # "Stalker_GAMMA" fallback below it was dead code; an emptied repo URL
+    # produced "https://.../Grokitach//refs/heads/..." (empty repo segment)
+    # instead of ever reaching that fallback. Check emptiness directly.
+    parts = repo_url.rstrip("/").split("/") if repo_url else []
+    owner = parts[-2] if len(parts) >= 2 else "Grokitach"
+    repo = parts[-1] if parts and parts[-1] else "Stalker_GAMMA"
+    return owner, repo
+
+
+def _repo_branch(profile) -> str:
+    return (getattr(profile, "stalker_gamma_repo_branch", "") or "main").strip()
+
+
 def _raw_repo_url(profile, filename: str) -> str:
     """Raw.githubusercontent URL for a file in the GAMMA repo."""
-    repo_url = (getattr(profile, "stalker_gamma_repo_url", "") or "").strip()
-    branch = (getattr(profile, "stalker_gamma_repo_branch", "") or "main").strip()
-    parts = repo_url.rstrip("/").split("/")
-    owner = parts[-2] if len(parts) >= 2 else "Grokitach"
-    repo = parts[-1] if len(parts) >= 1 else "Stalker_GAMMA"
+    owner, repo = _repo_owner_and_name(profile)
+    branch = _repo_branch(profile)
     return (
         f"https://raw.githubusercontent.com/{owner}/{repo}/"
         f"refs/heads/{branch}/{filename}"
     )
+
+
+def changelog_web_url(profile) -> str:
+    """Browser-facing (non-raw) GitHub URL for the repo's Patchnotes.md.
+
+    For the "View full changelog on GitHub" link - same owner/repo/branch
+    resolution as _raw_repo_url(), just a normal blob view a person can
+    actually open instead of a raw-text fetch URL.
+    """
+    owner, repo = _repo_owner_and_name(profile)
+    branch = _repo_branch(profile)
+    return f"https://github.com/{owner}/{repo}/blob/{branch}/{PATCHNOTES_FILENAME}"
 
 
 def remote_version(profile) -> str | None:
@@ -146,30 +182,129 @@ def remote_version(profile) -> str | None:
     return version or None
 
 
+def fetch_latest_patchnotes(profile) -> str | None:
+    """Fetch the repo's full ``Patchnotes.md`` body; None if unreachable.
+
+    latest_version_human() only ever needed a version-number regex match
+    out of this same fetch and discarded the rest - this keeps the full
+    text so callers (the Updates page's "What's New" panel) can show it.
+    """
+    try:
+        req = urllib.request.Request(
+            _raw_repo_url(profile, PATCHNOTES_FILENAME),
+            headers={"User-Agent": USER_AGENT},
+        )
+        with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
+                "utf-8", errors="replace"
+            )
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return text or None
+
+
+def _version_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    match = _PATCHNOTES_VERSION_RE.search(text) or _README_VERSION_RE.search(text)
+    return match.group("version") if match else None
+
+
+def parse_patchnotes_sections(text: str) -> list[tuple[str, str]]:
+    """Split a Patchnotes.md body into (title, body) per release.
+
+    Patchnotes.md is not just the latest release's notes - it's the
+    whole history, one level-1 Markdown heading per release (confirmed
+    against the real file: 0.9.5, 0.9.4, 0.9.3.1, 0.9.3, three separate
+    0.9.1 entries), stacked oldest-last. ``latest_version_human()``/
+    ``fetch_latest_patchnotes()`` only ever needed the very first one;
+    this is for showing the rest too, each as its own collapsible entry,
+    in the same (already latest-first) order the file itself uses.
+
+    ``title`` has its surrounding Markdown bold markers (``**``) and
+    whitespace stripped, since the exact heading wording has drifted
+    release to release ("# **GAMMA 0.9.5**" vs
+    "# **S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes**"). An empty list
+    means no level-1 heading was found at all (an unexpected format) -
+    callers should fall back to showing the raw text as a single,
+    untitled section rather than showing nothing.
+    """
+    matches = list(_RELEASE_HEADING_RE.finditer(text))
+    sections: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        title = match.group(1).strip().strip("*").strip()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        sections.append((title, body))
+    return sections
+
+
 def latest_version_human(profile) -> str | None:
     """Fetch the human-readable GAMMA version (e.g. "0.9.5").
 
     Taken from the repo's ``Patchnotes.md`` heading (``# **GAMMA 0.9.5**``),
     falling back to the README badge ``gamma-v0.9.5``. None if unreachable.
     """
-    for filename in (PATCHNOTES_FILENAME, README_FILENAME):
-        try:
-            req = urllib.request.Request(
-                _raw_repo_url(profile, filename),
-                headers={"User-Agent": USER_AGENT},
+    version = _version_from_text(fetch_latest_patchnotes(profile))
+    if version:
+        return version
+    try:
+        req = urllib.request.Request(
+            _raw_repo_url(profile, README_FILENAME),
+            headers={"User-Agent": USER_AGENT},
+        )
+        with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
+                "utf-8", errors="replace"
             )
-            with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-                text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
-                    "utf-8", errors="replace"
-                )
-        except (OSError, ValueError, UnicodeError):
-            continue
-        if not text:
-            continue
-        match = _PATCHNOTES_VERSION_RE.search(text) or _README_VERSION_RE.search(text)
-        if match:
-            return match.group("version")
-    return None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return _version_from_text(text)
+
+
+_COMMANDER_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
+_VERSION_NUMERIC_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
+
+
+def _numeric_version_tuple(text: str) -> tuple[int, ...] | None:
+    match = _VERSION_NUMERIC_RE.search(text)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(0).split("."))
+
+
+def check_commander_update(current_version: str) -> str | None:
+    """Return the newer COMMANDER release tag, or None if up to date/unreachable.
+
+    Deliberately avoids api.github.com/repos/.../releases/latest - like the
+    GAMMA checks above, that endpoint is rate-limited to 60 requests/hour
+    per IP and frequently 403s. GitHub's own "/releases/latest" HTML page
+    redirects (302) to "/releases/tag/<name>" without touching the REST
+    API at all - a HEAD request just needs the resolved URL, not the page
+    body, to read the tag name off it.
+    """
+    current = _numeric_version_tuple(current_version)
+    if current is None:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{_COMMANDER_REPO}/releases/latest",
+            method="HEAD",
+            headers={"User-Agent": USER_AGENT},
+        )
+        with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            final_url = resp.geturl()
+    except (OSError, ValueError):
+        return None
+    match = re.search(r"/releases/tag/([^/]+)/?$", final_url)
+    if not match:
+        return None
+    tag = urllib.parse.unquote(match.group(1))
+    remote = _numeric_version_tuple(tag)
+    if remote is None or remote <= current:
+        return None
+    return tag
 
 
 def _records_by_dl_link(
@@ -338,7 +473,13 @@ def check_updates(profile) -> UpdateStatus:
     # The version marker is served independently of the addon list -- still
     # fetch it so a list outage does not hide an available update.
     status.latest = remote_version(profile)
-    status.latest_human = latest_version_human(profile)
+    # One fetch shared between the human version label and the "What's
+    # New" panel - latest_version_human()'s own README fallback is only
+    # used if this single Patchnotes.md fetch didn't yield a match.
+    status.patchnotes = fetch_latest_patchnotes(profile)
+    status.latest_human = _version_from_text(status.patchnotes) or latest_version_human(
+        profile
+    )
     # The human label is only reliable for the latest release; an installed
     # build that is not current keeps its bare build number instead.
     if status.installed and status.latest and status.installed == status.latest:

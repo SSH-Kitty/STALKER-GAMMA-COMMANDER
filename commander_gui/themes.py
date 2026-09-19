@@ -76,7 +76,6 @@ _FONT_FAMILY_MAP: dict[str, str] = {
     "Exo 2": '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif',
     "Noto Sans": '"Noto Sans", "DejaVu Sans", sans-serif',
     "DejaVu Sans": '"DejaVu Sans", "Noto Sans", sans-serif',
-    "Ubuntu": '"Ubuntu", "DejaVu Sans", sans-serif',
     "Liberation Sans": '"Liberation Sans", "DejaVu Sans", sans-serif',
     "Inter": '"Inter", "DejaVu Sans", sans-serif',
 }
@@ -240,6 +239,7 @@ QWidget#panelTransparent {
 #installPage QGroupBox {
     margin-top: 12px;
     padding-top: 10px;
+    background-color: transparent;
 }
 #installPage QGroupBox::title {
     font-size: 13px;
@@ -250,6 +250,10 @@ QWidget#panelTransparent {
 }
 #installPage QCheckBox {
     padding: 3px 0;
+}
+#installPage QFrame#installDivider,
+#updatePage QFrame#installDivider {
+    background-color: $border;
 }
 QLabel#section3 {
     color: #7dc963;
@@ -440,12 +444,34 @@ QPushButton#consoleToggle:disabled {
     background-color: $btn_disabled;
     border-color: $btn_disabled;
 }
+QPushButton#releaseNotesToggle {
+    background-color: $card;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 3px 8px;
+    text-align: left;
+    color: $text_bright;
+    font-weight: bold;
+    font-size: 12px;
+}
+QPushButton#releaseNotesToggle:hover {
+    background-color: $btn_hover;
+    border-color: $border_strong;
+}
+QPushButton#releaseNotesToggle:checked {
+    color: $accent_strong;
+    border-color: $accent_strong;
+}
 QPushButton#tertiary {
     background: transparent;
     border: none;
     color: $text_info;
     text-decoration: underline;
     padding: 4px 8px;
+}
+QPushButton#tertiary:disabled {
+    color: $text_disabled;
+    background: transparent;
 }
 QPushButton#tertiary:hover {
     color: $text_tertiary_hover;
@@ -498,6 +524,37 @@ QComboBox::separator {
     background: $border_input;
     margin: 4px 8px;
 }
+/* A value that happens to be pickable from a few choices (Dashboard's
+   Profile overview row values) - reads as plain clickable text, not a
+   boxed form control, since it sits among a column of plain read-only
+   labels and would otherwise look out of place. */
+QComboBox#flatValueCombo {
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    color: $text;
+}
+QComboBox#flatValueCombo:hover,
+QComboBox#flatValueCombo:hover QLineEdit {
+    color: $link_hover;
+}
+/* Right-aligning the current value (see _FlatValueCombo) requires an
+   editable combo's internal QLineEdit - style it to disappear into the
+   combo itself rather than showing the general QLineEdit's own boxed
+   look (background/border/focus outline). */
+QComboBox#flatValueCombo QLineEdit {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: $text;
+    selection-background-color: transparent;
+    selection-color: $text;
+}
+QComboBox#flatValueCombo QAbstractItemView {
+    background-color: $card;
+    border: 1px solid $border_input;
+    selection-background-color: $selection;
+}
 QProgressBar {
     background-color: $input;
     border: 1px solid $border_input;
@@ -537,6 +594,37 @@ QTableWidget::item:selected, QListWidget::item:selected {
     background-color: $selection;
     color: $selection_text;
 }
+QTreeWidget {
+    background-color: $input;
+    border: 1px solid $border_input;
+    border-radius: 5px;
+    color: $text;
+}
+QTreeWidget::item {
+    padding: 3px 4px;
+    border: none;
+}
+QTreeWidget::item:selected {
+    background-color: $selection;
+    color: $selection_text;
+}
+QTreeWidget::branch {
+    background: transparent;
+}
+QTreeWidget::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid $border_strong;
+    border-radius: 3px;
+    background-color: $input;
+}
+QTreeWidget::indicator:checked {
+    background-color: $primary;
+    border-color: $accent_strong;
+}
+QTreeWidget::indicator:unchecked {
+    background-color: $input;
+}
 QPlainTextEdit {
     background-color: $mono;
     color: $text_mono;
@@ -571,6 +659,15 @@ QPushButton#githubLink {
 }
 QPushButton#githubLink:hover {
     color: $link_hover;
+    background: transparent;
+}
+QPushButton#commanderUpdateStatus {
+    padding: 0 4px;
+    border: none;
+    background: transparent;
+    font-size: 11px;
+}
+QPushButton#commanderUpdateStatus:disabled {
     background: transparent;
 }
 QMessageBox, QFileDialog {

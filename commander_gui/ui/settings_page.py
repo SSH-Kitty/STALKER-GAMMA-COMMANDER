@@ -1,8 +1,8 @@
 """Settings page: launch behaviour, launcher defaults and appearance.
 
-Start page, default runner and the "always gamemoderun" option persist to the
-GUI settings file and take effect immediately or on the next launch as
-described next to each control. Themes and the UI scale apply live.
+Start page and default runner persist to the GUI settings file and take
+effect immediately or on the next launch as described next to each
+control. Themes and the UI scale apply live.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -99,6 +100,7 @@ class SettingsPage(QWidget):
         root.addWidget(self._launcher_card())
         root.addWidget(self._appearance_card())
         root.addWidget(self._themes_card())
+        root.addWidget(self._discord_card())
         root.addWidget(self._diagnostics_card())
         root.addStretch(1)
 
@@ -133,17 +135,6 @@ class SettingsPage(QWidget):
         self._runner_combo.currentIndexChanged.connect(self._on_runner_changed)
         layout.addLayout(_option_row(tr("Default runner:"), self._runner_combo))
 
-        self._gamemode_check = QCheckBox(tr("Always use GameMode"))
-        self._gamemode_check.setToolTip(
-            tr("Wrap every launch in gamemoderun (enables the Feral GameMode CPU governor / scheduler optimisation), even for Proton.")
-        )
-        self._gamemode_check.toggled.connect(self._on_gamemode_toggled)
-        layout.addWidget(self._gamemode_check)
-        layout.addWidget(
-            info_label(
-                tr("umu-run launches already use gamemoderun automatically when it is installed.")
-            )
-        )
         self._winecfg_button = QPushButton(tr("Open Winecfg"))
         self._winecfg_button.setObjectName("secondary")
         self._winecfg_button.setToolTip(
@@ -193,7 +184,6 @@ class SettingsPage(QWidget):
             "Exo 2",
             "Noto Sans",
             "DejaVu Sans",
-            "Ubuntu",
             "Liberation Sans",
             "Inter",
         ):
@@ -251,6 +241,25 @@ class SettingsPage(QWidget):
         self._group.buttonToggled.connect(self._on_toggled)
         return card
 
+    def _discord_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label(tr("Discord Rich Presence"), level=2))
+        layout.addWidget(
+            info_label(
+                tr('Optional: show "Playing S.T.A.L.K.E.R. GAMMA" on your Discord profile while the game runs. Off by default, and does nothing without your own free Application Client ID from https://discord.com/developers/applications.')
+            )
+        )
+        self._discord_enable_check = QCheckBox(tr("Enable Discord Rich Presence"))
+        self._discord_enable_check.toggled.connect(self._on_discord_enabled_toggled)
+        layout.addWidget(self._discord_enable_check)
+        self._discord_client_id_edit = QLineEdit()
+        self._discord_client_id_edit.setPlaceholderText(tr("Discord Application Client ID"))
+        self._discord_client_id_edit.editingFinished.connect(self._on_discord_client_id_changed)
+        layout.addLayout(
+            _option_row(tr("Client ID:"), self._discord_client_id_edit)
+        )
+        return card
+
     def _diagnostics_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label(tr("Diagnostics"), level=2))
@@ -291,13 +300,18 @@ class SettingsPage(QWidget):
                 + (f"\n\n{reason}" if reason else ""),
             )
 
+    def _on_discord_enabled_toggled(self, checked: bool) -> None:
+        gui_settings.save_gui_settings(discord_rpc_enabled=bool(checked))
+
+    def _on_discord_client_id_changed(self) -> None:
+        gui_settings.save_gui_settings(
+            discord_client_id=self._discord_client_id_edit.text().strip()
+        )
+
     def _on_runner_changed(self, *_args) -> None:
         runner = self._runner_combo.currentData()
         if runner:
             gui_settings.save_gui_settings(runner=runner)
-
-    def _on_gamemode_toggled(self, checked: bool) -> None:
-        gui_settings.save_gui_settings(always_gamemoderun=bool(checked))
 
     def _open_winecfg(self) -> None:
         if mo2_running(force=True):
@@ -373,11 +387,17 @@ class SettingsPage(QWidget):
         size = self._font_size_combo.currentData()
         if size:
             self.window.apply_font_size(size)
+            # The status bar exposes the same font size/family/theme settings
+            # and is on screen at the same time as this page, but it is built
+            # once and only re-selects its combos from refresh_settings() -
+            # without this it keeps showing the previous value.
+            self.window.refresh_settings()
 
     def _on_font_family(self, *_args) -> None:
         family = self._font_family_combo.currentData()
         if family:
             self.window.apply_font_family(family)
+            self.window.refresh_settings()
 
     def _on_language(self, *_args) -> None:
         code = self._language_combo.currentData()
@@ -390,6 +410,7 @@ class SettingsPage(QWidget):
         key = next((k for k, radio in self._radios.items() if radio is button), None)
         if key is not None and key != active_theme():
             self.window.apply_theme(key)
+            self.window.refresh_settings()
 
     def _on_export_log(self) -> None:
         from PySide6.QtWidgets import QMessageBox
@@ -467,10 +488,6 @@ class SettingsPage(QWidget):
         self._language_combo.setCurrentIndex(max(language_index, 0))
         self._language_combo.blockSignals(False)
 
-        self._gamemode_check.blockSignals(True)
-        self._gamemode_check.setChecked(bool(state.get("always_gamemoderun")))
-        self._gamemode_check.blockSignals(False)
-
         dpi = int(state.get("mo2_display_dpi", 120))
         scale_index = self._display_scale_combo.findData(dpi)
         self._display_scale_combo.blockSignals(True)
@@ -484,6 +501,13 @@ class SettingsPage(QWidget):
         self._autostart_check.blockSignals(True)
         self._autostart_check.setChecked(autostart_on)
         self._autostart_check.blockSignals(False)
+
+        self._discord_enable_check.blockSignals(True)
+        self._discord_enable_check.setChecked(bool(state.get("discord_rpc_enabled")))
+        self._discord_enable_check.blockSignals(False)
+        self._discord_client_id_edit.blockSignals(True)
+        self._discord_client_id_edit.setText(str(state.get("discord_client_id") or ""))
+        self._discord_client_id_edit.blockSignals(False)
 
         current = state.get("theme") or "gamma"
         for key, radio in self._radios.items():

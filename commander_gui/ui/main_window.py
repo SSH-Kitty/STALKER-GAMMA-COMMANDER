@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import ClassVar
 
 from PySide6.QtCore import (
@@ -17,10 +18,12 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QFont,
+    QKeySequence,
     QLinearGradient,
     QPainter,
     QPen,
     QRadialGradient,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,6 +32,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStackedWidget,
     QTabBar,
@@ -36,8 +40,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version_label__, gui_settings
+from .. import __version__, __version_label__, gui_settings
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
+from ..self_update import (
+    commander_appimage_path,
+    download_and_install_commander_update,
+    relaunch_commander,
+)
 from ..settings import load_settings
 from ..themes import (
     THEME_INFO,
@@ -47,18 +56,24 @@ from ..themes import (
     build_stylesheet,
     set_active_theme,
 )
+from ..updates import check_commander_update, check_updates
 from .about_page import AboutPage
 from .common import (
+    OK_GREEN,
+    STATUS_GREY,
+    WARN,
+    BackgroundTask,
     NoWheelComboBox,
     count_active_mods,
     mo2_running,
+    notify_desktop,
     resume_after_shutdown,
     shutdown_active_runners,
     tr,
 )
 from .dashboard import DashboardPage
 from .help_page import HelpPage
-from .install_page import InstallPage
+from .install_page import InstallPage, _resume_state_matches
 from .mod_manager_page import ModManagerPage
 from .play_page import PlayPage
 from .profiles_page import ProfilesPage
@@ -270,11 +285,79 @@ class MainWindow(QMainWindow):
         # immediately, which needs these widgets to already exist.
         self._build_status_bar()
         self._build_ui()
+        self._build_shortcuts()
         self.tabs.setCurrentIndex(0)
+        QTimer.singleShot(0, self._maybe_check_for_updates_in_background)
+        QTimer.singleShot(0, self._check_commander_update_status)
 
         start_page = gui_settings.load_gui_settings().get("start_page")
         if start_page and start_page in self._page_index and start_page != "settings":
             self.tabs.setCurrentIndex(self._page_index[start_page])
+
+    def _build_shortcuts(self) -> None:
+        """Set up app-wide keyboard shortcuts - called once from __init__.
+
+        Deliberately NOT called from _build_ui(): that method reruns on
+        every switch_language() and would otherwise stack a duplicate
+        QShortcut (each one firing its action again) on every language
+        change, the same trap _build_status_bar()'s own docstring
+        documents for status bar widgets.
+        """
+        focus_search = QShortcut(QKeySequence("Ctrl+F"), self)
+        focus_search.activated.connect(self._focus_mod_search)
+        open_settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        open_settings_shortcut.activated.connect(self.open_settings)
+
+    def _focus_mod_search(self) -> None:
+        """Jump to Mod Manager and focus its search box.
+
+        Looks up the current page fresh rather than capturing it at
+        shortcut-creation time - _build_ui() replaces every page instance
+        on each switch_language(), so a captured reference would go stale.
+        """
+        self.set_page("modmanager")
+        page = self._pages.get("modmanager")
+        if page is not None and hasattr(page, "search"):
+            page.search.setFocus()
+            page.search.selectAll()
+
+    #: How often the background update check re-runs on its own, without
+    #: the user ever visiting the Dashboard/Updates page.
+    _UPDATE_CHECK_INTERVAL_S = 86400
+
+    def _maybe_check_for_updates_in_background(self) -> None:
+        """Once a day at most, check for a GAMMA update without being asked.
+
+        The Dashboard/Updates pages already check on demand when visited -
+        this covers the user who never opens either, surfacing a desktop
+        notification (see notify_desktop()) instead of a badge that would
+        need its own always-on UI plumbing.
+        """
+        gui_state = gui_settings.load_gui_settings()
+        last_check = gui_state.get("last_update_check_ts", 0.0)
+        try:
+            last_check = float(last_check)
+        except (TypeError, ValueError):
+            last_check = 0.0
+        if time.time() - last_check < self._UPDATE_CHECK_INTERVAL_S:
+            return
+        profile = self.settings.active_profile
+        if profile is None:
+            return
+        task = BackgroundTask(check_updates, profile, parent=self)
+        self._scheduled_update_task = task
+        task.result.connect(self._on_scheduled_update_checked)
+        task.start()
+
+    def _on_scheduled_update_checked(self, status: object) -> None:
+        gui_settings.save_gui_settings(last_update_check_ts=time.time())
+        if getattr(status, "update_available", False):
+            notify_desktop(
+                tr("GAMMA update available"),
+                tr(
+                    "A new GAMMA update is available - open COMMANDER's Updates page to review it."
+                ),
+            )
 
     def _build_ui(self) -> None:
         """(Re)build the header, nav tabs, and every page from scratch.
@@ -329,7 +412,6 @@ class MainWindow(QMainWindow):
 
         self.mod_counter_label = QLabel()
         self.mod_counter_label.setObjectName("modCounter")
-        self.mod_counter_label.hide()
         header_layout.addWidget(self.mod_counter_label)
 
         self._cog = QPushButton(tr("⚙"))
@@ -340,6 +422,25 @@ class MainWindow(QMainWindow):
         self._cog.clicked.connect(self.toggle_settings)
         header_layout.addWidget(self._cog)
         self.update_mod_counter()
+        # Keeps the topbar counter live on its own (e.g. while the user
+        # watches an install/repair finish, or after Mod Manager/MO2
+        # itself changes modlist.txt) instead of only updating it at the
+        # specific call sites that remember to - cheap (a single small
+        # file read/parse), so a few-second cadence is not wasteful.
+        # Stopped and dropped first: _build_ui() reruns on every
+        # switch_language(), and this timer is parented to the long-lived
+        # window rather than to the central widget that rebuild tears down -
+        # so nothing else would ever stop the previous one. Left running,
+        # every language switch would add another live timer firing
+        # update_mod_counter() on the same 5s cadence, forever.
+        previous_timer = getattr(self, "_mod_counter_timer", None)
+        if previous_timer is not None:
+            previous_timer.stop()
+            previous_timer.deleteLater()
+        self._mod_counter_timer = QTimer(self)
+        self._mod_counter_timer.setInterval(5000)
+        self._mod_counter_timer.timeout.connect(self.update_mod_counter)
+        self._mod_counter_timer.start()
 
         self._page_index: dict[str, int] = {}
         self._pages: dict[str, QWidget] = {}
@@ -372,8 +473,20 @@ class MainWindow(QMainWindow):
         # (0.9) keeps a perceptible fade without ever un-dimming the glow
         # enough for that to be noticeable.
         self._stack_opacity = QGraphicsOpacityEffect(self.stack)
+        # QGraphicsOpacityEffect's own default opacity is 0.7, not 1.0 -
+        # left unset, the very first page (Dashboard) renders dim until
+        # the first real page switch runs the fade below and leaves it
+        # at 1.0 for good.
+        self._stack_opacity.setOpacity(1.0)
         self.stack.setGraphicsEffect(self._stack_opacity)
-        self._stack_fade = QPropertyAnimation(self._stack_opacity, b"opacity", self)
+        # Parented to the opacity effect (not self/MainWindow): this whole
+        # fade setup is rebuilt fresh on every switch_language() call, and
+        # parenting the animation to the long-lived MainWindow instead of
+        # something torn down with the old stack would leak one orphaned
+        # animation object per language switch for the life of the app.
+        self._stack_fade = QPropertyAnimation(
+            self._stack_opacity, b"opacity", self._stack_opacity
+        )
         self._stack_fade.setDuration(400)
         self._stack_fade.setStartValue(0.9)
         self._stack_fade.setEndValue(1.0)
@@ -453,7 +566,76 @@ class MainWindow(QMainWindow):
         self._status_theme_combo.currentIndexChanged.connect(self._on_status_theme)
         self.statusBar().addWidget(self._status_theme_combo)
 
+        self._status_font_label = QLabel()
+        self._status_font_label.setStyleSheet(_STATUS_LABEL_STYLE)
+        self.statusBar().addWidget(self._status_font_label)
+
+        self._status_font_combo = NoWheelComboBox()
+        self._status_font_combo.setStyleSheet(_STATUS_COMBO_STYLE)
+        self._status_font_combo.setFixedHeight(21)
+        for family in (
+            "Exo 2",
+            "Noto Sans",
+            "DejaVu Sans",
+            "Liberation Sans",
+            "Inter",
+        ):
+            self._status_font_combo.addItem(family, family)
+        self._status_font_combo.currentIndexChanged.connect(
+            self._on_status_font_family
+        )
+        self.statusBar().addWidget(self._status_font_combo)
+
+        # No label before this one - a small numeric box right after the
+        # Font (family) box, matching the Settings page's own "Interface
+        # font size" combo (same 9-22 range) without a separate header.
+        self._status_fontsize_combo = NoWheelComboBox()
+        self._status_fontsize_combo.setStyleSheet(_STATUS_COMBO_STYLE)
+        self._status_fontsize_combo.setFixedHeight(21)
+        for size in range(9, 23):
+            self._status_fontsize_combo.addItem(str(size), size)
+        self._status_fontsize_combo.currentIndexChanged.connect(
+            self._on_status_font_size
+        )
+        self.statusBar().addWidget(self._status_fontsize_combo)
+
         self._refresh_status_bar()
+
+        # COMMANDER app-update status - separate from the GAMMA-modpack
+        # update check (_maybe_check_for_updates_in_background) - a
+        # flat, non-interactive label while checking/up to date, or a
+        # clickable one (opens the Releases page) once an update is
+        # confirmed available. Actually checked once, from __init__, via
+        # _check_commander_update_status().
+        #
+        # All three pieces (status, separator, GitHub link) are built
+        # into one container with its own QHBoxLayout and added as a
+        # SINGLE addPermanentWidget() call - relying on the relative
+        # order of multiple separate addPermanentWidget() calls proved
+        # unreliable in practice (worth remembering: don't guess at that
+        # ordering again), whereas a layout's own child order is always
+        # exactly what it's given, left to right.
+        update_area = QWidget()
+        update_layout = QHBoxLayout(update_area)
+        update_layout.setContentsMargins(0, 0, 0, 0)
+        update_layout.setSpacing(0)
+
+        self._update_status_button = QPushButton(tr("Checking for updates..."))
+        self._update_status_button.setObjectName("commanderUpdateStatus")
+        self._update_status_button.setFlat(True)
+        self._update_status_button.setEnabled(False)
+        self._update_status_button.setStyleSheet(
+            f"color: {STATUS_GREY.name()}; border: none;"
+        )
+        update_layout.addWidget(self._update_status_button)
+
+        # Same plain text-pipe separator style already used between the
+        # Language/Theme/Font controls above ("   |   " prefix), not a
+        # QFrame line - kept visually consistent with the rest of this
+        # status bar.
+        update_separator = QLabel("   |   ")
+        update_separator.setStyleSheet(_STATUS_LABEL_STYLE)
+        update_layout.addWidget(update_separator)
 
         github_link = QPushButton(tr("GitHub"))
         github_link.setObjectName("githubLink")
@@ -465,8 +647,109 @@ class MainWindow(QMainWindow):
                 QUrl("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER")
             )
         )
+        update_layout.addWidget(github_link)
+
         self.statusBar().setSizeGripEnabled(False)
-        self.statusBar().addPermanentWidget(github_link)
+        self.statusBar().addPermanentWidget(update_area)
+
+    def _check_commander_update_status(self) -> None:
+        """Best-effort, non-blocking check for a newer COMMANDER release.
+
+        Runs once, at startup - see the status bar's "Checking for
+        updates..." → "Up to date"/"Update available" label built in
+        _build_status_bar(). Just a status/link, not an auto-updater.
+        """
+        task = BackgroundTask(check_commander_update, __version__, parent=self)
+        task.result.connect(self._on_commander_update_status_checked)
+        task.start()
+
+    def _on_commander_update_status_checked(self, tag: object) -> None:
+        button = self._update_status_button
+        if tag and isinstance(tag, str):
+            button.setText(tr("COMMANDER update available"))
+            button.setStyleSheet(f"color: {WARN.name()}; border: none;")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setEnabled(True)
+            if commander_appimage_path() is not None:
+                # Running as an AppImage - offer to download and swap it in
+                # place instead of just sending the user to the browser. A
+                # source checkout or the AUR package (pacman-tracked, see
+                # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
+                # through to the plain "open the releases page" behavior.
+                button.setToolTip(tr("Download and install {tag} now", tag=tag))
+                button.clicked.connect(
+                    lambda: self._offer_commander_self_update(tag)
+                )
+            else:
+                button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
+                button.clicked.connect(
+                    lambda: QDesktopServices.openUrl(
+                        QUrl(
+                            "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
+                        )
+                    )
+                )
+        else:
+            button.setText(tr("COMMANDER is up to date"))
+            button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
+            button.setEnabled(False)
+
+    def _offer_commander_self_update(self, tag: str) -> None:
+        """Confirm, then download and swap in the new AppImage, then restart."""
+        answer = QMessageBox.question(
+            self,
+            tr("Update COMMANDER"),
+            tr(
+                "Download and install COMMANDER {tag} now? "
+                "The app will restart when it's done.",
+                tag=tag,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        progress = QProgressDialog(
+            tr("Downloading COMMANDER {tag}...", tag=tag), tr("Cancel"), 0, 0, self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        task = BackgroundTask(
+            download_and_install_commander_update, tag, parent=self
+        )
+        progress.canceled.connect(task.cancel_event.set)
+
+        def on_result(path: object) -> None:
+            progress.close()
+            relaunch_commander(path)
+            QApplication.quit()
+
+        def on_error(message: str) -> None:
+            progress.close()
+            self._show_commander_self_update_error(message)
+
+        task.result.connect(on_result)
+        task.error.connect(on_error)
+        task.start()
+        progress.show()
+
+    def _show_commander_self_update_error(self, message: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(tr("Update failed"))
+        box.setText(message)
+        box.addButton(QMessageBox.StandardButton.Close)
+        open_releases = box.addButton(
+            tr("Open Releases Page"), QMessageBox.ButtonRole.ActionRole
+        )
+        box.exec()
+        if box.clickedButton() == open_releases:
+            QDesktopServices.openUrl(
+                QUrl("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases")
+            )
 
     def _refresh_status_bar(self) -> None:
         """Re-render status bar text and re-select the combos' current items.
@@ -489,6 +772,17 @@ class MainWindow(QMainWindow):
         self._status_theme_combo.blockSignals(True)
         self._status_theme_combo.setCurrentIndex(max(theme_index, 0))
         self._status_theme_combo.blockSignals(False)
+        self._status_font_label.setText(f"   |   {tr('Font:')}")
+        font_family = gui_settings.load_gui_settings().get("font_family") or "Exo 2"
+        font_index = self._status_font_combo.findData(font_family)
+        self._status_font_combo.blockSignals(True)
+        self._status_font_combo.setCurrentIndex(max(font_index, 0))
+        self._status_font_combo.blockSignals(False)
+        font_size = int(gui_settings.load_gui_settings().get("font_size") or 13)
+        size_index = self._status_fontsize_combo.findData(font_size)
+        self._status_fontsize_combo.blockSignals(True)
+        self._status_fontsize_combo.setCurrentIndex(max(size_index, 0))
+        self._status_fontsize_combo.blockSignals(False)
 
     def _on_status_language(self, *_args) -> None:
         code = self._status_language_combo.currentData()
@@ -499,6 +793,16 @@ class MainWindow(QMainWindow):
         key = self._status_theme_combo.currentData()
         if key:
             self.apply_theme(key)
+
+    def _on_status_font_family(self, *_args) -> None:
+        family = self._status_font_combo.currentData()
+        if family:
+            self.apply_font_family(family)
+
+    def _on_status_font_size(self, *_args) -> None:
+        size = self._status_fontsize_combo.currentData()
+        if size is not None:
+            self.apply_font_size(size)
 
     #: Page class for each nav key. A page opts into extra dispatch behavior
     #: (see ``_schedule_page_refresh``) by defining the matching method, not
@@ -547,6 +851,10 @@ class MainWindow(QMainWindow):
             else "STALKER COMMANDER"
         )
         self.stack.setCurrentIndex(self._page_index[key])
+        # Immediate, not deferred to _schedule_page_refresh: a page switch
+        # should reflect the current mod count right away, independent of
+        # whether that particular page's own refresh() happens to call it.
+        self.update_mod_counter()
         self._schedule_page_refresh(key)
 
     def _schedule_page_refresh(self, key: str) -> None:
@@ -750,6 +1058,13 @@ class MainWindow(QMainWindow):
             )
         self.tabs.update()
         self.backdrop.update()
+        # The status bar is built exactly once and never rebuilt, so its
+        # Theme/Font/size combos do not pick up a change made from the
+        # Settings page's own pickers by themselves. Left showing the old
+        # value, such a combo can no longer switch back to it: picking the
+        # item it already displays emits no currentIndexChanged, so nothing
+        # would be applied.
+        self._refresh_status_bar()
 
     def set_install_busy(self, busy: bool, operation: str | None = None) -> None:
         """Lock/unlock every install-affecting control across pages.
@@ -787,21 +1102,48 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def update_mod_counter(self) -> None:
-        """Refresh the topbar's always-visible active/total mod count."""
+        """Refresh the topbar's always-visible active/total mod count.
+
+        Always shown, even with nothing to count yet (no active profile,
+        GAMMA not installed) - shows "0 Mods" rather than disappearing,
+        so the topbar layout doesn't shift and the counter reads as a
+        permanent fixture next to the settings cog.
+        """
         profile = self.settings.active_profile
         counts = (
             count_active_mods(profile.gamma, profile.mo2_profile)
             if profile is not None
             else None
         )
-        if counts is None:
-            self.mod_counter_label.hide()
-            return
-        enabled, total = counts
-        self.mod_counter_label.setText(tr("{enabled} Mods", enabled=enabled))
-        self.mod_counter_label.setToolTip(
-            tr("{enabled} of {total} mods enabled in profile “{profile_name}”", enabled=enabled, total=total, profile_name=profile.profile_name)
-        )
+        enabled, total = counts if counts is not None else (0, 0)
+        incomplete = False
+        if profile is not None:
+            resume_state = gui_settings.load_gui_settings().get("gamma_install_resume")
+            incomplete = _resume_state_matches(resume_state, profile)
+        if incomplete:
+            self.mod_counter_label.setText(
+                tr("{enabled} Mods (incomplete)", enabled=enabled)
+            )
+            self.mod_counter_label.setStyleSheet(f"color: {WARN.name()};")
+        else:
+            self.mod_counter_label.setText(tr("{enabled} Mods", enabled=enabled))
+            self.mod_counter_label.setStyleSheet("")
+        if counts is not None:
+            tooltip = tr(
+                "{enabled} of {total} mods enabled in profile “{profile_name}”",
+                enabled=enabled,
+                total=total,
+                profile_name=profile.profile_name,
+            )
+            if incomplete:
+                tooltip += "\n" + tr(
+                    "The last install attempt failed - this modpack may be incomplete. Resume the install on the Install page to finish it."
+                )
+            self.mod_counter_label.setToolTip(tooltip)
+        else:
+            self.mod_counter_label.setToolTip(
+                tr("No active profile, or GAMMA is not installed yet.")
+            )
         self.mod_counter_label.show()
 
     def refresh_settings(self) -> None:

@@ -8,10 +8,17 @@ import shutil
 import sys
 from pathlib import Path
 
+# Qt's FFmpeg multimedia backend (used for the click sound - see
+# ui/common.py::play_click_sound) prints its own startup banner and a
+# full ffmpeg-style "Input #0, wav, from ..." format dump to the
+# console the first time it loads an audio source - harmless, but reads
+# like an error/warning to anyone watching the terminal. Must be set
+# before Qt's logging categories are first touched; setdefault() so a
+# user debugging real audio issues can still override it themselves.
+os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg*=false")
+
 from PySide6.QtCore import (
-    QEasingCurve,
     QLockFile,
-    QPropertyAnimation,
     QtMsgType,
     qInstallMessageHandler,
 )
@@ -19,6 +26,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import gui_settings
+from .applog import install_excepthook
 from .config import cli_binary_path, project_root, settings_dir
 from .fonts import load_bundled_font
 from .i18n import set_active_language
@@ -119,6 +127,7 @@ def _acquire_instance_lock() -> QLockFile | None:
 
 def main() -> int:
     global _INSTANCE_LOCK, _PREVIOUS_QT_HANDLER
+    install_excepthook()
     _PREVIOUS_QT_HANDLER = qInstallMessageHandler(_quiet_qt_message_handler)
     app = QApplication(sys.argv)
     app.setApplicationName("STALKER COMMANDER")
@@ -252,17 +261,7 @@ def main() -> int:
 
     app.aboutToQuit.connect(_shutdown)
     window = MainWindow()
-    window.setWindowOpacity(0.0)
     window.show()
-    startup_fade = QPropertyAnimation(window, b"windowOpacity")
-    startup_fade.setDuration(250)
-    startup_fade.setStartValue(0.0)
-    startup_fade.setEndValue(1.0)
-    startup_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-    startup_fade.start()
-    # Kept alive on the window itself - nothing else references it, and
-    # Python would otherwise garbage-collect it mid-animation.
-    window._startup_fade = startup_fade
     return app.exec()
 
 
