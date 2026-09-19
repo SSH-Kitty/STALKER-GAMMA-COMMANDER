@@ -32,7 +32,7 @@ class CliProfile:
     gamma: str = "gamma/gamma"
     cache: str = "gamma/cache"
     mo2_profile: str = "G.A.M.M.A"
-    download_threads: int = 2
+    download_threads: int = 6
     mod_pack_maker_url: str = DEFAULT_MOD_PACK_MAKER_URL
     mod_list_url: str = DEFAULT_MOD_LIST_URL
     gamma_setup_repo_url: str = "https://github.com/Grokitach/gamma_setup"
@@ -94,7 +94,13 @@ class CliProfile:
             if python_key == "download_threads":
                 try:
                     value = int(value)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
+                    # OverflowError: a hand-edited/corrupt settings.json can
+                    # hold json.loads()'s non-standard "Infinity" token as a
+                    # real float, and int() on a non-finite float raises
+                    # OverflowError rather than ValueError - left uncaught,
+                    # a "DownloadThreads": Infinity value would crash
+                    # load_settings() itself instead of just being skipped.
                     continue
             elif python_key == "active":
                 if isinstance(value, bool):

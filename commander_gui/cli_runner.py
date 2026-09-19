@@ -57,7 +57,6 @@ class CliWorker(QObject):
         self._command: list[str] = []
         self._cwd = ""
         self._env: dict[str, str] | None = None
-        self._cancel_pending = False
         self._cancel_event = threading.Event()
 
     def setup(
@@ -66,7 +65,6 @@ class CliWorker(QObject):
         self._command = command
         self._cwd = cwd
         self._env = env
-        self._cancel_pending = False
         self._cancel_event.clear()
 
     @Slot()
@@ -148,8 +146,7 @@ class CliWorker(QObject):
         proc = self._process
         if proc is None or proc.poll() is not None:
             # The process has not been spawned yet (or already exited); run()
-            # checks this flag right after Popen and cancels immediately.
-            self._cancel_pending = True
+            # checks _cancel_event right after Popen and cancels immediately.
             self._cancel_event.set()
             return
         self._cancel_event.set()

@@ -22,7 +22,12 @@ _CORRUPT_RE = re.compile(r"\b(CORRUPT|MD5 mismatch|hash mismatch)\b", re.IGNOREC
 _EXCEPTION_TYPE_RE = re.compile(r"([\w.]+(?:Exception|Error))")
 _STACK_HINTS = ("Exception Message:", "--->", "End of inner exception")
 
-_CANCEL_WORDS = ("cancel", "aborted by user")
+#: Not the bare stem "cancel": that matches inside "CancellationToken", the
+#: .NET parameter type name that appears in nearly every async method
+#: signature in this CLI's stack traces regardless of whether the operation
+#: was actually canceled - "canceled"/"cancelled" still correctly catches
+#: OperationCanceledException/TaskCanceledException without that false hit.
+_CANCEL_WORDS = ("canceled", "cancelled", "aborted by user")
 _DOWNLOAD_WORDS = (
     "download",
     "http",
@@ -165,11 +170,28 @@ def _collect_exception_block(
 ) -> tuple[str, int]:
     """Gather exception frames after a failure line.
 
+    The CLI's own failure dumps intersperse plain "Key: value" context
+    lines (Url, Branch, Download Path, Output Dir, Repo URL...) both before
+    the first real exception line and between chained inner exceptions, and
+    use separator lines ("--- End of stack trace from previous location
+    ---") that don't match any of the known stack-frame hints below.
+    Bailing out at the first line that doesn't look like a stack frame (an
+    earlier version of this function did) stopped the block right after the
+    failure header in the common case - e.g. a real "Install failed!"
+    dump's very next line is "Url: ...", so the block ended up empty,
+    missing the actual "Exception Message: ..." detail and stack trace a
+    few lines down. Non-matching lines are now skipped over instead,
+    tolerated as long as *some* stack-hint line keeps turning up within a
+    reasonable window - if nothing ever does, there's no exception block to
+    collect and the scan gives up rather than running all the way to
+    max_lines through unrelated log content.
+
     Returns the formatted block and the first line index *not* consumed
     (so callers can skip these lines in later sweeps).
     """
     collected: list[str] = []
     offset = 1
+    unmatched_streak = 0
     while offset <= max_lines and start + offset < len(lines):
         raw = lines[start + offset]
         stripped = raw.strip()
@@ -180,11 +202,15 @@ def _collect_exception_block(
             or _EXCEPTION_TYPE_RE.search(raw) is not None
             or (stripped.startswith("at ") and len(collected) > 0)
         )
-        if not looks_like_stack:
-            if collected and not stripped:
-                offset += 1
-                continue
-            break
-        collected.append(f"[line {start + offset + 1}] {raw.rstrip()}")
+        if looks_like_stack:
+            collected.append(f"[line {start + offset + 1}] {raw.rstrip()}")
+            unmatched_streak = 0
+        elif not stripped:
+            if collected:
+                break
+        else:
+            unmatched_streak += 1
+            if unmatched_streak > 20:
+                break
         offset += 1
     return "\n".join(collected[:60]), start + offset

@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 import urllib.request
+import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .integrity import Md5ScanResult
-from .network import read_response_bytes, urlopen
+from .network import read_response_bytes
+from .network import urlopen_with_retry as urlopen
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -129,15 +133,20 @@ def find_record_for_folder(
     Tries an exact folder_name match first (cheap, and correct whenever the
     list has not been reordered since this mod was installed), then falls
     back to matching on the addon name + patch alone.
+
+    Returns None (unrepairable) if the fallback name-only match is
+    ambiguous - i.e. more than one record shares that stripped name (a
+    renamed/relisted/forked mod, or a duplicate entry). Repairing against
+    a guessed record with no way to confirm it is actually the same mod
+    would delete/redownload against the wrong archive and checksum, which
+    is worse than leaving it unrepaired.
     """
     record = records.get(folder)
     if record is not None:
         return record
     name = _name_only(folder)
-    for candidate in records.values():
-        if _name_only(candidate.folder_name) == name:
-            return candidate
-    return None
+    matches = [c for c in records.values() if _name_only(c.folder_name) == name]
+    return matches[0] if len(matches) == 1 else None
 
 
 @dataclass
@@ -147,7 +156,6 @@ class RepairPlan:
     repairable: list[str] = field(default_factory=list)
     unrepairable: list[str] = field(default_factory=list)
     added_only: list[str] = field(default_factory=list)
-    added_files: list[str] = field(default_factory=list)
     #: folder -> the record it was actually matched against (possibly via
     #: the name-only fallback), for every entry in ``repairable``.
     matched_records: dict[str, ModPackRecord] = field(default_factory=dict)
@@ -160,6 +168,7 @@ class RepairPlan:
 def classify_problems(
     scan: Md5ScanResult,
     records: dict[str, ModPackRecord],
+    extra_broken_folders: Iterable[str] = (),
 ) -> RepairPlan:
     """Split the scan problems into repairable / unrepairable / added.
 
@@ -167,6 +176,13 @@ def classify_problems(
     record in the official modpack list. Files that only appeared (added) are
     never repaired - they are usually the user's own edits - and mods without
     a record (extras, special repo mods) are reported but left alone.
+
+    ``extra_broken_folders`` lets a caller fold in mod folders known to be
+    broken by some other check (e.g. ``verify_gamma``'s presence check
+    reporting a mod missing/empty) - a folder that never made it into the
+    MD5 baseline in the first place produces no changed/removed entries of
+    its own, so without this it would be reported forever but never
+    actually offered for repair.
     """
     plan = RepairPlan()
 
@@ -176,63 +192,156 @@ def classify_problems(
             return parts[1]
         return None
 
-    for rel in sorted(set(scan.changed) | set(scan.removed)):
-        folder = folder_of(rel)
-        record = find_record_for_folder(folder, records) if folder is not None else None
+    broken_folders = {folder_of(rel) for rel in set(scan.changed) | set(scan.removed)}
+    broken_folders.discard(None)
+    broken_folders.update(extra_broken_folders)
+    unrepairable_rels = [
+        rel
+        for rel in sorted(set(scan.changed) | set(scan.removed))
+        if folder_of(rel) is None
+    ]
+
+    for folder in sorted(broken_folders):
+        record = find_record_for_folder(folder, records)
         if record is not None:
             if folder not in plan.repairable:
                 plan.repairable.append(folder)
                 plan.matched_records[folder] = record
-        else:
-            if folder is None:
-                plan.unrepairable.append(rel)
-            elif folder not in plan.unrepairable:
-                plan.unrepairable.append(folder)
+        elif folder not in plan.unrepairable:
+            plan.unrepairable.append(folder)
+    plan.unrepairable.extend(unrepairable_rels)
     for rel in sorted(scan.added):
-        plan.added_files.append(rel)
         folder = folder_of(rel)
         if folder is not None and folder not in plan.added_only:
             plan.added_only.append(folder)
     return plan
 
 
-def delete_mod_and_archive(
+_QUARANTINE_DIRNAME = ".verify-quarantine"
+
+
+@dataclass
+class QuarantineItem:
+    """One file/folder moved aside by a quarantine operation."""
+
+    original: Path
+    quarantined: Path
+
+
+@dataclass
+class QuarantineRecord:
+    """Everything moved aside for one mod folder, so it can be restored."""
+
+    folder: str
+    items: list[QuarantineItem] = field(default_factory=list)
+
+
+def _quarantine_dest(quarantine_dir: Path, name: str) -> Path:
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"{int(time.time())}.{uuid.uuid4().hex[:8]}"
+    return quarantine_dir / f"{name}.{suffix}"
+
+
+def quarantine_mod_and_archive(
     gamma_dir: str,
     folder: str,
     record: ModPackRecord | None = None,
-) -> list[Path]:
-    """Permanently delete a mod folder and its cached archive(s).
+) -> QuarantineRecord:
+    """Move a broken mod folder and its cached archive(s) aside, not delete them.
 
-    Returns the paths that were removed. The archive lives in
-    ``gamma/downloads`` (a symlink to the cache) under the record's archive
-    name; deleting it forces the installer to re-download the mod.
+    Verify Integrity's repair reinstalls whatever gets moved out of the
+    way here - if that reinstall then fails or is cancelled, the caller
+    can restore everything via ``restore_from_quarantine`` instead of the
+    mod simply being gone. Nothing is permanently removed until
+    ``purge_quarantine`` is called, which only happens after a repair is
+    confirmed to have actually succeeded.
     """
-    removed: list[Path] = []
+    result = QuarantineRecord(folder=folder)
     base = Path(gamma_dir)
     mods_root = base / "mods"
     mod_path = mods_root / folder
-    # This deletes user data, so never act on a name that escapes mods/.
+    # This moves user data, so never act on a name that escapes mods/.
     if not _is_direct_child(mods_root, mod_path):
-        raise ValueError(f"Refusing to delete mod folder outside mods/: {folder!r}")
-    if mod_path.is_dir():
-        shutil.rmtree(mod_path)
-        removed.append(mod_path)
-    if mod_path.exists():
-        raise OSError(f"Mod folder still exists after deletion: {mod_path}")
-    if record is not None:
-        # gamma/downloads is commonly a symlink to the cache directory;
-        # resolve it first or the child guard below rejects every archive.
+        raise ValueError(f"Refusing to touch mod folder outside mods/: {folder!r}")
+    try:
+        if mod_path.is_dir():
+            dest = _quarantine_dest(mods_root / _QUARANTINE_DIRNAME, folder)
+            mod_path.rename(dest)
+            result.items.append(QuarantineItem(original=mod_path, quarantined=dest))
+        if mod_path.exists():
+            raise OSError(f"Mod folder still exists after quarantine: {mod_path}")
+        if record is not None:
+            # gamma/downloads is commonly a symlink to the cache directory;
+            # resolve it first or the child guard below rejects every archive.
+            downloads = (base / "downloads").resolve()
+            for name in record.archive_names():
+                archive = downloads / name
+                if not _is_direct_child(downloads, archive):
+                    continue
+                if archive.is_file():
+                    dest = _quarantine_dest(downloads / _QUARANTINE_DIRNAME, name)
+                    archive.rename(dest)
+                    result.items.append(
+                        QuarantineItem(original=archive, quarantined=dest)
+                    )
+                if archive.exists():
+                    raise OSError(f"Archive still exists after quarantine: {archive}")
+    except (OSError, ValueError):
+        # All-or-nothing: the returned QuarantineRecord is the caller's ONLY
+        # handle on what was moved, and raising means the caller never gets
+        # it (install_page logs the folder as "could not be set aside" and
+        # carries on). A mod folder left half-quarantined that way would
+        # never be restored on cancel/failure, and the next successful
+        # repair's purge_quarantine() would then permanently delete the
+        # user's only copy of it. Put anything already moved back first.
+        restore_from_quarantine(result)
+        raise
+    return result
+
+
+def restore_from_quarantine(record: QuarantineRecord) -> list[str]:
+    """Move everything in ``record`` back to where it came from.
+
+    Best-effort per item, matching the rest of this module's "one
+    stubborn item must not stop the others" philosophy - returns a list
+    of human-readable failure messages (empty on full success) instead of
+    raising, since this itself typically runs as part of reporting a
+    different failure (the repair install that made restoring necessary
+    in the first place).
+    """
+    failures: list[str] = []
+    for item in record.items:
+        try:
+            if item.quarantined.exists() and not item.original.exists():
+                item.original.parent.mkdir(parents=True, exist_ok=True)
+                item.quarantined.rename(item.original)
+        except OSError as exc:
+            failures.append(f"{item.quarantined} -> {item.original}: {exc}")
+    return failures
+
+
+def purge_quarantine(gamma_dir: str) -> None:
+    """Permanently delete anything left in the quarantine folders.
+
+    Only call this once a repair is confirmed successful - this is the
+    actual point of no return that ``quarantine_mod_and_archive`` defers.
+    Best-effort: a failure here just leaves the (otherwise harmless,
+    already-replaced) quarantined copies on disk for manual cleanup.
+    """
+    base = Path(gamma_dir)
+    try:
         downloads = (base / "downloads").resolve()
-        for name in record.archive_names():
-            archive = downloads / name
-            if not _is_direct_child(downloads, archive):
-                continue
-            if archive.is_file():
-                archive.unlink(missing_ok=True)
-                removed.append(archive)
-            if archive.exists():
-                raise OSError(f"Archive still exists after deletion: {archive}")
-    return removed
+    except OSError:
+        downloads = base / "downloads"
+    for quarantine_dir in (
+        base / "mods" / _QUARANTINE_DIRNAME,
+        downloads / _QUARANTINE_DIRNAME,
+    ):
+        try:
+            if quarantine_dir.is_dir():
+                shutil.rmtree(quarantine_dir)
+        except OSError:
+            pass
 
 
 def _is_direct_child(parent: Path, child: Path) -> bool:

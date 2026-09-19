@@ -421,7 +421,11 @@ def check_protontricks() -> tuple[bool, str | None]:
         return True, None
 
     # pip exists but is externally managed (PEP 668) — recommend pipx instead.
-    if shutil.which("pip") and _externally_managed():
+    # (checked the same way _pip_usable() detects "pip exists" - a standalone
+    # `pip` binary isn't the only way it's reachable, `python3 -m pip` counts
+    # too, and only checking the former showed the vaguer "neither is
+    # available" message on a system where pip was only reachable that way.)
+    if (shutil.which("pip") or _pip_module_available()) and _externally_managed():
         cmd = _install_command("pipx")
         return True, (
             "protontricks is required but was not found.\n"

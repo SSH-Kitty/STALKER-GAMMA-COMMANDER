@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import random
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
 _ALLOWED_SCHEMES = ("http", "https")
+#: HTTP statuses worth a retry - a momentary rate-limit or upstream hiccup,
+#: not a request that's simply wrong (a 404/401 will never succeed no
+#: matter how many times it's retried).
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
@@ -27,6 +34,40 @@ def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
     if scheme not in _ALLOWED_SCHEMES:
         raise ValueError(f"Refusing to open a non-http(s) URL: {full_url!r}")
     return urllib.request.urlopen(url_or_request, timeout=timeout)
+
+
+def urlopen_with_retry(
+    url_or_request: str | urllib.request.Request,
+    *,
+    timeout: float,
+    attempts: int = 3,
+    base_delay: float = 0.5,
+):
+    """``urlopen()`` with a few retries on transient failures.
+
+    A single dropped packet or a momentary 429/5xx from GitHub previously
+    read as "update check failed" on the very first hiccup - most clear up
+    within a second or two. Never retries the scheme-rejection ``ValueError``
+    (not transient) or a non-retryable HTTP status (a 404 will never
+    succeed no matter how many times it's asked again). Only covers
+    connection establishment, not a failure partway through reading an
+    already-open response - a caller streaming a large body still needs its
+    own handling for a mid-download drop.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return urlopen(url_or_request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in _RETRYABLE_HTTP_STATUSES or attempt == attempts - 1:
+                raise
+            last_exc = exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            if attempt == attempts - 1:
+                raise
+            last_exc = exc
+        time.sleep(base_delay * (2**attempt) + random.uniform(0, base_delay))
+    raise last_exc  # pragma: no cover - loop above always returns or raises
 
 
 def read_response_bytes(response, max_bytes: int) -> bytes:

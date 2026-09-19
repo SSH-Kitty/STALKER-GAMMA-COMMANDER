@@ -15,8 +15,6 @@ from dataclasses import dataclass
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-OPERATIONS = ("Download", "Extract", "Expand", "Check MD5", "Skipped")
-
 # Informational progress line: [HH:mm:ss] Addon | Operation | Percent | [C/T]
 INFORMATIONAL_PROGRESS_RE = re.compile(
     r"^\[(\d{2}:\d{2}:\d{2})\]\s+"
@@ -33,34 +31,8 @@ VERBOSE_PROGRESS_RE = re.compile(
     r"\[(?P<complete>\d+)/(?P<total>\d+)\]\s*(?:\|.*)?$"
 )
 
-MO2_MOD_RE = re.compile(r"^(?P<status>Enabled|Disabled)\s*\|\s*(?P<name>.+)$")
-ANOMALY_CHECK_RE = re.compile(
-    r"^(?P<file>.+?)\s*\|\s*(?P<status>OK|CORRUPT|NOT FOUND)$"
-)
 PRUNE_ARCHIVE_RE = re.compile(
     r"^(?P<file>.+?)\s*\|\s*(?P<mb>\d+)mb\s*\|\s*(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$"
-)
-UPDATE_DIFF_RE = re.compile(r"^(?P<status>Modified|Added|Removed):\s+(?P<rest>.+)$")
-UPDATES_AVAILABLE_RE = re.compile(r"^Updates available:\s*(?P<count>\d+)$")
-
-PROGRESS_EVENT_LINES = OPERATIONS
-
-FINAL_STATUS_LINES = (
-    "Install finished",
-    "Install failed!",
-    "Anomaly install complete",
-    "Anomaly install failed!",
-    "Update finished",
-    "Update failed!",
-    "Update check failed!",
-    "Pruning check finished",
-    "Pruning finished",
-    "Prune check failed!",
-    "Prune apply failed!",
-    "No addons to prune",
-    "No updates found",
-    "Dependency not found:",
-    "No active profile",
 )
 
 
@@ -93,34 +65,6 @@ def parse_progress_line(line: str) -> ProgressEvent | None:
 
 
 @dataclass(frozen=True)
-class Mo2Mod:
-    status: str
-    name: str
-
-
-def parse_mo2_mod(line: str) -> Mo2Mod | None:
-    match = MO2_MOD_RE.match(line)
-    if not match:
-        return None
-    return Mo2Mod(status=match.group("status"), name=match.group("name").strip())
-
-
-@dataclass(frozen=True)
-class AnomalyCheckResult:
-    file: str
-    status: str
-
-
-def parse_anomaly_check(line: str) -> AnomalyCheckResult | None:
-    match = ANOMALY_CHECK_RE.match(line)
-    if not match:
-        return None
-    return AnomalyCheckResult(
-        file=match.group("file").strip(), status=match.group("status")
-    )
-
-
-@dataclass(frozen=True)
 class PruneArchive:
     file: str
     mb: int
@@ -144,10 +88,3 @@ class UpdateDiff:
     text: str
     detail: str = ""  # human-readable "Archive change" cell text (Modified only)
     detail_tooltip: str = ""  # raw technical detail shown on hover, if any
-
-
-def parse_update_diff(line: str) -> UpdateDiff | None:
-    match = UPDATE_DIFF_RE.match(line)
-    if not match:
-        return None
-    return UpdateDiff(status=match.group("status"), text=match.group("rest").strip())

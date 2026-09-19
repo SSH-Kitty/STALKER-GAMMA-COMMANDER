@@ -268,12 +268,24 @@ def ensure_runner_prefix(runner: Runner) -> None:
                 os.close(fd)
                 raise LaunchError(f"Runner marker is not a regular file: {marker}")
             if created:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                try:
+                    stream = os.fdopen(fd, "w", encoding="utf-8")
+                except BaseException:
+                    # fdopen failed before taking ownership of the descriptor.
+                    os.close(fd)
+                    raise
+                with stream:
                     stream.write(owner + "\n")
                     stream.flush()
                     os.fsync(stream.fileno())
             else:
-                with os.fdopen(fd, encoding="utf-8") as stream:
+                try:
+                    stream = os.fdopen(fd, encoding="utf-8")
+                except BaseException:
+                    # fdopen failed before taking ownership of the descriptor.
+                    os.close(fd)
+                    raise
+                with stream:
                     saved_owner = stream.read().strip()
                 saved_kind = saved_owner.split(":", 1)[0] if saved_owner else ""
                 if saved_kind and saved_kind != runner.kind:
@@ -473,35 +485,6 @@ def find_extra_protons() -> list[tuple[str, str]]:
     return sorted((label, path) for path, label in found.items())
 
 
-def find_wine_versions() -> list[tuple[str, str]]:
-    """Discover Wine builds: Lutris/Bottles runners and ``/opt/wine*`` installs.
-
-    Returns ``(label, bin/wine path)`` pairs, sorted by label. System Wine is
-    intentionally omitted - it is already covered by the plain ``wine`` preset.
-    """
-    found: dict[str, str] = {}
-    candidates: list[Path] = []
-    lutris = Path.home() / ".local" / "share" / "lutris" / "runners" / "wine"
-    bottles = Path.home() / ".local" / "share" / "bottles" / "runners"
-    if lutris.is_dir():
-        try:
-            candidates += sorted(lutris.iterdir())
-        except OSError:
-            pass
-    if bottles.is_dir():
-        try:
-            candidates += sorted(bottles.iterdir())
-        except OSError:
-            pass
-    for entry in candidates:
-        wine = entry / "bin" / "wine"
-        if entry.is_dir() and wine.is_file():
-            found.setdefault(str(wine.resolve()), f"Wine ({entry.name})")
-    for entry in sorted(Path("/opt").glob("wine*")):
-        wine = entry / "bin" / "wine"
-        if entry.is_dir() and wine.is_file():
-            found.setdefault(str(wine.resolve()), f"Wine ({entry.name})")
-    return sorted((label, path) for path, label in found.items())
 
 
 def _proton_runner(proton_script: str, prefix: str = "") -> Runner:

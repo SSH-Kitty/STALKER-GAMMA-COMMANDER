@@ -152,19 +152,38 @@ def _finding_lines(finding: Finding, severity: Severity) -> list[str]:
     return out
 
 
+#: A plain `\b` word-boundary fails immediately before the keyword whenever
+#: it's preceded by another word character - and `_` counts as one, so
+#: `\btoken\b` never matches the "token" in `GITHUB_TOKEN=...` (an extremely
+#: common env-var/config naming convention). `(?:^|(?<=[^A-Za-z]))` instead
+#: only requires the preceding character to not be a letter, which still
+#: excludes false positives like "tokenizer" while catching the
+#: underscore-joined names this exists to guard against.
+_KEY_START = r"(?:^|(?<=[^A-Za-z]))"
+_CREDENTIAL_KEYWORDS = (
+    r"(?:password|passwd|pwd|token|api[_-]?key|secret|access[_-]?key|client[_-]?secret)"
+)
 _CREDENTIAL = re.compile(
-    r"(?i)(\b(?:password|passwd|pwd|token|api[_-]?key|secret|access[_-]?key|client[_-]?secret)\b\s*[:=]\s*)[^\s,;]+"
+    r"(?i)" + _KEY_START + r"(" + _CREDENTIAL_KEYWORDS + r"\b\s*[:=]\s*)[^\s,;]+"
+)
+#: The JSON-quoted-key shape (`"key": "value"`) never reaches `_CREDENTIAL`
+#: above, since the quote sits between the key and the colon.
+_CREDENTIAL_JSON = re.compile(
+    r'(?i)("[^"]*' + _CREDENTIAL_KEYWORDS + r'[^"]*"\s*:\s*)"[^"]*"'
 )
 _BEARER = re.compile(r"(?i)(\bbearer\s+)[^\s]+")
 _KNOWN_TOKEN = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_./-]+")
+_URL_CREDENTIALS = re.compile(r"(?i)(://)[^/@\s]+:[^/@\s]+@")
 
 
 def _redact(value: str) -> str:
     """Remove common secrets and the local user's home path from exports."""
     text = str(value).replace(str(Path.home()), "~")
+    text = _CREDENTIAL_JSON.sub(r'\1"[REDACTED]"', text)
     text = _CREDENTIAL.sub(r"\1[REDACTED]", text)
     text = _BEARER.sub(r"\1[REDACTED]", text)
-    return _KNOWN_TOKEN.sub("[REDACTED]", text)
+    text = _KNOWN_TOKEN.sub("[REDACTED]", text)
+    return _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
 
 
 def _safe_inline(value: str) -> str:

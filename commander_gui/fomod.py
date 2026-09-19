@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from xml.parsers import expat
 
 from .mod_install import ModInstallError
@@ -14,7 +14,12 @@ from .mod_install import ModInstallError
 @dataclass(frozen=True)
 class FomodFile:
     source: str
-    destination: str = ""
+    #: None means the <file>/<folder> element omitted its destination
+    #: attribute entirely - distinct from an explicit destination="", so
+    #: apply_options() can tell "default to the source's own path" (the
+    #: FOMOD spec's rule for an omitted attribute) apart from "explicitly
+    #: place at the mod root".
+    destination: str | None = None
     is_folder: bool = False
 
 
@@ -43,10 +48,39 @@ class FomodConfig:
     name: str
     author: str
     steps: tuple[FomodStep, ...]
+    #: Files/folders installed unconditionally, independent of any step -
+    #: <requiredInstallFiles>. Many small, no-choice FOMODs ship only
+    #: this, with no <installSteps> at all.
+    required_files: tuple[FomodFile, ...] = ()
 
 
 def _text(element: ET.Element | None, default: str = "") -> str:
     return (element.text or default).strip() if element is not None else default
+
+
+def _parse_files_node(files_node: ET.Element | None) -> tuple[FomodFile, ...]:
+    """Parse a <files> or <requiredInstallFiles>-shaped node's children."""
+    files: list[FomodFile] = []
+    if files_node is None:
+        return ()
+    for file_node in files_node.findall("file"):
+        dest_attr = file_node.attrib.get("destination")
+        files.append(
+            FomodFile(
+                source=file_node.attrib.get("source", "").strip(),
+                destination=None if dest_attr is None else dest_attr.strip(),
+            )
+        )
+    for folder_node in files_node.findall("folder"):
+        dest_attr = folder_node.attrib.get("destination")
+        files.append(
+            FomodFile(
+                source=folder_node.attrib.get("source", "").strip(),
+                destination=None if dest_attr is None else dest_attr.strip(),
+                is_folder=True,
+            )
+        )
+    return tuple(files)
 
 
 def _named(element: ET.Element, child: str, default: str) -> str:
@@ -90,6 +124,7 @@ def parse_config(path: Path) -> FomodConfig:
         raise ModInstallError(f"Could not read FOMOD configuration: {exc}") from exc
     module = root.find("moduleName")
     author = root.find("author")
+    required_files = _parse_files_node(root.find("requiredInstallFiles"))
     steps: list[FomodStep] = []
     install_steps = root.find("installSteps")
     for step in (
@@ -99,34 +134,12 @@ def parse_config(path: Path) -> FomodConfig:
         for group in step.findall("optionalFileGroups/group"):
             options: list[FomodOption] = []
             for option in group.findall("plugins/plugin"):
-                files: list[FomodFile] = []
-                files_node = option.find("files")
-                for file_node in (
-                    files_node.findall("file") if files_node is not None else []
-                ):
-                    files.append(
-                        FomodFile(
-                            source=file_node.attrib.get("source", "").strip(),
-                            destination=file_node.attrib.get("destination", "").strip(),
-                        )
-                    )
-                for folder_node in (
-                    files_node.findall("folder") if files_node is not None else []
-                ):
-                    files.append(
-                        FomodFile(
-                            source=folder_node.attrib.get("source", "").strip(),
-                            destination=folder_node.attrib.get(
-                                "destination", ""
-                            ).strip(),
-                            is_folder=True,
-                        )
-                    )
+                files = _parse_files_node(option.find("files"))
                 options.append(
                     FomodOption(
                         name=_named(option, "name", "Unnamed option"),
                         description=_text(option.find("description")),
-                        files=tuple(files),
+                        files=files,
                     )
                 )
             groups.append(
@@ -142,9 +155,11 @@ def parse_config(path: Path) -> FomodConfig:
                 tuple(groups),
             )
         )
-    if not steps:
+    if not steps and not required_files:
         raise ModInstallError("This FOMOD has no supported installation steps")
-    return FomodConfig(_text(module, "FOMOD installation"), _text(author), tuple(steps))
+    return FomodConfig(
+        _text(module, "FOMOD installation"), _text(author), tuple(steps), required_files
+    )
 
 
 def apply_options(
@@ -161,6 +176,8 @@ def apply_options(
     destination = destination.resolve()
     if not destination.is_dir():
         raise ModInstallError("FOMOD destination is not a directory")
+    for item in config.required_files:
+        _place_item(item, root, destination)
     for step_index, step in enumerate(config.steps):
         for group_index, group in enumerate(step.groups):
             for option_index in selected.get((step_index, group_index), []):
@@ -170,58 +187,83 @@ def apply_options(
                     )
                 option = group.options[option_index]
                 for item in option.files:
-                    source_name = item.source.replace("\\", "/")
-                    source = (root / source_name).resolve()
-                    try:
-                        source.relative_to(root)
-                    except ValueError as exc:
-                        raise ModInstallError(
-                            "FOMOD file escapes the archive root"
-                        ) from exc
-                    if item.is_folder and not source.is_dir():
-                        raise ModInstallError(f"FOMOD folder is missing: {item.source}")
-                    if not item.is_folder and not source.is_file():
-                        raise ModInstallError(f"FOMOD file is missing: {item.source}")
-                    components = (
-                        item.destination.replace("\\", "/").split("/")
-                        if item.destination
-                        else []
-                    )
-                    if (
-                        item.destination.startswith(("/", "\\"))
-                        or any(
-                            not component
-                            or component in {".", ".."}
-                            or any(ord(char) < 32 or ord(char) == 127 for char in component)
-                            for component in components
-                        )
-                    ):
-                        raise ModInstallError("FOMOD destination contains unsafe components")
-                    target = destination.joinpath(*components, source.name)
-                    current = destination
-                    for component in components:
-                        current = current / component
-                        if current.is_symlink():
-                            raise ModInstallError("FOMOD destination contains a symlink")
-                        try:
-                            current.mkdir(exist_ok=True)
-                        except FileExistsError as exc:
-                            raise ModInstallError(
-                                f"FOMOD destination path component '{component}' "
-                                "already exists as a file"
-                            ) from exc
-                        if current.is_symlink():
-                            raise ModInstallError("FOMOD destination contains a symlink")
-                    target = target.resolve()
-                    try:
-                        target.relative_to(destination)
-                    except ValueError as exc:
-                        raise ModInstallError(
-                            "FOMOD destination escapes the mod folder"
-                        ) from exc
-                    if target.exists() and target.is_symlink():
-                        raise ModInstallError("FOMOD destination is a symlink")
-                    if item.is_folder:
-                        shutil.copytree(source, target, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(source, target)
+                    _place_item(item, root, destination)
+
+
+def _place_item(item: FomodFile, root: Path, destination: Path) -> None:
+    """Copy one FOMOD file/folder entry into ``destination``.
+
+    ``root``/``destination`` are already resolved absolute paths (see
+    ``apply_options``).
+    """
+    source_name = item.source.replace("\\", "/")
+    source = (root / source_name).resolve()
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise ModInstallError("FOMOD file escapes the archive root") from exc
+    if item.is_folder and not source.is_dir():
+        raise ModInstallError(f"FOMOD folder is missing: {item.source}")
+    if not item.is_folder and not source.is_file():
+        raise ModInstallError(f"FOMOD file is missing: {item.source}")
+    if item.destination is None:
+        # FOMOD spec: an omitted destination defaults to the item's own
+        # source path (preserving any subfolders), not the mod root -
+        # e.g. a <file source="gamedata/scripts/foo.script"/> with no
+        # destination must land at gamedata/scripts/foo.script, not be
+        # flattened to just foo.script at the mod's top level (which is
+        # exactly what used to strip a mod's gamedata folder away and
+        # get it flagged INVALID/red-X by MO2's own data checker).
+        parent = PurePosixPath(source_name).parent
+        dest_str = "" if str(parent) == "." else str(parent)
+    else:
+        dest_str = item.destination
+    components = dest_str.replace("\\", "/").split("/") if dest_str else []
+    if dest_str.startswith(("/", "\\")) or any(
+        not component
+        or component in {".", ".."}
+        or any(ord(char) < 32 or ord(char) == 127 for char in component)
+        for component in components
+    ):
+        raise ModInstallError("FOMOD destination contains unsafe components")
+    # A <folder> entry installs the SOURCE FOLDER'S CONTENTS at the
+    # destination, not the folder itself nested under its own name -
+    # e.g. <folder source="00 - Core" destination=""/> (a real,
+    # confirmed FOMOD shape: "00 - Core" is a meaningless packaging/step
+    # label wrapping the mod's actual "gamedata" folder) must merge
+    # "00 - Core"'s contents straight into the mod root, landing a
+    # single "gamedata" there - not a "00 - Core/gamedata" wrapper, and
+    # not a duplicated "gamedata/gamedata" if the destination already
+    # happens to be named the same as the source. A <file> entry, by
+    # contrast, needs an actual filename at its destination, so its own
+    # basename is kept.
+    target = (
+        destination.joinpath(*components)
+        if item.is_folder
+        else destination.joinpath(*components, source.name)
+    )
+    current = destination
+    for component in components:
+        current = current / component
+        if current.is_symlink():
+            raise ModInstallError("FOMOD destination contains a symlink")
+        try:
+            current.mkdir(exist_ok=True)
+        except FileExistsError as exc:
+            raise ModInstallError(
+                f"FOMOD destination path component '{component}' "
+                "already exists as a file"
+            ) from exc
+        if current.is_symlink():
+            raise ModInstallError("FOMOD destination contains a symlink")
+    target = target.resolve()
+    try:
+        target.relative_to(destination)
+    except ValueError as exc:
+        raise ModInstallError("FOMOD destination escapes the mod folder") from exc
+    if target.exists() and target.is_symlink():
+        raise ModInstallError("FOMOD destination is a symlink")
+    if item.is_folder:
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    else:
+        shutil.copy2(source, target)

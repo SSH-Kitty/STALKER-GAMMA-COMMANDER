@@ -53,9 +53,8 @@ class WriteDesktopShortcutTest(unittest.TestCase):
             self.assertEqual(exec_line, 'Exec="wine" "game.exe"')
 
     def test_empty_command_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(LaunchError):
-                write_desktop_shortcut("X", [], {}, ".", directory=Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(LaunchError):
+            write_desktop_shortcut("X", [], {}, ".", directory=Path(tmp))
 
     def test_quoting_escapes_special_chars(self):
         with tempfile.TemporaryDirectory() as tmp:

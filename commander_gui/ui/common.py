@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
+from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -24,6 +28,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -107,6 +112,25 @@ def update_cache_label(label: QLabel, cache_path: str) -> None:
         label.setStyleSheet(f"color: {OK_GREEN.name()};")
 
 
+def format_playtime(total_seconds: float) -> str:
+    """Format accumulated play time as e.g. "3h 24m", "12m", or "0m"."""
+    total_minutes = int(total_seconds // 60)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
+def format_last_played(timestamp: float | None) -> str:
+    """Format a last-played unix timestamp as a readable local date/time.
+
+    Absolute (not "N minutes ago"): the Dashboard only re-renders this on
+    explicit refreshes, not on a live ticking timer, so a relative string
+    would silently go stale between refreshes.
+    """
+    if not timestamp:
+        return tr("Never")
+    return datetime.fromtimestamp(timestamp).astimezone().strftime("%d/%m/%Y %H:%M")
+
+
 _MO2_RUNNING_CACHE: float = 0.0
 _MO2_RUNNING_RESULT: bool = False
 _MO2_CACHE_TTL: float = 3.0
@@ -139,9 +163,13 @@ def mo2_running(*, force: bool = False) -> bool:
         return False
     try:
         proc = subprocess.run(
-            # The bracket expression matches MO2 but not this pgrep command's
-            # own arguments, avoiding a false positive when MO2 is closed.
-            [exe, "-f", r"[Mm]odOrganizer\.exe"],
+            # Case-insensitive: Wine/umu-run can report the running
+            # process's own path in a different case than the literal
+            # "ModOrganizer.exe" filename (e.g. fully lowercased) - a
+            # bracket expression on just the first letter (the previous
+            # form of this pattern) does not cover that. pgrep excludes
+            # its own PID by default, so this cannot self-match.
+            [exe, "-if", r"ModOrganizer\.exe"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
@@ -172,7 +200,9 @@ def mo2_pids() -> set[int]:
         return set()
     try:
         proc = subprocess.run(
-            [exe, "-f", r"[Mm]odOrganizer\.exe"],
+            # See mo2_running()'s matching pattern comment: case-insensitive
+            # for the same reason.
+            [exe, "-if", r"ModOrganizer\.exe"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -188,6 +218,80 @@ def mo2_pids() -> set[int]:
         if line.isdigit():
             pids.add(int(line))
     return pids
+
+
+def exe_pids(exe_name: str) -> set[int]:
+    """PIDs of processes whose command line contains ``exe_name``, uncached.
+
+    Used to detect the actual game executable (as opposed to Mod
+    Organizer, which stays running after the game it launched exits) so
+    playtime can be recorded when the game itself closes.
+
+    Matches case-insensitively (``-i``), same as ``mo2_pids()``'s own
+    ``[Mm]odOrganizer\\.exe`` pattern - the exe name comes from
+    ModOrganizer.ini's ``[customExecutables]`` path, whose case is not
+    guaranteed to match how Wine reports the running process's own
+    command line.
+    """
+    exe = shutil.which("pgrep")
+    if not exe:
+        return set()
+    try:
+        proc = subprocess.run(
+            [exe, "-if", re.escape(exe_name)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if proc.returncode != 0:
+        return set()
+    pids: set[int] = set()
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.add(int(line))
+    return pids
+
+
+_click_sound_player = None
+_click_sound_output = None
+
+
+def play_click_sound() -> None:
+    """Play the short launch-button click sound, best-effort.
+
+    A missing asset or a broken audio backend must never block or crash
+    a game launch - any failure here is silently swallowed.
+    """
+    global _click_sound_player, _click_sound_output
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+        from ..config import project_root
+
+        if _click_sound_player is None:
+            # WAV, not MP3: Qt's FFmpeg backend re-decodes from scratch on
+            # every stop()+play() replay, and MP3's LAME encoder-delay/
+            # padding metadata makes the mp3float decoder print "Could not
+            # update timestamps for skipped samples" to stderr on a fast
+            # restart of a very short clip. PCM has no such metadata, so
+            # the warning class doesn't exist for it.
+            path = project_root() / "commander_gui" / "assets" / "pda.wav"
+            if not path.is_file():
+                return
+            _click_sound_output = QAudioOutput()
+            _click_sound_output.setVolume(0.5)
+            _click_sound_player = QMediaPlayer()
+            _click_sound_player.setAudioOutput(_click_sound_output)
+            _click_sound_player.setSource(QUrl.fromLocalFile(str(path)))
+        _click_sound_player.stop()
+        _click_sound_player.play()
+    except Exception:  # noqa: BLE001, S110 - a broken sound must never block a launch
+        pass
 
 
 def anomaly_installed(path: str) -> bool:
@@ -241,7 +345,7 @@ def count_active_mods(
         lines = read_lines(profile_dir / "modlist.txt")
     except (OSError, ValueError):
         return None
-    return count_mods(lines)
+    return count_mods(lines, mods_dir=base / "mods")
 
 
 class NoWheelComboBox(QComboBox):
@@ -333,6 +437,20 @@ class InstallStatusRow(QWidget):
         self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
         self._status.setStyleSheet(f"color: {color};")
 
+    def set_incomplete(self, detail: str = "") -> None:
+        """Show the amber "incomplete" state - present on disk, but the last
+
+        install attempt failed and never finished (see gamma_install_resume)
+        - distinct from the green "Installed" state, which would otherwise
+        look identical for a partial and a fully completed install.
+        """
+        color = WARN.name()
+        self._detail.setText(detail)
+        self._detail.setVisible(bool(detail))
+        self._status.setText(tr("Incomplete"))
+        self._dot.setStyleSheet(f"color: {color}; font-size: 18px;")
+        self._status.setStyleSheet(f"color: {color};")
+
     def set_status_tooltip(self, text: str) -> None:
         """Show the same status details when hovering any part of the row."""
         for widget in (self, self._dot, self._status, self._detail):
@@ -366,20 +484,56 @@ def resume_after_shutdown() -> None:
 
 
 def shutdown_active_runners(timeout_ms: int = 5000) -> None:
-    """Cancel and wait for all active command threads (called on app quit)."""
+    """Cancel and wait for all active command threads (called on app quit).
+
+    ``timeout_ms`` is a budget shared across every active runner/task, not
+    a fresh allowance handed to each one - a page that starts several
+    background checks at once (dashboard's size scan, its update check,
+    a dependency probe, ...) previously cost ``timeout_ms`` *per task*
+    here, so e.g. 6 still-in-flight tasks made a 2000ms caller (a
+    language switch) take a full 12 real seconds, and a 30000ms caller
+    (app quit) could take minutes. A single deadline, with each
+    remaining-time slice shrinking as it goes, keeps the real wait
+    bounded by what the caller actually asked for.
+    """
     begin_shutdown()
+    deadline = time.monotonic() + max(0, timeout_ms) / 1000
     for runner in list(_ACTIVE_RUNNERS):
+        remaining_ms = max(0, round((deadline - time.monotonic()) * 1000))
         try:
-            runner.shutdown(timeout_ms=timeout_ms)
+            runner.shutdown(timeout_ms=remaining_ms)
         except Exception:  # noqa: BLE001, S110
             pass
     for task in list(_ACTIVE_TASKS):
+        remaining_ms = max(0, round((deadline - time.monotonic()) * 1000))
         shutdown = getattr(task, "shutdown", None)
         if shutdown is not None:
             try:
-                shutdown(timeout_ms=timeout_ms)
+                shutdown(timeout_ms=remaining_ms)
             except Exception:  # noqa: BLE001, S110
                 pass
+
+
+def _detach_unfinished_task(task: QObject) -> None:
+    """Cut a still-running task loose from the widget that owns it.
+
+    ``BackgroundTask``/``StreamTask`` run a plain Python callable that cannot
+    be force-killed, so ``shutdown()``'s wait is bounded and can expire with
+    the worker thread still running. The task is parented to the page that
+    started it, and its ``QThread`` is parented to the task in turn - so a
+    caller that tears those pages down right after shutting the tasks down
+    (``MainWindow.switch_language()`` deleting the whole central widget) would
+    destroy a running ``QThread``, which Qt answers with a ``qFatal`` abort,
+    killing the app outright.
+
+    Re-parenting to nothing takes the task out of that destruction chain;
+    ``_ACTIVE_TASKS`` keeps it alive until ``QThread.finished`` arrives. Its
+    results are dropped from here on: the widgets that asked for them are
+    being destroyed, and ``_SHUTTING_DOWN`` alone cannot suppress them because
+    a mid-session rebuild clears that flag again (``resume_after_shutdown``).
+    """
+    task._abandoned = True
+    task.setParent(None)
 
 
 class CommandRunner(QObject):
@@ -536,6 +690,7 @@ class BackgroundTask(QObject):
         self._thread: QThread | None = None
         self._worker: _Worker | None = None
         self._cancel_event = threading.Event()
+        self._abandoned = False
 
     def start(self) -> None:
         if self._thread is not None and self._thread.isRunning():
@@ -544,6 +699,7 @@ class BackgroundTask(QObject):
             self._thread.deleteLater()
             self._thread = None
             self._worker = None
+        self._abandoned = False
         self._thread = QThread(self)
         self._worker = _Worker(self._fn, *self._args, **self._kwargs)
         self._worker.moveToThread(self._thread)
@@ -567,11 +723,11 @@ class BackgroundTask(QObject):
         self._cancel_event.set()
 
     def _on_result(self, result) -> None:
-        if not _SHUTTING_DOWN:
+        if not _SHUTTING_DOWN and not self._abandoned:
             self.result.emit(result)
 
     def _on_error(self, message: str) -> None:
-        if not _SHUTTING_DOWN:
+        if not _SHUTTING_DOWN and not self._abandoned:
             self.error.emit(message)
 
     def _on_thread_finished(self, thread: QThread) -> None:
@@ -595,6 +751,58 @@ class BackgroundTask(QObject):
         # bounded wait.
         if thread.wait(max(0, timeout_ms)):
             self._on_thread_finished(thread)
+            return
+        _detach_unfinished_task(self)
+
+
+def activate_profile(window, parent: QWidget, name: str, on_done=None) -> BackgroundTask:
+    """Switch the CLI's active profile to ``name``, asynchronously.
+
+    Runs ``config use <name>`` via the CLI, then refreshes ``window``'s
+    settings and verifies the switch actually took effect. Shared by the
+    Profiles page's "Set active" button and the Dashboard's inline
+    profile switcher - callers are responsible for their own busy-guard
+    and any "game running" confirmation before calling this (see
+    ``ProfilesPage._set_active`` for that pattern). ``on_done(True)``
+    fires on confirmed success, ``on_done(False)`` on any failure -
+    callers use it to restore UI state (re-enable buttons, revert a
+    combo selection, etc). Returns the ``BackgroundTask`` so a caller
+    that tracks its own in-flight task (e.g. for a busy guard) can keep
+    a reference to it.
+    """
+    from ..settings import cli_ok, run_config_command
+
+    def _finish(result) -> None:
+        rc, out, err = result
+        if not cli_ok(rc, out, err):
+            QMessageBox.warning(
+                parent, tr("Failed"), (out + "\n" + err).strip() or "config use failed"
+            )
+            if on_done is not None:
+                on_done(False)
+            return
+        window.refresh_settings()
+        active_now = window.settings.active_profile
+        if active_now is None or active_now.profile_name != name:
+            QMessageBox.warning(
+                parent, tr("Failed"), tr("Profile '{name}' could not be activated.", name=name)
+            )
+            if on_done is not None:
+                on_done(False)
+            return
+        if on_done is not None:
+            on_done(True)
+
+    def _error(msg: str) -> None:
+        QMessageBox.warning(parent, tr("Error"), msg)
+        if on_done is not None:
+            on_done(False)
+
+    task = BackgroundTask(run_config_command, ["use", name], timeout=300, parent=parent)
+    task.result.connect(_finish)
+    task.error.connect(_error)
+    task.start()
+    return task
 
 
 class _StreamWorker(QObject):
@@ -636,6 +844,7 @@ class StreamTask(QObject):
         self._cancel_event = threading.Event()
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
+        self._abandoned = False
 
     def start(self) -> None:
         if self._thread is not None and self._thread.isRunning():
@@ -645,6 +854,7 @@ class StreamTask(QObject):
             self._thread = None
             self._worker = None
         self._cancel_event.clear()
+        self._abandoned = False
         self._thread = QThread(self)
         self._worker = _StreamWorker(self._fn)
         self._worker.moveToThread(self._thread)
@@ -667,15 +877,15 @@ class StreamTask(QObject):
         self._cancel_event.set()
 
     def _on_line(self, line: str) -> None:
-        if not _SHUTTING_DOWN:
+        if not _SHUTTING_DOWN and not self._abandoned:
             self.line.emit(line)
 
     def _on_result(self, result) -> None:
-        if not _SHUTTING_DOWN:
+        if not _SHUTTING_DOWN and not self._abandoned:
             self.result.emit(result)
 
     def _on_error(self, message: str) -> None:
-        if not _SHUTTING_DOWN:
+        if not _SHUTTING_DOWN and not self._abandoned:
             self.error.emit(message)
 
     def _on_thread_finished(self, thread: QThread) -> None:
@@ -698,6 +908,8 @@ class StreamTask(QObject):
         # the timeout; releasing either while the thread runs is unsafe.
         if thread.wait(max(0, timeout_ms)):
             self._on_thread_finished(thread)
+            return
+        _detach_unfinished_task(self)
 
 
 class OutputPane(QFrame):
@@ -829,6 +1041,24 @@ def install_hover_grow_text(
     button._hover_grow_anim = anim
 
 
+def set_hover_grow_text(button: QPushButton, text: str) -> None:
+    """Change the visible text of a button set up via install_hover_grow_text().
+
+    That function clears the button's own .text() permanently and paints
+    an overlay QLabel instead (see its docstring) - calling
+    button.setText() afterward has no visible effect (the overlay hides
+    it) while also silently re-populating the button's real, supposedly-
+    empty text, so a later hover-grow animation would show both the
+    overlay's old text and the button's own new text at once. This
+    updates the overlay instead, which is what's actually visible.
+    """
+    overlay = getattr(button, "_hover_grow_overlay", None)
+    if overlay is not None:
+        overlay.setText(text)
+    else:
+        button.setText(text)
+
+
 def clear_layout(layout) -> None:
     """Remove and delete every item (widgets and nested layouts) in a layout.
 
@@ -858,6 +1088,22 @@ def info_label(text: str, *, wrap: bool = True) -> QLabel:
     label.setWordWrap(wrap)
     label.setObjectName("info")
     return label
+
+
+def make_header_row(title: str, status: QWidget | None = None) -> QHBoxLayout:
+    """A card column's title, with its status badge (if any) pushed to
+
+    the top-right of the same row instead of its own separate row above
+    the title. Shared by every page that lays two columns of content
+    side by side (Install page's Anomaly/GAMMA card, Updates page's
+    Installed/Latest Available card, ...).
+    """
+    row = QHBoxLayout()
+    row.addWidget(section_label(tr(title), level=2))
+    row.addStretch(1)
+    if status is not None:
+        row.addWidget(status)
+    return row
 
 
 def assistant_token(text: str = "ASSISTANT") -> str:
@@ -941,6 +1187,46 @@ def dir_size(path: str | Path, *, max_entries: int = 200_000) -> int:
     return total
 
 
+def free_space_bytes(path: str | Path) -> int | None:
+    """Free space on the filesystem that would hold ``path``.
+
+    ``path`` (e.g. a profile's Anomaly/GAMMA folder) need not exist yet -
+    walks up to the nearest existing ancestor first, since a fresh
+    install's target folders are typically only created after the user
+    confirms. Returns ``None`` on any ``OSError`` (missing permissions, an
+    unmounted path, ...) rather than raising - a failed check must never
+    block the caller (e.g. an install confirmation dialog) from proceeding.
+    """
+    candidate = Path(path).expanduser()
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        pass
+    for ancestor in (candidate, *candidate.parents):
+        if ancestor.exists():
+            try:
+                return shutil.disk_usage(ancestor).free
+            except OSError:
+                return None
+    return None
+
+
+def crash_dump_names(anomaly_path: str | Path) -> set[str]:
+    """Filenames of X-Ray crash minidumps (``.mdmp``) in the Anomaly
+
+    install's log folder. X-Ray's own crash handler reliably writes one
+    of these on any native engine crash, regardless of how the game was
+    launched (MO2-mediated or direct) - a simpler, more reliable signal
+    than trying to track the actual game process's exit code, which this
+    app cannot do at all for the MO2-mediated launch path.
+    """
+    logs_dir = Path(anomaly_path).expanduser() / "appdata" / "logs"
+    try:
+        return {p.name for p in logs_dir.glob("*.mdmp")}
+    except OSError:
+        return set()
+
+
 def open_in_file_manager(path: str | Path) -> bool:
     """Open ``path`` in the file manager. Returns True if a launcher was started.
 
@@ -997,6 +1283,30 @@ def open_in_file_manager(path: str | Path) -> bool:
         return False
 
 
+def notify_desktop(title: str, message: str) -> None:
+    """Best-effort desktop notification for a long task finishing.
+
+    GAMMA installs/updates can run for a long time - if the user alt-tabs
+    away, this is the only way they find out it's done without coming
+    back to check. Uses notify-send (present on virtually every Linux
+    desktop via libnotify) rather than a persistent QSystemTrayIcon, so
+    nothing new appears in the tray. Silently does nothing if it isn't
+    available - a missing notification must never affect the operation
+    that just completed.
+    """
+    exe = shutil.which("notify-send")
+    if exe is None:
+        return
+    try:
+        subprocess.Popen(
+            [exe, "--app-name=STALKER COMMANDER", title, message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
 class ProgressTable(QTableWidget):
     """Live table of per-addon install progress."""
 
@@ -1017,11 +1327,31 @@ class ProgressTable(QTableWidget):
             2, self.horizontalHeader().ResizeMode.ResizeToContents
         )
         self.setSortingEnabled(False)
-        self._rows: dict[str, int] = {}
+        # OrderedDict, not dict: move_to_end() on every touch in upsert()
+        # turns iteration order into least-recently-touched-first, which
+        # finish_stale_by_concurrency() relies on to evict the *oldest*
+        # still-open rows first.
+        self._rows: OrderedDict[str, int] = OrderedDict()
+        # Matches the profile default of 6 download threads (see
+        # set_concurrency()) until a real install configures the actual
+        # value.
+        self._concurrency_cap = 10
 
     def reset(self) -> None:
         self.setRowCount(0)
         self._rows.clear()
+
+    def set_concurrency(self, threads: int) -> None:
+        """Set how many rows can plausibly be in flight at once.
+
+        With only N download threads, at most roughly N mods can
+        genuinely be downloading/extracting concurrently - the +4 buffer
+        allows for normal overlap between pipeline stages (e.g. one item
+        finishing Download while another starts Extract). Anything beyond
+        this count showing as non-terminal must be stale, not still
+        running - see finish_stale_by_concurrency().
+        """
+        self._concurrency_cap = max(1, threads) + 4
 
     def upsert(self, event: ProgressEvent) -> None:
         row = self._rows.get(event.name)
@@ -1039,19 +1369,27 @@ class ProgressTable(QTableWidget):
                 return
             op.setText(event.operation)
             pct.setText(f"{event.percent:.1%}")
+            self._rows.move_to_end(event.name)
 
-        if event.percent >= 1.0:
+        if event.operation == "Skipped" or event.percent >= 1.0:
             self.item(row, 1).setForeground(QColor(OK_GREEN.name()))
             self.item(row, 2).setForeground(QColor(OK_GREEN.name()))
+            # Done - hide instead of leaving a finished archive's row (and,
+            # for anything whose very last line never cleanly hit 100%, its
+            # stale operation/percent) cluttering the list indefinitely.
+            self.setRowHidden(row, True)
         elif event.operation == "Check MD5":
             self.item(row, 1).setForeground(QColor(TEAL.name()))
         else:
             self.item(row, 1).setForeground(QColor(LIGHT_GREY.name()))
             self.item(row, 2).setForeground(QColor(LIGHT_GREY.name()))
 
-    def finish_all(self) -> None:
-        """Mark every remaining row as 100% complete (used when a run ends)."""
-        for row in set(self._rows.values()):
+    def _finish_rows(self, names) -> None:
+        """Shared "force to Complete/100%, green, hidden" body."""
+        for name in names:
+            row = self._rows.get(name)
+            if row is None or self.isRowHidden(row):
+                continue
             op = self.item(row, 1)
             pct = self.item(row, 2)
             if op is None or pct is None:
@@ -1060,6 +1398,60 @@ class ProgressTable(QTableWidget):
             pct.setText(tr("100.0%"))
             op.setForeground(QColor(OK_GREEN.name()))
             pct.setForeground(QColor(OK_GREEN.name()))
+            self.setRowHidden(row, True)
+
+    def finish_all(self) -> None:
+        """Mark every remaining row as 100% complete (used when a run ends)."""
+        self._finish_rows(list(self._rows.keys()))
+
+    def finish_all_except(self, keep_names: frozenset[str]) -> None:
+        """Force-complete and hide every row not in ``keep_names``.
+
+        Used once the CLI's own [complete/total] counter proves every item
+        still not finished must be one of the still-pending heavy repos in
+        ``keep_names`` - so any other row still lingering as non-terminal
+        (its own last line never cleanly signalled completion) is safe to
+        force-finish and hide instead of leaving it stuck.
+        """
+        self._finish_rows(
+            name for name in self._rows if name.strip().lower() not in keep_names
+        )
+
+    def finish_stale_by_concurrency(self, keep_names: frozenset[str]) -> None:
+        """Force-complete the oldest visible rows beyond the concurrency cap.
+
+        With only a handful of download threads, at most roughly that many
+        ordinary rows can genuinely be in flight at once - covers the
+        mid-install case finish_all_except() cannot: a row whose own last
+        line never cleanly reached 100%/Skipped, well before the CLI's
+        [complete/total] counter is anywhere near the end of the run.
+        """
+        visible = [
+            name
+            for name in self._rows
+            if name.strip().lower() not in keep_names
+            and not self.isRowHidden(self._rows[name])
+        ]
+        excess = len(visible) - self._concurrency_cap
+        if excess > 0:
+            self._finish_rows(visible[:excess])
+
+    def mark_interrupted(self) -> None:
+        """Relabel any row still non-terminal when a run ends without success.
+
+        The row stays visible (it did not actually finish - hiding it
+        would be dishonest), but its stale operation/percent no longer
+        looks like it is silently still running once the whole process
+        has actually stopped or been cancelled.
+        """
+        for row in set(self._rows.values()):
+            if self.isRowHidden(row):
+                continue
+            op = self.item(row, 1)
+            if op is None or op.text() == tr("Complete"):
+                continue
+            op.setText(tr("Interrupted"))
+            op.setForeground(QColor(WARN.name()))
 
 
 def progress_value(complete: int, total: int) -> int:
@@ -1069,14 +1461,76 @@ def progress_value(complete: int, total: int) -> int:
     return max(0, min(100, round(complete / total * 100)))
 
 
-def aggregate_progress_value(complete: int, total: int, percent: float) -> int:
-    """Return overall progress using the CLI counter and current item fraction."""
+#: The three git-cloned "special repos" (see
+#: install_page._looks_like_special_repo_clone_failure) - confirmed via a
+#: real captured install log to take the large majority of total
+#: wall-clock install time despite being only 3 of ~577 total items.
+_HEAVY_ARCHIVE_NAMES = frozenset(
+    {"stalker_gamma", "gamma_setup", "gamma_large_files_v2"}
+)
+#: Collective share of the overall bar reserved for those 3 items, so the
+#: bar can't race to ~99% purely by finishing hundreds of small archives
+#: while the real bottleneck (the heavy clones) hasn't even started.
+_HEAVY_ARCHIVE_SHARE = 0.5
+
+#: Minimum seconds between status-label repaints during a GAMMA install -
+#: with several archives downloading at once the raw line rate can flip
+#: this label several times a second; holding each update for a full
+#: second keeps it readable instead of flickering.
+_STATUS_LABEL_THROTTLE_S = 1.0
+
+
+def _heavy_item_phase_value(operation: str, percent: float) -> float:
+    """Fold a heavy item's own Download/Extract percent into one 0..1
+    completion fraction for that item (clone = first half, checkout =
+    second half - the only two operations seen for these repos)."""
+    pct = max(0.0, min(1.0, percent))
+    if operation == "Download":
+        return pct * 0.5
+    if operation == "Extract":
+        return 0.5 + pct * 0.5
+    return pct
+
+
+def aggregate_progress_value(
+    complete: int,
+    total: int,
+    percent: float,
+    name: str = "",
+    heavy_progress: dict[str, float] | None = None,
+    operation: str = "",
+) -> int:
+    """Return overall progress using the CLI counter and current item fraction.
+
+    Once a known-heavy git-cloned repo (see ``_HEAVY_ARCHIVE_NAMES``) has
+    reported progress, its collective share of the bar is fixed at
+    ``_HEAVY_ARCHIVE_SHARE`` instead of the flat ``1/total`` every other
+    item gets - otherwise those 3 items, which dominate real install time,
+    would only ever move the bar by a fraction of a percent each.
+    """
     if total <= 0:
         return 0
     current = max(0.0, min(1.0, percent))
-    completed_before_current = max(0, complete - 1)
-    fraction = (completed_before_current + current) / total
-    return max(0, min(100, round(fraction * 100)))
+    heavy_progress = {} if heavy_progress is None else heavy_progress
+    key = name.strip().lower()
+    if key in _HEAVY_ARCHIVE_NAMES:
+        heavy_progress[key] = _heavy_item_phase_value(operation, current)
+    if not heavy_progress:
+        completed_before_current = max(0, complete - 1)
+        fraction = (completed_before_current + current) / total
+        return max(0, min(100, round(fraction * 100)))
+
+    heavy_fraction = sum(heavy_progress.values()) / len(_HEAVY_ARCHIVE_NAMES)
+    light_total = max(1, total - len(_HEAVY_ARCHIVE_NAMES))
+    heavy_done = sum(1 for p in heavy_progress.values() if p >= 1.0)
+    completed_light = max(0, complete - 1 - heavy_done)
+    light_current = 0.0 if key in _HEAVY_ARCHIVE_NAMES else current
+    light_fraction = min(1.0, (completed_light + light_current) / light_total)
+    overall = (
+        (1 - _HEAVY_ARCHIVE_SHARE) * light_fraction
+        + _HEAVY_ARCHIVE_SHARE * heavy_fraction
+    )
+    return max(0, min(100, round(overall * 100)))
 
 
 def single_file_progress(operation: str, percent: float) -> int:
@@ -1117,18 +1571,37 @@ class ProgressArea(QWidget):
         show_log: bool = True,
         stage_progress: bool = False,
         log_max_height: int | None = None,
+        auto_expand_log: bool = True,
+        bar_follows_log: bool = False,
+        toggle_row_extra: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.show_table = show_table
         self.show_log = show_log
+        #: An extra widget (e.g. a secondary action button) placed to the
+        #: left of "Show Console" on its own row, instead of the page
+        #: giving it a separate row of its own - lets a page fold a
+        #: secondary action onto the console toggle's row to stay compact.
+        self._toggle_row_extra = toggle_row_extra
+        #: Whether on_started() auto-expands the collapsed log/table pane
+        #: (see _show_log()) - the right default for a page where seeing
+        #: live output matters (a full install), not for a page where
+        #: the console should stay tucked away unless the user asks.
+        self._auto_expand_log = auto_expand_log
+        #: Whether the progress bar and idle status line are tied to the
+        #: log/table's own collapsed state - both hidden while the
+        #: console is collapsed, shown alongside it (see
+        #: _toggle_log()/_toggle_table()/_show_log()). False everywhere
+        #: else: the bar is normally the one thing worth seeing at a
+        #: glance without opening the console at all.
+        self._bar_follows_log = bar_follows_log
         self.stage_progress = stage_progress
         self._bar_idle_format = "Idle"
         self._bar_percent_format = "%p%"
         self._status_idle = ""
-        self._seen: set[str] = set()
-        self._completed: set[str] = set()
-        self._per_archive: dict[str, float] = {}
         self._max_bar_value: int = 0
+        self._heavy_progress: dict[str, float] = {}
+        self._last_status_update: float = 0.0
         self._runner: CommandRunner | None = None
         self._paused = False
         self.bar = QProgressBar(self)
@@ -1140,16 +1613,41 @@ class ProgressArea(QWidget):
         self.status_label = QLabel(self._status_idle)
         self.status_label.setObjectName("info")
 
+        self.heavy_notice_label: QLabel | None = None
+        if show_table:
+            self.heavy_notice_label = QLabel()
+            self.heavy_notice_label.setObjectName("info")
+            self.heavy_notice_label.setStyleSheet(f"color: {WARN.name()};")
+            self.heavy_notice_label.setWordWrap(True)
+            self.heavy_notice_label.hide()
+
         self.log = OutputPane(self) if show_log else None
         self.log_toggle: QPushButton | None = None
         if self.log is not None:
             if log_max_height is not None:
                 self.log.setMaximumHeight(log_max_height)
             self.log.hide()
-            self.log_toggle = QPushButton(tr("Show"), self)
+            self.log_toggle = QPushButton(tr("Show Console"), self)
             self.log_toggle.setObjectName("consoleToggle")
-            self.log_toggle.setFixedSize(60, 26)
+            self.log_toggle.setFixedSize(110, 26)
             self.log_toggle.clicked.connect(self._toggle_log)
+            if self._bar_follows_log:
+                self.bar.hide()
+                self.status_label.hide()
+
+        # A table with no log (full GAMMA install) has nothing else to
+        # collapse it behind - give it its own toggle so it isn't stuck
+        # permanently visible like every other progress box's console.
+        self.table_toggle: QPushButton | None = None
+        if self.table is not None and self.log is None:
+            self.table.hide()
+            self.table_toggle = QPushButton(tr("Show Console"), self)
+            self.table_toggle.setObjectName("consoleToggle")
+            self.table_toggle.setFixedSize(110, 26)
+            self.table_toggle.clicked.connect(self._toggle_table)
+            if self._bar_follows_log:
+                self.bar.hide()
+                self.status_label.hide()
 
         self.pause_button = QPushButton(tr("Pause"), self)
         self.pause_button.setObjectName("secondary")
@@ -1172,17 +1670,38 @@ class ProgressArea(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
         layout.addLayout(status_row)
+        layout.addSpacing(2)
         layout.addWidget(self.status_label)
         if show_table:
+            # Tight, matching the log-toggle gap below - pulls the addon
+            # table (Addon/Operation/Percent) up right under the bar and
+            # status text instead of floating two full 8px gaps down
+            # (heavy_notice_label is empty/hidden most of the time, so
+            # those gaps were pure dead space above the table).
+            layout.addSpacing(2)
+            layout.addWidget(self.heavy_notice_label)
+            layout.addSpacing(2)
             layout.addWidget(self.table, 3)
             if self.log is not None:
+                # Tighter than the other gaps - pulls the Show Console
+                # toggle up right under the table/status text instead of
+                # leaving it floating with a full 8px gap, so the console
+                # (and the card around it) sits shorter while the log
+                # stays collapsed, its default state.
+                layout.addSpacing(2)
                 layout.addLayout(self._log_toggle_row())
+                layout.addSpacing(8)
                 layout.addWidget(self.log, 2)
+            elif self.table_toggle is not None:
+                layout.addSpacing(2)
+                layout.addLayout(self._table_toggle_row())
         else:
             if self.log is not None:
+                layout.addSpacing(2)
                 layout.addLayout(self._log_toggle_row())
+                layout.addSpacing(8)
                 layout.addWidget(self.log, 2)
             else:
                 layout.addStretch(1)
@@ -1190,6 +1709,8 @@ class ProgressArea(QWidget):
 
     def _log_toggle_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
+        if self._toggle_row_extra is not None:
+            row.addWidget(self._toggle_row_extra)
         row.addStretch(1)
         row.addWidget(self.log_toggle)
         return row
@@ -1199,30 +1720,66 @@ class ProgressArea(QWidget):
             return
         if self.log.isVisible():
             self.log.hide()
-            self.log_toggle.setText(tr("Show"))
+            self.log_toggle.setText(tr("Show Console"))
         else:
             self.log.show()
-            self.log_toggle.setText(tr("Hide"))
+            self.log_toggle.setText(tr("Hide Console"))
+        if self._bar_follows_log:
+            self.bar.setVisible(self.log.isVisible())
+            self.status_label.setVisible(self.log.isVisible())
+
+    def _table_toggle_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.table_toggle)
+        return row
+
+    def _toggle_table(self) -> None:
+        if self.table is None or self.table_toggle is None:
+            return
+        if self.table.isVisible():
+            self.table.hide()
+            self.table_toggle.setText(tr("Show Console"))
+        else:
+            self.table.show()
+            self.table_toggle.setText(tr("Hide Console"))
+        if self._bar_follows_log:
+            self.bar.setVisible(self.table.isVisible())
+            self.status_label.setVisible(self.table.isVisible())
 
     def _show_log(self) -> None:
-        """Expand the log pane, e.g. when a run starts - collapsed by default."""
-        if self.log is None or self.log_toggle is None or self.log.isVisible():
-            return
-        self.log.show()
-        self.log_toggle.setText(tr("Hide"))
+        """Expand the log/table pane, e.g. when a run starts - collapsed by default."""
+        if (
+            self.log is not None
+            and self.log_toggle is not None
+            and not self.log.isVisible()
+        ):
+            self.log.show()
+            self.log_toggle.setText(tr("Hide Console"))
+        if (
+            self.table is not None
+            and self.table_toggle is not None
+            and not self.table.isVisible()
+        ):
+            self.table.show()
+            self.table_toggle.setText(tr("Hide Console"))
+        if self._bar_follows_log:
+            self.bar.show()
+            self.status_label.show()
 
     def reset(self) -> None:
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat(self._bar_idle_format)
         self.bar.setStyleSheet("")
-        self._seen.clear()
-        self._completed.clear()
-        self._per_archive.clear()
         self._max_bar_value = 0
+        self._heavy_progress = {}
+        self._last_status_update = 0.0
         self._paused = False
         if self.table is not None:
             self.table.reset()
+        if self.heavy_notice_label is not None:
+            self.heavy_notice_label.hide()
         self.status_label.setText(self._status_idle)
         if self.log is not None:
             self.log.clear()
@@ -1235,6 +1792,14 @@ class ProgressArea(QWidget):
         self._runner = runner
         self._paused = False
         self.pause_button.setText(tr("Pause"))
+
+    def set_concurrency(self, threads: int) -> None:
+        """Forward the configured download-thread count to the addon table.
+
+        No-op for the single-file install path (no table).
+        """
+        if self.table is not None:
+            self.table.set_concurrency(threads)
 
     @property
     def is_paused(self) -> bool:
@@ -1286,33 +1851,34 @@ class ProgressArea(QWidget):
                     self.bar.setFormat(f"{pct}%")
                     self.status_label.setText(tr("{name} - {operation}...", name=event.name, operation=event.operation))
             else:
-                self.status_label.setText(
-                    f"{event.name} - {event.operation} - {event.percent:.1%}"
-                )
+                # Dropped, not queued: with several archives downloading at
+                # once the raw line rate can flip this label several times a
+                # second - showing whichever archive is active at each tick,
+                # held for a full second, reads far calmer than chasing
+                # every single line.
+                now = time.monotonic()
+                if now - self._last_status_update >= _STATUS_LABEL_THROTTLE_S:
+                    self._last_status_update = now
+                    self.status_label.setText(
+                        f"{event.name} — {event.operation} — {event.percent:.0%}"
+                        f"  ·  {event.complete}/{event.total} done"
+                    )
                 if self.table is None:
                     self.bar.setRange(0, 100)
                     self.bar.setValue(round(event.percent * 100))
                     self.bar.setFormat(self._bar_percent_format)
             if self.table is not None:
                 self.table.upsert(event)
-            self._seen.add(event.name)
-            # Track per-archive percent for average-based progress.
-            # Terminal states (percent >= 1.0, Skipped) pin at 1.0.
-            # Extract/Expand/Check MD5 keep prior value (no regression).
-            if event.percent >= 1.0 or event.operation == "Skipped":
-                self._per_archive[event.name] = 1.0
-                self._completed.add(event.name)
-            elif event.operation in ("Extract", "Expand", "Check MD5"):
-                # Keep prior value; don't regress to 0
-                pass
-            else:
-                # Download or other: update current percent
-                self._per_archive[event.name] = event.percent
             # The CLI counter is authoritative for overall progress. Include
             # the current archive's fraction so a large download does not look
             # stalled until that archive finishes.
             value = aggregate_progress_value(
-                event.complete, event.total, event.percent
+                event.complete,
+                event.total,
+                event.percent,
+                name=event.name,
+                heavy_progress=self._heavy_progress,
+                operation=event.operation,
             )
             self._max_bar_value = max(self._max_bar_value, value)
             if self.table is not None:
@@ -1323,6 +1889,38 @@ class ProgressArea(QWidget):
                 self.bar.setRange(0, 100)
                 self.bar.setValue(round(event.percent * 100))
                 self.bar.setFormat(self._bar_percent_format)
+            if self.table is not None:
+                heavy_not_done = sum(
+                    1
+                    for h in _HEAVY_ARCHIVE_NAMES
+                    if self._heavy_progress.get(h, 0.0) < 1.0
+                )
+                # The CLI's own counter can never say fewer items are
+                # unfinished than the heavy repos we know are still
+                # pending - equality means nothing else is left running,
+                # so any other row still lingering as non-terminal is safe
+                # to force-finish instead of staying stuck.
+                if event.total - event.complete == heavy_not_done:
+                    self.table.finish_all_except(_HEAVY_ARCHIVE_NAMES)
+                else:
+                    # Mid-install case the counter check above can't catch:
+                    # a row whose own last line never cleanly reached
+                    # 100%/Skipped, long before the run is anywhere near
+                    # its end.
+                    self.table.finish_stale_by_concurrency(_HEAVY_ARCHIVE_NAMES)
+                if self.heavy_notice_label is not None:
+                    heavy_active = any(
+                        p < 1.0 for p in self._heavy_progress.values()
+                    )
+                    if heavy_active:
+                        self.heavy_notice_label.setText(
+                            tr(
+                                "A large repository is downloading in the background - other addons may pause until it finishes. This can take a while."
+                            )
+                        )
+                        self.heavy_notice_label.show()
+                    else:
+                        self.heavy_notice_label.hide()
 
     def status_message(self, text: str) -> None:
         self.status_label.setText(text)
@@ -1339,7 +1937,8 @@ class ProgressArea(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat("Starting...")
-        self._show_log()
+        if self._auto_expand_log:
+            self._show_log()
 
     def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()
@@ -1358,21 +1957,27 @@ class ProgressArea(QWidget):
             self.bar.setFormat("Failed")
             self.bar.setValue(0)
             self.status_label.setText(tr("Failed"))
-        self._seen.clear()
-        self._completed.clear()
-        self._per_archive.clear()
+            if self.table is not None:
+                self.table.mark_interrupted()
+        # The run has ended (success or failure) - "still downloading in
+        # the background" can no longer be true, regardless of whether the
+        # last progress line happened to trigger the per-line hide check
+        # in on_line() above.
+        if self.heavy_notice_label is not None:
+            self.heavy_notice_label.hide()
 
     def on_cancelled(self) -> None:
         """Reset the bar/buttons to an idle Cancelled state (keeps the log)."""
         self.cancel_button.hide()
         self.pause_button.hide()
         self._paused = False
+        if self.table is not None:
+            self.table.mark_interrupted()
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.bar.setFormat("Cancelled")
-        self._seen.clear()
-        self._completed.clear()
-        self._per_archive.clear()
+        if self.heavy_notice_label is not None:
+            self.heavy_notice_label.hide()
 
     def set_success_state(self, text: str = "Verified successfully") -> None:
         """Show a successful completed state using the install-bar styling."""
@@ -1393,37 +1998,3 @@ class ProgressArea(QWidget):
             f"QProgressBar::chunk {{ background: {gradient}; border-radius: 4px; }}"
         )
         self.status_label.setText(text)
-        self._seen.clear()
-        self._completed.clear()
-        self._per_archive.clear()
-
-    def set_installed_state(self, installed: bool | None, detail: str = "") -> None:
-        """Set the bar to a persistent Installed / Not installed / Unknown state."""
-        from ..themes import active_theme_tokens
-
-        self.cancel_button.hide()
-        self.pause_button.hide()
-        self.bar.setRange(0, 1)
-        tokens = active_theme_tokens()
-        if installed is True:
-            self.bar.setValue(1)
-            self.bar.setFormat("Installed")
-            gradient = (
-                f"qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                f"stop:0 {tokens['hero1']},stop:1 {tokens['accent_strong']})"
-            )
-        elif installed is False:
-            self.bar.setValue(0)
-            self.bar.setFormat("Not installed")
-            gradient = STATUS_RED.name()
-        else:
-            self.bar.setValue(0)
-            self.bar.setFormat("Unknown")
-            gradient = STATUS_GREY.name()
-        self.bar.setStyleSheet(
-            f"QProgressBar::chunk {{ background: {gradient}; border-radius: 4px; }}"
-        )
-        self.status_label.setText(detail)
-        self._seen.clear()
-        self._completed.clear()
-        self._per_archive.clear()

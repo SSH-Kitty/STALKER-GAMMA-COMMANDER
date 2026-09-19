@@ -50,7 +50,7 @@ _CSS_HINT_RE = re.compile(
 
 
 class _Span:
-    __slots__ = ("start", "end", "replacement")
+    __slots__ = ("end", "replacement", "start")
 
     def __init__(self, start: int, end: int, replacement: str) -> None:
         self.start = start
@@ -113,9 +113,7 @@ def _slug(expr: ast.expr, used: set[str]) -> str:
 def _is_prose(text: str) -> bool:
     if not text.strip():
         return False
-    if _CSS_HINT_RE.search(text):
-        return False
-    return True
+    return not _CSS_HINT_RE.search(text)
 
 
 def _template_and_kwargs(node: ast.JoinedStr, source: str) -> tuple[str, str] | None:
