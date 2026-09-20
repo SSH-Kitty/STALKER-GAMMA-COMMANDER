@@ -53,6 +53,15 @@ class LaunchError(RuntimeError):
     """Raised when the launcher cannot be resolved or started."""
 
 
+class ForeignPrefixError(LaunchError):
+    """A prefix carries another Wine's system files - fixable via repair.
+
+    A distinct type (not just a differently-worded LaunchError) so the UI
+    layer can offer a one-click "Repair Now" action instead of a plain
+    dialog the user has to act on manually elsewhere.
+    """
+
+
 _RUNNER_ENV_PREFIXES = ("WINE", "PROTON", "STEAM_COMPAT_")
 _RUNNER_ENV_NAMES = {
     "PROTONPATH",
@@ -377,12 +386,12 @@ def ensure_runner_prefix(runner: Runner) -> None:
     # does not fail cleanly - it fork-bombs winedbg until the machine freezes.
     foreign = prefix_foreign_dlls(prefix, runner)
     if foreign and os.environ.get("COMMANDER_SKIP_PREFIX_GUARD") != "1":
-        raise LaunchError(
+        raise ForeignPrefixError(
             f"The Wine prefix at {prefix} contains system files from a "
             f"different Wine build ({', '.join(foreign)}), so Mod Organizer "
             "cannot start - every process would crash on launch.\n\n"
             "This happens when another Wine touches a Proton prefix. Use "
-            "Repair Prefix on the Utilities page, then reinstall the "
+            "Repair Wine prefix on the Utilities page, then reinstall the "
             "dependencies from the Install page."
         )
     marker = prefix / ".commander-runner"

@@ -102,6 +102,7 @@ class SettingsPage(QWidget):
         root.addWidget(self._appearance_card())
         root.addWidget(self._themes_card())
         root.addWidget(self._discord_card())
+        root.addWidget(self._playtime_card())
         root.addWidget(self._diagnostics_card())
         root.addStretch(1)
 
@@ -278,6 +279,20 @@ class SettingsPage(QWidget):
         )
         return card
 
+    def _playtime_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label(tr("Playtime"), level=2))
+        layout.addWidget(
+            info_label(
+                tr("Reset the total playtime tracked for the active profile.")
+            )
+        )
+        reset_btn = QPushButton(tr("Reset Playtime"))
+        reset_btn.setObjectName("secondary")
+        reset_btn.clicked.connect(self._on_reset_playtime)
+        layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        return card
+
     def _diagnostics_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label(tr("Diagnostics"), level=2))
@@ -293,6 +308,34 @@ class SettingsPage(QWidget):
         return card
 
     # --------------------------------------------------------------- handlers
+    def _on_reset_playtime(self) -> None:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            QMessageBox.information(
+                self, tr("Reset Playtime"), tr("No active profile.")
+            )
+            return
+        name = profile.profile_name or tr("this profile")
+        answer = QMessageBox.question(
+            self,
+            tr("Reset Playtime"),
+            tr("Reset total playtime for profile '{name}' to 0?", name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        state = gui_settings.load_gui_settings()
+        playtime = dict(state.get("playtime_seconds") or {})
+        playtime[profile.profile_name] = 0.0
+        gui_settings.save_gui_settings(playtime_seconds=playtime)
+        # Dashboard/Play only re-read this on their own refresh() - normally
+        # triggered by a tab switch - so without this the reset would sit
+        # invisible until the user happened to leave and come back.
+        for key in ("dashboard", "play"):
+            page = self.window._pages.get(key)
+            if page is not None and hasattr(page, "refresh"):
+                page.refresh()
+
     def _on_start_page(self, *_args) -> None:
         key = self._start_page_combo.currentData()
         if key:

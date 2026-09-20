@@ -40,6 +40,7 @@ from ..integrity import format_size
 from ..launcher import (
     DEFAULT_PROTON_PREFIX,
     DEFAULT_UMU_PREFIX,
+    ForeignPrefixError,
     LaunchError,
     Mo2Executable,
     ProcessGroupRegistry,
@@ -1232,6 +1233,20 @@ class PlayPage(QWidget):
                 "play: launch label=%s monitoring_mo2=%s game_exe_name=%s",
                 label, monitoring_mo2, game_exe_name,
             )
+        except ForeignPrefixError as exc:
+            self._abort_launch(f"Could not launch: {exc}")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(tr("Could not launch"))
+            box.setText(str(exc))
+            repair_button = box.addButton(
+                tr("Repair Now"), QMessageBox.ButtonRole.ActionRole
+            )
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if box.clickedButton() is repair_button:
+                self._repair_prefix()
+            return
         except LaunchError as exc:
             self._abort_launch(f"Could not launch: {exc}")
             QMessageBox.warning(self, tr("Could not launch"), str(exc))

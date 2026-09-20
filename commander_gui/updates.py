@@ -264,14 +264,22 @@ def latest_version_human(profile) -> str | None:
 
 
 _COMMANDER_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
-_VERSION_NUMERIC_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
+#: Release tags look like "v1.2.9" or "v1.2.9H2" - the trailing "H<n>" is a
+#: hotfix counter on top of the same numeric version, not a separate
+#: release. Without capturing it, "1.2.9H1" and "1.2.9H2" both reduced to
+#: the same (1, 2, 9) tuple and compared as equal, so a hotfix release
+#: never looked newer than the one before it.
+_VERSION_NUMERIC_RE = re.compile(
+    r"(?P<base>[0-9]+(?:\.[0-9]+)*)(?:[Hh](?P<hotfix>[0-9]+))?"
+)
 
 
 def _numeric_version_tuple(text: str) -> tuple[int, ...] | None:
     match = _VERSION_NUMERIC_RE.search(text)
     if not match:
         return None
-    return tuple(int(part) for part in match.group(0).split("."))
+    base = tuple(int(part) for part in match.group("base").split("."))
+    return base + (int(match.group("hotfix") or 0),)
 
 
 def check_commander_update(current_version: str) -> str | None:
