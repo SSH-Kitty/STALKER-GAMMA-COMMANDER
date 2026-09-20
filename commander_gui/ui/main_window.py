@@ -380,6 +380,71 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+    def _build_shortcuts(self) -> None:
+        """Set up app-wide keyboard shortcuts - called once from __init__.
+
+        Deliberately NOT called from _build_ui(): that method reruns on
+        every switch_language() and would otherwise stack a duplicate
+        QShortcut (each one firing its action again) on every language
+        change, the same trap _build_status_bar()'s own docstring
+        documents for status bar widgets.
+        """
+        focus_search = QShortcut(QKeySequence("Ctrl+F"), self)
+        focus_search.activated.connect(self._focus_mod_search)
+        open_settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        open_settings_shortcut.activated.connect(self.open_settings)
+
+    def _focus_mod_search(self) -> None:
+        """Jump to Mod Manager and focus its search box.
+
+        Looks up the current page fresh rather than capturing it at
+        shortcut-creation time - _build_ui() replaces every page instance
+        on each switch_language(), so a captured reference would go stale.
+        """
+        self.set_page("modmanager")
+        page = self._pages.get("modmanager")
+        if page is not None and hasattr(page, "search"):
+            page.search.setFocus()
+            page.search.selectAll()
+
+    #: How often the background update check re-runs on its own, without
+    #: the user ever visiting the Dashboard/Updates page.
+    _UPDATE_CHECK_INTERVAL_S = 86400
+
+    def _maybe_check_for_updates_in_background(self) -> None:
+        """Once a day at most, check for a GAMMA update without being asked.
+
+        The Dashboard/Updates pages already check on demand when visited -
+        this covers the user who never opens either, surfacing a desktop
+        notification (see notify_desktop()) instead of a badge that would
+        need its own always-on UI plumbing.
+        """
+        gui_state = gui_settings.load_gui_settings()
+        last_check = gui_state.get("last_update_check_ts", 0.0)
+        try:
+            last_check = float(last_check)
+        except (TypeError, ValueError):
+            last_check = 0.0
+        if time.time() - last_check < self._UPDATE_CHECK_INTERVAL_S:
+            return
+        profile = self.settings.active_profile
+        if profile is None:
+            return
+        task = BackgroundTask(check_updates, profile, parent=self)
+        self._scheduled_update_task = task
+        task.result.connect(self._on_scheduled_update_checked)
+        task.start()
+
+    def _on_scheduled_update_checked(self, status: object) -> None:
+        gui_settings.save_gui_settings(last_update_check_ts=time.time())
+        if getattr(status, "update_available", False):
+            notify_desktop(
+                tr("GAMMA update available"),
+                tr(
+                    "A new GAMMA update is available - open COMMANDER's Updates page to review it."
+                ),
+            )
+
     def _build_ui(self) -> None:
         """(Re)build the header, nav tabs, and every page from scratch.
 
