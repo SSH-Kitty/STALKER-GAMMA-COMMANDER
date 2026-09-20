@@ -97,6 +97,14 @@ class DeckBackdrop(QWidget):
     the glow reads through the cards and rows.
     """
 
+    def sizeHint(self) -> QSize:
+        # The real one: a QVBoxLayout of header + a QStackedWidget of
+        # QScrollAreas + nav reports whatever its shallowest visible page
+        # needs, not the Deck's actual 1280x800 design size - and this is
+        # the only widget DeckWindow's centering layout has to go on when
+        # deciding how big to make it.
+        return QSize(DECK_W, DECK_H)
+
     def _rgb(self, tokens: dict[str, str], key: str) -> tuple[int, int, int]:
         red, green, blue = (part.strip() for part in tokens[key].split(","))
         return int(red), int(green), int(blue)
@@ -154,11 +162,26 @@ def deck_label(text: str, *, role: str = "body", wrap: bool = False) -> QLabel:
             "rowTitle": "deckRowTitle",
             "rowValue": "deckRowValue",
             "headerInfo": "deckHeaderInfo",
+            "modCounter": "deckModCounter",
             "hint": "deckHint",
+            "wordmark": "deckWordmark",
+            "byline": "deckByline",
         }.get(role, "deckBody")
     )
     label.setWordWrap(wrap)
     return label
+
+
+def deck_step_badge(number: int) -> QLabel:
+    """A small numbered accent pill, e.g. the "1" before "Install Anomaly".
+
+    Replaces raw inline ``<span style='color:...'>`` HTML: a themed, reusable
+    widget rather than a hardcoded color baked into a screen's text.
+    """
+    badge = QLabel(str(number))
+    badge.setObjectName("deckStepBadge")
+    badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    return badge
 
 
 def deck_chip(text: str, state: str = "ok") -> QLabel:
@@ -210,6 +233,34 @@ class DeckCard(QFrame):
         self.body = QVBoxLayout(self)
         self.body.setContentsMargins(20, 16, 20, 16)
         self.body.setSpacing(12)
+
+
+def deck_two_column_card(
+    parent: QWidget | None = None,
+) -> tuple[DeckCard, QVBoxLayout, QVBoxLayout]:
+    """A :class:`DeckCard` split into two equal columns by a divider.
+
+    The Deck equivalent of the desktop Install page's Anomaly/GAMMA
+    ``QGridLayout(col | divider | col)`` pattern - shared here because both
+    the Dashboard (Anomaly/GAMMA readout) and Install (Anomaly/GAMMA steps)
+    screens need the identical split.
+    """
+    card = DeckCard()
+    row = QHBoxLayout()
+    row.setSpacing(20)
+    left_col = QVBoxLayout()
+    left_col.setSpacing(8)
+    right_col = QVBoxLayout()
+    right_col.setSpacing(8)
+    row.addLayout(left_col, 1)
+    divider = QFrame()
+    divider.setObjectName("deckDivider")
+    divider.setFrameShape(QFrame.Shape.NoFrame)
+    divider.setFixedWidth(1)
+    row.addWidget(divider)
+    row.addLayout(right_col, 1)
+    card.body.addLayout(row)
+    return card, left_col, right_col
 
 
 # ------------------------------------------------------------------- rows
@@ -387,6 +438,20 @@ class DeckPicker(QWidget):
         self.list.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self.list.itemActivated.connect(self._emit)
+        self.list.itemClicked.connect(self._emit)
+        layout.addWidget(self.list, 1)
+        self.set_options(options, current)
+
+    def set_options(
+        self, options: Sequence[tuple[str, object]], current: object = None
+    ) -> None:
+        """Reload the list in place - lets a caller re-render without
+
+        tearing down and rebuilding the whole picker (and its hosting
+        overlay), e.g. a folder browser navigating between directories.
+        """
+        self.list.clear()
         for index, (label, value) in enumerate(options):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, value)
@@ -396,9 +461,6 @@ class DeckPicker(QWidget):
                 self.list.setCurrentRow(index)
         if self.list.currentRow() < 0 and options:
             self.list.setCurrentRow(0)
-        self.list.itemActivated.connect(self._emit)
-        self.list.itemClicked.connect(self._emit)
-        layout.addWidget(self.list, 1)
 
     def _emit(self, item: QListWidgetItem) -> None:
         self.chosen.emit(item.data(Qt.ItemDataRole.UserRole))
@@ -557,6 +619,7 @@ class DeckProgress(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._runner = None
+        self._cancel_fn: Callable[[], None] | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -587,9 +650,23 @@ class DeckProgress(QWidget):
     # -- runner wiring ----------------------------------------------------
     def set_runner(self, runner) -> None:
         self._runner = runner
+        self._cancel_fn = None
+        self.pause_button.show()
         enabled = runner is not None
         self.pause_button.setEnabled(enabled)
         self.cancel_button.setEnabled(enabled)
+
+    def set_cancellable(self, cancel: Callable[[], None] | None) -> None:
+        """Drive a plain StreamTask/BackgroundTask job: Cancel only, no Pause.
+
+        For jobs with no pause concept (a Python function on a worker
+        thread, not a real CLI subprocess) - set_runner() is for the other
+        kind, a real CommandRunner.
+        """
+        self._runner = None
+        self._cancel_fn = cancel
+        self.pause_button.hide()
+        self.cancel_button.setEnabled(cancel is not None)
 
     def reset(self) -> None:
         self.bar.setRange(0, 100)
@@ -617,6 +694,9 @@ class DeckProgress(QWidget):
     def _cancel(self) -> None:
         if self._runner is not None:
             self._runner.cancel()
+            self.status.setText(tr("Cancelling..."))
+        elif self._cancel_fn is not None:
+            self._cancel_fn()
             self.status.setText(tr("Cancelling..."))
 
     # -- slots ------------------------------------------------------------

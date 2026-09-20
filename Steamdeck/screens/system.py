@@ -38,6 +38,10 @@ class SystemScreen(DeckScreen):
         header = QHBoxLayout()
         header.setSpacing(12)
         self.summary = deck_label(tr("Checking..."), role="body", wrap=True)
+        # Always accent-colored, matching desktop's system_check_page.py -
+        # the summary line stays #accent even when reporting something is
+        # missing, a deliberate desktop quirk this mirrors exactly.
+        self.summary.setObjectName("deckBodyAccent")
         header.addWidget(self.summary, 1)
         self.recheck_button = deck_button(tr("Re-check"), on_click=self._start)
         self.recheck_button.setFixedWidth(220)

@@ -86,7 +86,7 @@ class _ModRowDelegate(QStyledItemDelegate):
         border = QColor(tokens.get("border_strong", "#333333"))
         painter.setPen(border)
         painter.setBrush(accent if enabled else QColor(0, 0, 0, 0))
-        painter.drawRoundedRect(box, 5, 5)
+        painter.drawRoundedRect(box, box_size / 2, box_size / 2)
         if enabled:
             painter.setPen(QColor(tokens.get("accent_text", "#000000")))
             painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "✓")

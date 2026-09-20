@@ -133,6 +133,7 @@ def load_gui_settings() -> dict:
         "mods",
         "profile",
         "system",
+        "utilities",
         "settings",
     }:
         data["deck_start_screen"] = "play"

@@ -93,12 +93,6 @@ _HIDDEN_LAUNCH_TARGETS = {"dx8", "dx8-avx"}
 _CRASH_POLL_INTERVAL_MS = 2000
 _CRASH_POLL_MAX_ATTEMPTS = 45  # 90s total window
 
-#: If nothing (MO2/the game) has appeared this long after launching, warn
-#: that the launch may be stuck (e.g. a Wine crash loop) - confirmed via
-#: a real incident: a hung wrapper spun indefinitely with no way for the
-#: user to know something was wrong short of a full system restart.
-_STALL_WARNING_SECONDS = 180
-
 
 def _is_hidden_launch_target(title: str) -> bool:
     return title.strip().casefold() in _HIDDEN_LAUNCH_TARGETS
@@ -158,9 +152,6 @@ class PlayPage(QWidget):
         #: group. Quitting must still be able to reach them by killpg-ing
         #: this pid even after self._proc has already been cleared.
         self._launch_wrapper_pid: int | None = None
-        #: One-shot guard so the stall warning (see _on_launch_check) only
-        #: ever fires once per launch attempt.
-        self._stall_warned = False
         self._launch_timer = None
         self._monitoring_mo2 = False
         self._mo2_seen = False
@@ -1097,32 +1088,6 @@ class PlayPage(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self._abort_launch(tr("Game closed by user."))
 
-    def _prompt_possible_stall(self) -> None:
-        """Warn once per launch if nothing has appeared for a while.
-
-        Confirmed via a real incident: a hung wrapper (a Wine crash loop,
-        in that case) can run indefinitely with no MO2/game window ever
-        appearing, silently consuming system memory the whole time - the
-        user had no way to know something was wrong short of a full
-        system restart. See _STALL_WARNING_SECONDS.
-
-        This is the backstop for a launch that hangs *silently*. A crash
-        loop is no longer left to it: it produces output, and
-        _on_launch_check kills it on sight (see runner_crash_loop) - the
-        machine froze in two minutes and this warning fires at three.
-        """
-        reply = QMessageBox.question(
-            self,
-            tr("Launch May Be Stuck"),
-            tr(
-                "The game hasn't started after a few minutes - this can happen during a crash loop, which may consume system memory the longer it runs.\n\nQuit the game now?"
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._abort_launch(tr("Game closed by user."))
-
     def launch_game(self) -> None:
         """Launch the selected game target using the primary Play workflow."""
         # Claim the launch before resolving a runner. Resolution probes the
@@ -1243,7 +1208,6 @@ class PlayPage(QWidget):
                 command, env, cwd, log_path=log_path, registry=self._registry
             )
             self._launch_wrapper_pid = self._proc.pid
-            self._stall_warned = False
             # Not "Open MO2" - that opens the mod manager, not the game.
             is_game_session = label != "Mod Organizer 2"
             self._launch_started_at = time.monotonic() if is_game_session else None
@@ -1513,21 +1477,10 @@ class PlayPage(QWidget):
         # prefix carrying another Wine's ntdll makes every process fault;
         # Wine answers each fault by starting winedbg, whose process faults
         # too. Left alone that is a fork bomb that exhausts memory in about
-        # two minutes and freezes the machine - the stall warning below fires
-        # at three, which is why it never saved anyone. Kill it the moment
-        # the pattern is recognisable.
+        # two minutes and freezes the machine. Kill it the moment the
+        # pattern is recognisable.
         if runner_crash_loop(read_log_tail(log_path)):
             self._break_crash_loop(log_path)
-            return
-        if (
-            not self._stall_warned
-            and not self._mo2_seen
-            and not self._game_seen
-            and self._launch_started_at is not None
-            and time.monotonic() - self._launch_started_at >= _STALL_WARNING_SECONDS
-        ):
-            self._stall_warned = True
-            self._prompt_possible_stall()
             return
         proc = getattr(self, "_proc", None)
         if proc is None:

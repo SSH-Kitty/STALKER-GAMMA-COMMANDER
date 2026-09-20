@@ -67,6 +67,10 @@ class ProfileScreen(DeckScreen):
                 chevron=not selected,
             )
             row.setEnabled(not self.window.install_busy)
+            if selected:
+                # Matches desktop's profiles_page.py giving the active
+                # profile's whole name #accent, not just a bullet marker.
+                row.title_label.setObjectName("deckRowTitleAccent")
             if not selected:
                 row.activated.connect(
                     lambda _=False, n=name: self._confirm_switch(n)

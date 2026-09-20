@@ -67,6 +67,7 @@ class UpdateScreen(DeckScreen):
             self.summary_label.setText(
                 tr("Create or activate a profile first (Profiles page).")
             )
+            self._reset_summary_color()
             self.action_button.setEnabled(False)
             return
         self.action_button.setEnabled(
@@ -91,6 +92,7 @@ class UpdateScreen(DeckScreen):
             return
         self.action_button.setEnabled(False)
         self.summary_label.setText(tr("Checking..."))
+        self._reset_summary_color()
         self._task = BackgroundTask(check_updates, profile, parent=self)
         self._task.result.connect(self._on_checked)
         self._task.error.connect(self._on_check_error)
@@ -108,8 +110,16 @@ class UpdateScreen(DeckScreen):
             getattr(status, "latest", None), getattr(status, "latest_human", None)
         )
         self.version_label.setText(f"{installed}  →  {latest}")
-        text, _kind = status_summary(status)
+        text, kind = status_summary(status)
         self.summary_label.setText(text)
+        # kind is "accent" or "warn", matching desktop's own #accent/#warn
+        # object names for this exact text (see update_page.py's
+        # _set_status()).
+        self.summary_label.setObjectName(
+            "deckBodyAccent" if kind == "accent" else "deckBodyWarn"
+        )
+        self.summary_label.style().unpolish(self.summary_label)
+        self.summary_label.style().polish(self.summary_label)
         self.action_button.setText(
             tr("Apply updates")
             if getattr(status, "update_available", False)
@@ -127,10 +137,18 @@ class UpdateScreen(DeckScreen):
         else:
             self.notes_label.setText(notes.strip() or tr("No patch notes."))
 
+    def _reset_summary_color(self) -> None:
+        self.summary_label.setObjectName("deckBody")
+        self.summary_label.style().unpolish(self.summary_label)
+        self.summary_label.style().polish(self.summary_label)
+
     def _on_check_error(self, message: str) -> None:
         self._task = None
         self.action_button.setEnabled(True)
         self.summary_label.setText(tr("Failed") + ": " + message)
+        self.summary_label.setObjectName("deckBodyWarn")
+        self.summary_label.style().unpolish(self.summary_label)
+        self.summary_label.style().polish(self.summary_label)
 
     # -- applying ---------------------------------------------------------
     def _confirm_apply(self) -> None:

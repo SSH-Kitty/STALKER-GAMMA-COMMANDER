@@ -30,6 +30,7 @@ from commander_gui.deck_launch import (
     steam_deck_model,
     strip_deck_flag,
 )
+from commander_gui.winetricks import WINETRICKS_VERBS
 from Steamdeck.screens import SCREEN_KEYS, SCREENS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -235,10 +236,11 @@ class DeckSettingsTests(unittest.TestCase):
         """Desktop-only pages must not leak into the Deck start screen.
 
         Deck Mode shares "dashboard" with the desktop window, but these
-        four have no Deck screen behind them, so accepting one would leave
-        the window with a start screen it cannot build.
+        three have no Deck screen behind them, so accepting one would leave
+        the window with a start screen it cannot build. "utilities" used to
+        be in this list too, before Deck Mode got its own Utilities screen.
         """
-        for desktop_only in ("modmanager", "utilities", "systemcheck", "about"):
+        for desktop_only in ("modmanager", "systemcheck", "about"):
             self._write_raw(deck_start_screen=desktop_only)
             self.assertEqual(
                 gui_settings.load_gui_settings()["deck_start_screen"],
@@ -410,6 +412,162 @@ class DeckThemeTests(unittest.TestCase):
 
 
 # =====================================================================
+# C2. DeckProgress cancel routing
+# =====================================================================
+class DeckProgressTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_set_cancellable_routes_cancel_through_the_given_callable(self):
+        from Steamdeck.widgets import DeckProgress
+
+        progress = DeckProgress()
+        calls = []
+        progress.set_cancellable(lambda: calls.append(1))
+        self.assertFalse(progress.pause_button.isVisible() and progress.pause_button.isEnabled())
+        self.assertTrue(progress.cancel_button.isEnabled())
+        progress._cancel()
+        self.assertEqual(calls, [1])
+
+    def test_set_cancellable_none_disables_cancel(self):
+        from Steamdeck.widgets import DeckProgress
+
+        progress = DeckProgress()
+        progress.set_cancellable(None)
+        self.assertFalse(progress.cancel_button.isEnabled())
+
+    def test_set_runner_restores_pause_after_set_cancellable(self):
+        from unittest.mock import Mock
+
+        from Steamdeck.widgets import DeckProgress
+
+        progress = DeckProgress()
+        progress.set_cancellable(lambda: None)
+        self.assertTrue(progress.pause_button.isHidden())
+        progress.set_runner(Mock())
+        self.assertFalse(progress.pause_button.isHidden())
+
+
+# =====================================================================
+# C3. The Deck-native folder picker (Move Installation's destination)
+# =====================================================================
+class DeckFolderPickerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_list_subfolders_returns_only_real_directories_sorted(self):
+        from Steamdeck.folder_picker import list_subfolders
+
+        (self.tmp / "b").mkdir()
+        (self.tmp / "a").mkdir()
+        (self.tmp / "file.txt").write_text("x", encoding="utf-8")
+        (self.tmp / "link").symlink_to(self.tmp / "a")
+        self.assertEqual(
+            [p.name for p in list_subfolders(self.tmp)], ["a", "b"]
+        )
+
+    def test_list_subfolders_on_a_missing_path_returns_empty(self):
+        from Steamdeck.folder_picker import list_subfolders
+
+        self.assertEqual(list_subfolders(self.tmp / "missing"), [])
+
+    def test_candidate_roots_includes_home_and_real_mounts_only(self):
+        from Steamdeck import folder_picker
+
+        media = self.tmp / "media"
+        user_dir = media / "deck"
+        user_dir.mkdir(parents=True)
+        mounted = user_dir / "sdcard"
+        mounted.mkdir()
+        not_mounted = user_dir / "not-a-mount"
+        not_mounted.mkdir()
+        with (
+            patch.object(folder_picker, "_MEDIA_ROOTS", (media,)),
+            patch(
+                "Steamdeck.folder_picker.os.path.ismount",
+                side_effect=lambda p: Path(p) == mounted,
+            ),
+        ):
+            roots = folder_picker.candidate_roots()
+        labels = dict(roots)
+        self.assertIn(Path.home(), labels.values())
+        self.assertIn(mounted, labels.values())
+        self.assertNotIn(not_mounted, labels.values())
+
+    def test_folder_picker_navigates_up_and_down(self):
+        from Steamdeck.folder_picker import _UP, DeckFolderPicker
+
+        sub = self.tmp / "sub"
+        sub.mkdir()
+        picker = DeckFolderPicker(self.tmp)
+        self.assertEqual(picker.current(), self.tmp)
+        picker._activate(sub)
+        self.assertEqual(picker.current(), sub)
+        picker._activate(_UP)
+        self.assertEqual(picker.current(), self.tmp)
+
+    def test_show_folder_picker_calls_on_choose_and_dismisses(self):
+        from PySide6.QtWidgets import QPushButton
+
+        from Steamdeck.folder_picker import show_folder_picker
+        from Steamdeck.window import DeckWindow
+
+        config = self.tmp / "config"
+        (config / "stalker-gamma").mkdir(parents=True)
+        (config / "stalker-gamma" / "settings.json").write_text("{}", encoding="utf-8")
+        with patch.dict(
+            os.environ,
+            {"XDG_CONFIG_HOME": str(config), "COMMANDER_DECK_WINDOWED": "1"},
+        ):
+            window = DeckWindow()
+            try:
+                window.setGeometry(0, 0, 1280, 800)
+                window.show()
+                self.app.processEvents()
+
+                chosen = []
+                sub = self.tmp / "sub"
+                sub.mkdir()
+                show_folder_picker(
+                    window, title="Pick", start=self.tmp, on_choose=chosen.append
+                )
+                self.app.processEvents()
+                self.assertIsNotNone(window.current_overlay())
+
+                overlay = window.current_overlay()
+                from Steamdeck.folder_picker import DeckFolderPicker
+
+                body = overlay.findChild(DeckFolderPicker)
+                self.assertIsNotNone(body)
+                body._activate(sub)
+
+                use_button = next(
+                    b
+                    for b in overlay.findChildren(QPushButton)
+                    if b.text() == "Use this folder"
+                )
+                use_button.click()
+                self.app.processEvents()
+
+                self.assertEqual(chosen, [sub])
+                self.assertIsNone(window.current_overlay())
+            finally:
+                window.close()
+                window.deleteLater()
+                self.app.processEvents()
+
+
+# =====================================================================
 # Shared fixture for the widget tests
 # =====================================================================
 class DeckWindowFixture(unittest.TestCase):
@@ -492,6 +650,10 @@ class DeckWindowFixture(unittest.TestCase):
                 ([{"label": "Wine", "state": "ready", "detail": ""}], True, {}),
             ),
             ("Steamdeck.screens.install.check_all_dependencies", []),
+            (
+                "Steamdeck.screens.install.check_winetricks_full_status",
+                {verb: True for verb in WINETRICKS_VERBS},
+            ),
         ):
             patcher = patch(target, return_value=result)
             patcher.start()
@@ -551,6 +713,68 @@ class DeckLayoutTests(DeckWindowFixture):
             hint = page.minimumSizeHint()
             self.assertLessEqual(hint.width(), DECK_W, key)
             self.assertLessEqual(hint.height(), CONTENT_H, key)
+
+    def test_header_shows_the_wordmark_not_the_page_title(self):
+        """The header's top-left is a persistent "COMMANDER" wordmark.
+
+        Regression test for a UI overhaul that removed the old per-screen
+        title label (the nav bar's own highlighted entry already shows which
+        screen is current, so a second copy of that in the header was
+        redundant clutter) in favour of the same branding the desktop UI
+        shows in its top-left corner.
+        """
+        from PySide6.QtWidgets import QLabel
+
+        self.goto("dashboard")
+        wordmarks = [
+            w for w in self.window.findChildren(QLabel) if w.objectName() == "deckWordmark"
+        ]
+        self.assertEqual(len(wordmarks), 1)
+        self.assertEqual(wordmarks[0].text(), "COMMANDER")
+        self.assertFalse(hasattr(self.window, "title_label"))
+
+    def test_dashboard_update_row_still_opens_update_screen(self):
+        """Regression test: restructuring the Updates section into a card
+
+        must not disturb the row below it, whose only job is navigating to
+        the full Update screen.
+        """
+        dashboard = self.goto("dashboard")
+        dashboard.update_row.activated.emit()
+        self.pump()
+        self.assertEqual(self.window.current_key(), "update")
+
+    def test_play_status_caption_reflects_launch_state(self):
+        """Regression test: de-boxing the Status row into a plain caption
+
+        must not silently drop the live launch-lifecycle feed.
+        """
+        play = self.goto("play")
+        play._on_status("Running")
+        self.assertEqual(play.status_caption.text(), "Running")
+
+    def test_install_options_reach_full_install_args(self):
+        """Regression test: the Preserve toggles are no longer hardcoded.
+
+        Unchecking them on screen must genuinely change the CLI args the
+        install invokes, not just look editable.
+        """
+        install = self.goto("install")
+        install.preserve_user_row.set_checked(False, notify=True)
+        install.preserve_mcm_row.set_checked(False, notify=True)
+        with (
+            patch("Steamdeck.screens.install.cli_command", return_value=["stub"]) as cli,
+            patch("Steamdeck.screens.install.CommandRunner"),
+        ):
+            install._start_install()
+        args = cli.call_args[0][0]
+        self.assertNotIn("--preserve-user-settings", args)
+        self.assertNotIn("--preserve-mcm-settings", args)
+        # The mocked CommandRunner never fires .finished, so install_busy is
+        # still True here - left alone, tearDown's window.close() would hit
+        # the real "An install is still running, quit anyway?" QMessageBox
+        # and hang forever with nothing to click it.
+        install._finish_run()
 
     def test_interactive_widgets_are_touch_sized(self):
         from Steamdeck.focus import audit_focusables
@@ -664,6 +888,129 @@ class DeckLayoutTests(DeckWindowFixture):
         data = gui_settings.load_gui_settings()
         self.assertEqual(data["window_width"], 1080)
         self.assertEqual(data["window_height"], 950)
+
+
+class DeckUtilitiesTests(DeckWindowFixture):
+    """The Utilities screen: maintenance tools, guards, resets, moves."""
+
+    def test_clean_cache_confirm_run_report_cycle(self):
+        from PySide6.QtWidgets import QPushButton
+
+        utilities = self.goto("utilities")
+        with (
+            patch("Steamdeck.screens.utilities.mo2_running", return_value=False),
+            patch(
+                "Steamdeck.screens.utilities.cli_command", return_value=["stub"]
+            ) as cli,
+            patch("Steamdeck.screens.utilities.CommandRunner"),
+        ):
+            utilities._prune_apply()
+            self.pump()
+            overlay = self.window.current_overlay()
+            self.assertIsNotNone(overlay)
+            overlay.findChildren(QPushButton)[-1].click()
+            self.pump()
+        cli.assert_called_once_with(["cache", "prune", "apply"])
+        self.assertTrue(self.window.install_busy)
+        # The mocked CommandRunner never fires .finished, so install_busy is
+        # still True here - left alone, tearDown's window.close() would hang
+        # on the real "quit anyway?" modal with nothing to click it (see the
+        # Install screen's own test_install_options_reach_full_install_args
+        # for the same lesson learned the hard way).
+        utilities._on_cli_finished(0, "")
+        self.assertFalse(self.window.install_busy)
+        self.assertEqual(utilities.status.text(), "Done")
+
+    def test_mo2_guard_blocks_after_confirm_too(self):
+        """TOCTOU: mo2_running is re-checked inside the confirm callback,
+
+        not just before the confirm dialog is shown.
+        """
+        from PySide6.QtWidgets import QPushButton
+
+        utilities = self.goto("utilities")
+        with (
+            patch("Steamdeck.screens.utilities.mo2_running", return_value=True),
+            patch("Steamdeck.screens.utilities.CommandRunner") as runner_cls,
+        ):
+            utilities._purge_shader_cache()
+            self.pump()
+            overlay = self.window.current_overlay()
+            self.assertIsNotNone(overlay)
+            overlay.findChildren(QPushButton)[-1].click()
+            self.pump()
+            runner_cls.assert_not_called()
+        self.assertFalse(self.window.install_busy)
+
+    def test_busy_blocks_a_tool_before_any_confirm_is_shown(self):
+        utilities = self.goto("utilities")
+        self.window.install_busy = True
+        utilities._purge_shader_cache()
+        self.pump()
+        self.assertIsNone(self.window.current_overlay())
+        self.window.install_busy = False
+
+    def test_fresh_reset_forces_preserve_off_gamma_reset_reads_toggles(self):
+        from Steamdeck.screens.install import InstallScreen
+
+        install = self.goto("install")
+        utilities = self.goto("utilities")
+        profile = utilities.profile()
+        utilities._wipe_targets = (profile.anomaly, profile.gamma)
+
+        for include_anomaly, toggle_state, expected in (
+            (True, True, (False, False)),
+            (False, True, (True, True)),
+            (False, False, (False, False)),
+        ):
+            install.preserve_user_row.set_checked(toggle_state, notify=True)
+            install.preserve_mcm_row.set_checked(toggle_state, notify=True)
+            utilities._reset_includes_anomaly = include_anomaly
+            with patch.object(
+                InstallScreen, "start_auto_install", return_value=True
+            ) as start_auto:
+                utilities._on_reset_wiped("Title")
+            kwargs = start_auto.call_args.kwargs
+            self.assertEqual(
+                (kwargs["preserve_user"], kwargs["preserve_mcm"]), expected
+            )
+
+    def test_move_installation_success_and_recovery_required(self):
+        utilities = self.goto("utilities")
+        profile = utilities.profile()
+        sources = [
+            ("Anomaly", profile.anomaly),
+            ("GAMMA", profile.gamma),
+            ("Cache", profile.cache),
+        ]
+        moved = [
+            ("Anomaly", str(self.tmp / "moved_anomaly")),
+            ("GAMMA", str(self.tmp / "moved_gamma")),
+            ("Cache", str(self.tmp / "moved_cache")),
+        ]
+        with patch("Steamdeck.screens.utilities.StreamTask") as stream_cls:
+            utilities._start_move(sources, self.tmp / "dest", profile.profile_name)
+        self.assertTrue(self.window.install_busy)
+        stream_cls.return_value.start.assert_called_once()
+
+        with (
+            patch("Steamdeck.screens.utilities._rewrite_mo2_ini_paths"),
+            patch("Steamdeck.screens.utilities._save_moved_profile"),
+        ):
+            utilities._on_move_done(moved)
+        self.assertFalse(self.window.install_busy)
+        self.assertEqual(utilities.status.text(), "Move complete.")
+
+        with (
+            patch("Steamdeck.screens.utilities._rewrite_mo2_ini_paths"),
+            patch(
+                "Steamdeck.screens.utilities._save_moved_profile",
+                side_effect=OSError("boom"),
+            ),
+        ):
+            utilities._on_move_done(moved)
+        self.assertIn("Move Recovery Required", utilities.status.text())
+        self.assertFalse(self.window.install_busy)
 
 
 class DeckBackStackTests(DeckWindowFixture):
