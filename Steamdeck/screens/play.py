@@ -8,8 +8,6 @@ someone does while holding the device.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-
 from commander_gui import gui_settings
 from commander_gui.i18n import tr
 from commander_gui.ui.common import (
@@ -24,6 +22,7 @@ from ..widgets import (
     DeckRow,
     deck_button,
     deck_label,
+    deck_two_column_card,
 )
 from .base import DeckScreen
 
@@ -37,6 +36,21 @@ class PlayScreen(DeckScreen):
 
         self._targets: list[str] = []
 
+        # Shared divided-card pattern (also used by Dashboard/Install) rather
+        # than two independent cards, so "two things side by side" looks the
+        # same everywhere in the app.
+        config_card, target_col, runner_col = deck_two_column_card()
+
+        self.target_row = DeckRow(tr("Launch Game"))
+        self.target_row.activated.connect(self._pick_target)
+        target_col.addWidget(self.target_row)
+
+        self.runner_row = DeckRow(tr("Runner"))
+        self.runner_row.activated.connect(self._pick_runner)
+        runner_col.addWidget(self.runner_row)
+
+        self.body.addWidget(config_card)
+
         # The glyph is not decoration: this is the one control a Deck user
         # aims for without reading it first.
         self.hero = deck_button(
@@ -45,19 +59,11 @@ class PlayScreen(DeckScreen):
         self.hero.clicked.connect(play_click_sound)
         self.body.addWidget(self.hero)
 
-        self.target_row = DeckRow(tr("Launch Game"))
-        self.target_row.activated.connect(self._pick_target)
-        self.body.addWidget(self.target_row)
-
-        self.runner_row = DeckRow(tr("Runner"))
-        self.runner_row.activated.connect(self._pick_runner)
-        self.body.addWidget(self.runner_row)
-
-        self.status_row = DeckRow(tr("Status"), chevron=False)
-        # Read-only, so keep it out of the D-pad's path - landing on a row
-        # that does nothing reads as the controller having stopped working.
-        self.status_row.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.body.addWidget(self.status_row)
+        # Live launch-lifecycle text ("Starting...", "Running", ...) - a
+        # plain caption rather than a boxed row, since it is read-only and
+        # was never meant to be a D-pad stop.
+        self.status_caption = deck_label("", role="caption", wrap=True)
+        self.body.addWidget(self.status_caption)
 
         self.playtime_label = deck_label("", role="caption", wrap=True)
         self.body.addWidget(self.playtime_label)
@@ -74,7 +80,7 @@ class PlayScreen(DeckScreen):
             self.hero.setEnabled(False)
             self.target_row.set_value(tr("No Profile"))
             self.runner_row.set_value(tr("No Profile"))
-            self.status_row.set_value(tr("No Profile"))
+            self._set_status(tr("No Profile"), accent=False)
             self.playtime_label.setText(
                 tr("Create or activate a profile first (Profiles page).")
             )
@@ -93,9 +99,10 @@ class PlayScreen(DeckScreen):
         self.hero.setEnabled(bool(current) and not busy)
         self.mo2_button.setEnabled(not busy)
         if not self.controller.is_active():
-            self.status_row.set_value(
-                tr("Ready") if current else tr("Not installed")
-            )
+            if current:
+                self._set_status(tr("Ready"), accent=True)
+            else:
+                self._set_status(tr("Not installed"), accent=False)
 
         name = profile.profile_name or ""
         playtime = (state.get("playtime_seconds") or {}).get(name, 0.0)
@@ -182,7 +189,19 @@ class PlayScreen(DeckScreen):
             self.refresh()
 
     def _on_status(self, text: str) -> None:
-        self.status_row.set_value(text)
+        self._set_status(text, accent=True)
+
+    def _set_status(self, text: str, *, accent: bool) -> None:
+        """Colored like desktop's launch-status label (accent green for a
+        live/good state), plain dim caption only for "no profile"/"not
+        installed" - matching play_page.py's own ACCENT-for-success rule.
+        """
+        self.status_caption.setText(text)
+        self.status_caption.setObjectName(
+            "deckCaptionAccent" if accent else "deckCaption"
+        )
+        self.status_caption.style().unpolish(self.status_caption)
+        self.status_caption.style().polish(self.status_caption)
 
     def _on_failed(self, title: str, message: str) -> None:
         body = deck_label(message, role="body", wrap=True)

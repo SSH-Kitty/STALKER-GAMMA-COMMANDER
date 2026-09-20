@@ -21,10 +21,7 @@ from ..cli_runner import run_sync
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
 from ..launcher import find_extra_protons
 from ..settings import CliSettings
-
-# 1.2.9H1 hotfix: unused while the Deck button is disabled, see below. Restore
-# alongside the button's icon colour.
-# from ..themes import active_theme_tokens
+from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
 from ..winetricks import WINETRICKS_VERBS, check_winetricks_full_status
 from .common import (
@@ -52,10 +49,7 @@ from .common import (
     winetricks_tooltip,
 )
 from .deck_icon import deck_icon
-
-# 1.2.9H1 hotfix: unused while the Deck button is disabled, see below. Restore
-# alongside the button's click handler.
-# from .deck_switch import switch_mode
+from .deck_switch import switch_mode
 from .mod_manager_page import _QUERY_TIMEOUT, _query_mo2_profiles
 
 #: Shared fixed width for every flat value combo on the Profile overview
@@ -906,15 +900,14 @@ class DashboardPage(QWidget):
         # nothing outside this method touches it, so rebuilding is enough.
         deck_button = QPushButton()
         deck_button.setObjectName("deckModeButton")
-        # 1.2.9H1 hotfix: Steam Deck Mode disabled for this release, revert
-        # this block (restore the icon colour, tooltip, cursor and click
-        # handler below) once the Deck build ships.
-        deck_button.setIcon(deck_icon(QColor("#6b7280")))
+        deck_button.setIcon(
+            deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")))
+        )
         deck_button.setIconSize(QSize(22, 22))
         deck_button.setFixedSize(34, 28)
-        deck_button.setEnabled(False)
         deck_button.setToolTip(tr("Steam Deck version coming soon"))
-        deck_button.setCursor(Qt.CursorShape.ArrowCursor)
+        deck_button.setEnabled(False)
+        deck_button.clicked.connect(lambda: switch_mode(self.window, deck=True))
         header.addWidget(deck_button)
         layout.addLayout(header)
         profile = self.settings.active_profile

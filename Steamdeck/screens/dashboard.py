@@ -37,7 +37,7 @@ from commander_gui.ui.common import (
 )
 from commander_gui.updates import check_updates, format_version
 
-from ..widgets import DeckRow, DeckStatusRow, deck_label
+from ..widgets import DeckCard, DeckRow, DeckStatusRow, deck_label, deck_two_column_card
 from .base import DeckScreen
 
 #: Directory sizes mean walking the whole install tree, which on a Deck's SD
@@ -65,13 +65,34 @@ class DashboardScreen(DeckScreen):
         )
         self.body.addWidget(self.profile_row)
 
+        install_card, anomaly_col, gamma_col = deck_two_column_card()
         self.anomaly_row = DeckStatusRow(tr("STALKER Anomaly"))
-        self.gamma_row = DeckStatusRow(tr("GAMMA Modpack"))
-        self.deps_row = DeckStatusRow(tr("Dependencies"))
-        for row in (self.anomaly_row, self.gamma_row, self.deps_row):
-            self.body.addWidget(row)
+        self.anomaly_detail = deck_label("", role="caption", wrap=True)
+        anomaly_col.addWidget(self.anomaly_row)
+        anomaly_col.addWidget(self.anomaly_detail)
 
-        self.update_row = DeckRow(tr("Updates"))
+        self.gamma_row = DeckStatusRow(tr("GAMMA Modpack"))
+        self.gamma_detail = deck_label("", role="caption", wrap=True)
+        gamma_col.addWidget(self.gamma_row)
+        gamma_col.addWidget(self.gamma_detail)
+        self.body.addWidget(install_card)
+
+        deps_card = DeckCard()
+        self.deps_row = DeckStatusRow(tr("Dependencies"))
+        deps_card.body.addWidget(self.deps_row)
+        self.deps_detail = deck_label("", role="caption", wrap=True)
+        deps_card.body.addWidget(self.deps_detail)
+        self.body.addWidget(deps_card)
+
+        self.updates_card = DeckCard()
+        self.updates_installed_label = deck_label("", role="rowValue")
+        self.updates_status_label = deck_label("", role="body", wrap=True)
+        self.updates_card.body.addWidget(deck_label(tr("Updates"), role="rowTitle"))
+        self.updates_card.body.addWidget(self.updates_installed_label)
+        self.updates_card.body.addWidget(self.updates_status_label)
+        self.body.addWidget(self.updates_card)
+
+        self.update_row = DeckRow(tr("Open Updates page"))
         self.update_row.activated.connect(lambda: self.window.set_page("update"))
         self.body.addWidget(self.update_row)
 
@@ -95,6 +116,10 @@ class DashboardScreen(DeckScreen):
             self.profile_row.set_value(tr("No Profile"))
             for row in (self.anomaly_row, self.gamma_row, self.deps_row):
                 row.set_status(tr("No Profile"), "warn")
+            for label in (self.anomaly_detail, self.gamma_detail, self.deps_detail):
+                label.setText("")
+            self.updates_installed_label.setText("")
+            self.updates_status_label.setText("")
             self.update_row.set_value("")
             self.mods_row.set_value("")
             self.storage_row.set_value("")
@@ -148,27 +173,31 @@ class DashboardScreen(DeckScreen):
             return
         names = list(missing)
         if names:
+            detail = ", ".join(str(name) for name in names)
             self.deps_row.set_status(tr("{count} missing", count=len(names)), "bad")
-            self.deps_row.setToolTip(", ".join(str(name) for name in names))
+            self.deps_row.setToolTip(detail)
+            self.deps_detail.setText(detail)
         else:
             self.deps_row.set_status(tr("Ready"), "ok")
             self.deps_row.setToolTip("")
+            self.deps_detail.setText("")
 
     # -- updates ----------------------------------------------------------
     def _start_update_check(self, profile) -> None:
         if self._update_task is not None:
             return
-        self.update_row.set_value(tr("Checking..."))
+        self.updates_installed_label.setText(tr("Checking..."))
+        self.updates_status_label.setText("")
         self._update_task = BackgroundTask(check_updates, profile, parent=self)
         self._update_task.result.connect(self._on_update_checked)
         self._update_task.error.connect(
-            lambda _m: self._finish_update(tr("status unavailable"))
+            lambda _m: self._finish_update(tr("status unavailable"), None)
         )
         self._update_task.start()
 
     def _on_update_checked(self, status: object) -> None:
         if getattr(status, "error", None):
-            self._finish_update(tr("status unavailable"))
+            self._finish_update(tr("status unavailable"), None)
             return
         installed = format_version(
             getattr(status, "installed", None),
@@ -179,13 +208,29 @@ class DashboardScreen(DeckScreen):
                 getattr(status, "latest", None),
                 getattr(status, "latest_human", None),
             )
-            self._finish_update(f"{installed}  →  {latest}")
+            self._finish_update(f"{installed}  →  {latest}", status)
         else:
-            self._finish_update(tr("Up to date") + f"  ({installed})")
+            self._finish_update(tr("Up to date") + f"  ({installed})", status)
 
-    def _finish_update(self, text: str) -> None:
+    def _finish_update(self, text: str, status: object) -> None:
         self._update_task = None
-        self.update_row.set_value(text)
+        self.updates_installed_label.setText(text)
+        if status is None:
+            self.updates_status_label.setText("")
+        else:
+            # Both possible states here are desktop's "accent" case (an
+            # update is available, or the pack is up to date) - it hardcodes
+            # the same fixed green as the Installed status dot rather than
+            # the theme's accent color, so this does too (deckBodyOk).
+            self.updates_status_label.setText(
+                tr("Update available")
+                if getattr(status, "update_available", False)
+                else tr("Up to date")
+            )
+            self.updates_status_label.setObjectName("deckBodyOk")
+            self.updates_status_label.style().unpolish(self.updates_status_label)
+            self.updates_status_label.style().polish(self.updates_status_label)
+        self.update_row.set_value(tr("Details"))
 
     # -- storage ----------------------------------------------------------
     def _start_size_check(self, profile) -> None:
@@ -211,12 +256,24 @@ class DashboardScreen(DeckScreen):
         self._sizes_at = time.monotonic()
         if not result:
             self.storage_row.set_value(tr("status unavailable"))
+            self.storage_row.value_label.setObjectName("deckRowValue")
+            self._repolish_storage_value()
             return
         total, free = result
         text = human_size(total)
         if free is not None:
             text += "   ·   " + tr("{free} free", free=human_size(free))
         self.storage_row.set_value(text)
+        # Matches desktop's storage "Total" line, hardcoded to the same
+        # fixed green as the Installed status dot rather than the theme's
+        # accent color.
+        self.storage_row.value_label.setObjectName("deckRowValueOk")
+        self._repolish_storage_value()
+
+    def _repolish_storage_value(self) -> None:
+        label = self.storage_row.value_label
+        label.style().unpolish(label)
+        label.style().polish(label)
 
     # -- footer -----------------------------------------------------------
     def _render_footer(self, profile) -> None:

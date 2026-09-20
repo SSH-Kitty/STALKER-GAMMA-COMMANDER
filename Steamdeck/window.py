@@ -31,6 +31,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QGridLayout,
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
@@ -50,6 +51,7 @@ from commander_gui.ui.common import (
     instance_window_title,
 )
 from commander_gui.ui.deck_switch import switch_mode
+from commander_gui.ui.install_page import _resume_state_matches
 
 from .deck_theme import build_deck_stylesheet
 from .focus import DeckFocusController
@@ -169,6 +171,14 @@ class DeckWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = DeckBackdrop()
         central.setObjectName("deckCentral")
+        # Capped at the Deck's own design size - every row/button/font in
+        # this UI is a pixel budget tuned for exactly this panel (see
+        # widgets.py). A bigger window (docked to a TV, or a resized
+        # preview) does not stretch it past that; it gets centred instead,
+        # in the wrapper below. A maximum rather than a fixed size, so the
+        # window can still shrink smaller than 1280x800 exactly as before
+        # (see _MIN_W/_MIN_H) - only growth is capped.
+        central.setMaximumSize(DECK_W, DECK_H)
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -184,7 +194,32 @@ class DeckWindow(QMainWindow):
         else:
             self.stack.addWidget(self._build_fatal_screen())
 
-        self.setCentralWidget(central)
+        # A plain QWidget filling the actual window, centring the fixed-size
+        # panel above instead of leaving Qt's default top-left anchor - the
+        # previous behaviour when the window was bigger than 1280x800.
+        #
+        # central sits in the middle cell of a 3x3 grid, with the four
+        # spacer cells around it carrying all the stretch - not an alignment
+        # flag on addWidget(), which would size central to its own sizeHint
+        # instead of filling the cell up to its maximumSize, shifting every
+        # row/button by a few px and breaking DeckFocusController's
+        # geometry-based D-pad routing.
+        letterbox = QWidget()
+        letterbox.setObjectName("deckLetterbox")
+        letterbox.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        grid = QGridLayout(letterbox)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(2, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(2, 1)
+        grid.addWidget(central, 1, 1)
+
+        self.setCentralWidget(letterbox)
+        # The real widget tree (used for overlay geometry, the toast, and
+        # DeckFocusController's scope) is always this fixed-size panel, never
+        # the letterbox wrapper around it.
+        self._deck_root = central
 
         self.toast = DeckToast(central)
         self._status_shim = _DeckStatusBar(self.toast)
@@ -197,12 +232,25 @@ class DeckWindow(QMainWindow):
         layout.setContentsMargins(MARGIN_X, 0, MARGIN_X, 0)
         layout.setSpacing(16)
 
-        self.title_label = deck_label("", role="title")
-        layout.addWidget(self.title_label)
+        wordmark_block = QWidget()
+        wordmark_block.setObjectName("deckWordmarkBlock")
+        wordmark_layout = QVBoxLayout(wordmark_block)
+        wordmark_layout.setContentsMargins(0, 0, 0, 0)
+        wordmark_layout.setSpacing(0)
+        wordmark_layout.addWidget(deck_label(tr("COMMANDER"), role="wordmark"))
+        wordmark_layout.addWidget(deck_label(tr("by SSH-Kitty"), role="byline"))
+        layout.addWidget(wordmark_block, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch(1)
 
-        self.info_label = deck_label("", role="headerInfo")
-        layout.addWidget(self.info_label)
+        self.profile_label = deck_label("", role="headerInfo")
+        layout.addWidget(self.profile_label)
+        self.mod_counter_sep = deck_label("·", role="headerInfo")
+        layout.addWidget(self.mod_counter_sep)
+        # A separate, distinctly-colored label rather than one combined
+        # string - matching the desktop topbar's own #modCounter, which is
+        # a second QLabel next to the profile name, not part of it.
+        self.mod_counter_label = deck_label("", role="modCounter")
+        layout.addWidget(self.mod_counter_label)
 
         hint = tr("B  Back")
         if not (is_steam_deck() or in_game_mode()):
@@ -253,7 +301,6 @@ class DeckWindow(QMainWindow):
             1,
         )
         layout.addLayout(row)
-        self.title_label.setText(tr("Setup problem"))
         return page
 
     # ----------------------------------------------------------- screens
@@ -268,6 +315,7 @@ class DeckWindow(QMainWindow):
         from .screens.settings import SettingsScreen
         from .screens.system import SystemScreen
         from .screens.update import UpdateScreen
+        from .screens.utilities import UtilitiesScreen
 
         classes = {
             "dashboard": DashboardScreen,
@@ -277,6 +325,7 @@ class DeckWindow(QMainWindow):
             "mods": ModsScreen,
             "profile": ProfileScreen,
             "system": SystemScreen,
+            "utilities": UtilitiesScreen,
             "settings": SettingsScreen,
         }
         return classes[key](self)
@@ -309,8 +358,6 @@ class DeckWindow(QMainWindow):
             button.setProperty("current", "true" if nav_key == key else "false")
             button.style().unpolish(button)
             button.style().polish(button)
-        title = next(t for k, t, _g in SCREENS if k == key)
-        self.title_label.setText(tr(title))
         self.update_mod_counter()
         # Refresh after Qt has laid the new screen out, so anything sized
         # from its own contents measures correctly.
@@ -341,9 +388,11 @@ class DeckWindow(QMainWindow):
     def update_mod_counter(self) -> None:
         profile = self.settings.active_profile
         if profile is None:
-            self.info_label.setText(tr("No Profile"))
+            self.profile_label.setText(tr("No Profile"))
+            self.mod_counter_sep.hide()
+            self.mod_counter_label.hide()
             return
-        name = profile.profile_name or tr("No Profile")
+        self.profile_label.setText(profile.profile_name or tr("No Profile"))
         # None means "count unavailable" (GAMMA not installed yet, or the
         # profile folder is missing) - show just the profile name then,
         # rather than a misleading zero.
@@ -351,12 +400,27 @@ class DeckWindow(QMainWindow):
             profile.gamma, profile.mo2_profile or GAMMA_PROFILE
         )
         if counts is None:
-            self.info_label.setText(name)
+            self.mod_counter_sep.hide()
+            self.mod_counter_label.hide()
             return
+        self.mod_counter_sep.show()
+        self.mod_counter_label.show()
         enabled, _total = counts
-        self.info_label.setText(
-            name + "   \u00b7   " + tr("{enabled} Mods", enabled=enabled)
+        # Same resume-state check the desktop topbar uses to tell an
+        # interrupted install apart from a genuinely small mod count.
+        resume_state = gui_settings.load_gui_settings().get("gamma_install_resume")
+        incomplete = _resume_state_matches(resume_state, profile)
+        if incomplete:
+            self.mod_counter_label.setText(
+                tr("{enabled} Mods (incomplete)", enabled=enabled)
+            )
+        else:
+            self.mod_counter_label.setText(tr("{enabled} Mods", enabled=enabled))
+        self.mod_counter_label.setObjectName(
+            "deckModCounterWarn" if incomplete else "deckModCounter"
         )
+        self.mod_counter_label.style().unpolish(self.mod_counter_label)
+        self.mod_counter_label.style().polish(self.mod_counter_label)
 
     def statusBar(self) -> _DeckStatusBar:
         """Return the toast shim, never a real QStatusBar.
@@ -374,7 +438,7 @@ class DeckWindow(QMainWindow):
     def show_overlay(self, overlay: DeckOverlay) -> None:
         """Display ``overlay`` over the whole window, focusing its first button."""
         self.dismiss_overlay()
-        central = self.centralWidget()
+        central = self._deck_root
         overlay.setParent(central)
         overlay.setGeometry(central.rect())
         overlay.show()
@@ -518,7 +582,7 @@ class DeckWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        central = self.centralWidget()
+        central = getattr(self, "_deck_root", None)
         if central is None:
             return
         if self._overlay is not None:

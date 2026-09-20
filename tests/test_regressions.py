@@ -2965,7 +2965,6 @@ class RegressionTests(unittest.TestCase):
         page._crash_check_pending = False
         page._pre_launch_crash_dumps = set()
         page._launch_wrapper_pid = None
-        page._stall_warned = True
         page._launch_started_at = None
         page._registry = ProcessGroupRegistry()
         page._set_result = Mock()
@@ -5953,115 +5952,6 @@ class ModCounterTests(unittest.TestCase):
             self.assertEqual(overlay.text(), "Quit Game")
             self.assertTrue(page.launch_button.isEnabled())
 
-    def test_stall_warning_fires_once_after_the_threshold(self):
-        """Regression test for a real incident: a hung wrapper (a Wine
-
-        crash loop, in that case) ran indefinitely with no MO2/game
-        window ever appearing, silently consuming system memory. After
-        _STALL_WARNING_SECONDS with nothing detected, the app must warn
-        and offer to quit - exactly once per launch attempt.
-        """
-        from PySide6.QtWidgets import QApplication, QMessageBox
-
-        from commander_gui.ui import play_page as play_page_module
-
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {"XDG_CONFIG_HOME": tmp}
-        ):
-            QApplication.instance() or QApplication([])
-            page = self._make_stubbed_play_page(tmp)
-            page._stall_warned = False
-            page._launch_started_at = (
-                time.monotonic() - play_page_module._STALL_WARNING_SECONDS - 1
-            )
-
-            with (
-                patch.object(page, "_abort_launch") as mock_abort,
-                patch(
-                    "commander_gui.ui.play_page.QMessageBox.question",
-                    return_value=QMessageBox.StandardButton.No,
-                ) as mock_question,
-            ):
-                page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
-            mock_question.assert_called_once()
-            mock_abort.assert_not_called()
-            self.assertTrue(page._stall_warned)
-
-            # A second tick must not prompt again for this same launch.
-            with patch(
-                "commander_gui.ui.play_page.QMessageBox.question"
-            ) as mock_question_again:
-                page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
-            mock_question_again.assert_not_called()
-
-    def test_stall_warning_does_not_fire_before_the_threshold(self):
-        from PySide6.QtWidgets import QApplication
-
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {"XDG_CONFIG_HOME": tmp}
-        ):
-            QApplication.instance() or QApplication([])
-            page = self._make_stubbed_play_page(tmp)
-            page._stall_warned = False
-            page._launch_started_at = time.monotonic()
-            page._proc = None
-            page._monitoring_mo2 = False
-
-            with patch(
-                "commander_gui.ui.play_page.QMessageBox.question"
-            ) as mock_question:
-                page._on_launch_check("GAMMA", ["umu-run"], Path("/tmp/launcher.log"))
-            mock_question.assert_not_called()
-
-    def test_stall_warning_does_not_fire_once_the_game_is_confirmed_running(self):
-        """Regression test for a real incident: a genuinely successful,
-
-        long-loading launch (GAMMA/Anomaly routinely takes well over three
-        minutes - shader compilation, asset loading) got the same "Launch
-        May Be Stuck - quit the game now?" prompt as an actual hang, because
-        the stall check was purely time-since-launch and never looked at
-        whether MO2 or the game had already been confirmed running. A user
-        already playing, screen full of gameplay, would see a dialog asking
-        to quit their own working session. The check must be suppressed the
-        moment real progress (_mo2_seen or _game_seen) has been observed,
-        for the rest of that launch.
-        """
-        from PySide6.QtWidgets import QApplication
-
-        from commander_gui.ui import play_page as play_page_module
-
-        QApplication.instance() or QApplication([])
-        for seen_attr in ("_mo2_seen", "_game_seen"):
-            with tempfile.TemporaryDirectory() as tmp, patch.dict(
-                os.environ, {"XDG_CONFIG_HOME": tmp}
-            ):
-                page = self._make_stubbed_play_page(tmp)
-                page._stall_warned = False
-                page._launch_started_at = (
-                    time.monotonic() - play_page_module._STALL_WARNING_SECONDS - 1
-                )
-                page._proc = None
-                page._monitoring_mo2 = True
-                # mo2_launch_pids matching mo2_pids' own mocked return: once
-                # either "seen" flag is set, the rest of the tick just needs
-                # to reach its "still running" branch without crashing on
-                # unrelated stubs it does not otherwise need for this test.
-                page._mo2_launch_pids = {1}
-                page._launch_timer = Mock()
-                setattr(page, seen_attr, True)
-
-                with (
-                    patch("commander_gui.ui.play_page.mo2_pids", return_value={1}),
-                    patch(
-                        "commander_gui.ui.play_page.QMessageBox.question"
-                    ) as mock_question,
-                ):
-                    page._on_launch_check(
-                        "GAMMA", ["umu-run"], Path("/tmp/launcher.log")
-                    )
-                mock_question.assert_not_called()
-                self.assertFalse(page._stall_warned, seen_attr)
-
     def _chip_texts(self, page) -> list[str]:
         texts = []
         for i in range(page.chips_row.count()):
@@ -7752,14 +7642,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page._game_exe_name = "AnomalyDX11AVX.exe"
             page._pre_launch_game_pids = set()
             page._game_seen = False
-            page._launch_started_at = time.monotonic() - 300  # 5 minutes ago
-            # _launch_started_at is 300s ago so _record_playtime() below has
-            # something to record - but that's also past _STALL_WARNING_SECONDS
-            # (180s), so without this the first _on_launch_check() call would
-            # hit the (unmocked, real) stall-warning QMessageBox.question()
-            # instead of the game/MO2 detection this test actually exercises,
-            # and hang forever waiting for a click that never comes.
-            page._stall_warned = True
+            # 5 minutes ago, so _record_playtime() below has something to
+            # record.
+            page._launch_started_at = time.monotonic() - 300
 
             with (
                 patch(

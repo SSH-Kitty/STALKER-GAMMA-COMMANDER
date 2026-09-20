@@ -64,6 +64,11 @@ _DECK_TEMPLATE = string.Template("""
 QMainWindow {
     background-color: $bg;
 }
+/* Fills the margin around the fixed-size Deck panel when the window is
+   bigger than 1280x800 (docked to an external display, or resized). */
+QWidget#deckLetterbox {
+    background-color: $bg;
+}
 QWidget {
     background: transparent;
     color: $text;
@@ -78,11 +83,11 @@ QScrollArea > QWidget#qt_scrollarea_viewport {
 }
 QWidget#deckHeader {
     background-color: $topbar;
-    border-bottom: 2px solid $border_strong;
+    border-bottom: 1px solid $border;
 }
 QWidget#deckNav {
     background-color: $topbar;
-    border-top: 2px solid $border_strong;
+    border-top: 1px solid $border;
 }
 QLabel#deckTitle {
     font-size: 28px;
@@ -91,9 +96,40 @@ QLabel#deckTitle {
     background: transparent;
     letter-spacing: 2px;
 }
+QLabel#deckWordmark {
+    font-size: 26px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: $accent_strong;
+    background: transparent;
+}
+QLabel#deckByline {
+    font-size: 14px;
+    letter-spacing: 1px;
+    color: $accent_strong;
+    background: transparent;
+}
 QLabel#deckHeaderInfo {
     font-size: 18px;
     color: $text_info;
+    background: transparent;
+}
+/* Matches desktop's #modCounter exactly - bold and accent-colored, not the
+   dim profile-name text next to it. */
+QLabel#deckModCounter {
+    font-size: 20px;
+    font-weight: bold;
+    color: $accent_strong;
+    background: transparent;
+}
+/* Literal, not $warn: desktop's own incomplete-install case
+   (main_window.py's update_mod_counter()) hardcodes WARN.name() rather
+   than going through the theme, so it reads the same amber in every
+   theme - matched here rather than substituting the per-theme token. */
+QLabel#deckModCounterWarn {
+    font-size: 20px;
+    font-weight: bold;
+    color: #d9a04c;
     background: transparent;
 }
 QLabel#deckHint {
@@ -106,9 +142,39 @@ QLabel#deckCaption {
     color: $text_dim;
     background: transparent;
 }
+/* Same size as deckCaption, colored like desktop's launch-status label
+   (play_page.py's _set_result(), which paints live/good status in accent
+   green) - used for Play's "Ready"/"Running" line, not "No Profile". */
+QLabel#deckCaptionAccent {
+    font-size: 15px;
+    color: $accent_strong;
+    background: transparent;
+}
 QLabel#deckBody {
     font-size: 18px;
     color: $text;
+    background: transparent;
+}
+/* Themed variants of deckBody, matching desktop's generic #accent/#warn
+   QLabel classes (commander_gui/themes.py) - used for the Update screen's
+   and Dashboard's Updates-card status line. */
+QLabel#deckBodyAccent {
+    font-size: 18px;
+    color: $accent_strong;
+    background: transparent;
+}
+QLabel#deckBodyWarn {
+    font-size: 18px;
+    color: $warn;
+    background: transparent;
+}
+/* Literal, not $accent_strong: matches Dashboard's own storage-total and
+   "up to date" text on desktop, which hardcodes OK_GREEN so it always
+   agrees with the Installed status dot regardless of the active theme's
+   accent hue (see commander_gui/ui/dashboard.py). */
+QLabel#deckBodyOk {
+    font-size: 18px;
+    color: #7dc963;
     background: transparent;
 }
 QLabel#deckRowTitle {
@@ -117,25 +183,61 @@ QLabel#deckRowTitle {
     color: $text_bright;
     background: transparent;
 }
+/* The active profile's row title on the Profile screen, matching desktop's
+   profiles_page.py giving that one name #accent instead of plain text. */
+QLabel#deckRowTitleAccent {
+    font-size: 20px;
+    font-weight: 600;
+    color: $accent_strong;
+    background: transparent;
+}
 QLabel#deckRowValue {
     font-size: 18px;
     color: $text_info;
     background: transparent;
 }
+QLabel#deckRowValueOk {
+    font-size: 18px;
+    color: #7dc963;
+    background: transparent;
+}
+/* A small numbered pill in front of a step's label, replacing raw inline
+   HTML color spans - same accent color, actually themed and reusable. */
+QLabel#deckStepBadge {
+    font-size: 16px;
+    font-weight: bold;
+    color: $accent_text;
+    background-color: $accent;
+    border-radius: 15px;
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 30px;
+    max-height: 30px;
+    qproperty-alignment: AlignCenter;
+}
 
-/* ---------------------------------------------------------------- cards */
+/* ---------------------------------------------------------------- cards
+   Radius scale: 14px rows/buttons/inputs, 20px cards/overlay, 22px hero,
+   pill (radius = half height) for chips/jump letters. Borders lean on the
+   dim $border token rather than $border_strong almost everywhere, so
+   separation reads mainly as a shade step off the card/bg colors instead
+   of a drawn outline - $border_strong/2px is kept in reserve for the hero
+   button and the overlay panel, the two things worth calling out. */
 QFrame#deckCard {
     background-color: $card;
-    border: 1px solid $border_strong;
-    border-radius: 12px;
+    border: 1px solid $border;
+    border-radius: 20px;
+}
+QFrame#deckDivider {
+    background-color: $border;
 }
 
 /* -------------------------------------------------------------- buttons */
 QPushButton {
     background-color: $btn;
     color: $text_btn;
-    border: 1px solid $border_strong;
-    border-radius: 10px;
+    border: 1px solid $border;
+    border-radius: 14px;
     padding: 0 20px;
     min-height: 64px;
     font-size: 20px;
@@ -160,7 +262,7 @@ QPushButton#deckPrimary {
     );
     color: $accent_text;
     border: 1px solid $accent;
-    border-radius: 10px;
+    border-radius: 16px;
     min-height: 96px;
     font-size: 22px;
     letter-spacing: 1px;
@@ -183,7 +285,7 @@ QPushButton#deckHero {
     );
     color: $hero_text;
     border: 2px solid $hero_border;
-    border-radius: 14px;
+    border-radius: 22px;
     min-height: 168px;
     font-size: 32px;
     font-weight: bold;
@@ -213,7 +315,7 @@ QPushButton#deckChip {
     min-height: 48px;
     padding: 0 14px;
     font-size: 16px;
-    border-radius: 6px;
+    border-radius: 24px;
 }
 /* The A-Z jump strip: 26 of these have to fit across the content area, so
    they drop the horizontal padding every other button carries. Without this
@@ -223,7 +325,7 @@ QPushButton#deckJumpChip {
     min-width: 0;
     padding: 0;
     font-size: 15px;
-    border-radius: 5px;
+    border-radius: 22px;
 }
 QPushButton#deckChip:checked {
     background-color: $chip;
@@ -239,7 +341,8 @@ QPushButton#deckStep {
 QPushButton#deckNavCell {
     background: transparent;
     border: none;
-    border-radius: 8px;
+    border-bottom: 3px solid transparent;
+    border-radius: 14px;
     min-height: 88px;
     padding: 0;
     font-size: 15px;
@@ -250,18 +353,19 @@ QPushButton#deckNavCell:hover {
     background-color: $btn_hover;
     color: $text_btn_hover;
 }
+/* A thin accent underline rather than a filled rectangle, so the active tab
+   reads as a highlight under the label instead of a boxed-off cell. */
 QPushButton#deckNavCell[current="true"] {
     color: $accent;
-    background-color: $chip;
-    border-top: 3px solid $accent;
-    border-radius: 0 0 8px 8px;
+    background: transparent;
+    border-bottom: 3px solid $accent;
 }
 
 /* ----------------------------------------------------------------- rows */
 QWidget#deckRow {
     background-color: $card;
     border: 1px solid $border;
-    border-radius: 10px;
+    border-radius: 14px;
 }
 QWidget#deckRow:hover {
     background-color: $btn_hover;
@@ -273,7 +377,7 @@ QLineEdit {
     background-color: $mono;
     color: $text;
     border: 1px solid $border_input;
-    border-radius: 8px;
+    border-radius: 14px;
     padding: 0 16px;
     min-height: 72px;
     font-size: 20px;
@@ -287,27 +391,27 @@ QLineEdit::placeholder {
 /* ----------------------------------------------------------------- list */
 QListWidget {
     background-color: $card;
-    border: 1px solid $border_strong;
-    border-radius: 10px;
+    border: 1px solid $border;
+    border-radius: 18px;
     padding: 4px;
     font-size: 20px;
 }
 QListWidget::item {
     color: $text;
-    border: 3px solid transparent;
-    border-radius: 6px;
+    border: 2px solid transparent;
+    border-radius: 12px;
 }
 QListWidget::item:selected {
     background-color: $btn_hover;
     color: $text_bright;
-    border: 3px solid $focus;
+    border: 2px solid $focus;
 }
 
 /* ------------------------------------------------------------- progress */
 QProgressBar {
     background-color: $input;
     border: 1px solid $border_input;
-    border-radius: 6px;
+    border-radius: 14px;
     min-height: 28px;
     text-align: center;
     color: $text_bright;
@@ -318,13 +422,13 @@ QProgressBar::chunk {
         x1: 0, y1: 0, x2: 1, y2: 0,
         stop: 0 $hero1, stop: 1 $accent_strong
     );
-    border-radius: 5px;
+    border-radius: 12px;
 }
 QPlainTextEdit#deckLog {
     background-color: $mono;
     color: $text_mono;
     border: 1px solid $border;
-    border-radius: 8px;
+    border-radius: 14px;
     font-family: monospace;
     font-size: 15px;
 }
@@ -333,7 +437,7 @@ QPlainTextEdit#deckLog {
 QLabel#deckChipOk,
 QLabel#deckChipWarn,
 QLabel#deckChipBad {
-    border-radius: 6px;
+    border-radius: 20px;
     padding: 6px 12px;
     font-size: 16px;
     min-width: 92px;
@@ -361,7 +465,7 @@ QWidget#deckOverlay {
 QFrame#deckOverlayPanel {
     background-color: $card;
     border: 2px solid $border_strong;
-    border-radius: 12px;
+    border-radius: 20px;
 }
 QLabel#deckOverlayTitle {
     font-size: 24px;
@@ -372,8 +476,8 @@ QLabel#deckOverlayTitle {
 QLabel#deckToast {
     background-color: $checking_bg;
     color: $text_bright;
-    border: 1px solid $border_strong;
-    border-radius: 8px;
+    border: 1px solid $border;
+    border-radius: 18px;
     padding: 14px 20px;
     font-size: 18px;
 }
@@ -427,15 +531,15 @@ QCheckBox:focus,
 QComboBox:focus,
 QAbstractScrollArea:focus,
 QWidget#deckRow:focus {
-    border: 3px solid $focus;
+    border: 2px solid $focus;
     background-color: $btn_hover;
 }
 QPushButton#deckHero:focus {
-    border: 3px solid $focus;
+    border: 2px solid $focus;
     background-color: $hero_hover1;
 }
 QPushButton#deckNavCell:focus {
-    border: 3px solid $focus;
+    border-bottom: 3px solid $focus;
     background-color: $btn_hover;
 }
 

@@ -32,6 +32,7 @@ SCREENS: list[tuple[str, str, str]] = [
     ("mods", "Mods", "☰"),
     ("profile", "Profile", "●"),
     ("system", "System", "✓"),
+    ("utilities", "Utilities", "⚒"),
     ("settings", "Settings", "⚙"),
 ]
 
