@@ -65,6 +65,7 @@ from commander_gui.self_update import (
     download_and_install_commander_update,
     download_commander_update,
     install_commander_update,
+    relaunch_commander,
 )
 from commander_gui.settings import CliProfile, CliSettings, cli_ok, load_settings
 from commander_gui.ui import common
@@ -6996,6 +6997,74 @@ class UserModsTrackerTests(unittest.TestCase):
             finally:
                 downloaded.unlink(missing_ok=True)
 
+    def test_download_commander_update_reports_progress(self):
+        """Regression test: the self-update dialog showed an indeterminate
+
+        bouncing bar, never a real percentage, because download_commander_
+        update() had no way to report bytes downloaded as it streamed -
+        progress_cb closes that gap the same way proton_installer.py's
+        install_proton() already does.
+        """
+        body = b"x" * 300
+
+        class FakeResponse:
+            def __init__(self, data: bytes, headers: dict | None = None):
+                self._data = data
+                self.headers = headers or {}
+
+            def read(self, size: int = -1) -> bytes:
+                if size < 0 or size >= len(self._data):
+                    chunk, self._data = self._data, b""
+                    return chunk
+                chunk, self._data = self._data[:size], self._data[size:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            return FakeResponse(body, {"Content-Length": str(len(body))})
+
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            running_path = Path(tmp) / "Commander.AppImage"
+            running_path.write_bytes(b"old bytes")
+            with patch(
+                "commander_gui.self_update.urllib.request.urlopen",
+                side_effect=fake_urlopen,
+            ):
+                downloaded = download_commander_update(
+                    "v9.9.9", running_path, progress_cb=lambda d, t: calls.append((d, t))
+                )
+            downloaded.unlink(missing_ok=True)
+        self.assertTrue(calls)
+        self.assertEqual(calls[-1], (len(body), len(body)))
+        for done, total in calls:
+            self.assertEqual(total, len(body))
+            self.assertLessEqual(done, total)
+
+    def test_relaunch_commander_releases_the_lock_before_spawning(self):
+        """Regression test: after a self-update download, the new COMMANDER
+
+        could not open because the old instance still held the single-
+        instance lock when the new process reached its own startup check -
+        release_lock must run before subprocess.Popen, not after, matching
+        deck_launch.relaunch_exec's own release_lock ordering.
+        """
+        order = []
+        with patch(
+            "commander_gui.self_update.subprocess.Popen",
+            side_effect=lambda *a, **k: order.append("popen"),
+        ):
+            relaunch_commander(
+                Path("/tmp/Commander.AppImage"),
+                release_lock=lambda: order.append("unlock"),
+            )
+        self.assertEqual(order, ["unlock", "popen"])
+
     def test_download_commander_update_raises_a_distinct_error_on_404(self):
         def fake_urlopen(request, timeout=None):
             raise urllib.error.HTTPError(
@@ -7207,6 +7276,76 @@ class UserModsTrackerTests(unittest.TestCase):
             page.refresh()
             self.assertFalse(page._discord_enable_check.isChecked())
             self.assertEqual(page._discord_client_id_edit.text(), "987654321")
+
+    def test_settings_page_reset_playtime_zeroes_the_active_profile_only(self):
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        from commander_gui import gui_settings
+        from commander_gui.ui.settings_page import SettingsPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            profile = CliProfile(active=True, profile_name="Test")
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                _pages: dict = {}
+
+                def switch_language(self):
+                    pass
+
+                def apply_theme(self):
+                    pass
+
+            gui_settings.save_gui_settings(
+                playtime_seconds={"Test": 3600.0, "Other": 1200.0}
+            )
+            page = SettingsPage(FakeWindow())
+            with patch.object(
+                QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+            ):
+                page._on_reset_playtime()
+            playtime = gui_settings.load_gui_settings()["playtime_seconds"]
+            self.assertEqual(playtime["Test"], 0.0)
+            # A reset must never touch another profile's tracked playtime.
+            self.assertEqual(playtime["Other"], 1200.0)
+
+    def test_settings_page_reset_playtime_declines_without_an_active_profile(self):
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        from commander_gui import gui_settings
+        from commander_gui.ui.settings_page import SettingsPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            class FakeWindow:
+                settings = CliSettings(profiles=[])
+                _pages: dict = {}
+
+                def switch_language(self):
+                    pass
+
+                def apply_theme(self):
+                    pass
+
+            gui_settings.save_gui_settings(playtime_seconds={"Test": 3600.0})
+            page = SettingsPage(FakeWindow())
+            with (
+                patch.object(QMessageBox, "information") as mock_info,
+                patch.object(QMessageBox, "question") as mock_question,
+            ):
+                page._on_reset_playtime()
+            mock_info.assert_called_once()
+            mock_question.assert_not_called()
+            self.assertEqual(
+                gui_settings.load_gui_settings()["playtime_seconds"]["Test"], 3600.0
+            )
 
     def test_settings_page_font_change_resyncs_the_status_bar_pickers(self):
         """Regression test: the status bar now exposes the same font family,
@@ -9156,6 +9295,29 @@ class UserModsTrackerTests(unittest.TestCase):
             "commander_gui.updates.urllib.request.urlopen", return_value=response
         ):
             self.assertIsNone(check_commander_update("1.2.9-unstable"))
+
+    def test_check_commander_update_detects_a_newer_hotfix(self):
+        """Regression test: v1.2.9H1 running against a v1.2.9H2 release must
+
+        see an update. Both tags reduce to the same (1, 2, 9) numeric
+        version, so without reading the trailing "H<n>" hotfix counter too,
+        a hotfix release never looked newer than the one before it - a real
+        user on H1 checking for updates after H2 shipped saw "COMMANDER is
+        up to date".
+        """
+        from commander_gui.updates import check_commander_update
+
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.geturl.return_value = (
+            "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/tag/v1.2.9H2"
+        )
+        with patch(
+            "commander_gui.updates.urllib.request.urlopen", return_value=response
+        ):
+            self.assertEqual(check_commander_update("1.2.9H1"), "v1.2.9H2")
+            self.assertIsNone(check_commander_update("1.2.9H2"))
 
     def test_check_commander_update_returns_none_when_unreachable(self):
         from commander_gui.updates import check_commander_update

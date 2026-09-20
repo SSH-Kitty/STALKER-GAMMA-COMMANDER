@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import ClassVar
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QObject,
     QPointF,
     QPropertyAnimation,
     Qt,
     QTimer,
     QUrl,
     QVariantAnimation,
+    Signal,
 )
 from PySide6.QtGui import (
     QColor,
@@ -65,6 +68,7 @@ from .common import (
     BackgroundTask,
     NoWheelComboBox,
     count_active_mods,
+    human_size,
     instance_window_title,
     mo2_running,
     notify_desktop,
@@ -273,6 +277,19 @@ class Backdrop(QWidget):
         glow2.setColorAt(0.0, QColor(r2[0], r2[1], r2[2], int(tokens["back_glow2_a"])))
         glow2.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.fillRect(rect, glow2)
+
+
+class _CommanderUpdateProgressBridge(QObject):
+    """Cross-thread signal bridge for the COMMANDER self-update download.
+
+    download_and_install_commander_update()'s progress_cb runs on the
+    BackgroundTask's worker thread; PySide only auto-queues a cross-thread
+    signal onto the main thread for a QObject-bound slot, so this exists for
+    the same reason play_page.py's own _ProgressBridge does - a lambda would
+    run on the worker thread instead, touching the QProgressDialog unsafely.
+    """
+
+    updated = Signal(int, str)
 
 
 class MainWindow(QMainWindow):
@@ -792,21 +809,47 @@ class MainWindow(QMainWindow):
             return
 
         progress = QProgressDialog(
-            tr("Downloading COMMANDER {tag}...", tag=tag), tr("Cancel"), 0, 0, self
+            tr("Downloading COMMANDER {tag}...", tag=tag), tr("Cancel"), 0, 100, self
         )
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
+        progress.setValue(0)
 
-        task = BackgroundTask(
-            download_and_install_commander_update, tag, parent=self
+        bridge = _CommanderUpdateProgressBridge(parent=self)
+        bridge.updated.connect(progress.setValue)
+        bridge.updated.connect(
+            lambda _pct, text: progress.setLabelText(text)
         )
+
+        def _progress(downloaded: int, total: int) -> None:
+            pct = int(downloaded * 100 / total) if total > 0 else 0
+            text = tr(
+                "Downloading COMMANDER {tag}... {done}/{total}",
+                tag=tag,
+                done=human_size(downloaded),
+                total=human_size(total),
+            )
+            bridge.updated.emit(pct, text)
+
+        def _work() -> Path:
+            return download_and_install_commander_update(
+                tag, cancel_event=task.cancel_event, progress_cb=_progress
+            )
+
+        task = BackgroundTask(_work, parent=self)
         progress.canceled.connect(task.cancel_event.set)
 
         def on_result(path: object) -> None:
             progress.close()
-            relaunch_commander(path)
+            from ..main import release_instance_lock
+
+            # release_instance_lock must run in this (still-running)
+            # process before the new one starts - see relaunch_commander()'s
+            # own docstring for why a lock held past this point makes the
+            # new COMMANDER exit immediately with no window.
+            relaunch_commander(path, release_lock=release_instance_lock)
             QApplication.quit()
 
         def on_error(message: str) -> None:

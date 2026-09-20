@@ -22,6 +22,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from .network import urlopen_with_retry as urlopen
@@ -62,6 +63,7 @@ def download_commander_update(
     tag: str,
     running_path: Path,
     cancel_event: threading.Event | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Download the AppImage asset for *tag* into ``running_path``'s own directory.
 
@@ -110,6 +112,9 @@ def download_commander_update(
                     f"move COMMANDER to a writable folder and try again: {exc}"
                 ) from exc
             tmp_path = Path(tmp_name)
+            # Progress falls back to indeterminate (total=1) only for the
+            # callback, independent of the size-cap/disk-space checks above.
+            progress_total = total or 1
             downloaded = 0
             try:
                 with os.fdopen(fd, "wb") as f:
@@ -125,6 +130,8 @@ def download_commander_update(
                             raise CommanderSelfUpdateError(
                                 "Update download exceeds the allowed size"
                             )
+                        if progress_cb is not None:
+                            progress_cb(downloaded, progress_total)
             except Exception:
                 tmp_path.unlink(missing_ok=True)
                 raise
@@ -148,8 +155,21 @@ def install_commander_update(downloaded: Path, running_path: Path) -> None:
     os.replace(downloaded, running_path)
 
 
-def relaunch_commander(path: Path) -> None:
-    """Start *path* as a new, independent process."""
+def relaunch_commander(
+    path: Path, release_lock: Callable[[], None] | None = None
+) -> None:
+    """Start *path* as a new, independent process.
+
+    *release_lock* must drop the single-instance lock before the new
+    process starts - same requirement as ``deck_launch.relaunch_exec``'s own
+    *release_lock*, and for the same reason: the new process reaches its own
+    ``_acquire_instance_lock()`` almost immediately, typically before this
+    (still-running) process has actually exited, and a lock still held at
+    that moment makes the new process conclude another instance is running
+    and exit with no window at all.
+    """
+    if release_lock is not None:
+        release_lock()
     subprocess.Popen(
         [str(path)],
         start_new_session=True,
@@ -160,7 +180,9 @@ def relaunch_commander(path: Path) -> None:
 
 
 def download_and_install_commander_update(
-    tag: str, cancel_event: threading.Event | None = None
+    tag: str,
+    cancel_event: threading.Event | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Download and install *tag* over the running AppImage. Returns its path."""
     running_path = commander_appimage_path()
@@ -169,7 +191,7 @@ def download_and_install_commander_update(
             "COMMANDER is not running as an AppImage - it cannot update itself."
         )
     downloaded = download_commander_update(
-        tag, running_path, cancel_event=cancel_event
+        tag, running_path, cancel_event=cancel_event, progress_cb=progress_cb
     )
     install_commander_update(downloaded, running_path)
     return running_path

@@ -905,7 +905,7 @@ class DashboardPage(QWidget):
         )
         deck_button.setIconSize(QSize(22, 22))
         deck_button.setFixedSize(34, 28)
-        deck_button.setToolTip(tr("Steam Deck version coming soon"))
+        deck_button.setToolTip(tr("Steam Deck mode available soon."))
         deck_button.setEnabled(False)
         deck_button.clicked.connect(lambda: switch_mode(self.window, deck=True))
         header.addWidget(deck_button)

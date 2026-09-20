@@ -24,6 +24,7 @@ from unittest.mock import patch
 from commander_gui.launcher import (
     RUNNER_CRASH_LOOP_MARKER,
     RUNNER_CRASH_LOOP_THRESHOLD,
+    ForeignPrefixError,
     LaunchError,
     Runner,
     ensure_runner_prefix,
@@ -241,11 +242,16 @@ class PrefixGuardTests(unittest.TestCase):
 
     def test_ensure_runner_prefix_refuses_and_names_the_fix(self):
         (self.system32 / "ntdll.dll").write_bytes(_REAL_DLL + b"HOST64")
-        with self.assertRaises(LaunchError) as caught:
+        # A distinct, catchable type - not just a differently-worded
+        # LaunchError - so the UI can offer a one-click repair action
+        # instead of a plain dialog the user has to act on manually.
+        with self.assertRaises(ForeignPrefixError) as caught:
             ensure_runner_prefix(self.runner)
+        self.assertIsInstance(caught.exception, LaunchError)
         message = str(caught.exception)
         self.assertIn("ntdll.dll", message)
-        self.assertIn("Repair Prefix", message)
+        # Must name the Utilities button exactly, not a paraphrase of it.
+        self.assertIn("Repair Wine prefix", message)
         # And nothing was written: the guard runs before the marker file.
         self.assertFalse((self.prefix / ".commander-runner").exists())
 
