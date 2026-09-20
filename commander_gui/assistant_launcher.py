@@ -31,11 +31,6 @@ def reap_assistant_processes() -> list[subprocess.Popen[bytes]]:
     return completed
 
 
-def assistant_is_running() -> bool:
-    """Return whether an ASSISTANT process is still running."""
-    return active_assistant_process() is not None
-
-
 def active_assistant_process() -> subprocess.Popen[bytes] | None:
     """Return the tracked active ASSISTANT process, if any."""
     reap_assistant_processes()

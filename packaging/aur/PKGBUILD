@@ -1,6 +1,6 @@
 # Maintainer: SSH-Kitty
 pkgname=stalker-gamma-commander
-pkgver=1.2.8
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="Graphical installer/manager for S.T.A.L.K.E.R. Anomaly + GAMMA on Linux"
 arch=('x86_64')
@@ -13,6 +13,7 @@ optdepends=(
   'protontricks: runs Winetricks against a Steam Proton prefix'
   'gamemode: optional performance helper'
   'mangohud: optional performance overlay'
+  'python-pypresence: enables the optional Discord Rich Presence integration'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
@@ -20,7 +21,7 @@ sha256sums=('SKIP')
 package() {
   cd "STALKER-GAMMA-COMMANDER-$pkgver"
 
-  # commander_gui/, assistant/ and cli/ must stay siblings on disk exactly
+  # commander_gui/, assistant/, Steamdeck/ and cli/ must stay siblings on disk exactly
   # as they are in this checkout - commander_gui/config.py's project_root()
   # resolves the bundled CLI, the assistant package and the window icon
   # relative to wherever commander_gui itself physically lives, and the
@@ -28,12 +29,17 @@ package() {
   # to remain in the same directory (it's a self-contained .NET build that
   # resolves them next to its own executable path, not via PATH or cwd).
   install -d "$pkgdir/opt/$pkgname"
-  cp -a commander_gui assistant cli "$pkgdir/opt/$pkgname/"
+  cp -a commander_gui assistant Steamdeck cli "$pkgdir/opt/$pkgname/"
 
   install -Dm755 packaging/stalker-gamma-commander.sh \
     "$pkgdir/usr/bin/$pkgname"
   install -Dm644 packaging/stalker-gamma-commander.desktop \
     "$pkgdir/usr/share/applications/$pkgname.desktop"
+  # Second entry so a Steam Deck user can pick Deck Mode straight out of
+  # Steam's "Add a Non-Steam Game" dialog instead of having to know about
+  # the --deck launch option.
+  install -Dm644 packaging/stalker-gamma-commander-deck.desktop \
+    "$pkgdir/usr/share/applications/$pkgname-deck.desktop"
   install -Dm644 cli/stalker-gamma.png \
     "$pkgdir/usr/share/icons/hicolor/256x256/apps/$pkgname.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

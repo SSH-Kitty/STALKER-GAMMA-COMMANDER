@@ -14,7 +14,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from . import __version__
+from . import __version__, network
 from .network import read_response_bytes
 
 _GITHUB_API = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
@@ -33,7 +33,7 @@ def _api_get(url: str) -> dict | list:
         url,
         headers={"User-Agent": _USER_AGENT, "Accept": "application/vnd.github+json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with network.urlopen_with_retry(req, timeout=30) as resp:
         return json.loads(read_response_bytes(resp, _MAX_API_RESPONSE_BYTES))
 
 
@@ -137,10 +137,16 @@ def install_proton(
 
         # --- download tarball ---
         req = urllib.request.Request(tar_url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with network.urlopen_with_retry(req, timeout=600) as resp:
             try:
                 header_value = resp.headers.get("Content-Length")
                 total = int(header_value) if header_value is not None else None
+                # A literal "0" is still "not None" but is just as
+                # untrustworthy as a missing header - treating it as a
+                # real size let the worst-case disk-space fallback below
+                # be silently skipped instead of applied.
+                if total is not None and total <= 0:
+                    total = None
             except (TypeError, ValueError):
                 total = None
             if total is not None and total > _MAX_ARCHIVE_BYTES:
@@ -174,7 +180,7 @@ def install_proton(
         # --- verify checksum ---
         check_cancelled()
         req_sum = urllib.request.Request(sum_url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req_sum, timeout=30) as resp:
+        with network.urlopen_with_retry(req_sum, timeout=30) as resp:
             checksum_text = read_response_bytes(resp, _MAX_CHECKSUM_BYTES).decode(
                 errors="replace"
             )

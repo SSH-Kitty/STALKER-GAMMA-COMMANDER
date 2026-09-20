@@ -394,6 +394,11 @@ class DetailPane(QWidget):
         self.technical_view.setVisible(checked)
 
     def _copy_excerpt(self) -> None:
+        # Route through the same redaction the export path uses - a
+        # one-click "copy this and paste it into a bug report" action must
+        # not be the one place secrets slip out unfiltered.
+        from ..report import _redact
+
         text = "\n".join(
             part
             for part in (self.where_label.text(), self.excerpt_view.toPlainText())
@@ -401,7 +406,7 @@ class DetailPane(QWidget):
         )
         from PySide6.QtGui import QGuiApplication
 
-        QGuiApplication.clipboard().setText(text)
+        QGuiApplication.clipboard().setText(_redact(text))
 
 
 class QTextEditReadOnlyHolder(QPlainTextEdit):

@@ -4,13 +4,31 @@ Mod Organizer and the game need the native Microsoft Visual C++ and DirectX
 runtime DLLs, which a fresh Wine/Proton prefix does not ship (Wine only provides
 stubs - MO2 aborts on ``concrt140.dll`` without the real VC++ redistributable).
 These helpers drive ``winetricks`` against the GUI's configured prefix.
+
+THE ONE RULE OF THIS MODULE: nothing here may execute a Wine binary that did
+not build the prefix it is pointed at.
+
+That rule exists because of a real incident. The old status probe ran
+``winetricks list-installed`` with ``WINEPREFIX`` set to the Proton prefix and
+no ``WINE=``, so it used the *system* wine. Winetricks runs
+``wine cmd /c "echo init"`` before dispatching any command - even a read-only
+one - and system wine, finding a prefix whose ``.update-timestamp`` was not
+its own, performed its implicit prefix update and overwrote 97 DLLs Proton had
+copied into ``system32``, ``ntdll.dll`` included, with its own builds. Every
+Proton process then loaded a foreign ntdll and faulted on its first thread;
+each fault spawned ``winedbg``, which faulted, which spawned another. The
+probe ran on every Dashboard refresh, so the prefix was re-corrupted faster
+than anything could repair it, and a full reinstall (which keeps the prefix)
+changed nothing. The machine froze from memory exhaustion within two minutes
+of pressing Play.
+
+So: status is a file read, and installs go through the runner's own Wine.
 """
 
 from __future__ import annotations
 
-import os
 import shutil
-import subprocess
+from pathlib import Path
 
 from .dependencies import _externally_managed, configured_tool
 
@@ -33,15 +51,6 @@ UMU_ZIPAPP_URL = (
     f"download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar"
 )
 
-_NOISE_PREFIXES = (
-    "Using winetricks",
-    "warning:",
-    "wine:",
-    "Wine:",
-    "wine-",
-)
-
-
 def winetricks_binary() -> str:
     """Path to winetricks, or '' when it is not on PATH."""
     return configured_tool("winetricks") or shutil.which("winetricks") or ""
@@ -57,12 +66,75 @@ def umu_binary() -> str:
     return configured_tool("umu-run") or shutil.which("umu-run") or ""
 
 
-def winetricks_install_command(verbs: tuple[str, ...] = WINETRICKS_VERBS) -> list[str]:
-    """Build the ``winetricks -q <verbs>`` command line."""
+def _proton_build_dir(runner) -> Path | None:
+    """The Proton build a runner uses, or None for plain Wine / unknown."""
+    proton_path = runner.env.get("PROTONPATH")
+    if proton_path:
+        return Path(proton_path)
+    if runner.kind == "proton" and runner.wrapper:
+        # wrapper is [<build>/proton, "run"]
+        return Path(runner.wrapper[0]).parent
+    return None
+
+
+def winetricks_install_command(
+    runner, verbs: tuple[str, ...] = WINETRICKS_VERBS
+) -> tuple[list[str], dict[str, str]]:
+    """Command and environment to install ``verbs`` with the *runner's* Wine.
+
+    Returns ``([], {})`` when the needed tool is unavailable. The environment
+    returned is the complete set of runner-specific variables the call needs;
+    callers merge it over ``os.environ`` and add nothing Wine-related.
+
+    umu / GE-Proton runners go through ``umu-run winetricks``, umu's own
+    winetricks mode: it runs the winetricks bundled inside the Proton build,
+    with that build's wine, inside the Steam runtime container, against the
+    prefix umu manages. That is the only path that can install verbs into a
+    Proton prefix without a second Wine build touching it.
+
+    Steam Proton and plain-wine runners fall back to the system winetricks
+    script, but with ``WINE``/``WINESERVER`` pinned to the runner's own
+    binaries, which winetricks honours. What it must never do is what it did
+    before: run winetricks bare, and let it pick up whatever ``wine`` is on
+    PATH.
+    """
+    env: dict[str, str] = {"WINEDEBUG": "-all"}
+    build = _proton_build_dir(runner)
+
+    if runner.kind == "umu":
+        umu = umu_binary()
+        if not umu:
+            return [], {}
+        for key in ("PROTONPATH", "WINEPREFIX", "GAMEID", "STORE"):
+            if key in runner.env:
+                env[key] = runner.env[key]
+        return [umu, "winetricks", *verbs], env
+
     binary = winetricks_binary()
     if not binary:
-        return []
-    return [binary, "-q", *verbs]
+        return [], {}
+
+    if runner.kind == "proton":
+        if build is None:
+            return [], {}
+        wine = build / "files" / "bin" / "wine"
+        wineserver = build / "files" / "bin" / "wineserver"
+        if not wine.is_file():
+            return [], {}
+        env["WINE"] = str(wine)
+        if wineserver.is_file():
+            env["WINESERVER"] = str(wineserver)
+        compat = runner.env.get("STEAM_COMPAT_DATA_PATH")
+        if compat:
+            env["WINEPREFIX"] = str(Path(compat) / "pfx")
+        return [binary, "-q", *verbs], env
+
+    # Plain wine: winetricks with the same binary that owns the prefix.
+    if runner.wrapper:
+        env["WINE"] = runner.wrapper[-1]
+    if "WINEPREFIX" in runner.env:
+        env["WINEPREFIX"] = runner.env["WINEPREFIX"]
+    return [binary, "-q", *verbs], env
 
 
 def protontricks_install_command() -> list[str]:
@@ -120,44 +192,29 @@ def check_winetricks_status(
 ) -> dict[str, bool]:
     """Return {verb: installed} for ``verbs`` in the prefix.
 
-    Queries ``winetricks list-installed`` (authoritative - it reads the prefix's
-    winetricks.log). File-presence checks are unreliable because Proton ships
-    builtin copies of the same DLLs. Returns all-False when winetricks is
-    missing or the query fails.
+    Reads ``<prefix>/winetricks.log`` directly. That file is the whole of what
+    ``winetricks list-installed`` reports - the script just ``cat``s it - and
+    reading it ourselves means no Wine process is ever started for a status
+    check. See the module docstring for why that matters: the subprocess this
+    replaced ran system wine inside the Proton prefix on every Dashboard
+    refresh and corrupted it.
+
+    ``timeout`` is accepted for signature compatibility and ignored; there is
+    nothing left to time out.
     """
-    binary = winetricks_binary()
+    del timeout
     result = {verb: False for verb in verbs}
-    if not binary:
+    if not prefix:
         return result
-    env = dict(os.environ)
-    if prefix:
-        env["WINEPREFIX"] = prefix
-    # WINEDEBUG=-all keeps the probe from flashing a Wine window; only its
-    # output (winetricks.log contents) is used.
-    env["WINEDEBUG"] = "-all"
+    log = Path(prefix).expanduser() / "winetricks.log"
     try:
-        proc = subprocess.run(
-            [binary, "list-installed"],
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # Never installed, or unreadable: nothing is known to be present.
         return result
-    if proc.returncode != 0:
-        return result
-    tokens: set[str] = set()
-    for raw in (proc.stdout or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith(_NOISE_PREFIXES):
-            continue
-        tokens.update(line.split())
+    installed = {line.strip() for line in text.splitlines() if line.strip()}
     for verb in verbs:
-        result[verb] = verb in tokens
+        result[verb] = verb in installed
     return result
 
 
@@ -168,8 +225,8 @@ def check_winetricks_full_status(
 ) -> dict[str, bool]:
     """Return {name: installed} for verbs *and* tool availability (wine, protontricks, umu-run).
 
-    Combines the slow ``winetricks list-installed`` query with instant
-    ``shutil.which()`` checks for wine, protontricks, and umu-run.
+    Combines the ``winetricks.log`` read with instant ``shutil.which()``
+    checks for wine, protontricks, and umu-run. Starts no process.
     """
     status = check_winetricks_status(prefix, verbs, timeout)
     status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))

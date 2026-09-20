@@ -4,29 +4,41 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from ..gui_settings import configured_wine_prefix
+from ..cli_runner import run_sync
+from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
+from ..launcher import find_extra_protons
 from ..settings import CliSettings
+
+# 1.2.9H1 hotfix: unused while the Deck button is disabled, see below. Restore
+# alongside the button's icon colour.
+# from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
 from ..winetricks import WINETRICKS_VERBS, check_winetricks_full_status
 from .common import (
     OK_GREEN,
     BackgroundTask,
     InstallStatusRow,
+    NoWheelComboBox,
+    activate_profile,
     anomaly_installed,
     clear_layout,
     dir_size,
     display_state,
+    format_last_played,
+    format_playtime,
     gamma_installed,
     human_size,
     info_label,
@@ -34,10 +46,72 @@ from .common import (
     make_card,
     mo2_running,
     open_in_file_manager,
+    play_click_sound,
     section_label,
     tr,
     winetricks_tooltip,
 )
+from .deck_icon import deck_icon
+
+# 1.2.9H1 hotfix: unused while the Deck button is disabled, see below. Restore
+# alongside the button's click handler.
+# from .deck_switch import switch_mode
+from .mod_manager_page import _QUERY_TIMEOUT, _query_mo2_profiles
+
+#: Shared fixed width for every flat value combo on the Profile overview
+#: card (Profile, MO2 profile, Current runner, Download threads) - each
+#: sits at the end of its own row, so a shared width is what makes their
+#: text actually line up into one column instead of each combo just
+#: hugging its own (differently sized) content.
+_VALUE_COMBO_WIDTH = 260
+
+
+class _FlatValueCombo(NoWheelComboBox):
+    """A read-only combo whose current value sits right-aligned, flush
+
+    against the dropdown arrow, instead of the default left-aligned combo
+    label - matches how the plain read-only value rows around it
+    (Total playtime, Last played, ...) are right-aligned too, and keeps
+    the text close to the arrow that opens it rather than floating off to
+    the left of a wide, mostly-empty box.
+
+    Achieved by making the combo editable with a read-only QLineEdit
+    (the only way to get right-aligned text out of a QComboBox) - which,
+    as a side effect, stops a click on the text itself from opening the
+    popup (only the arrow would). The event filter below restores that.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setEditable(True)
+        line_edit = self.lineEdit()
+        line_edit.setReadOnly(True)
+        line_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        line_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        line_edit.installEventFilter(self)
+
+    _CLICK_EVENTS = (
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseButtonRelease,
+        QEvent.Type.MouseButtonDblClick,
+    )
+
+    def eventFilter(self, obj, event):
+        if obj is self.lineEdit() and event.type() in self._CLICK_EVENTS:
+            # Open on release, not press: calling showPopup() from within
+            # the press handler starts the popup's own mouse grab while
+            # this same click is still in progress, so Qt reads the click's
+            # own release (landing back on the line edit, outside the
+            # popup's list) as the native combo box's press-drag-release
+            # "select on release" gesture cancelling with nothing picked -
+            # closing the popup the instant it opened. Waiting for release
+            # to open it means there is no in-flight grab for that release
+            # to cancel; press is still swallowed so the line edit itself
+            # never reacts to it (cursor placement, focus selection, ...).
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                self.showPopup()
+            return True
+        return super().eventFilter(obj, event)
 
 
 def _query_winetricks_status(prefix: str) -> dict[str, bool] | None:
@@ -53,10 +127,11 @@ class DashboardPage(QWidget):
         self.window = window
         self.settings: CliSettings = window.settings
         self._sizes: dict[str, int] = {}
-        self._update_checker: BackgroundTask | None = None
         self._update_checking = False
         self._winetricks_task: BackgroundTask | None = None
         self._size_task: BackgroundTask | None = None
+        self._mo2_profiles_task: BackgroundTask | None = None
+        self._set_mo2_selected_task: BackgroundTask | None = None
         # Re-walking a ~150GB install tree on every Dashboard visit is
         # expensive; reuse a recent scan of the same paths instead.
         self._size_cache_key: tuple[str, str, str] | None = None
@@ -78,15 +153,6 @@ class DashboardPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label(tr("COMMANDER DASHBOARD"), level=1)
-        title.setWordWrap(True)
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        subtitle = info_label(
-            tr("COMMANDER manages STALKER Anomaly and the GAMMA Modpack on Linux. Install, update, verify, and launch your game from one place.")
-        )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(title)
-        root.addWidget(subtitle)
 
         self.profile_card, _ = make_card(expand=True)
         root.addWidget(self.profile_card)
@@ -105,6 +171,14 @@ class DashboardPage(QWidget):
         self.sizes_card, _ = make_card(expand=True)
         bottom.addWidget(self.sizes_card, 1)
 
+        # Without this, a window taller than the page's natural content
+        # stretches the Expanding-policy cards above (every make_card()
+        # here uses expand=True) to fill the extra height instead of
+        # leaving it as blank page space - shifting each card's, and so
+        # each title's, vertical position as the window is resized rather
+        # than keeping every card pinned at its natural size.
+        root.addStretch(1)
+
         self.refresh()
 
     # ----- profile card -----
@@ -115,6 +189,7 @@ class DashboardPage(QWidget):
         self._render_profile()
         self._render_install_status()
         self._build_actions()
+        self._start_mo2_profiles_task()
         self._start_size_task()
         self._start_update_check()
 
@@ -264,14 +339,117 @@ class DashboardPage(QWidget):
             go.clicked.connect(lambda: self.window.set_page("profiles"))
             layout.addWidget(go)
             return
-        layout.addWidget(section_label(tr("Active COMMANDER profile")))
+        layout.addWidget(section_label(tr("Profile overview")))
+
+        # Profile row is a live switcher (not a static label) when more
+        # than one profile exists - Anomaly/GAMMA/Cache folder paths were
+        # removed from this card entirely, since they're already shown as
+        # the detail text under "STALKER Anomaly"/"GAMMA Modpack" in the
+        # Installation status card above.
+        profile_row = QHBoxLayout()
+        profile_key = QLabel(tr("Profile"))
+        profile_key.setObjectName("dim")
+        profile_row.addWidget(profile_key)
+        profile_row.addStretch(1)
+        profile_combo = _FlatValueCombo()
+        profile_combo.setObjectName("flatValueCombo")
+        profile_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        profile_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        for candidate in self.settings.profiles:
+            profile_combo.addItem(candidate.profile_name, candidate.profile_name)
+        profile_combo.blockSignals(True)
+        profile_combo.setCurrentIndex(
+            max(profile_combo.findData(profile.profile_name), 0)
+        )
+        profile_combo.blockSignals(False)
+        profile_combo.currentIndexChanged.connect(
+            lambda _index, combo=profile_combo: self._on_dashboard_profile_switch(combo)
+        )
+        profile_row.addWidget(profile_combo)
+        layout.addLayout(profile_row)
+
+        # MO2 profile is a live switcher too, same as Profile above -
+        # populated for real by _start_mo2_profiles_task() once its
+        # background query returns; starts out showing just the
+        # configured profile so there is never a blank/empty combo.
+        mo2_row = QHBoxLayout()
+        mo2_key = QLabel(tr("MO2 profile"))
+        mo2_key.setObjectName("dim")
+        mo2_row.addWidget(mo2_key)
+        mo2_row.addStretch(1)
+        self.mo2_profile_combo = _FlatValueCombo()
+        self.mo2_profile_combo.setObjectName("flatValueCombo")
+        self.mo2_profile_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mo2_profile_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        self.mo2_profile_combo.addItem(profile.mo2_profile, profile.mo2_profile)
+        self.mo2_profile_combo.currentIndexChanged.connect(
+            lambda _index, combo=self.mo2_profile_combo: self._on_mo2_profile_switch(
+                combo
+            )
+        )
+        mo2_row.addWidget(self.mo2_profile_combo)
+        layout.addLayout(mo2_row)
+
+        # Current runner is a live switcher too - same combo (Auto-detect +
+        # every installed GE-Proton version) and the same gui_settings
+        # "runner" key as the Play page's own runner selector, which is
+        # where this value actually comes from/is normally changed.
+        runner_row = QHBoxLayout()
+        runner_key = QLabel(tr("Current runner"))
+        runner_key.setObjectName("dim")
+        runner_row.addWidget(runner_key)
+        runner_row.addStretch(1)
+        self.runner_combo = _FlatValueCombo()
+        self.runner_combo.setObjectName("flatValueCombo")
+        self.runner_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.runner_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        self._populate_runner_combo(self.runner_combo)
+        self.runner_combo.currentIndexChanged.connect(
+            lambda _index, combo=self.runner_combo: self._on_runner_switch(combo)
+        )
+        runner_row.addWidget(self.runner_combo)
+        layout.addLayout(runner_row)
+
+        # Download threads is a live switcher too - a fixed 3-option
+        # choice (rather than the Profiles page's free-form 1-20 spin box)
+        # since this is meant as a quick, low-friction "just pick a speed"
+        # control, not the full range editing already available there.
+        threads_row = QHBoxLayout()
+        threads_key = QLabel(tr("Download threads"))
+        threads_key.setObjectName("dim")
+        threads_row.addWidget(threads_key)
+        threads_row.addStretch(1)
+        self.download_threads_combo = _FlatValueCombo()
+        self.download_threads_combo.setObjectName("flatValueCombo")
+        self.download_threads_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.download_threads_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        for value, threads_label in (
+            (4, tr("4 (Safe)")),
+            (6, tr("6 (Balanced)")),
+            (8, tr("8 (Fast)")),
+        ):
+            self.download_threads_combo.addItem(threads_label, value)
+        idx = self.download_threads_combo.findData(profile.download_threads)
+        self.download_threads_combo.blockSignals(True)
+        self.download_threads_combo.setCurrentIndex(max(idx, 0))
+        self.download_threads_combo.blockSignals(False)
+        self.download_threads_combo.currentIndexChanged.connect(
+            lambda _index, combo=self.download_threads_combo: (
+                self._on_download_threads_switch(combo)
+            )
+        )
+        threads_row.addWidget(self.download_threads_combo)
+        layout.addLayout(threads_row)
+
+        playtime_seconds = load_gui_settings().get("playtime_seconds", {}).get(
+            profile.profile_name, 0.0
+        )
+        last_played_ts = load_gui_settings().get("last_played_ts", {}).get(
+            profile.profile_name
+        )
         for label, value in [
-            ("Profile", profile.profile_name),
-            ("Anomaly folder", profile.anomaly),
-            ("GAMMA", profile.gamma),
-            ("Cache folder", profile.cache),
-            ("MO2 profile", profile.mo2_profile),
-            ("Download threads", str(profile.download_threads)),
+            ("Total playtime", format_playtime(playtime_seconds)),
+            ("Last played", format_last_played(last_played_ts)),
         ]:
             row = QHBoxLayout()
             key = QLabel(tr(label))
@@ -282,6 +460,224 @@ class DashboardPage(QWidget):
             row.addStretch(1)
             row.addWidget(val)
             layout.addLayout(row)
+
+    def _sync_profile_combo(self, combo: NoWheelComboBox) -> None:
+        """Reset the profile combo's displayed selection to the real active profile."""
+        active = self.settings.active_profile
+        combo.blockSignals(True)
+        if active is not None:
+            combo.setCurrentIndex(max(combo.findData(active.profile_name), 0))
+        combo.blockSignals(False)
+
+    def _on_dashboard_profile_switch(self, combo: NoWheelComboBox) -> None:
+        name = combo.currentData()
+        if not name:
+            return
+        active = self.settings.active_profile
+        if active is not None and active.profile_name == name:
+            return
+        # Same guard the Profiles page's "Set active" applies: repointing
+        # every page at another profile while an install is writing into the
+        # current one's folders must not be possible from here either.
+        if self.window.install_busy:
+            self._sync_profile_combo(combo)
+            return
+        if active is not None and mo2_running():
+            answer = QMessageBox.question(
+                self,
+                tr("Game Running"),
+                tr("Mod Organizer / the game appears to be running under the current active profile ('{active_name}').\n\nSwitching the active profile now will not stop it, but COMMANDER's other pages will stop reflecting its state.\n\nSwitch anyway?", active_name=active.profile_name),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._sync_profile_combo(combo)
+                return
+        combo.setEnabled(False)
+        # _render_profile() rebuilds this card from scratch (clear_layout()
+        # deletes the combo) on every refresh, and a refresh can land while
+        # the CLI "config use" call is still in flight - touching the combo
+        # from the callback then raises "Internal C++ object already
+        # deleted" inside a slot. The newly rendered combo already shows the
+        # real active profile, so there is nothing left to restore.
+        generation = self._refresh_generation
+
+        def _done(success: bool) -> None:
+            if success:
+                self.refresh()
+            elif generation == self._refresh_generation:
+                combo.setEnabled(True)
+                self._sync_profile_combo(combo)
+
+        activate_profile(self.window, self, name, on_done=_done)
+
+    # ----- MO2 profile switcher -----
+    def _start_mo2_profiles_task(self) -> None:
+        if self._mo2_profiles_task is not None:
+            return
+        if self.settings.active_profile is None:
+            return
+        generation = self._refresh_generation
+        task = BackgroundTask(_query_mo2_profiles, parent=self)
+        task.result.connect(
+            lambda result, generation=generation: self._on_mo2_profiles_loaded(
+                result, generation
+            )
+        )
+        task.error.connect(
+            lambda _msg, generation=generation: self._on_mo2_profiles_error(generation)
+        )
+        self._mo2_profiles_task = task
+        task.start()
+
+    def _on_mo2_profiles_loaded(
+        self, result: tuple[list[str], str], generation: int
+    ) -> None:
+        self._mo2_profiles_task = None
+        if generation != self._refresh_generation:
+            return
+        combo = getattr(self, "mo2_profile_combo", None)
+        names, selected = result
+        if combo is None or not names:
+            return
+        profile = self.settings.active_profile
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(names)
+        # Same preference as Mod Manager's own profile combo: MO2's actual
+        # selected profile wins over a stale CliProfile.mo2_profile field.
+        for candidate in (selected, profile.mo2_profile if profile else None):
+            if not candidate:
+                continue
+            wanted = candidate.upper()
+            match = next((n for n in names if n.upper() == wanted), None)
+            if match is not None:
+                combo.setCurrentText(match)
+                break
+        combo.blockSignals(False)
+
+    def _on_mo2_profiles_error(self, generation: int) -> None:
+        self._mo2_profiles_task = None
+
+    def _sync_mo2_profile_combo(self, combo: NoWheelComboBox) -> None:
+        """Reset the MO2 profile combo to the real configured profile."""
+        profile = self.settings.active_profile
+        combo.blockSignals(True)
+        if profile is not None:
+            idx = combo.findText(profile.mo2_profile)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _on_mo2_profile_switch(self, combo: NoWheelComboBox) -> None:
+        name = combo.currentText()
+        if not name:
+            return
+        profile = self.settings.active_profile
+        if profile is not None and profile.mo2_profile == name:
+            return
+        if self.window.install_busy:
+            self._sync_mo2_profile_combo(combo)
+            return
+        if mo2_running():
+            # Mirrors Mod Manager's own guard on this exact action: MO2
+            # rewrites ModOrganizer.ini on exit and would silently
+            # overwrite this change.
+            QMessageBox.warning(
+                self,
+                tr("Mod Organizer is running"),
+                tr("Close Mod Organizer first - it would overwrite this change when it exits."),
+            )
+            self._sync_mo2_profile_combo(combo)
+            return
+        combo.setEnabled(False)
+        generation = self._refresh_generation
+        task = BackgroundTask(
+            run_sync,
+            ["mo2", "config", "set", "selected-profile", name],
+            timeout=_QUERY_TIMEOUT,
+            parent=self,
+        )
+        task.result.connect(
+            lambda res, name=name, generation=generation: self._on_mo2_profile_set(
+                name, generation, *res
+            )
+        )
+        task.error.connect(
+            lambda _msg, generation=generation: self._on_mo2_profile_set_error(
+                generation
+            )
+        )
+        self._set_mo2_selected_task = task
+        task.start()
+
+    def _on_mo2_profile_set(
+        self, name: str, generation: int, rc: int, out: str
+    ) -> None:
+        self._set_mo2_selected_task = None
+        if generation != self._refresh_generation:
+            return
+        combo = getattr(self, "mo2_profile_combo", None)
+        if rc != 0:
+            if combo is not None:
+                combo.setEnabled(True)
+                self._sync_mo2_profile_combo(combo)
+            QMessageBox.warning(
+                self, tr("Failed"), out.strip() or tr("Could not set selected profile")
+            )
+            return
+        # _render_profile() rebuilds this card from scratch on refresh() -
+        # do not touch `combo` after this point (see the Profile combo's
+        # own switch handler above for why).
+        profile = self.settings.active_profile
+        if profile is not None and profile.mo2_profile != name:
+            profile.mo2_profile = name
+            self.settings.save()
+        self.refresh()
+
+    def _on_mo2_profile_set_error(self, generation: int) -> None:
+        self._set_mo2_selected_task = None
+        if generation != self._refresh_generation:
+            return
+        combo = getattr(self, "mo2_profile_combo", None)
+        if combo is not None:
+            combo.setEnabled(True)
+            self._sync_mo2_profile_combo(combo)
+
+    def _populate_runner_combo(self, combo: NoWheelComboBox) -> None:
+        """Same item list/order as the Play page's own runner combo."""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
+        extra_protons = find_extra_protons()
+        if extra_protons:
+            combo.insertSeparator(combo.count())
+            for label, path in extra_protons:
+                combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
+        saved = load_gui_settings().get("runner", "auto")
+        idx = combo.findData(saved)
+        if idx < 0:
+            idx = combo.findData("auto")
+        combo.setCurrentIndex(max(idx, 0))
+        combo.blockSignals(False)
+
+    def _on_runner_switch(self, combo: NoWheelComboBox) -> None:
+        kind = combo.currentData() or "auto"
+        if kind == (load_gui_settings().get("runner") or "auto"):
+            return
+        # Just the shared gui_settings "runner" key - the Play page
+        # computes its own wine-prefix-per-runner and launch preview from
+        # this same key the next time it loads, so there is nothing else
+        # to keep in sync here.
+        save_gui_settings(runner=kind)
+        self._render_profile()
+
+    def _on_download_threads_switch(self, combo: NoWheelComboBox) -> None:
+        value = combo.currentData()
+        profile = self.settings.active_profile
+        if profile is None or value is None or profile.download_threads == value:
+            return
+        profile.download_threads = value
+        self.settings.save()
 
     # ----- sizes card -----
     def _start_size_task(self) -> None:
@@ -394,7 +790,6 @@ class DashboardPage(QWidget):
             profile,
             parent=self,
         )
-        self._update_checker = task
         task.result.connect(
             lambda status, generation=generation, profile_id=profile_id: (
                 self._on_update_check_done(status, generation, profile_id)
@@ -410,7 +805,6 @@ class DashboardPage(QWidget):
     def _on_update_check_done(
         self, status: UpdateStatus, generation: int, profile_id
     ) -> None:
-        self._update_checker = None
         current = self.window.settings.active_profile
         if (
             generation != self._refresh_generation
@@ -426,7 +820,6 @@ class DashboardPage(QWidget):
         self._render_update_card(status, text, kind)
 
     def _on_update_check_error(self, message: str, generation: int, profile_id) -> None:
-        self._update_checker = None
         current = self.window.settings.active_profile
         if (
             generation != self._refresh_generation
@@ -502,14 +895,42 @@ class DashboardPage(QWidget):
     def _build_actions(self) -> None:
         layout = self.actions_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label(tr("Quick actions")))
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(section_label(tr("Quick actions")))
+        header.addStretch(1)
+        # Deliberately not stored on self: _build_actions() runs on every
+        # refresh() and clear_layout() above deletes whatever it made, so a
+        # retained reference would go stale - the same trap _play_button
+        # below has to null out explicitly. This button holds no state and
+        # nothing outside this method touches it, so rebuilding is enough.
+        deck_button = QPushButton()
+        deck_button.setObjectName("deckModeButton")
+        # 1.2.9H1 hotfix: Steam Deck Mode disabled for this release, revert
+        # this block (restore the icon colour, tooltip, cursor and click
+        # handler below) once the Deck build ships.
+        deck_button.setIcon(deck_icon(QColor("#6b7280")))
+        deck_button.setIconSize(QSize(22, 22))
+        deck_button.setFixedSize(34, 28)
+        deck_button.setEnabled(False)
+        deck_button.setToolTip(tr("Steam Deck version coming soon"))
+        deck_button.setCursor(Qt.CursorShape.ArrowCursor)
+        header.addWidget(deck_button)
+        layout.addLayout(header)
         profile = self.settings.active_profile
+        # clear_layout() above just deleted the previous render's Play
+        # button. Drop the reference to it before deciding whether a new one
+        # is built: with no active profile there is no replacement, and
+        # on_busy_changed()/_set_play_button_disabled() would otherwise
+        # still be holding the deleted widget.
+        self._play_button = None
         if profile is not None:
             play = QPushButton(tr("Play GAMMA"))
             play.setObjectName("primary")
             self._play_button = play
             install_hover_grow_text(play, "accent_text")
             play.clicked.connect(self._play_gamma)
+            play.clicked.connect(play_click_sound)
             layout.addWidget(play)
             QTimer.singleShot(0, self._bind_play_state)
             grid = QGridLayout()
@@ -533,7 +954,7 @@ class DashboardPage(QWidget):
             layout.addLayout(grid)
 
     def _bind_play_state(self) -> None:
-        play_page = self.window._pages.get("play")
+        play_page = getattr(self.window, "_pages", {}).get("play")
         button = getattr(self, "_play_button", None)
         if play_page is None or button is None:
             return
@@ -553,8 +974,11 @@ class DashboardPage(QWidget):
     def on_busy_changed(self, busy: bool) -> None:
         """Mirror the Play page lock while installation work is active."""
         button = getattr(self, "_play_button", None)
-        if button is not None:
-            button.setEnabled(not busy and not self.window._pages["play"].is_launching)
+        if button is None:
+            return
+        play_page = getattr(self.window, "_pages", {}).get("play")
+        is_launching = play_page.is_launching if play_page is not None else False
+        button.setEnabled(not busy and not is_launching)
 
     def on_install_activity_changed(self, operation: str | None) -> None:
         """Show active Anomaly/GAMMA installs in the dashboard status card."""
@@ -563,10 +987,30 @@ class DashboardPage(QWidget):
         elif operation == "gamma" and hasattr(self, "gamma_status"):
             self.gamma_status.set_installing(tr("Installing GAMMA..."))
         elif operation is None and self.settings.active_profile is not None:
+            # Bump the generation the same way refresh() does: _render_
+            # install_status() below replaces self.winetricks_status with a
+            # new widget, but _render_winetricks_status()/_on_winetricks_
+            # error() only self-heal (re-render) a stale in-flight check
+            # when they see a generation mismatch - without bumping it
+            # here, a check started by an earlier refresh() that's still
+            # running when an install finishes sees a matching generation
+            # despite the widget having changed underneath it, so it just
+            # no-ops instead of re-rendering, leaving the new widget stuck
+            # on "Checking..." until the next real refresh().
+            self._refresh_generation += 1
             self._render_install_status()
 
     def _play_gamma(self) -> None:
-        play_page = self.window._pages.get("play")
+        # Play pages are built lazily by MainWindow, only on first visit to
+        # the Play tab - use _ensure_page() (falling back to a plain lookup
+        # for stub windows in tests) so clicking Play here builds it too,
+        # rather than silently no-op'ing because it was never visited yet.
+        ensure_page = getattr(self.window, "_ensure_page", None)
+        play_page = (
+            ensure_page("play")
+            if ensure_page is not None
+            else getattr(self.window, "_pages", {}).get("play")
+        )
         # Reject duplicate dashboard clicks before delegating to the Play page.
         if self.window.install_busy or play_page is None or play_page.is_launching:
             return

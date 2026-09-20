@@ -53,13 +53,33 @@ def _desktop_exec(parts: list[str]) -> str:
     any path containing a space (e.g. an AppImage under a directory with a
     space in its name) into multiple bogus arguments.
     """
+    # The Desktop Entry spec reserves these characters in an unquoted Exec=
+    # argument beyond whitespace/quotes/backslash - a path containing one
+    # (e.g. a folder named with "(", "&", "$", or a literal "'") would
+    # otherwise be emitted unquoted, a technically malformed value even if
+    # most real-world parsers tolerate it. Single quote is reserved too:
+    # left out of this set, a folder name containing one (e.g. "o'brien")
+    # would be emitted unquoted, and glib's g_shell_parse_argv (used by
+    # many desktop environments to launch autostart entries) treats a bare
+    # "'" as opening shell-style quoting - an odd number of them in the
+    # value makes the whole Exec= line fail to parse, silently breaking
+    # autostart for that path.
+    _RESERVED = "\"'\\`$&;<>~|*?#()"
     escaped: list[str] = []
     for part in parts:
         escaped_part = part.replace("%", "%%")
         if any(char.isspace() for char in escaped_part) or any(
-            char in escaped_part for char in '"\\'
+            char in escaped_part for char in _RESERVED
         ):
-            escaped_part = escaped_part.replace("\\", "\\\\").replace('"', '\\"')
+            # Per spec, only these four need their own backslash once
+            # inside the quotes - the rest of _RESERVED only matters
+            # unquoted (that's what decides whether to quote at all).
+            escaped_part = (
+                escaped_part.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("`", "\\`")
+                .replace("$", "\\$")
+            )
             escaped.append(f'"{escaped_part}"')
         else:
             escaped.append(escaped_part)

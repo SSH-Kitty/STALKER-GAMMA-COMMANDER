@@ -82,6 +82,7 @@ def _traceback_finding(
             "tool often clears one-off failures."
         ),
         excerpt_text=excerpt(lines, start, before=0, after=min(len(collected), 12)),
+        dedup_key=last_error_line or None,
         technical="\n".join(
             f"[line {start + i + 1}] {text}" for i, text in enumerate(collected)
         ),

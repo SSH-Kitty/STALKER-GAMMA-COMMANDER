@@ -186,12 +186,54 @@ def extract_archive(
         raise
 
 
+#: MO2's own STALKER Anomaly/GAMMA game-support plugin
+#: (game_stalkeranomaly.py, StalkerAnomalyModDataChecker._valid_folders)
+#: only recognizes a mod as valid if one of these sits at its top level -
+#: anything else gets flagged INVALID (a red X in MO2's Flags column)
+#: and the game's VFS never mounts it.
+_GAME_DATA_FOLDER_NAMES = {"appdata", "bin", "db", "gamedata"}
+
+
 def payload_root(staging: Path) -> Path:
-    """Return the archive payload, unwrapping one harmless root directory."""
-    children = list(staging.iterdir())
-    if len(children) == 1 and children[0].is_dir() and children[0].name != "fomod":
-        return children[0]
-    return staging
+    """Return the archive payload, unwrapping harmless root directories.
+
+    Peels consecutive single-child wrapper directories (an archiver
+    often wraps everything in a meaningless container folder). Never
+    unwraps *into* a lone top-level directory that is itself one of
+    MO2's recognized data folders (see _GAME_DATA_FOLDER_NAMES) - doing
+    so used to strip e.g. a mod's own "gamedata" wrapper entirely,
+    landing its contents with no recognized top-level folder at all and
+    getting the mod flagged INVALID by MO2, even though the archive was
+    perfectly valid.
+
+    The one exception: a recognized data folder whose own single child
+    is *another* directory with the exact same name (e.g.
+    "gamedata/gamedata/...") is a redundant duplicate wrapper, not the
+    real payload - that layer is still peeled through, landing on the
+    inner one. This keeps both cases correct: "gamedata/<real files>"
+    is returned as-is (so "gamedata" lands at the mod's top level), while
+    "gamedata/gamedata/<real files>" collapses to a single "gamedata".
+    """
+    current = staging
+    while True:
+        children = list(current.iterdir())
+        if len(children) != 1 or not children[0].is_dir():
+            return current
+        child = children[0]
+        if child.name == "fomod":
+            return current
+        if child.name.lower() not in _GAME_DATA_FOLDER_NAMES:
+            current = child
+            continue
+        grandchildren = list(child.iterdir())
+        if (
+            len(grandchildren) == 1
+            and grandchildren[0].is_dir()
+            and grandchildren[0].name.lower() == child.name.lower()
+        ):
+            current = child
+            continue
+        return current
 
 
 def move_payload(
@@ -217,6 +259,30 @@ def move_payload(
         raise
 
 
+def write_basic_meta_ini(destination: Path, installation_file: str) -> None:
+    """Write a minimal MO2-style meta.ini into a freshly installed mod.
+
+    MO2's own installer always writes one; this app previously wrote
+    none at all, which is a real (if secondary - it doesn't affect
+    whether MO2 considers the mod's file layout valid) divergence from
+    installing the same mod through MO2 directly. Skips writing if the
+    mod's own archive already shipped a meta.ini, so this never
+    clobbers real metadata.
+    """
+    target = destination / "meta.ini"
+    if target.exists():
+        return
+    target.write_text(
+        "[General]\n"
+        "gameName=stalkeranomaly\n"
+        "modid=0\n"
+        "version=\n"
+        f"installationFile={installation_file}\n"
+        "[installedFiles]\n",
+        encoding="utf-8",
+    )
+
+
 def install_archive(
     archive: Path,
     mods_dir: Path,
@@ -231,5 +297,5 @@ def install_archive(
     with tempfile.TemporaryDirectory(prefix="gamma-mod-") as temp:
         staging = Path(temp) / "payload"
         extract_archive(archive, staging, cancel_event, progress)
-        move_payload(staging, mods_dir / mod_name)
+        move_payload(staging, mods_dir / mod_name, cancel_event)
     return mod_name

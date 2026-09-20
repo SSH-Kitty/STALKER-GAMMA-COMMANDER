@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import shutil
 
 from .atomic import write_text
@@ -37,6 +38,21 @@ _DEFAULTS = {
     "move_expected": [],  # destination folder names owned by an in-progress move
     "window_width": 1080,
     "window_height": 950,
+    "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
+    "playtime_seconds": {},  # accumulated play time per profile name, in seconds
+    "last_played_ts": {},  # time.time() a session last ended, per profile name
+    "flip_priority_pending": {},  # profile name -> True after Flip Priority is used, until the next play session ends
+    "user_created_categories": {},  # profile name -> list of category names the user created (deletable); official GAMMA categories are never in this list
+    "discord_rpc_enabled": False,  # show "Playing S.T.A.L.K.E.R. GAMMA" on Discord
+    "discord_client_id": "",  # user's own Discord Application Client ID (developers.discord.com)
+    # Steam Deck Mode (the separate `Steamdeck` GUI). Deliberately a small,
+    # self-contained set: Deck Mode shares runner/prefix/target/theme/language
+    # and the playtime tallies with the desktop UI, because switching modes
+    # must not change which profile or runner you play with.
+    "deck_mode_preference": "ask",  # "ask" | "always" | "never" - auto-start on Deck hardware
+    "deck_font_scale": 100,  # percent; scales the Deck UI's fonts only, never the desktop UI
+    "deck_start_screen": "play",  # Deck screen shown on launch (key into Steamdeck.screens.SCREENS)
+    "deck_runner_confirmed": False,  # user picked a runner once in Deck Mode
 }
 
 _cache: dict | None = None
@@ -82,7 +98,11 @@ def load_gui_settings() -> dict:
         data["theme"] = "gamma"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
         data["language"] = "en"
-    if data.get("start_page") not in {
+    # A hand-edited or corrupted settings file can hold any JSON type here,
+    # and an unhashable one (a list, an object) makes `x not in {...}` raise
+    # TypeError rather than simply fail the check - which would crash the
+    # app during startup, before any window exists to report it.
+    if not isinstance(data.get("start_page"), str) or data.get("start_page") not in {
         "dashboard",
         "systemcheck",
         "play",
@@ -95,29 +115,69 @@ def load_gui_settings() -> dict:
         "about",
     }:
         data["start_page"] = "dashboard"
+    if not isinstance(data.get("deck_mode_preference"), str) or data[
+        "deck_mode_preference"
+    ] not in {"ask", "always", "never"}:
+        data["deck_mode_preference"] = "ask"
+    # Hardcoded for the same reason start_page above is: deriving this from
+    # Steamdeck.screens.SCREENS would make this module import the Deck GUI,
+    # inverting the dependency (Steamdeck imports commander_gui, never the
+    # other way round). tests/test_steamdeck.py asserts the two stay in sync.
+    if not isinstance(data.get("deck_start_screen"), str) or data[
+        "deck_start_screen"
+    ] not in {
+        "dashboard",
+        "play",
+        "install",
+        "update",
+        "mods",
+        "profile",
+        "system",
+        "settings",
+    }:
+        data["deck_start_screen"] = "play"
     try:
         font_size = int(data.get("font_size", 13))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads() accepts the bare "Infinity"/"-Infinity"
+        # tokens as real floats, and int() on a non-finite float raises
+        # OverflowError rather than ValueError - a corrupt/hand-edited
+        # gui-settings.json with "font_size": Infinity would otherwise crash
+        # load_gui_settings() itself, called during startup.
         font_size = 13
     data["font_size"] = min(22, max(9, font_size))
+    try:
+        deck_font_scale = int(data.get("deck_font_scale", 100))
+    except (TypeError, ValueError, OverflowError):
+        # Same OverflowError guard as font_size above: a hand-edited
+        # gui-settings.json containing the bare JSON token Infinity parses
+        # to a float that int() refuses to convert.
+        deck_font_scale = 100
+    data["deck_font_scale"] = min(150, max(80, deck_font_scale))
     for key in ("window_width", "window_height"):
         try:
             size = int(data.get(key, _DEFAULTS[key]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             size = _DEFAULTS[key]
         data[key] = min(3840, max(640, size))
     _allowed_fonts = {
         "Exo 2",
         "Noto Sans",
         "DejaVu Sans",
-        "Ubuntu",
         "Liberation Sans",
         "Inter",
     }
     font_family = data.get("font_family")
     if not isinstance(font_family, str) or font_family not in _allowed_fonts:
         data["font_family"] = "Exo 2"
-    for key in ("always_gamemoderun", "autostart"):
+    if not isinstance(data.get("discord_client_id"), str):
+        data["discord_client_id"] = ""
+    for key in (
+        "always_gamemoderun",
+        "autostart",
+        "discord_rpc_enabled",
+        "deck_runner_confirmed",
+    ):
         v = data.get(key)
         if isinstance(v, bool):
             pass
@@ -133,6 +193,48 @@ def load_gui_settings() -> dict:
             if isinstance(value, dict)
             else {}
         )
+    playtime = data.get("playtime_seconds")
+    data["playtime_seconds"] = (
+        {
+            str(k): float(v)
+            for k, v in playtime.items()
+            if isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+            and v >= 0
+        }
+        if isinstance(playtime, dict)
+        else {}
+    )
+    last_played = data.get("last_played_ts")
+    data["last_played_ts"] = (
+        {
+            str(k): float(v)
+            for k, v in last_played.items()
+            if isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+            and v >= 0
+        }
+        if isinstance(last_played, dict)
+        else {}
+    )
+    flip_pending = data.get("flip_priority_pending")
+    data["flip_priority_pending"] = (
+        {str(k): bool(v) for k, v in flip_pending.items() if isinstance(v, bool)}
+        if isinstance(flip_pending, dict)
+        else {}
+    )
+    user_categories = data.get("user_created_categories")
+    data["user_created_categories"] = (
+        {
+            str(k): [n for n in v if isinstance(n, str)]
+            for k, v in user_categories.items()
+            if isinstance(v, list)
+        }
+        if isinstance(user_categories, dict)
+        else {}
+    )
     if not isinstance(data.get("move_dest"), str):
         data["move_dest"] = ""
     if not isinstance(data.get("move_expected"), list):
@@ -140,7 +242,7 @@ def load_gui_settings() -> dict:
     data["move_expected"] = [x for x in data["move_expected"] if isinstance(x, str)]
     try:
         dpi = int(data.get("mo2_display_dpi", 120))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         dpi = 120
     data["mo2_display_dpi"] = dpi if dpi in {96, 120, 144, 168, 192} else 120
     _cache = copy.deepcopy(data)
@@ -158,13 +260,21 @@ def save_gui_settings(**changes) -> None:
     data = load_gui_settings()
     data.update(changes)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Preserve a last-known-good backup before overwriting.
+    # Preserve a last-known-good backup before overwriting - but only if the
+    # current file is actually valid JSON. Copying a corrupted file over the
+    # backup would destroy the one thing load_gui_settings() falls back to
+    # when corruption strikes, leaving no way to recover the next time.
     if path.exists():
         try:
-            backup = path.with_suffix(".json.last-good")
-            shutil.copy2(path, backup)
-        except OSError:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
             pass
+        else:
+            try:
+                backup = path.with_suffix(".json.last-good")
+                shutil.copy2(path, backup)
+            except OSError:
+                pass
     write_text(path, json.dumps(data, indent=2) + "\n")
     _cache = None
     _cache_path_str = ""
@@ -185,3 +295,27 @@ def configured_wine_prefix() -> str:
     return wine_prefix_for(
         state.get("runner") or "auto", state.get("wine_prefix") or ""
     )
+
+
+def configured_runner():
+    """The Runner the saved settings describe, resolved.
+
+    The same choice the Play page makes from its combo and prefix box, taken
+    from the saved ``runner`` key and the raw (not ``pfx``-resolved) prefix
+    stored for it. Anything that must act on the game's prefix with the
+    game's own Wine - installing winetricks verbs, repairing the prefix -
+    goes through this so it can never pick a different Wine than a launch
+    would.
+    """
+    from pathlib import Path
+
+    from .launcher import resolve_runner  # deferred: keeps this module leaf-ish
+
+    state = load_gui_settings()
+    kind = state.get("runner") or "auto"
+    prefixes = state.get("prefixes") or {}
+    prefix = prefixes.get(kind) or state.get("wine_prefix") or ""
+    if kind.startswith("proton:") and Path(prefix).name == "umu-default":
+        # Older builds could carry the UMU default into a Steam Proton runner.
+        prefix = ""
+    return resolve_runner(kind, prefix)

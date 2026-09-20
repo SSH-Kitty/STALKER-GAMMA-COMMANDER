@@ -181,12 +181,42 @@ class DumpArchive:
                     is_text=is_text,
                 )
                 if is_text:
+                    # A zip entry's declared file_size is attacker-controlled
+                    # metadata, not verified against the actual compressed
+                    # payload - zf.read() would decompress the whole thing
+                    # into memory in one call before any size check runs,
+                    # so a crafted entry claiming a small size but expanding
+                    # to gigabytes bypasses MAX_TEXT_BYTES/MAX_TOTAL_TEXT_BYTES
+                    # entirely (only failing on a CRC mismatch afterward,
+                    # once the memory is already allocated). Reading in
+                    # bounded chunks caps the ACTUAL bytes decompressed
+                    # regardless of what the entry claims.
+                    chunks: list[bytes] = []
+                    read_bytes = 0
                     try:
-                        raw = zf.read(info)
+                        with zf.open(info) as fh:
+                            while True:
+                                chunk = fh.read(1_048_576)
+                                if not chunk:
+                                    break
+                                read_bytes += len(chunk)
+                                if (
+                                    read_bytes > MAX_TEXT_BYTES
+                                    or decoded_text_bytes + read_bytes
+                                    > MAX_TOTAL_TEXT_BYTES
+                                ):
+                                    raise DumpError(
+                                        f"{resolved.name} contains an entry "
+                                        "larger than its declared size."
+                                    )
+                                chunks.append(chunk)
+                    except DumpError:
+                        raise
                     except _ZIP_READ_ERRORS as exc:
                         raise DumpError(
                             f"Could not read {resolved.name}: {exc}"
                         ) from exc
+                    raw = b"".join(chunks)
                     decoded_text_bytes += len(raw)
                     if decoded_text_bytes > MAX_TOTAL_TEXT_BYTES:
                         raise DumpError(

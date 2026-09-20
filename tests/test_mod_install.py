@@ -27,7 +27,6 @@ from commander_gui.modlist import (
     flip_priority,
     grouped,
     move_mod,
-    reorder_mods,
     seed_new_mo2_profile,
 )
 
@@ -51,6 +50,25 @@ class ModInstallTests(unittest.TestCase):
         )
         self.assertEqual(count_mods(lines), (enabled_from_grouped, total_from_grouped))
 
+    def test_count_mods_excludes_entries_with_no_folder_on_disk(self):
+        """Regression test: a mod listed in modlist.txt but never actually
+
+        extracted (e.g. one archive that failed while everything else
+        succeeded during install) must not inflate the count - it was
+        never really installed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp) / "mods"
+            (mods_dir / "ModA").mkdir(parents=True)
+            (mods_dir / "ModC").mkdir(parents=True)
+            # ModB is listed but its folder was never created.
+            lines = ["+ModA", "-ModB", "-Weapons_separator", "+ModC"]
+            self.assertEqual(count_mods(lines, mods_dir=mods_dir), (2, 2))
+
+    def test_count_mods_without_mods_dir_keeps_old_behavior(self):
+        lines = ["+ModA", "-ModB", "-Weapons_separator", "+ModC"]
+        self.assertEqual(count_mods(lines), (2, 3))
+
     def test_sanitize_name_rejects_empty_and_path_parts(self):
         self.assertEqual(sanitize_name(" My Mod "), "My Mod")
         self.assertEqual(sanitize_name("folder/name"), "folder name")
@@ -61,13 +79,16 @@ class ModInstallTests(unittest.TestCase):
 
     def test_add_mod_appends_disabled_entry(self):
         lines = ["# GAMMA", "+Existing"]
-        # Newly installed mods land at the very top of the list (after any
-        # leading comment line), with no category - matching real MO2's
-        # landing spot for a fresh install. The mod starts disabled so it
-        # cannot alter a working GAMMA setup.
+        # Newly installed mods are appended at the very end of the file,
+        # with no category - MO2 writes modlist.txt with file-end as the
+        # LOWEST-priority mod, rendered at the on-screen TOP (confirmed
+        # against MO2's own source - see add_mod()'s docstring), so this
+        # is what actually lands a fresh install at the top of the list on
+        # screen, matching real MO2. The mod starts disabled so it cannot
+        # alter a working GAMMA setup.
         self.assertEqual(
             add_mod(lines, "New Mod"),
-            ["# GAMMA", "-New Mod", "+Existing"],
+            ["# GAMMA", "+Existing", "-New Mod"],
         )
         with self.assertRaises(ValueError):
             add_mod(lines, "Existing")
@@ -82,17 +103,19 @@ class ModInstallTests(unittest.TestCase):
         )
 
     def test_add_mod_with_new_category_appends_mod_then_separator(self):
+        # "+A" has no separator after it, so it sits in the file's trailing
+        # "nothing closes it" zone - grouped() renders that as
+        # "Uncategorized" (see its own docstring). The new "Extras"
+        # category must land *before* that zone, not after it: appending
+        # unconditionally at the absolute end would put "+A" above the new
+        # "-Extras_separator" line with nothing else in between, which
+        # grouped() would then read as "+A" being a *member* of Extras
+        # (a separator claims everything above it back to the previous
+        # one) - silently recategorizing a pre-existing, unrelated mod.
         lines = ["+A"]
         self.assertEqual(
             add_mod(lines, "New Mod", category="Extras"),
-            ["+A", "-New Mod", "-Extras_separator"],
-        )
-
-    def test_reorder_mods_moves_down_without_skipping_target(self):
-        lines = ["# GAMMA", "+A", "-B", "+C"]
-        self.assertEqual(
-            reorder_mods(lines, 1, 3),
-            ["# GAMMA", "-B", "+A", "+C"],
+            ["-New Mod", "-Extras_separator", "+A"],
         )
 
     def test_move_mod_preserves_status_and_can_target_empty_category(self):
@@ -130,6 +153,12 @@ class ModInstallTests(unittest.TestCase):
         # then its separator) moves to the front with its own mods
         # reversed, and the "Graphics" block (A, then its separator) moves
         # after it.
+        #
+        # This function is direction-agnostic (pure file-index reversal) -
+        # it's mod_manager_page._populate_tree() that renders grouped()'s
+        # output bottom-to-top to match real MO2 (see its comment). So this
+        # result, being now first in FILE order, is what ends up rendered
+        # at the on-screen BOTTOM after a flip, not the top.
         lines = ["+A", "-Graphics_separator", "-B", "+C", "-Empty_separator"]
         self.assertEqual(
             flip_priority(lines),
@@ -258,6 +287,48 @@ class ModInstallTests(unittest.TestCase):
 
             self.assertEqual(
                 (destination_dir / "modlist.txt").read_text(), "+Custom Mod\n"
+            )
+
+    def test_seed_new_mo2_profile_also_copies_the_modpack_maker_list(self):
+        """Regression test: Updates/Dashboard read modpack_maker_list.txt
+
+        (not modlist.txt) to show real update status - a profile that's
+        really just a copy of an already fully-installed one otherwise
+        looks completely uninstalled to them ("No modpack list found in
+        this profile. Run a full install...").
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            source = gamma / "profiles" / "G.A.M.M.A"
+            source.mkdir(parents=True)
+            (source / "modlist.txt").write_text("+Real Mod\n-Audio_separator\n")
+            (source / "modpack_maker_list.txt").write_text("1\tReal Mod\t1.0\n")
+
+            self.assertTrue(seed_new_mo2_profile(gamma, "NewProfile"))
+
+            destination = gamma / "profiles" / "NewProfile"
+            self.assertEqual(
+                (destination / "modpack_maker_list.txt").read_text(),
+                "1\tReal Mod\t1.0\n",
+            )
+
+    def test_seed_new_mo2_profile_never_overwrites_an_existing_modpack_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            source = gamma / "profiles" / "G.A.M.M.A"
+            source.mkdir(parents=True)
+            (source / "modlist.txt").write_text("+Real Mod\n")
+            (source / "modpack_maker_list.txt").write_text("source version\n")
+            destination = gamma / "profiles" / "NewProfile"
+            destination.mkdir(parents=True)
+            (destination / "modpack_maker_list.txt").write_text("already here\n")
+
+            # modlist.txt still gets seeded (destination has none of its
+            # own yet) - only the modpack list is left alone.
+            self.assertTrue(seed_new_mo2_profile(gamma, "NewProfile"))
+
+            self.assertEqual(
+                (destination / "modpack_maker_list.txt").read_text(), "already here\n"
             )
 
     def test_seed_new_mo2_profile_does_nothing_without_a_source(self):
@@ -431,8 +502,13 @@ class ModInstallTests(unittest.TestCase):
             destination = root / "selected"
             apply_options(config, root, destination, {(0, 0): [0]})
 
+            # An explicit destination places the folder's CONTENTS there,
+            # not nested under the source's own basename (see
+            # test_fomod_folder_with_explicit_named_destination_still_renames
+            # in test_regressions.py) - "gamedata" here is destination="gamedata",
+            # not a second copy of the source folder's own name.
             self.assertEqual(
-                (destination / "gamedata" / "gamedata" / "config.ltx").read_text(
+                (destination / "gamedata" / "config.ltx").read_text(
                     encoding="utf-8"
                 ),
                 "data",

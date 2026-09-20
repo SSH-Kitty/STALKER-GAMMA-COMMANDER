@@ -70,6 +70,14 @@ class Finding:
     excerpt: str = ""
     technical: str = ""
     count: int = 1
+    #: Untruncated identity for collapse_findings() to merge on, for
+    #: analyzers whose displayed `title` is truncated (e.g. to a fixed
+    #: character count) - without this, two genuinely different messages
+    #: that happen to share the same truncated prefix would silently
+    #: merge into one, discarding the second one's actual detail. Falls
+    #: back to `title` itself when unset (the common case, title already
+    #: is the full identity).
+    dedup_key: str | None = None
 
     def where_text(self) -> str:
         """Human-readable location string, e.g. ``file.log · line 24 · 3x``."""
@@ -94,7 +102,7 @@ def sort_findings(findings: Iterable[Finding]) -> list[Finding]:
     )
 
 
-_COLLAPSE_KEY_FIELDS = ("severity", "category", "title", "arcname")
+_COLLAPSE_KEY_FIELDS = ("severity", "category", "arcname")
 
 
 def collapse_findings(findings: Iterable[Finding]) -> list[Finding]:
@@ -102,14 +110,19 @@ def collapse_findings(findings: Iterable[Finding]) -> list[Finding]:
 
     Repeated log lines (43 identical ``dlopen`` failures, the same failed
     install reported twice, ...) would otherwise flood the UI. Findings are
-    merged when severity, category, title and file all match; the earliest
-    line number and excerpt are kept and technical details concatenated
-    (capped so pathological logs cannot blow up the report).
+    merged when severity, category, file and identity (``dedup_key``, or
+    ``title`` itself when an analyzer didn't need to truncate it) all
+    match; the earliest line number and excerpt are kept and technical
+    details concatenated (capped so pathological logs cannot blow up the
+    report).
     """
     key_to_index: dict[tuple, int] = {}
     merged: list[Finding] = []
     for finding in findings:
-        key = tuple(getattr(finding, name) for name in _COLLAPSE_KEY_FIELDS)
+        key = (
+            *(getattr(finding, name) for name in _COLLAPSE_KEY_FIELDS),
+            finding.dedup_key or finding.title,
+        )
         index = key_to_index.get(key)
         if index is None:
             key_to_index[key] = len(merged)
