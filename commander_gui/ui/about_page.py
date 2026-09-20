@@ -6,9 +6,10 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from .. import __version_label__
+from .. import __version__, __version_label__
 from ..config import cli_binary_path, gui_settings_path, logs_dir, settings_path
-from .common import info_label, make_card, section_label, tr
+from ..updates import check_commander_update
+from .common import BackgroundTask, info_label, make_card, section_label, tr
 
 _GITHUB = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
 
@@ -45,15 +46,6 @@ class AboutPage(QWidget):
         root.setSpacing(14)
         scroll.setWidget(content)
 
-        title = section_label(tr("ABOUT"), level=1)
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(title)
-        subtitle = info_label(
-            tr("A focused Linux desktop companion for installing, managing and playing GAMMA.")
-        )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(subtitle)
-
         root.addWidget(self._hero_card())
         root.addWidget(self._included_card())
         root.addWidget(self._how_it_works_card())
@@ -65,6 +57,7 @@ class AboutPage(QWidget):
         root.addStretch(1)
 
         self.refresh()
+        self._check_for_commander_update()
 
     def _hero_card(self) -> QWidget:
         card, layout = make_card()
@@ -77,7 +70,33 @@ class AboutPage(QWidget):
                 tr("COMMANDER is a GUI around FaithBeam/stalker-gamma-cli. It keeps the CLI's installation workflow and adds a practical desktop interface for management, launch and repair tasks.")
             )
         )
+        self.update_button = QPushButton("")
+        self.update_button.setObjectName("primary")
+        self.update_button.hide()
+        self.update_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(f"{_GITHUB}/releases"))
+        )
+        layout.addWidget(self.update_button)
         return card
+
+    def _check_for_commander_update(self) -> None:
+        """Best-effort, non-blocking check for a newer COMMANDER release.
+
+        Just a notice with a link to the Releases page - not an
+        auto-updater, so there is no elevated-permissions or
+        replace-the-running-binary complexity to get right.
+        """
+        task = BackgroundTask(check_commander_update, __version__, parent=self)
+        task.result.connect(self._on_commander_update_checked)
+        task.start()
+
+    def _on_commander_update_checked(self, tag: object) -> None:
+        if not tag or not isinstance(tag, str):
+            return
+        self.update_button.setText(
+            tr("Update available: {tag} — open Releases", tag=tag)
+        )
+        self.update_button.show()
 
     def _included_card(self) -> QWidget:
         card, layout = make_card()
@@ -134,22 +153,23 @@ class AboutPage(QWidget):
         card, layout = make_card()
         layout.addWidget(section_label(tr("Current environment"), level=2))
         self.profile_value = self._path_row(layout, tr("Active profile"), "")
-        self.cli_value = self._path_row(layout, tr("CLI binary"), str(cli_binary_path()))
-        self.settings_value = self._path_row(layout, tr("CLI settings"), str(settings_path()))
-        self.gui_settings_value = self._path_row(
-            layout, tr("GUI settings"), str(gui_settings_path())
-        )
-        self.logs_value = self._path_row(layout, tr("Logs"), str(logs_dir()))
+        self._path_row(layout, tr("CLI binary"), str(cli_binary_path()))
+        self._path_row(layout, tr("CLI settings"), str(settings_path()))
+        self._path_row(layout, tr("GUI settings"), str(gui_settings_path()))
+        self._path_row(layout, tr("Logs"), str(logs_dir()))
         return card
 
     def _credits_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label(tr("Credits"), level=2))
         for line in (
-            tr("FaithBeam — stalker-gamma-cli, the CLI this GUI drives."),
+            tr("SSH-Kitty — COMMANDER graphical user interface."),
+            tr(
+                "Dnttnd — testing implementations, dev builds, bug reports, and helping polish the UI."
+            ),
+            tr("FaithBeam — the STALKER-GAMMA CLI."),
             tr("Grokitach and the GAMMA team — the GAMMA modpack."),
             tr("GSC Game World and the Anomaly team — the game."),
-            tr("SSH-Kitty — the COMMANDER graphical interface."),
         ):
             layout.addWidget(info_label(tr("• {line}", line=line)))
         return card

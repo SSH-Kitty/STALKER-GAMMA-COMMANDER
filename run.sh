@@ -44,5 +44,19 @@ if [ "$requirements_hash" != "$saved_hash" ]; then
     printf '%s\n' "$requirements_hash" > "$REQUIREMENTS_HASH_FILE"
 fi
 
+# The venv is ready, so drop the setup lock before handing off. `exec N>file`
+# does not set FD_CLOEXEC and a flock lives on the open file description, so
+# without this the GUI would inherit fd 9 and hold the lock for as long as it
+# runs - blocking the next ./run.sh at the `flock -x 9` above, however the
+# app's own instance rule is set.
+exec 9>&-
+
+# Opt this launch out of the single-instance rule, so several source builds
+# can run side by side while developing (see multiple_instances_allowed() in
+# commander_gui/config.py). The shipped AppImage and AUR package never set
+# this and are unaffected. An existing value wins, so
+# `COMMANDER_ALLOW_MULTIPLE=0 ./run.sh` still behaves like a release build.
+export COMMANDER_ALLOW_MULTIPLE="${COMMANDER_ALLOW_MULTIPLE:-1}"
+
 cd "$SCRIPT_DIR"
 exec "$VENV_DIR/bin/python" -m commander_gui "$@"

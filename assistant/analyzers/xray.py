@@ -53,7 +53,7 @@ def analyze_xray(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                 )
             )
         match = _ENGINE_BUILD_RE.search(line)
-        if match and not any(f.title.startswith("Engine") for f in findings):
+        if match and not any(f.title.startswith("Game engine started") for f in findings):
             findings.append(
                 factory.make(
                     Severity.INFO,

@@ -9,10 +9,19 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    Qt,
+    QTimer,
+    QUrl,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -34,6 +43,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -44,6 +55,7 @@ from .. import gui_settings
 from ..cli_runner import run_sync
 from ..config import logs_dir
 from ..fomod import FomodConfig, apply_options, parse_config
+from ..integrity import _md5_file, invalidate_baseline
 from ..launcher import (
     LaunchError,
     build_command,
@@ -57,22 +69,35 @@ from ..mod_install import (
     extract_archive,
     move_payload,
     sanitize_name,
+    write_basic_meta_ini,
 )
 from ..modlist import (
+    _line_info,
+    _valid_name,
     add_category,
-    add_mod,
+    add_custom_mod,
+    custom_mod_names,
     delete_at,
+    delete_category,
+    find_enabled_mod_file_conflicts,
     flip_priority,
     grouped,
     install_conflict,
     move,
+    move_category,
     move_mod,
     read_lines,
+    rename_category,
     rename_mod,
     reorder_to_original,
     save_lines,
+    seed_new_mo2_profile,
+    separator_name,
     set_status_at,
+    summarize_mod_conflicts,
 )
+from ..themes import active_theme_tokens
+from ..updates import local_modpack_records
 from .common import (
     ACCENT,
     ITEM_GREEN,
@@ -101,12 +126,22 @@ class DragTree(QTreeWidget):
     """
 
     mod_dropped = Signal(str, object, str, bool)
+    #: source_category, target_category, before
+    category_dropped = Signal(str, str, bool)
+    #: Emitted when a drag ends over empty space/an invalid target -
+    #: lets the page surface "that drop didn't do anything" feedback
+    #: instead of the drag silently vanishing with no explanation.
+    drop_cancelled = Signal()
     _SCROLL_MARGIN = 40
     _SCROLL_STEP = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drag_source_name: str | None = None
+        #: Set instead of _drag_source_name when dragging a whole
+        #: category header (with all its member mods) rather than a
+        #: single mod row - the two are mutually exclusive per drag.
+        self._drag_source_category: str | None = None
         self._drag_active = False
         self._drag_label: QLabel | None = None
         self._press_x = 0
@@ -115,6 +150,8 @@ class DragTree(QTreeWidget):
         self._scroll_timer = QTimer(self)
         self._scroll_timer.setInterval(16)
         self._scroll_timer.timeout.connect(self._auto_scroll)
+        self._hover_header_item = None
+        self._hover_header_original_bg = None
         self._drop_indicator = QFrame(self.viewport())
         self._drop_indicator.setFrameShape(QFrame.Shape.HLine)
         self._drop_indicator.setLineWidth(2)
@@ -127,6 +164,15 @@ class DragTree(QTreeWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setMouseTracking(True)
+        # Pixel-based scrolling, not Qt's default per-item mode - lets
+        # wheelEvent() below animate toward a real pixel offset instead of
+        # jumping by a row-index delta (see wheelEvent's docstring).
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._scroll_anim_target = None
+        self._scroll_anim = QVariantAnimation(self)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scroll_anim.setDuration(180)
+        self._scroll_anim.valueChanged.connect(self._apply_animated_scroll)
 
     def _find_scroll_area(self):
         """Walk up the widget tree to find the parent QScrollArea."""
@@ -167,19 +213,65 @@ class DragTree(QTreeWidget):
         self._scroll_direction = 0
         self._drag_active = False
         self._drag_source_name = None
+        self._drag_source_category = None
+
+    def _header_row_index(self, category: str) -> int | None:
+        for i in range(self.topLevelItemCount()):
+            if self.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) == category:
+                return i
+        return None
 
     def _hide_drop_indicator(self) -> None:
         if self._drop_indicator is not None and not self._drop_indicator.isHidden():
             self._drop_indicator.hide()
+        self._set_hover_header(None)
+
+    def _set_hover_header(self, header) -> None:
+        """Highlight the header row a drop would currently land on/in.
+
+        Distinct from the thin drop-line indicator: that shows the exact
+        before/after slot, this shows *which category* is the target at
+        a glance, independent of hovering a header row directly or one
+        of its mod rows.
+        """
+        if header is getattr(self, "_hover_header_item", None):
+            return
+        previous = getattr(self, "_hover_header_item", None)
+        if previous is not None:
+            try:
+                previous.setBackground(0, self._hover_header_original_bg)
+                previous.setBackground(1, self._hover_header_original_bg)
+            except RuntimeError:
+                pass  # the item/tree was rebuilt mid-drag
+        if header is not None:
+            self._hover_header_original_bg = header.background(0)
+            highlight = QColor(ACCENT)
+            highlight.setAlpha(60)
+            header.setBackground(0, highlight)
+            header.setBackground(1, highlight)
+        self._hover_header_item = header
 
     def _update_drop_indicator(self, pos) -> None:
-        """Show a bar at the slot the dragged mod will land in, if any."""
+        """Show a bar at the slot the dragged item will land in, if any."""
         drop_item = self.itemAt(pos.x(), pos.y())
         if drop_item is None:
             self._hide_drop_indicator()
             return
-        item_rect = self.visualItemRect(drop_item)
-        before = pos.y() < item_rect.center().y()
+        if self._drag_source_category is not None:
+            # A category can only be dropped relative to another
+            # category's header, never inside a specific mod slot.
+            header = drop_item if drop_item.parent() is None else drop_item.parent()
+            if header.data(0, Qt.ItemDataRole.UserRole) == self._drag_source_category:
+                self._hide_drop_indicator()
+                return
+            item_rect = self.visualItemRect(header)
+            before = pos.y() < item_rect.center().y()
+            self._set_hover_header(header)
+        else:
+            item_rect = self.visualItemRect(drop_item)
+            before = pos.y() < item_rect.center().y()
+            header = drop_item if drop_item.parent() is None else drop_item.parent()
+            self._set_hover_header(header)
         self._drop_indicator.setGeometry(
             0,
             item_rect.top() if before else item_rect.bottom() - 1,
@@ -190,28 +282,52 @@ class DragTree(QTreeWidget):
         self._drop_indicator.raise_()
 
     def mousePressEvent(self, event) -> None:
-        """Begin tracking when the user presses on a mod item."""
+        """Begin tracking when the user presses on a mod or header item."""
         super().mousePressEvent(event)
+        self._drag_source_name = None
+        self._drag_source_category = None
         if event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.position().toPoint())
-            if item is not None and item.parent() is not None:
-                self._drag_source_name = item.text(0)
-                self._drag_active = False
-                self._press_x = event.position().toPoint().x()
-                self._press_y = event.position().toPoint().y()
-                return
-        self._drag_source_name = None
+            if item is not None:
+                if item.parent() is not None:
+                    self._drag_source_name = item.text(0)
+                else:
+                    category = item.data(0, Qt.ItemDataRole.UserRole)
+                    # "Uncategorized" has no separator line to move by
+                    # name - not draggable as a whole category.
+                    if category is not None and category != "Uncategorized":
+                        self._drag_source_category = category
+                if self._drag_source_name is not None or self._drag_source_category is not None:
+                    self._drag_active = False
+                    self._press_x = event.position().toPoint().x()
+                    self._press_y = event.position().toPoint().y()
 
     def mouseMoveEvent(self, event) -> None:
         """Track the cursor during a manual drag."""
-        if self._drag_source_name is not None:
+        if self._drag_source_name is not None or self._drag_source_category is not None:
             pos = event.position().toPoint()
             if not self._drag_active:
                 dx = abs(pos.x() - self._press_x)
                 dy = abs(pos.y() - self._press_y)
                 if dx + dy > QApplication.startDragDistance():
                     self._drag_active = True
-                    self._drag_label = QLabel(self._drag_source_name, self.viewport())
+                    if self._drag_source_category is not None:
+                        # Distinct from a single-mod drag label, so it's
+                        # clear at a glance an entire category (and all
+                        # its mods) is what's being moved.
+                        header_index = self._header_row_index(self._drag_source_category)
+                        header_item = (
+                            self.topLevelItem(header_index) if header_index is not None else None
+                        )
+                        count = header_item.childCount() if header_item is not None else 0
+                        label_text = tr(
+                            "{category} ({count} mods)",
+                            category=self._drag_source_category,
+                            count=count,
+                        )
+                    else:
+                        label_text = self._drag_source_name
+                    self._drag_label = QLabel(label_text, self.viewport())
                     self._drag_label.setStyleSheet(
                         f"background: {ACCENT.name()}; color: white; "
                         "padding: 2px 6px; border-radius: 3px; font-weight: bold;"
@@ -239,8 +355,9 @@ class DragTree(QTreeWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
-        """Complete the drag by emitting ``mod_dropped``."""
-        if self._drag_active and self._drag_source_name is not None:
+        """Complete the drag by emitting mod_dropped/category_dropped."""
+        dragging_category = self._drag_source_category is not None
+        if self._drag_active and (self._drag_source_name is not None or dragging_category):
             pos = event.position().toPoint()
             if self._drag_label is not None:
                 self._drag_label.deleteLater()
@@ -250,52 +367,89 @@ class DragTree(QTreeWidget):
             self._scroll_direction = 0
             drop_item = self.itemAt(pos.x(), pos.y())
             source = self._drag_source_name
+            source_category = self._drag_source_category
+            self._drag_active = False
+            self._drag_source_name = None
+            self._drag_source_category = None
             if drop_item is None:
-                # Released over empty space: treat as a cancelled drag rather
-                # than silently re-filing the mod into the last category.
-                self._drag_active = False
-                self._drag_source_name = None
+                # Released over empty space: treat as a cancelled drag
+                # rather than silently re-filing into the last category.
+                self.drop_cancelled.emit()
                 return
+            target_header = (
+                drop_item if drop_item.parent() is None else drop_item.parent()
+            )
+            target_category = target_header.data(0, Qt.ItemDataRole.UserRole)
+            if dragging_category:
+                if target_category is None or target_category == source_category:
+                    self.drop_cancelled.emit()
+                    return
+                item_rect = self.visualItemRect(target_header)
+                before = pos.y() < item_rect.center().y()
+                self.category_dropped.emit(source_category, target_category, before)
             else:
-                target_header = (
-                    drop_item if drop_item.parent() is None else drop_item.parent()
-                )
                 target_name = None if drop_item.parent() is None else drop_item.text(0)
                 item_rect = self.visualItemRect(drop_item)
                 before = pos.y() < item_rect.center().y()
-            self._drag_active = False
-            self._drag_source_name = None
-            self.mod_dropped.emit(source, target_name, target_header.text(0), before)
+                self.mod_dropped.emit(source, target_name, target_category, before)
             return
         self._drag_active = False
         self._drag_source_name = None
+        self._drag_source_category = None
         super().mouseReleaseEvent(event)
 
+    def _apply_animated_scroll(self, value) -> None:
+        if self._scroll_anim_target is not None:
+            self._scroll_anim_target.setValue(int(value))
+
     def wheelEvent(self, event) -> None:
-        """Forward wheel events to the appropriate scrollbar."""
+        """Animate wheel scrolling instead of jumping straight to the target.
+
+        The scrollbar is in ScrollPerPixel mode (see __init__), so its
+        units are pixels - directly subtracting the wheel's raw
+        angleDelta() (~120 per notch) the way the old code did would once
+        have jumped ~120 ROWS per notch back when the scrollbar was still
+        in Qt's default per-item mode. This computes a normal per-notch
+        pixel step the way Qt's own per-pixel wheel handling does
+        (wheelScrollLines() lines per notch, scaled by this tree's own row
+        height) and animates toward it.
+        """
         delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
         sb = self.verticalScrollBar()
-        if sb.maximum() > sb.minimum():
-            sb.setValue(sb.value() - delta)
-        else:
+        target_sb = sb if sb.maximum() > sb.minimum() else None
+        if target_sb is None:
             area = self._find_scroll_area()
-            if area is not None:
-                vsb = area.verticalScrollBar()
-                vsb.setValue(vsb.value() - delta)
+            target_sb = area.verticalScrollBar() if area is not None else None
+        if target_sb is None:
+            event.accept()
+            return
+        row_height = self.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = 24
+        pixels_per_notch = QApplication.wheelScrollLines() * row_height
+        pixel_delta = (delta / 120.0) * pixels_per_notch
+        # Continue from the animation's own in-flight target rather than
+        # the live value, so successive fast notches accumulate smoothly
+        # instead of restarting from wherever the animation happens to be
+        # mid-flight.
+        base = (
+            self._scroll_anim.endValue()
+            if self._scroll_anim.state() == QAbstractAnimation.State.Running
+            and self._scroll_anim_target is target_sb
+            else target_sb.value()
+        )
+        new_value = max(
+            target_sb.minimum(), min(target_sb.maximum(), round(base - pixel_delta))
+        )
+        self._scroll_anim.stop()
+        self._scroll_anim_target = target_sb
+        self._scroll_anim.setStartValue(target_sb.value())
+        self._scroll_anim.setEndValue(new_value)
+        self._scroll_anim.start()
         event.accept()
-
-    def dragMoveEvent(self, event) -> None:
-        """Accept drops onto any child item (mod) so cross-category drags work."""
-        pos = event.position().toPoint()
-        item = self.itemAt(pos.x(), pos.y())
-        if item is not None and item.parent() is not None:
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event) -> None:
-        """Unused: drops are handled by ``mouseReleaseEvent``."""
-        event.ignore()
 
     def leaveEvent(self, event) -> None:
         self._reset_drag_state()
@@ -397,6 +551,168 @@ class _FomodDialog(QDialog):
         }
 
 
+class _ConflictsDialog(QDialog):
+    """Scrollable, searchable view of summarize_mod_conflicts()'s output.
+
+    Two earlier approaches both proved unreadable on a real GAMMA profile:
+    a plain QMessageBox dump put every owner name for one conflicting
+    file on a single comma-joined line (a file shared by 100+ mods became
+    one giant wall of text), and a later one-row-per-file table just
+    moved that same wall of text into thousands of rows - two mods that
+    overlap across dozens of gamedata files (an audio overhaul touching
+    many scripts, say) showed up as the exact same two mod names
+    repeated dozens of times. summarize_mod_conflicts() already collapses
+    that down to one row per distinct (winner, overridden) mod pair - but
+    even collapsed, a full GAMMA profile still has ~1000 such pairs, and
+    almost all of them are GAMMA's own curated, intentional internal
+    overrides that a typical user can't act on and doesn't need to see.
+
+    So this defaults to only the pairs touching a mod actually filed
+    under "Custom Mods" (see modlist.custom_mod_names()) - the ones the
+    user installed themselves, the only conflicts genuinely worth
+    checking - with a checkbox to reveal the full GAMMA-internal picture
+    for anyone who wants it.
+    """
+
+    def __init__(
+        self,
+        rows: list[tuple[str, str, int]],
+        custom_mods: set[str],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.resize(760, 500)
+        layout = QVBoxLayout(self)
+        self._all_rows = rows
+        self._custom_mods = custom_mods
+        self._custom_rows = [
+            row for row in rows if row[0] in custom_mods or row[1] in custom_mods
+        ]
+        self._showing_all = False
+
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+
+        self.show_all_checkbox = QCheckBox(
+            tr(
+                "Show all {total} conflicts (including GAMMA's own)",
+                total=len(self._all_rows),
+            )
+        )
+        self.show_all_checkbox.toggled.connect(self._on_show_all_toggled)
+        layout.addWidget(self.show_all_checkbox)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(tr("Filter by mod name..."))
+        self.search.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.search)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(
+            [tr("Mod"), tr("Overrides"), tr("Files")]
+        )
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self.table, 1)
+
+        self._total = 0
+        self.count_label = QLabel()
+        self.count_label.setObjectName("dim")
+        layout.addWidget(self.count_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self._refresh_view()
+
+    def _on_show_all_toggled(self, checked: bool) -> None:
+        self._showing_all = checked
+        self.search.clear()
+        self._refresh_view()
+
+    def _refresh_view(self) -> None:
+        rows = self._all_rows if self._showing_all else self._custom_rows
+        if self._showing_all:
+            self.setWindowTitle(
+                tr("{count} Mod Conflict(s) Found", count=len(self._all_rows))
+            )
+            self.info.setText(
+                tr(
+                    "Every mod pair that overrides each other's gamedata files, "
+                    "including GAMMA's own mods overriding each other - mostly "
+                    "intentional, curated by the pack itself."
+                )
+            )
+        else:
+            self.setWindowTitle(
+                tr("{count} Mod Conflict(s) Found", count=len(self._custom_rows))
+            )
+            if not self._custom_mods:
+                self.info.setText(
+                    tr(
+                        "You haven't installed any mods of your own yet (nothing "
+                        "is filed under \"Custom Mods\"), so there's nothing here "
+                        "to check."
+                    )
+                )
+            elif not self._custom_rows:
+                self.info.setText(
+                    tr("None of your own installed mods conflict with anything.")
+                )
+            else:
+                self.info.setText(
+                    tr(
+                        "Conflicts touching a mod you installed yourself (Custom "
+                        "Mods) - the ones actually worth checking."
+                    )
+                )
+        self._populate_table(rows)
+
+    def _populate_table(self, rows: list[tuple[str, str, int]]) -> None:
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(rows))
+        for row, (winner, loser, count) in enumerate(rows):
+            self.table.setRowHidden(row, False)
+            winner_item = QTableWidgetItem(winner)
+            loser_item = QTableWidgetItem(loser)
+            count_item = QTableWidgetItem()
+            count_item.setData(Qt.ItemDataRole.DisplayRole, count)
+            self.table.setItem(row, 0, winner_item)
+            self.table.setItem(row, 1, loser_item)
+            self.table.setItem(row, 2, count_item)
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(2, Qt.SortOrder.DescendingOrder)
+        self._total = len(rows)
+        self.count_label.setText(
+            tr("Showing {count} of {total}", count=self._total, total=self._total)
+        )
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        visible = 0
+        for row in range(self.table.rowCount()):
+            match = (
+                not needle
+                or needle in self.table.item(row, 0).text().lower()
+                or needle in self.table.item(row, 1).text().lower()
+            )
+            self.table.setRowHidden(row, not match)
+            visible += int(match)
+        self.count_label.setText(
+            tr("Showing {count} of {total}", count=visible, total=self._total)
+        )
+
+
 def _query_mo2_profiles() -> tuple[list[str], str]:
     """Return (profile names, selected profile). Runs on a worker thread."""
     rc, out = run_sync(["mo2", "profiles", "list"], timeout=_QUERY_TIMEOUT)
@@ -419,6 +735,15 @@ class ModManagerPage(QWidget):
         self._profiles_loading = False
         self._profiles_generation = 0
         self._profiles_task = None
+        #: Set by New/Rename Profile just before triggering a reload, so
+        #: _on_profiles_loaded() selects the profile just created/renamed
+        #: instead of falling back to MO2's own selected profile.
+        self._pending_profile_select: str | None = None
+        #: Mirrors selected_label's text (MO2's own selected_profile, from
+        #: ModOrganizer.ini) as a plain name - Rename Profile needs this to
+        #: decide whether the renamed profile was the selected one, and
+        #: parsing it back out of the label text would be fragile.
+        self._mo2_selected_profile: str = ""
         self._install_task: StreamTask | None = None
         self._finalize_task: BackgroundTask | None = None
         self._install_staging: Path | None = None
@@ -426,12 +751,23 @@ class ModManagerPage(QWidget):
         self._install_name = ""
         self._install_active = False
         self._install_generation = 0
+        #: True while the current _start_mod_install() run is a "Reinstall
+        #: from Cache" on an already-listed mod, not a brand-new install -
+        #: _on_mod_moved() checks this to skip add_custom_mod() (the entry
+        #: already exists) and _finish_install() checks it to know whether
+        #: _reinstall_backup needs restoring or discarding.
+        self._install_is_reinstall = False
+        #: (real destination, moved-aside backup of what was there before)
+        #: set by _reinstall_mod_from_cache() right before a reinstall
+        #: starts; _finish_install() discards the backup on success or
+        #: restores it on any failure/cancellation - see that method.
+        self._reinstall_backup: tuple[Path, Path] | None = None
         self._pending_refresh = False
         self._load_failed = False
         #: Name of the mod just installed, so the rebuilt tree can scroll to
-        #: and select it - new mods land disabled at the top of the list
-        #: (see add_mod()), so this also confirms to the user which entry
-        #: is the one they just installed.
+        #: and select it - new mods land disabled in "Custom Mods" at the
+        #: bottom of the list (see add_custom_mod()), so this also confirms
+        #: to the user which entry is the one they just installed.
         self._just_installed_name: str | None = None
 
         outer = QVBoxLayout(self)
@@ -448,20 +784,53 @@ class ModManagerPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label(tr("MOD MANAGER"), level=1)
-        title.setWordWrap(True)
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(title)
-        subtitle = info_label(
-            tr("Choose an MO2 profile and safely manage its GAMMA modlist.")
-        )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(subtitle)
-
         card, layout = make_card()
         root.addWidget(card, 1)
-        layout.addWidget(section_label(tr("GAMMA modlist")))
+        # Tighter than make_card()'s shared default (10px) - reclaims a
+        # little vertical space for the tree without touching the shared
+        # helper other pages' cards also use.
+        layout.setSpacing(8)
+        layout.addWidget(section_label(tr("Profile Mods")))
 
+        # Profile context first, top of the card - two rows grouped by
+        # purpose: which MO2 profile is being edited (+ creating/renaming/
+        # deleting one), then MO2's own "selected profile" state for it.
+        # Everything below acts on whichever profile the combo picks.
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(8)
+        profile_row.addWidget(QLabel(tr("MO2 profile:")))
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(self._load_mods)
+        profile_row.addWidget(self.profile_combo, 1)
+        # One compact button with a menu instead of three full-width
+        # New/Rename/Delete buttons - this row is already tight with the
+        # label and a stretching combo.
+        self.manage_profile_button = QPushButton(tr("Manage Profile"))
+        manage_profile_menu = QMenu(self)
+        manage_profile_menu.addAction(tr("New Profile..."), self._create_mo2_profile)
+        manage_profile_menu.addAction(tr("Rename Profile..."), self._rename_mo2_profile)
+        manage_profile_menu.addAction(tr("Delete Profile..."), self._delete_mo2_profile)
+        self.manage_profile_button.setMenu(manage_profile_menu)
+        profile_row.addWidget(self.manage_profile_button)
+        layout.addLayout(profile_row)
+
+        selected_row = QHBoxLayout()
+        selected_row.setSpacing(8)
+        self.selected_label = QLabel(tr("MO2 selected profile: -"))
+        self.selected_label.setObjectName("dim")
+        selected_row.addWidget(self.selected_label, 1)
+        self.set_selected_button = QPushButton(tr("Use as MO2 selected profile"))
+        self.set_selected_button.clicked.connect(self._set_selected)
+        selected_row.addWidget(self.set_selected_button)
+        self.open_mo2_button = QPushButton(tr("Open MO2"))
+        self.open_mo2_button.clicked.connect(self._open_mo2)
+        selected_row.addWidget(self.open_mo2_button)
+        layout.addLayout(selected_row)
+
+        # Actions, grouped by what they do: add content, then modlist
+        # safety nets, then a plain refresh - a visual gap (not a divider
+        # widget) separates each group instead of one undifferentiated
+        # row of buttons.
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         self.install_button = QPushButton(tr("Install Mod"))
@@ -471,7 +840,14 @@ class ModManagerPage(QWidget):
         )
         self.install_button.clicked.connect(self._install_mod)
         action_row.addWidget(self.install_button)
+        self.new_category_button = QPushButton(tr("New Category"))
+        self.new_category_button.setToolTip(
+            tr("Add an MO2 separator category to this modlist.")
+        )
+        self.new_category_button.clicked.connect(self._create_category)
+        action_row.addWidget(self.new_category_button)
 
+        action_row.addSpacing(20)
         self.create_backup_button = QPushButton(tr("Create Backup"))
         self.create_backup_button.setToolTip(
             tr("Save a backup of the current MO2 modlist.")
@@ -490,37 +866,12 @@ class ModManagerPage(QWidget):
         self.restore_original_button.clicked.connect(self._restore_original_order)
         action_row.addWidget(self.restore_original_button)
 
+        action_row.addSpacing(20)
         self.refresh_button = QPushButton(tr("Refresh"))
         self.refresh_button.clicked.connect(self.refresh)
         action_row.addWidget(self.refresh_button)
-        self.new_category_button = QPushButton(tr("New Category"))
-        self.new_category_button.setToolTip(
-            tr("Add an MO2 separator category to this modlist.")
-        )
-        self.new_category_button.clicked.connect(self._create_category)
-        action_row.addWidget(self.new_category_button)
         action_row.addStretch(1)
         layout.addLayout(action_row)
-
-        top_row = QHBoxLayout()
-        top_row.addWidget(QLabel(tr("MO2 profile:")))
-        self.profile_combo = QComboBox()
-        self.profile_combo.currentIndexChanged.connect(self._load_mods)
-        top_row.addWidget(self.profile_combo, 1)
-        layout.addLayout(top_row)
-
-        sel_row = QHBoxLayout()
-        self.selected_label = QLabel(tr("MO2 selected profile: -"))
-        self.selected_label.setObjectName("dim")
-        sel_row.addWidget(self.selected_label)
-        self.set_selected_button = QPushButton(tr("Use as MO2 selected profile"))
-        self.set_selected_button.clicked.connect(self._set_selected)
-        sel_row.addWidget(self.set_selected_button)
-        self.open_mo2_button = QPushButton(tr("Open MO2"))
-        self.open_mo2_button.clicked.connect(self._open_mo2)
-        sel_row.addWidget(self.open_mo2_button)
-        sel_row.addStretch(1)
-        layout.addLayout(sel_row)
 
         self.guard_label = QLabel(
             tr("MO2 is running. Close it before editing the modlist; edits are disabled while it is open.")
@@ -546,43 +897,48 @@ class ModManagerPage(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setAnimated(True)
         self.tree.setIndentation(18)
-        self.tree.setMinimumHeight(320)
+        # Taller now that the page-level title/subtitle above are gone -
+        # reclaims that freed vertical space for the modlist itself.
+        self.tree.setMinimumHeight(680)
+        self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemSelectionChanged.connect(self._update_count)
         self.tree.mod_dropped.connect(self._on_tree_drop)
+        self.tree.category_dropped.connect(self._on_category_drop)
+        self.tree.drop_cancelled.connect(self._on_drop_cancelled)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.tree, 1)
 
+        # Enable/Disable/Delete/Move Up/Move Down used to live here too,
+        # duplicating what right-clicking a mod already offers - dropped
+        # to declutter; the tree's own context menu and drag-and-drop are
+        # the one place to do those now. What's left here acts on the
+        # whole list, not a selection.
         btn_row = QHBoxLayout()
-        selected_label = QLabel(tr("Selected mods"))
-        selected_label.setObjectName("dim")
-        btn_row.addWidget(selected_label)
-        self.enable_button = QPushButton(tr("Enable"))
-        self.enable_button.clicked.connect(lambda: self._set_selected_mods(True))
-        self.disable_button = QPushButton(tr("Disable"))
-        self.disable_button.clicked.connect(lambda: self._set_selected_mods(False))
-        self.delete_button = QPushButton(tr("Delete"))
-        self.delete_button.setObjectName("danger")
-        self.delete_button.clicked.connect(self._delete_selected_mods)
-        self.move_up_button = QPushButton(tr("Move Up"))
-        self.move_up_button.clicked.connect(lambda: self._move_selected(-1))
-        self.move_down_button = QPushButton(tr("Move Down"))
-        self.move_down_button.clicked.connect(lambda: self._move_selected(1))
+        list_tools_label = QLabel(tr("List tools:"))
+        list_tools_label.setObjectName("dim")
+        btn_row.addWidget(list_tools_label)
+        # Toggles between collapsing every category and expanding them
+        # all back - tracked via _all_collapsed rather than the button's
+        # own text, so a modlist reload (which always re-expands, see
+        # _load_mods()) can reliably reset it back to "Collapse All".
+        self._all_collapsed = False
+        self.collapse_all_button = QPushButton(tr("Collapse All"))
+        self.collapse_all_button.clicked.connect(self._toggle_collapse_all)
+        btn_row.addWidget(self.collapse_all_button)
         self.flip_priority_button = QPushButton(tr("Flip Priority"))
         self.flip_priority_button.setToolTip(
-            tr("Reverse the entire load order: categories and the mods inside them at the top go to the bottom and vice versa.")
+            tr("Reverse the entire load order: categories and the mods inside them at the top go to the bottom and vice versa. Your own installed mods (Custom Mods) always stay at the bottom, unaffected.")
         )
         self.flip_priority_button.clicked.connect(self._on_flip_priority)
-        for b in (
-            self.enable_button,
-            self.disable_button,
-            self.delete_button,
-            self.move_up_button,
-            self.move_down_button,
-            self.flip_priority_button,
-        ):
+        self.conflicts_button = QPushButton(tr("Check for File Conflicts"))
+        self.conflicts_button.setToolTip(
+            tr("Scan every currently-enabled mod's files for ones that appear in more than one mod - not full conflict resolution, just what the current load order is overriding.")
+        )
+        self.conflicts_button.clicked.connect(self._check_file_conflicts)
+        for b in (self.flip_priority_button, self.conflicts_button):
             btn_row.addWidget(b)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
@@ -673,11 +1029,6 @@ class ModManagerPage(QWidget):
         for widget in (
             self.tree,
             self.profile_combo,
-            self.enable_button,
-            self.disable_button,
-            self.delete_button,
-            self.move_up_button,
-            self.move_down_button,
             self.restore_button,
             self.restore_original_button,
             self.create_backup_button,
@@ -774,7 +1125,18 @@ class ModManagerPage(QWidget):
                 if match is not None:
                     self.profile_combo.setCurrentText(match)
                     break
+            # New/Rename Profile requested a specific selection - it wins
+            # over the "follow MO2's own selection" logic above, since
+            # neither creating nor renaming a profile changes MO2's own
+            # selected_profile. getattr-guarded: some tests build this
+            # page via __new__() and stub only the attributes their own
+            # scenario touches.
+            pending_select = getattr(self, "_pending_profile_select", None)
+            if pending_select in names:
+                self.profile_combo.setCurrentText(pending_select)
+        self._pending_profile_select = None
         self.profile_combo.blockSignals(False)
+        self._mo2_selected_profile = selected or ""
         self.selected_label.setText(tr("MO2 selected profile: {arg}", arg=selected or '-'))
         if not names:
             self.count_label.setText(
@@ -796,6 +1158,7 @@ class ModManagerPage(QWidget):
         self._profiles_task = None
         if generation != self._profiles_generation:
             return
+        self._mo2_selected_profile = ""
         self.selected_label.setText(tr("MO2 selected profile: -"))
         self.count_label.setText(tr("Could not list MO2 profiles: {message}", message=message))
         self.tree.clear()
@@ -811,6 +1174,7 @@ class ModManagerPage(QWidget):
             path = self._modlist_path(mo2_profile)
             self._lines = read_lines(path)
             self.backup_status.setText(self._backup_status_text(path))
+            self._restore_missing_user_categories()
             self._populate_tree()
             self._update_count()
         except Exception as exc:  # noqa: BLE001
@@ -887,7 +1251,12 @@ class ModManagerPage(QWidget):
                 raise
             self.backup_status.setText(tr("Backup saved: {backup}", backup=backup))
             self._update_guard()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
+            # RuntimeError: _modlist_path()/_active_profile() raise it when
+            # the active profile is gone (e.g. deleted on the Profiles page
+            # while this combo still lists its MO2 profiles) - the same
+            # cases every other action here already reports instead of
+            # letting the exception escape the slot.
             QMessageBox.warning(self, tr("Backup Failed"), str(exc))
 
     def _populate_tree(self) -> None:
@@ -903,15 +1272,36 @@ class ModManagerPage(QWidget):
         self.tree.header().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
         )
-        for category, mods in grouped(self._lines):
-            header = QTreeWidgetItem([category])
+        # MO2 writes modlist.txt with file-top as the HIGHEST-priority mod
+        # (rendered at the BOTTOM of MO2's own list) and file-bottom as the
+        # lowest-priority mod (rendered at the TOP) - confirmed directly
+        # against Mod Organizer 2's own source (profile.cpp: "the priority
+        # are reversed ... since the mod list is written in reverse
+        # order"). Walking grouped()'s file-order output in reverse here is
+        # what makes this tree match MO2's actual on-screen order, category
+        # order and mod order alike, and also makes the incrementing
+        # `priority` counter below come out matching MO2's own numbering
+        # (lowest at screen-top) with no separate formula needed.
+        card_bg = QColor(active_theme_tokens()["card"])
+        for category, mods in reversed(grouped(self._lines)):
+            header = QTreeWidgetItem([f"{category} ({len(mods)})"])
+            # The display text carries a "(N)" mod-count suffix - drop
+            # handling needs the raw category name to match against
+            # modlist.py's separator-derived labels, so keep it out of band
+            # rather than re-parsing the display text back off of it.
+            header.setData(0, Qt.ItemDataRole.UserRole, category)
             header.setFlags(Qt.ItemFlag.ItemIsEnabled)
             header.setForeground(0, QColor(ACCENT.name()))
             font = header.font(0)
             font.setBold(True)
             header.setFont(0, font)
+            # Same background token QHeaderView::section already uses (see
+            # themes.py), so the column header and category rows read as
+            # one consistent "header" band when scanning a long list.
+            header.setBackground(0, card_bg)
+            header.setBackground(1, card_bg)
             self.tree.addTopLevelItem(header)
-            for status, name, line_index in mods:
+            for status, name, line_index in reversed(mods):
                 priority += 1
                 item = QTreeWidgetItem([name])
                 item.setText(1, str(priority))
@@ -937,9 +1327,25 @@ class ModManagerPage(QWidget):
                 )
                 header.addChild(item)
         self.tree.expandAll()
+        self._all_collapsed = False
+        # getattr-guarded: some tests build a ModManagerPage via __new__()
+        # (bypassing __init__) to call _populate_tree() directly against a
+        # hand-built self.tree, without the rest of the real page's widgets.
+        collapse_all_button = getattr(self, "collapse_all_button", None)
+        if collapse_all_button is not None:
+            collapse_all_button.setText(tr("Collapse All"))
         self.tree.blockSignals(False)
         self._populating = False
         self._apply_filter()
+
+    def _toggle_collapse_all(self) -> None:
+        if self._all_collapsed:
+            self.tree.expandAll()
+            self.collapse_all_button.setText(tr("Collapse All"))
+        else:
+            self.tree.collapseAll()
+            self.collapse_all_button.setText(tr("Expand All"))
+        self._all_collapsed = not self._all_collapsed
 
     # ----- search filter -----
     def _apply_filter(self) -> None:
@@ -958,10 +1364,21 @@ class ModManagerPage(QWidget):
     def _update_count(self) -> None:
         total = enabled = visible = 0
         visible_enabled = 0
+        # Dedup by name: GAMMA's own official modlist.txt has been
+        # confirmed to list at least one mod twice (e.g. "G.A.M.M.A.
+        # Vehicles in Darkscape") - there's only one real mod/folder for
+        # it, and MO2 counts a name once regardless of how many times it
+        # appears, so this must too or it overcounts relative to MO2's
+        # own (and the community's) count. See modlist.py's count_mods().
+        seen: set[str] = set()
         for i in range(self.tree.topLevelItemCount()):
             header = self.tree.topLevelItem(i)
             for j in range(header.childCount()):
                 item = header.child(j)
+                name = item.text(0)
+                if name in seen:
+                    continue
+                seen.add(name)
                 total += 1
                 if item.checkState(0) == Qt.CheckState.Checked:
                     enabled += 1
@@ -1157,6 +1574,114 @@ class ModManagerPage(QWidget):
             return False
         return True
 
+    def _cached_archive_for(self, name: str) -> Path | None:
+        """Return the cached archive for an already-listed mod, if findable.
+
+        Matches by the ModPackRecord.folder_name convention (see
+        repair.py) against the profile's own modpack_maker_list.txt - the
+        only per-mod archive mapping this app has. That list's line
+        numbers shift whenever the official list is reordered, so a mod
+        installed a while ago can legitimately have no match at all
+        (confirmed against a real profile: roughly a third of entries
+        don't resolve this way) - callers must treat None as "can't do
+        this automatically", not as an error.
+
+        When the record carries an MD5 (md5_mod_db), the cached file must
+        match it - an archive that's merely present under the expected
+        name is not proof it's the right, uncorrupted one.
+        """
+        try:
+            profile = self._active_profile()
+        except RuntimeError:
+            return None
+        mo2_profile = self.profile_combo.currentText()
+        records = local_modpack_records(profile.gamma, mo2_profile)
+        if records is None:
+            return None
+        record = records.get(name)
+        if record is None:
+            return None
+        cache_dir = Path(profile.cache)
+        for archive_name in record.archive_names():
+            if not archive_name or Path(archive_name).name != archive_name:
+                continue
+            archive = cache_dir / archive_name
+            if not archive.is_file() or archive.is_symlink():
+                continue
+            if record.md5_mod_db:
+                digest = _md5_file(archive)
+                if digest is None or digest[0].lower() != record.md5_mod_db.lower():
+                    continue
+            return archive
+        return None
+
+    def _reinstall_mod_from_cache(self, name: str) -> None:
+        """Re-extract an already-listed mod from its cached archive.
+
+        Right-click "Reinstall from Cache" - for a mod whose on-disk
+        folder is missing or corrupted without needing a full install or
+        GAMMA Reset. Only proceeds when _cached_archive_for() finds a
+        confirmed-matching cache archive; otherwise explains why not
+        instead of silently doing nothing or falling back to a full
+        repair the user didn't ask for.
+        """
+        if self.window.install_busy or self._install_active or self._mo2_running():
+            self._update_guard()
+            return
+        archive = self._cached_archive_for(name)
+        if archive is None:
+            QMessageBox.information(
+                self,
+                tr("Can't reinstall from cache"),
+                tr(
+                    "COMMANDER has no cached archive on file for '{name}' - "
+                    "this usually means the official GAMMA list has changed "
+                    "since it was installed, or it isn't tracked by the "
+                    "official modpack at all. Use the Reset or Uninstall "
+                    "tools on the Utilities page instead.",
+                    name=name,
+                ),
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Reinstall from Cache"),
+            tr(
+                "Reinstall '{name}' from its cached archive? Any existing "
+                "files for this mod are replaced - its enabled/disabled "
+                "state and position in the list are unaffected.",
+                name=name,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            profile = self._active_profile()
+        except RuntimeError as exc:
+            QMessageBox.warning(self, tr("Error"), str(exc))
+            return
+        mods_dir = Path(profile.gamma) / "mods"
+        if mods_dir.is_symlink():
+            QMessageBox.warning(
+                self,
+                tr("Cannot install"),
+                tr("The GAMMA mods directory cannot be a symlink."),
+            )
+            return
+        destination = mods_dir / name
+        self._reinstall_backup = None
+        if destination.exists() or destination.is_symlink():
+            backup = destination.with_name(f".{name}.reinstall-backup-{uuid.uuid4().hex}")
+            try:
+                shutil.move(str(destination), str(backup))
+            except OSError as exc:
+                QMessageBox.warning(self, tr("Cannot reinstall"), str(exc))
+                return
+            self._reinstall_backup = (destination, backup)
+        self._install_is_reinstall = True
+        self._start_mod_install(archive, name)
+
     def _start_mod_install(self, archive: Path, name: str) -> None:
         if self.window.install_busy or self._install_active or self._mo2_running():
             self._update_guard()
@@ -1260,9 +1785,12 @@ class ModManagerPage(QWidget):
         name = self._install_name
         self.install_progress.status_message(f"Installing {name}...")
 
+        installation_file = self._install_source.name if self._install_source else ""
+
         def worker():
             destination = mods_dir / name
             move_payload(source, destination, self._finalize_task.cancel_event)
+            write_basic_meta_ini(destination, installation_file)
             return destination
 
         task = BackgroundTask(worker, parent=self)
@@ -1286,8 +1814,38 @@ class ModManagerPage(QWidget):
             not self._install_active or generation != self._install_generation
         ):
             return
+        if getattr(self, "_install_is_reinstall", False):
+            # The modlist.txt entry already exists (that's the whole
+            # point) - add_custom_mod() below would just raise on the
+            # duplicate name, so this skips straight to the same
+            # post-install housekeeping the new-mod path ends with.
+            self._just_installed_name = destination.name
+            self.window.statusBar().showMessage(
+                f"Reinstalled '{destination.name}' from its cached archive.",
+                8000,
+            )
+            try:
+                invalidate_baseline(self._active_profile().gamma)
+            except RuntimeError:
+                pass
+            self._finish_install()
+            # An explicit popup, not just the status-bar line above - a
+            # transient message is easy to miss right after dismissing
+            # the confirmation dialog, and unlike a brand-new install
+            # (which scrolls to a freshly-visible "Custom Mods" entry)
+            # a reinstalled mod often sits somewhere already on screen,
+            # so there's no other obvious sign anything happened.
+            QMessageBox.information(
+                self,
+                tr("Reinstalled"),
+                tr(
+                    "'{name}' was reinstalled from its cached archive.",
+                    name=destination.name,
+                ),
+            )
+            return
         try:
-            new_lines = add_mod(self._lines, destination.name, enabled=False)
+            new_lines = add_custom_mod(self._lines, destination.name, enabled=False)
         except ValueError as exc:
             # Mod already exists in modlist.txt (e.g., disabled mod whose folder was deleted).
             try:
@@ -1300,10 +1858,16 @@ class ModManagerPage(QWidget):
         if self._write_lines(new_lines, internal=True):
             self._just_installed_name = destination.name
             self.window.statusBar().showMessage(
-                f"Installed '{destination.name}' - added disabled at the "
-                "top of the list. Enable it below.",
+                f"Installed '{destination.name}' - added disabled to "
+                "Custom Mods, at the bottom of the list. Enable it below.",
                 8000,
             )
+            # A new mod folder just appeared under gamma/mods - Verify
+            # Integrity's MD5 baseline doesn't know about it yet.
+            try:
+                invalidate_baseline(self._active_profile().gamma)
+            except RuntimeError:
+                pass
             self._finish_install()
             return
         try:
@@ -1351,6 +1915,27 @@ class ModManagerPage(QWidget):
             self._finish_install()
 
     def _finish_install(self) -> None:
+        if getattr(self, "_reinstall_backup", None) is not None:
+            # move_payload() only ever creates `destination` on a genuine
+            # success (and removes it again itself on any failure) - so
+            # its existence here is a reliable enough signal for every
+            # path that ends up at _finish_install() (success, error,
+            # cancel, FOMOD-dialog-cancelled) without each needing to say
+            # explicitly which case this is.
+            destination, backup = self._reinstall_backup
+            self._reinstall_backup = None
+            if destination.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                try:
+                    shutil.move(str(backup), str(destination))
+                except OSError:
+                    self.window.statusBar().showMessage(
+                        f"Could not restore the previous '{destination.name}' "
+                        f"- it's saved at {backup}",
+                        8000,
+                    )
+        self._install_is_reinstall = False
         if self._install_staging is not None:
             staging_root = self._install_staging.parent
             try:
@@ -1384,10 +1969,11 @@ class ModManagerPage(QWidget):
     def _focus_mod_in_tree(self, name: str) -> None:
         """Scroll to, select, and briefly highlight a mod by name.
 
-        Used right after install: a newly-added mod lands disabled at the
-        top of the list (see add_mod()) - it's on-screen right away, but
-        this still gives it a clear visual cue so it's not mistaken for
-        "it didn't work" among everything else at the top.
+        Used right after install: a newly-added mod lands disabled in
+        "Custom Mods", at the bottom of the list (see add_custom_mod()) -
+        this scrolls it into view and gives it a clear visual cue so it's
+        not mistaken for "it didn't work" just because it isn't near the
+        top.
         """
         for i in range(self.tree.topLevelItemCount()):
             header = self.tree.topLevelItem(i)
@@ -1468,8 +2054,16 @@ class ModManagerPage(QWidget):
         # Delete folders BEFORE committing the modlist: if folder deletion
         # fails partway, the modlist still references the remaining folders
         # and nothing is orphaned.
-        if delete_files.isChecked() and not self._delete_mod_folders(names):
+        deleting_files = delete_files.isChecked()
+        if deleting_files and not self._delete_mod_folders(names):
             return
+        if deleting_files:
+            # Actual files under gamma/mods just changed - Verify
+            # Integrity's MD5 baseline must not compare against them.
+            try:
+                invalidate_baseline(self._active_profile().gamma)
+            except RuntimeError:
+                pass
         new_lines = list(self._lines)
         for idx in sorted(indexes, reverse=True):
             new_lines = delete_at(new_lines, idx)
@@ -1545,7 +2139,10 @@ class ModManagerPage(QWidget):
     # ----- context menu -----
     def _show_context_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
-        if item is None or item.parent() is None:
+        if item is None:
+            return
+        if item.parent() is None:
+            self._show_category_context_menu(item, pos)
             return
         # Operate on the mod that was right-clicked.
         self.tree.clearSelection()
@@ -1576,7 +2173,11 @@ class ModManagerPage(QWidget):
         # deduping here is a harmless guard against a duplicate menu entry
         # if that ever stops being true.
         categories = list(dict.fromkeys(name for name, _ in grouped(self._lines)))
-        current = item.parent().text(0)
+        # The header's display text carries a "(N)" mod-count suffix (see
+        # _populate_tree()), so comparing it against grouped()'s raw
+        # category names never matched and the mod's own category was
+        # offered in this submenu - use the raw name stored out of band.
+        current = item.parent().data(0, Qt.ItemDataRole.UserRole)
         for cat in categories:
             if cat == current:
                 continue
@@ -1587,6 +2188,11 @@ class ModManagerPage(QWidget):
 
         folder_action = menu.addAction("Open Mod Folder")
         folder_action.setEnabled(not blocked)
+        menu.addSeparator()
+        # Only for a single mod - re-extracting from cache is a per-mod
+        # operation, there's no meaningful "for all N selected" version.
+        reinstall_action = menu.addAction("Reinstall from Cache...")
+        reinstall_action.setEnabled(single and not blocked)
         menu.addSeparator()
         delete_action = menu.addAction("Delete")
         delete_action.setEnabled(not blocked)
@@ -1601,15 +2207,19 @@ class ModManagerPage(QWidget):
         elif chosen == disable_action:
             self._set_selected_mods(False)
         elif chosen == move_up_action:
-            self._move_selected(-1)
-        elif chosen == move_down_action:
             self._move_selected(1)
+        elif chosen == move_down_action:
+            self._move_selected(-1)
         elif chosen in category_actions:
             self._move_selected_to_category(category_actions[chosen])
         elif chosen == folder_action:
             names = self._selected_mod_names()
             if names:
                 self._open_mod_folder_by_name(names[0])
+        elif chosen == reinstall_action:
+            names = self._selected_mod_names()
+            if names:
+                self._reinstall_mod_from_cache(names[0])
         elif chosen == delete_action:
             self._delete_selected_mods()
 
@@ -1642,6 +2252,238 @@ class ModManagerPage(QWidget):
         if self._write_lines(new_lines):
             self._load_mods()
             self._select_mod_names([new_name])
+
+    def _show_category_context_menu(self, item, pos) -> None:
+        category = item.data(0, Qt.ItemDataRole.UserRole)
+        # "Uncategorized" is grouped()'s synthetic label for trailing,
+        # separator-less mods - there's no real separator line to rename.
+        if category is None or category == "Uncategorized":
+            return
+        blocked = self._mo2_running() or self.window.install_busy or self._install_active
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename Category...")
+        rename_action.setEnabled(not blocked)
+        menu.addSeparator()
+        move_up_action = menu.addAction("Move Category Up")
+        move_down_action = menu.addAction("Move Category Down")
+        move_up_action.setEnabled(not blocked)
+        move_down_action.setEnabled(not blocked)
+        delete_action = None
+        if category in self._tracked_user_categories():
+            menu.addSeparator()
+            delete_action = menu.addAction("Delete Category...")
+            delete_action.setEnabled(not blocked)
+        chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if chosen == rename_action:
+            self._rename_category(category)
+        elif chosen == move_up_action:
+            self._move_category(category, -1)
+        elif chosen == move_down_action:
+            self._move_category(category, 1)
+        elif delete_action is not None and chosen == delete_action:
+            self._delete_category(category)
+
+    def _move_category(self, category: str, delta: int) -> None:
+        """Move a category, with all its members, past its neighbor -
+
+        delta -1 is "Move Up" (earlier on screen = later in file = lower
+        MO2 priority, matching the file's own top-to-bottom = highest-to-
+        lowest priority convention), +1 is "Move Down".
+        """
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        categories = [name for name, _mods in grouped(self._lines) if name != "Uncategorized"]
+        try:
+            index = categories.index(category)
+        except ValueError:
+            return
+        neighbor_index = index + delta
+        if not 0 <= neighbor_index < len(categories):
+            return
+        neighbor = categories[neighbor_index]
+        try:
+            new_lines = move_category(
+                self._lines, category, neighbor, before=delta < 0
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Cannot Move Category"), str(exc))
+            return
+        if self._write_lines(new_lines):
+            self._load_mods()
+
+    def _delete_category(self, category: str) -> None:
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        _name, mods = next(
+            (
+                (name, mods)
+                for name, mods in grouped(self._lines)
+                if name == category
+            ),
+            (category, []),
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Delete Category"))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            tr(
+                'Delete the category "{category}"? Its {count} mod(s) are moved to Uncategorized, not deleted, unless you check the box below.',
+                category=category,
+                count=len(mods),
+            )
+        )
+        delete_mods_check = QCheckBox(
+            tr("Also remove these {count} mod(s) from the modlist", count=len(mods))
+        )
+        box.setCheckBox(delete_mods_check)
+        confirm = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() != confirm:
+            return
+        try:
+            new_lines = delete_category(
+                self._lines, category, delete_members=delete_mods_check.isChecked()
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Cannot Delete Category"), str(exc))
+            return
+        if self._write_lines(new_lines):
+            self._remove_tracked_user_category(category)
+            self._load_mods()
+
+    def _rename_category(self, old_category: str) -> None:
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Rename Category",
+            "New category name:",
+            text=old_category,
+        )
+        if not accepted:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == old_category:
+            return
+        try:
+            new_lines = rename_category(self._lines, old_category, new_name)
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Invalid Name"), str(exc))
+            return
+        if new_lines == self._lines:
+            return
+        if self._write_lines(new_lines):
+            # rename_category() may itself further clean new_name (e.g.
+            # stripping a redundant "_separator" suffix the user typed) -
+            # find the actual resulting name by diffing rather than
+            # assuming new_name is exactly what landed in the file.
+            final_name = next(
+                (
+                    separator_name(_info[1])
+                    for old_line, new_line in zip(self._lines, new_lines, strict=True)
+                    if old_line != new_line
+                    and (_info := _line_info(new_line)) is not None
+                    and separator_name(_info[1]) is not None
+                ),
+                new_name,
+            )
+            self._rename_tracked_user_category(old_category, final_name)
+            self._load_mods()
+
+    # ----- user-created-category tracking (gui_settings.py) -----
+    #
+    # An allow-list of category names the user themselves created via
+    # "New Category" - the *only* source of truth for which categories
+    # are safe to offer "Delete Category..." on. Deliberately never a
+    # hardcoded/fetched "official GAMMA category names" list: that would
+    # go stale whenever the modpack adds/renames categories upstream,
+    # risking exposing Delete on a real GAMMA category. Worst case here
+    # is the reverse (a user category not yet offered Delete), never a
+    # real category wrongly offered it.
+    def _restore_missing_user_categories(self) -> None:
+        """Re-add a user-created category MO2 silently dropped.
+
+        Reported bug: a "New Category" the user made disappeared after
+        launching the game. Root cause is outside this app - Mod
+        Organizer 2 itself does not persist a completely empty separator
+        category across a session where it rewrites modlist.txt on its
+        own (which launching through MO2 does at exit); a brand-new
+        category with nothing filed into it yet is exactly the case that
+        happens to. This re-adds any category still in this profile's
+        own tracked user_created_categories list (see
+        _add_tracked_user_category()) but missing from the modlist.txt
+        just read from disk - the same list "Delete Category..." already
+        uses to know which categories are the user's own, so a category
+        only ever stops coming back once the user deletes it themselves
+        (which also untracks it - see _delete_category()).
+
+        Silently declines to write while MO2 is running/blocked, same as
+        any other edit here - it simply tries again next time this loads.
+        """
+        tracked = self._tracked_user_categories()
+        if not tracked:
+            return
+        existing = {name for name, _ in grouped(self._lines)}
+        missing = [name for name in tracked if name not in existing]
+        if not missing:
+            return
+        restored = self._lines
+        for name in missing:
+            try:
+                restored = add_category(restored, name)
+            except ValueError:
+                continue
+        self._write_lines(restored, quiet=True, snapshot=False)
+
+    def _tracked_user_categories(self) -> list[str]:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return []
+        tracked = gui_settings.load_gui_settings().get("user_created_categories", {})
+        return list(tracked.get(profile.profile_name, []))
+
+    def _add_tracked_user_category(self, name: str) -> None:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        tracked = dict(
+            gui_settings.load_gui_settings().get("user_created_categories", {})
+        )
+        names = list(tracked.get(profile.profile_name, []))
+        if name not in names:
+            names.append(name)
+        tracked[profile.profile_name] = names
+        gui_settings.save_gui_settings(user_created_categories=tracked)
+
+    def _rename_tracked_user_category(self, old_name: str, new_name: str) -> None:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        tracked = dict(
+            gui_settings.load_gui_settings().get("user_created_categories", {})
+        )
+        names = list(tracked.get(profile.profile_name, []))
+        if old_name not in names:
+            return
+        tracked[profile.profile_name] = [
+            new_name if n == old_name else n for n in names
+        ]
+        gui_settings.save_gui_settings(user_created_categories=tracked)
+
+    def _remove_tracked_user_category(self, name: str) -> None:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        tracked = dict(
+            gui_settings.load_gui_settings().get("user_created_categories", {})
+        )
+        names = [n for n in tracked.get(profile.profile_name, []) if n != name]
+        tracked[profile.profile_name] = names
+        gui_settings.save_gui_settings(user_created_categories=tracked)
 
     def _move_selected_to_category(self, category: str) -> None:
         if self.window.install_busy or self._mo2_running():
@@ -1718,7 +2560,18 @@ class ModManagerPage(QWidget):
     def _on_set_selected_done(self, profile: str, rc: int, out: str) -> None:
         self.set_selected_button.setEnabled(True)
         if rc == 0:
-            self.selected_label.setText(tr("Selected profile: {profile}", profile=profile))
+            self._mo2_selected_profile = profile
+            self.selected_label.setText(tr("MO2 selected profile: {arg}", arg=profile))
+            # This button's whole point is "make this the profile in use" -
+            # without also updating the active CliProfile's own mo2_profile
+            # field, everything that reads it directly (Dashboard's Profile
+            # overview, Play page's launch command) kept showing/using the
+            # old profile until it happened to get edited some other way.
+            active = self.window.settings.active_profile
+            if active is not None and active.mo2_profile != profile:
+                active.mo2_profile = profile
+                self.window.settings.save()
+                self.window.refresh_settings()
         else:
             QMessageBox.warning(
                 self, tr("Failed"), out.strip() or "Could not set selected profile"
@@ -1726,6 +2579,202 @@ class ModManagerPage(QWidget):
 
     def _on_set_selected_error(self, msg: str) -> None:
         self.set_selected_button.setEnabled(True)
+        QMessageBox.warning(self, tr("Error"), msg)
+
+    # ----- MO2 profile management (New/Rename/Delete) -----
+    def _existing_mo2_profile_names(self) -> list[str]:
+        return [
+            self.profile_combo.itemText(i) for i in range(self.profile_combo.count())
+        ]
+
+    def _create_mo2_profile(self) -> None:
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        existing = self._existing_mo2_profile_names()
+        current = self.profile_combo.currentText()
+        empty_label = tr("(Empty profile)")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("New MO2 Profile"))
+        dialog.resize(420, 160)
+        dlg_layout = QVBoxLayout(dialog)
+        dlg_layout.addWidget(QLabel(tr("Profile name:")))
+        name_field = QLineEdit()
+        name_field.setMinimumWidth(280)
+        dlg_layout.addWidget(name_field)
+        dlg_layout.addWidget(QLabel(tr("Copy modlist from:")))
+        source_combo = QComboBox()
+        source_combo.addItem(empty_label)
+        source_combo.addItems(existing)
+        if current:
+            idx = source_combo.findText(current)
+            if idx >= 0:
+                source_combo.setCurrentIndex(idx)
+        dlg_layout.addWidget(source_combo)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dlg_layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        name = name_field.text().strip()
+        if not _valid_name(name):
+            QMessageBox.warning(
+                self,
+                tr("Invalid Name"),
+                tr("Profile names cannot be empty or contain path separators."),
+            )
+            return
+        if name in existing:
+            QMessageBox.warning(
+                self,
+                tr("Profile Exists"),
+                tr('A profile named "{name}" already exists.', name=name),
+            )
+            return
+
+        gamma = self._active_profile().gamma
+        new_modlist = Path(gamma) / "profiles" / name / "modlist.txt"
+        source_choice = source_combo.currentText()
+        try:
+            copied = (
+                source_choice != empty_label
+                and seed_new_mo2_profile(gamma, name, source_profile=source_choice)
+            )
+            if not copied:
+                # Either "(Empty profile)" was chosen, or the source
+                # profile had no modlist.txt of its own to copy (e.g. a
+                # brand-new install with nothing set up yet) -
+                # save_lines() creates the profile folder either way, so
+                # the new profile still shows up and Mod Manager has
+                # something to render.
+                save_lines(new_modlist, [])
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Could Not Create Profile"), str(exc))
+            return
+
+        self._pending_profile_select = name
+        self._load_profiles(self._profiles_generation)
+
+    def _rename_mo2_profile(self) -> None:
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        old_name = self.profile_combo.currentText()
+        if not old_name:
+            return
+        existing = self._existing_mo2_profile_names()
+        new_name, accepted = QInputDialog.getText(
+            self,
+            tr("Rename Profile"),
+            tr('New name for "{name}":', name=old_name),
+            text=old_name,
+        )
+        if not accepted:
+            return
+        new_name = new_name.strip()
+        if new_name == old_name:
+            return
+        if not _valid_name(new_name):
+            QMessageBox.warning(
+                self,
+                tr("Invalid Name"),
+                tr("Profile names cannot be empty or contain path separators."),
+            )
+            return
+        if new_name in existing:
+            QMessageBox.warning(
+                self,
+                tr("Profile Exists"),
+                tr('A profile named "{name}" already exists.', name=new_name),
+            )
+            return
+
+        gamma = self._active_profile().gamma
+        profiles_root = Path(gamma) / "profiles"
+        try:
+            (profiles_root / old_name).rename(profiles_root / new_name)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Could Not Rename Profile"), str(exc))
+            return
+
+        # MO2 would otherwise be left pointing at a folder that no longer
+        # exists - only touch selected_profile when it actually named the
+        # profile just renamed.
+        if self._mo2_selected_profile == old_name:
+            run_sync(
+                ["mo2", "config", "set", "selected-profile", new_name],
+                timeout=_QUERY_TIMEOUT,
+            )
+        # Likewise, any app-level CliProfile pointing at this MO2 profile
+        # (by folder name, for this same GAMMA install) would otherwise be
+        # left referencing a ghost folder.
+        settings = self.window.settings
+        changed = False
+        for cli_profile in settings.profiles:
+            if cli_profile.gamma == gamma and cli_profile.mo2_profile == old_name:
+                cli_profile.mo2_profile = new_name
+                changed = True
+        if changed:
+            settings.save()
+            self.window.refresh_settings()
+
+        self._pending_profile_select = new_name
+        self._load_profiles(self._profiles_generation)
+
+    def _delete_mo2_profile(self) -> None:
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        name = self.profile_combo.currentText()
+        if not name:
+            return
+        if self.profile_combo.count() <= 1:
+            QMessageBox.warning(
+                self,
+                tr("Cannot Delete Profile"),
+                tr("This is the only MO2 profile - nothing would be left to switch to."),
+            )
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Delete Profile"))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            tr(
+                'Permanently delete the MO2 profile "{name}" and everything in it '
+                "(modlist, saves, settings)? This cannot be undone.",
+                name=name,
+            )
+        )
+        confirm = box.addButton(tr("Delete"), QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() != confirm:
+            return
+
+        self.manage_profile_button.setEnabled(False)
+        task = BackgroundTask(
+            run_sync, ["mo2", "profile", "delete", name], timeout=_QUERY_TIMEOUT, parent=self
+        )
+        task.result.connect(lambda res: self._on_delete_profile_done(name, *res))
+        task.error.connect(self._on_delete_profile_error)
+        task.start()
+
+    def _on_delete_profile_done(self, name: str, rc: int, out: str) -> None:
+        self.manage_profile_button.setEnabled(True)
+        if rc != 0:
+            QMessageBox.warning(
+                self, tr("Failed"), out.strip() or tr("Could not delete profile.")
+            )
+            return
+        self._load_profiles(self._profiles_generation)
+
+    def _on_delete_profile_error(self, msg: str) -> None:
+        self.manage_profile_button.setEnabled(True)
         QMessageBox.warning(self, tr("Error"), msg)
 
     def _create_category(self) -> None:
@@ -1741,11 +2790,27 @@ class ModManagerPage(QWidget):
             QMessageBox.warning(self, tr("Invalid Category"), str(exc))
             return
         if self._write_lines(new_lines):
+            # add_category() always appends the new separator as the
+            # very last line - read the actual (possibly further
+            # cleaned) name back from it rather than assuming the raw
+            # typed text is exactly what landed in the file.
+            info = _line_info(new_lines[-1])
+            final_name = separator_name(info[1]) if info is not None else None
+            if final_name is not None:
+                self._add_tracked_user_category(final_name)
             self._load_mods()
 
     def _on_flip_priority(self) -> None:
         """Reverse the mod order in the current modlist."""
-        if self.window.install_busy or self._mo2_running():
+        # Deliberately not also checking _mo2_running() here (unlike other
+        # guards in this file) - MO2 being open is a completely normal
+        # state while tuning mod order, and this button stays enabled
+        # while it is (_update_guard() only re-runs on refresh()/busy-
+        # change, not on every click), so bailing out here silently would
+        # make the click appear to do nothing. _write_lines() below
+        # already checks the same condition and shows a proper "Mod
+        # Organizer is running" warning instead.
+        if self.window.install_busy:
             self._update_guard()
             return
         mo2_profile = self.profile_combo.currentText()
@@ -1775,6 +2840,16 @@ class ModManagerPage(QWidget):
         new_lines = flip_priority(self._lines)
         if self._write_lines(new_lines):
             self._load_mods()
+            # Flag the active profile so the Play page can warn if the
+            # very next session ends in a crash - an incompatible load
+            # order is a real, common cause of native engine crashes.
+            profile = self.window.settings.active_profile
+            if profile is not None:
+                pending = dict(
+                    gui_settings.load_gui_settings().get("flip_priority_pending", {})
+                )
+                pending[profile.profile_name] = True
+                gui_settings.save_gui_settings(flip_priority_pending=pending)
             # Show temporary status
             self.flip_priority_button.setText(tr("Priority Flipped!"))
             QTimer.singleShot(
@@ -1783,6 +2858,61 @@ class ModManagerPage(QWidget):
         else:
             self._load_mods()
             QMessageBox.warning(self, tr("Flip Failed"), tr("Could not flip priority order."))
+
+    def _check_file_conflicts(self) -> None:
+        """Scan enabled mods' folders for files shared by 2+ of them.
+
+        Not full MO2-style conflict resolution - just "what is the
+        current load order actually overriding," which nothing else in
+        the app surfaces. Scanning can take a while with 1000+ mods, so
+        it runs in the background rather than freezing the UI.
+        """
+        if self.window.install_busy:
+            self._update_guard()
+            return
+        try:
+            profile = self._active_profile()
+        except RuntimeError as exc:
+            QMessageBox.warning(self, tr("Error"), str(exc))
+            return
+        mods_dir = Path(profile.gamma) / "mods"
+        if mods_dir.is_symlink():
+            QMessageBox.warning(
+                self,
+                tr("Cannot scan for conflicts"),
+                tr("The GAMMA mods directory cannot be a symlink."),
+            )
+            return
+        lines = list(self._lines)
+        self.conflicts_button.setEnabled(False)
+        self.conflicts_button.setText(tr("Scanning..."))
+        task = BackgroundTask(
+            find_enabled_mod_file_conflicts, lines, mods_dir, parent=self
+        )
+        task.result.connect(self._on_conflicts_found)
+        task.error.connect(self._on_conflicts_error)
+        task.start()
+
+    def _on_conflicts_found(self, conflicts: list[tuple[str, list[str]]]) -> None:
+        self.conflicts_button.setEnabled(True)
+        self.conflicts_button.setText(tr("Check for File Conflicts"))
+        if not conflicts:
+            QMessageBox.information(
+                self,
+                tr("No Conflicts Found"),
+                tr("No enabled mod shares a file with another enabled mod."),
+            )
+            return
+        _ConflictsDialog(
+            summarize_mod_conflicts(conflicts),
+            custom_mod_names(self._lines),
+            self,
+        ).exec()
+
+    def _on_conflicts_error(self, message: str) -> None:
+        self.conflicts_button.setEnabled(True)
+        self.conflicts_button.setText(tr("Check for File Conflicts"))
+        QMessageBox.warning(self, tr("Scan Failed"), message)
 
     def _on_tree_drop(
         self,
@@ -1795,13 +2925,20 @@ class ModManagerPage(QWidget):
         if self.window.install_busy or self._mo2_running():
             self._update_guard()
             return
+        # `before` from DragTree means "dropped above the target on
+        # screen." move_mod()'s before/at_start are file-index semantics,
+        # and screen position runs opposite to file position (see
+        # _populate_tree()'s comment) - "above on screen" means "wants
+        # lower priority than target," which is a LATER file index, i.e.
+        # move_mod's before=False. Invert here, at the one boundary where
+        # screen semantics cross into file-index semantics.
         new_lines = move_mod(
             self._lines,
             source_name,
             target_name=target_name,
             category=category if target_name is None else None,
-            before=before,
-            at_start=before and target_name is None,
+            before=not before,
+            at_start=(not before) and target_name is None,
         )
         if new_lines == self._lines:
             return
@@ -1812,6 +2949,33 @@ class ModManagerPage(QWidget):
             QTimer.singleShot(
                 0, lambda name=source_name: self._select_mod_names([name])
             )
+
+    def _on_category_drop(
+        self, source_category: str, target_category: str, before: bool
+    ) -> None:
+        """Persist a whole-category drag/drop reorder from the mod tree."""
+        if self.window.install_busy or self._mo2_running():
+            self._update_guard()
+            return
+        # Same screen-vs-file inversion _on_tree_drop() already applies -
+        # "dropped above the target on screen" wants lower priority than
+        # the target, which is a LATER file position (before=False there).
+        try:
+            new_lines = move_category(
+                self._lines, source_category, target_category, before=not before
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Cannot Move Category"), str(exc))
+            return
+        if new_lines == self._lines:
+            return
+        if self._write_lines(new_lines):
+            QTimer.singleShot(0, self._load_mods)
+
+    def _on_drop_cancelled(self) -> None:
+        self.window.statusBar().showMessage(
+            tr("Drop cancelled - nothing was moved."), 2500
+        )
 
     def _open_mo2(self) -> None:
         mo2_profile = self.profile_combo.currentText()

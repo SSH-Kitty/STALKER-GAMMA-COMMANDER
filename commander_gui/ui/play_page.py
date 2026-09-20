@@ -10,12 +10,14 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -30,8 +32,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import applog, gui_settings
+from ..assistant_launcher import AssistantLaunchError, launch_assistant
 from ..config import logs_dir
+from ..discord_rpc import start_presence, stop_presence, update_presence
 from ..integrity import format_size
 from ..launcher import (
     DEFAULT_PROTON_PREFIX,
@@ -39,6 +43,7 @@ from ..launcher import (
     LaunchError,
     Mo2Executable,
     ProcessGroupRegistry,
+    _terminate_process_group,
     available_commands,
     build_command,
     build_direct_command,
@@ -47,16 +52,23 @@ from ..launcher import (
     find_extra_protons,
     launch_detached,
     parse_mo2_executables,
+    prefix_foreign_dlls,
+    read_log_tail,
     resolve_runner,
+    runner_crash_loop,
     runner_graphics_error,
     runner_prefix_error,
     write_desktop_shortcut,
 )
+from ..log_dump import create_log_dump
 from ..proton_installer import fetch_ge_proton_releases, install_proton
 from .common import (
     ACCENT,
     WARN,
     BackgroundTask,
+    crash_dump_names,
+    exe_pids,
+    format_playtime,
     gamma_installed,
     info_label,
     install_hover_grow_text,
@@ -64,16 +76,46 @@ from .common import (
     mo2_pids,
     mo2_running,
     normalize_path,
+    notify_desktop,
+    play_click_sound,
     section_label,
+    set_hover_grow_text,
     tr,
     update_cache_label,
 )
+from .install_page import _resume_state_matches
 
 _HIDDEN_LAUNCH_TARGETS = {"dx8", "dx8-avx"}
+
+# X-Ray's crash handler can take tens of seconds to finish writing a
+# .mdmp after the wrapper/MO2 process is already gone (confirmed against
+# a real crash: 39s) - poll for it instead of checking once, immediately.
+_CRASH_POLL_INTERVAL_MS = 2000
+_CRASH_POLL_MAX_ATTEMPTS = 45  # 90s total window
+
+#: If nothing (MO2/the game) has appeared this long after launching, warn
+#: that the launch may be stuck (e.g. a Wine crash loop) - confirmed via
+#: a real incident: a hung wrapper spun indefinitely with no way for the
+#: user to know something was wrong short of a full system restart.
+_STALL_WARNING_SECONDS = 180
 
 
 def _is_hidden_launch_target(title: str) -> bool:
     return title.strip().casefold() in _HIDDEN_LAUNCH_TARGETS
+
+
+def _kill_stray_debuggers() -> None:
+    """winedbg instances that escaped the launch's process group."""
+    try:
+        subprocess.run(
+            ["pkill", "-f", "winedbg"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 class _ProtonVersionComboBox(QComboBox):
@@ -110,6 +152,15 @@ class PlayPage(QWidget):
         self._launching = False
         self._install_busy = False
         self._proc = None
+        #: The wrapper's own pid, remembered independently of the Popen
+        #: handle above - once MO2 takes over, the wrapper process can
+        #: exit while MO2/the game keep running under the same process
+        #: group. Quitting must still be able to reach them by killpg-ing
+        #: this pid even after self._proc has already been cleared.
+        self._launch_wrapper_pid: int | None = None
+        #: One-shot guard so the stall warning (see _on_launch_check) only
+        #: ever fires once per launch attempt.
+        self._stall_warned = False
         self._launch_timer = None
         self._monitoring_mo2 = False
         self._mo2_seen = False
@@ -120,15 +171,44 @@ class PlayPage(QWidget):
         #: had open (see mo2_pids() docstring).
         self._pre_launch_mo2_pids: set[int] = set()
         self._mo2_launch_pids: set[int] = set()
+        #: The actual game executable's basename (not MO2's own exe) and
+        #: its pre-launch pids, so playtime can be recorded when the game
+        #: itself exits instead of waiting for MO2 (which stays open
+        #: after the game closes) to exit.
+        self._game_exe_name: str | None = None
+        self._pre_launch_game_pids: set[int] = set()
+        self._game_seen = False
+        #: Whether Flip Priority was used since the last completed
+        #: session - if so, a new crash dump at session-end gets a
+        #: dedicated warning instead of being silently indistinguishable
+        #: from any other crash. See _check_flip_priority_crash().
+        self._crash_check_pending = False
+        self._pre_launch_crash_dumps: set[str] = set()
+        #: X-Ray's own crash handler can take a while (tens of seconds,
+        #: confirmed against a real user's crash: 39s) to actually finish
+        #: writing the .mdmp file after the wrapper/MO2 process is
+        #: already gone - checking once, immediately, at session-end
+        #: misses it. These back a bounded poll instead of one shot; see
+        #: _poll_for_flip_priority_crash().
+        self._crash_poll_timer: QTimer | None = None
+        self._crash_poll_anomaly = ""
+        self._crash_poll_baseline: set[str] = set()
+        self._crash_poll_attempts_left = 0
         self._registry = ProcessGroupRegistry()
         self._launch_status_clear_timer = QTimer(self)
         self._launch_status_clear_timer.setSingleShot(True)
         self._launch_status_clear_timer.timeout.connect(self._clear_launch_status)
+        self._crash_report_task: BackgroundTask | None = None
+        self._launch_started_at: float | None = None
+        self._discord_rpc = None
         self._persisting = False
         #: Steam Proton labels, refreshed with the runner combo so the chip row
         #: does not re-scan Steam libraries on every keystroke.
         self._proton_labels: list[str] = []
         self._installed_protons: list[tuple[str, str]] = []
+        #: Set only once a GE-Proton install actually starts (_install_proton());
+        #: explicit here so cancel logic never has to guess whether one is running.
+        self._cancel_event: threading.Event | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -142,17 +222,6 @@ class PlayPage(QWidget):
         root.setContentsMargins(32, 24, 32, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
-
-        # -- hero header ---------------------------------------------------
-        hero = section_label(tr("PLAY STALKER GAMMA"), level=1)
-        hero.setWordWrap(True)
-        hero.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(hero)
-        subtitle = info_label(
-            tr("Launch GAMMA with Mod Organizer 2 (MO2), manage your mods in MO2, or run STALKER Anomaly directly. Choose a target and runner, then launch.")
-        )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(subtitle)
 
         # -- config grid (launch game | select runner) ------------------------
         grid = QHBoxLayout()
@@ -183,8 +252,6 @@ class PlayPage(QWidget):
         self.shortcut_button.setVisible(os.name != "nt")
         self.shortcut_button.clicked.connect(self._add_desktop_shortcut)
         target_layout.addWidget(self.shortcut_button)
-        grid.addWidget(target_card, 1)
-
         runner_card, runner_layout = make_card()
         runner_layout.setSpacing(12)
         runner_layout.addWidget(section_label(tr("Runner"), level=2))
@@ -199,6 +266,13 @@ class PlayPage(QWidget):
         self.runner_hint.setObjectName("dim")
         self.runner_hint.setWordWrap(True)
         runner_layout.addWidget(self.runner_hint)
+
+        self.gamemode_check = QCheckBox(tr("Always use GameMode"))
+        self.gamemode_check.setToolTip(
+            tr("Wrap every launch in gamemoderun (enables the Feral GameMode CPU governor / scheduler optimisation), even for Proton.")
+        )
+        self.gamemode_check.toggled.connect(self._on_gamemode_toggled)
+        runner_layout.addWidget(self.gamemode_check)
 
         prefix_row = QHBoxLayout()
         prefix_row.addWidget(QLabel(tr("Runner prefix:")))
@@ -253,6 +327,7 @@ class PlayPage(QWidget):
         runner_layout.addLayout(cancel_row)
 
         grid.addWidget(runner_card, 1)
+        grid.addWidget(target_card, 1)
 
         root.addLayout(grid)
 
@@ -268,8 +343,14 @@ class PlayPage(QWidget):
             tr("Launch the selected target through Mod Organizer 2 with the GAMMA modlist and virtual file system.")
         )
         install_hover_grow_text(self.launch_button, "hero_text")
-        self.launch_button.clicked.connect(self.launch_game)
+        self.launch_button.clicked.connect(self._on_launch_button_clicked)
+        self.launch_button.clicked.connect(play_click_sound)
         root.addWidget(self.launch_button)
+
+        self.playtime_label = info_label("")
+        self.playtime_label.setObjectName("dim")
+        self.playtime_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(self.playtime_label)
 
         self.launch_live_status = info_label("")
         self.launch_live_status.setObjectName("accent")
@@ -296,6 +377,7 @@ class PlayPage(QWidget):
             tr("Run the selected Anomaly executable without MO2 or its virtual mod list.")
         )
         self.direct_button.clicked.connect(self._launch_direct)
+        self.direct_button.clicked.connect(play_click_sound)
         secondary_row.addWidget(self.direct_button, 1)
         root.addLayout(secondary_row)
 
@@ -361,20 +443,13 @@ class PlayPage(QWidget):
 
         root.addWidget(folders_card)
 
-        # -- command preview --------------------------------------------------
-        preview_card, preview_layout = make_card()
-        preview_row = QHBoxLayout()
+        # _refresh_preview_inner() still writes the resolved launch command
+        # into this (setPlainText/setStyleSheet) as part of deciding
+        # whether launch_button/open_mo2_button/direct_button should be
+        # enabled - kept alive but never added to any layout, so the
+        # command-preview card itself is gone from the page.
         self.preview_label = QPlainTextEdit()
         self.preview_label.setReadOnly(True)
-        self.preview_label.setMaximumHeight(60)
-        self.preview_label.setFrameShape(QPlainTextEdit.Shape.NoFrame)
-        self.preview_label.setObjectName("mono")
-        preview_row.addWidget(self.preview_label, 1)
-        self.copy_button = QPushButton(tr("Copy launch command"))
-        self.copy_button.clicked.connect(self._copy_command)
-        preview_row.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignTop)
-        preview_layout.addLayout(preview_row)
-        root.addWidget(preview_card)
 
         root.addStretch(1)
 
@@ -382,6 +457,7 @@ class PlayPage(QWidget):
         self._reload_targets()
         self._load_state()
         self._refresh_preview()
+        self._update_playtime_label()
         self._releases: list[dict] = []
         self._fetch_proton_releases()
 
@@ -497,13 +573,22 @@ class PlayPage(QWidget):
         self.launch_button.setEnabled(False)
         self.launch_state_changed.emit(True)
 
+        # A retry after a failed/cancelled install would otherwise leave the
+        # previous bridge alive as an idle child of PlayPage forever - it's
+        # done with once this new one takes over.
+        old_bridge = getattr(self, "_proton_bridge", None)
+        if old_bridge is not None:
+            old_bridge.deleteLater()
         bridge = _ProgressBridge(parent=self)
-        bridge.updated.connect(
-            lambda p, t: (
-                self.proton_progress.setValue(p),
-                self.proton_status.setText(t),
-            )
-        )
+        self._proton_bridge = bridge
+        # Bound method, not a lambda: install_proton()'s progress_cb runs on
+        # the BackgroundTask's worker thread, and PySide only auto-queues a
+        # cross-thread signal onto the main thread for a QObject-bound slot
+        # (as every other worker-thread signal in this codebase already
+        # does, see common.py's CommandRunner/BackgroundTask) - a lambda has
+        # no thread affinity of its own, so it would run direct, on the
+        # worker thread, touching these QWidgets unsafely.
+        bridge.updated.connect(self._on_proton_progress)
 
         def _progress(downloaded: int, total: int) -> None:
             if total > 0:
@@ -551,6 +636,10 @@ class PlayPage(QWidget):
         task.result.connect(_done)
         task.error.connect(_fail)
         task.start()
+
+    def _on_proton_progress(self, percent: int, text: str) -> None:
+        self.proton_progress.setValue(percent)
+        self.proton_status.setText(text)
 
     def _cancel_proton_download(self) -> None:
         if self._cancel_event:
@@ -617,6 +706,12 @@ class PlayPage(QWidget):
         self._reload_runners()
         self._reload_targets()
         self._load_folders()
+        self._update_playtime_label()
+        self.gamemode_check.blockSignals(True)
+        self.gamemode_check.setChecked(
+            bool(gui_settings.load_gui_settings().get("always_gamemoderun"))
+        )
+        self.gamemode_check.blockSignals(False)
         self._refresh_preview()
 
     # ---------------------------------------------------------------- folders
@@ -787,7 +882,8 @@ class PlayPage(QWidget):
         except Exception as exc:  # noqa: BLE001 - never leave buttons silently dead
             self.preview_label.setPlainText(f"Launch check failed: {exc}")
             self.preview_label.setStyleSheet(f"color: {WARN.name()};")
-            self.launch_button.setEnabled(False)
+            if not self._launching:
+                self.launch_button.setEnabled(False)
             self.open_mo2_button.setEnabled(False)
             self.direct_button.setEnabled(False)
 
@@ -795,12 +891,17 @@ class PlayPage(QWidget):
         # Resolve the runner once: each resolution probes the filesystem for
         # Steam libraries and Proton builds, and this runs on every edit.
         profile = self.window.settings.active_profile
+        resume_state = gui_settings.load_gui_settings().get("gamma_install_resume")
+        incomplete = profile is not None and _resume_state_matches(
+            resume_state, profile
+        )
         try:
             runner = self._runner()
         except LaunchError as exc:
             self.preview_label.setPlainText(str(exc))
             self.preview_label.setStyleSheet(f"color: {WARN.name()};")
-            self.launch_button.setEnabled(False)
+            if not self._launching:
+                self.launch_button.setEnabled(False)
             self.open_mo2_button.setEnabled(False)
             self.direct_button.setEnabled(False)
             self._build_chips(ok=False, runner=None)
@@ -830,7 +931,8 @@ class PlayPage(QWidget):
             self.preview_label.setPlainText("No launch target available")
             self.preview_label.setStyleSheet(f"color: {WARN.name()};")
             self.target_path.setText("")
-            self.launch_button.setEnabled(False)
+            if not self._launching:
+                self.launch_button.setEnabled(False)
             self.open_mo2_button.setEnabled(False)
             self.direct_button.setEnabled(False)
             self._build_chips(ok=False, runner=None)
@@ -847,8 +949,9 @@ class PlayPage(QWidget):
             ),
             None,
         )
-        base_ok = not self._launching and not self._install_busy
-        self.launch_button.setEnabled(base_ok and mo2_ok)
+        base_ok = not self._launching and not self._install_busy and not incomplete
+        if not self._launching:
+            self.launch_button.setEnabled(base_ok and mo2_ok)
         self.open_mo2_button.setEnabled(base_ok and mo2_ok)
         self.direct_button.setEnabled(
             base_ok and (mo2_ok or direct_ok or anomaly_fallback is not None)
@@ -869,6 +972,13 @@ class PlayPage(QWidget):
         self.direct_button.setToolTip(
             "" if self.direct_button.isEnabled() else "No launch target available"
         )
+        if incomplete:
+            tip = tr(
+                "The last GAMMA install attempt failed - resume it on the Install page before playing."
+            )
+            self.launch_button.setToolTip(tip)
+            self.open_mo2_button.setToolTip(tip)
+            self.direct_button.setToolTip(tip)
         self._build_chips(ok=True, runner=runner)
         target = self._selected_target()
         exe = next((e for e in self.executables if e.title == target), Mo2Executable())
@@ -881,18 +991,22 @@ class PlayPage(QWidget):
             if widget is not None:
                 widget.deleteLater()
         chips: list[tuple[str, bool]] = []
-        # Installed GE-Proton versions
-        proton_versions = []
-        for label in self._proton_labels:
-            ver = label.removeprefix("GE-Proton").removeprefix("Proton ").strip()
-            if ver:
-                proton_versions.append(ver)
+        # The GE-Proton build that will actually be used for this launch
+        # (not every installed build - with several installed that made
+        # this chip very wide). Both an explicit pick and "auto" resolve
+        # through umu-run with PROTONPATH set to the chosen build
+        # directory - auto's own Runner.label is just the generic
+        # string "Proton", so PROTONPATH is the only reliable source of
+        # the actual version in both cases.
+        proton_version = ""
+        if runner is not None and runner.kind == "umu":
+            proton_path = runner.env.get("PROTONPATH", "")
+            if proton_path:
+                proton_version = Path(proton_path).name.removeprefix("GE-Proton")
         proton_text = (
-            f"Proton GE: {', '.join(proton_versions)}"
-            if proton_versions
-            else "Proton GE: none"
+            f"Proton GE: {proton_version}" if proton_version else "Proton GE: none"
         )
-        chips.append((proton_text, bool(proton_versions)))
+        chips.append((proton_text, bool(proton_version)))
         # GameMode (only if installed AND enabled in Settings)
         if gui_settings.load_gui_settings().get("always_gamemoderun"):
             gamemoderun = available_commands().get("gamemoderun")
@@ -909,11 +1023,6 @@ class PlayPage(QWidget):
             chip.style().polish(chip)
             self.chips_row.addWidget(chip)
         self.chips_row.addStretch(1)
-
-    def _copy_command(self) -> None:
-        text = self.preview_label.toPlainText().strip()
-        if text:
-            QGuiApplication.clipboard().setText(text)
 
     def _save_state(self) -> None:
         # currentData() is None on an empty/uninitialized combo (or if a
@@ -961,6 +1070,58 @@ class PlayPage(QWidget):
     def _on_change(self, *_args) -> None:
         self._save_state()
         self._refresh_preview()
+
+    def _on_gamemode_toggled(self, checked: bool) -> None:
+        gui_settings.save_gui_settings(always_gamemoderun=bool(checked))
+        self._refresh_preview()
+
+    def _on_launch_button_clicked(self) -> None:
+        """Route the hero button's click: "Launch Game" while idle,
+
+        "Quit Game" (with confirmation) once a launch is under way - see
+        _set_launch_button_state().
+        """
+        if self._launching:
+            self._confirm_quit_game()
+        else:
+            self.launch_game()
+
+    def _confirm_quit_game(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            tr("Quit Game"),
+            tr("Are you sure you want to quit the game?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._abort_launch(tr("Game closed by user."))
+
+    def _prompt_possible_stall(self) -> None:
+        """Warn once per launch if nothing has appeared for a while.
+
+        Confirmed via a real incident: a hung wrapper (a Wine crash loop,
+        in that case) can run indefinitely with no MO2/game window ever
+        appearing, silently consuming system memory the whole time - the
+        user had no way to know something was wrong short of a full
+        system restart. See _STALL_WARNING_SECONDS.
+
+        This is the backstop for a launch that hangs *silently*. A crash
+        loop is no longer left to it: it produces output, and
+        _on_launch_check kills it on sight (see runner_crash_loop) - the
+        machine froze in two minutes and this warning fires at three.
+        """
+        reply = QMessageBox.question(
+            self,
+            tr("Launch May Be Stuck"),
+            tr(
+                "The game hasn't started after a few minutes - this can happen during a crash loop, which may consume system memory the longer it runs.\n\nQuit the game now?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._abort_launch(tr("Game closed by user."))
 
     def launch_game(self) -> None:
         """Launch the selected game target using the primary Play workflow."""
@@ -1018,6 +1179,10 @@ class PlayPage(QWidget):
     def _run(self, *, open_mo2: bool, direct: bool, runner=None) -> None:
         """Launch the game through Mod Organizer 2 or directly."""
         self._launch_status_clear_timer.stop()
+        # A crash-dump poll from the previous session must not fire a
+        # warning attributed to this brand-new one (e.g. a quick retry
+        # launched while the old poll's 90s window was still open).
+        self._cancel_crash_poll()
         log_path = logs_dir() / "launcher.log"
         # launch_detached raises LaunchError too (spawn failures); if that
         # escapes, _launching stays True and every launch button stays dead.
@@ -1041,14 +1206,68 @@ class PlayPage(QWidget):
             # started MO2, making its pid look pre-existing and breaking
             # handoff detection.
             pre_launch_mo2_pids = mo2_pids() if monitoring_mo2 else set()
+            # Same idea, but for the actual game executable MO2 will launch
+            # (not MO2 itself) - MO2 stays running after the game closes,
+            # so playtime must be recorded on the game exiting, not MO2.
+            game_exe_name = None
+            if monitoring_mo2 and not open_mo2:
+                target = self._selected_target()
+                game_binary = next(
+                    (e.binary for e in self.executables if e.title == target),
+                    None,
+                )
+                game_exe_name = Path(game_binary).name if game_binary else None
+            pre_launch_game_pids = (
+                exe_pids(game_exe_name) if game_exe_name else set()
+            )
+            # Only bother listing crash dumps at all when Flip Priority
+            # was actually used since the last completed session - zero
+            # filesystem work on every ordinary launch otherwise. See
+            # _check_flip_priority_crash().
+            crash_check_pending = False
+            pre_launch_crash_dumps: set[str] = set()
+            if not open_mo2:
+                launch_profile = self.window.settings.active_profile
+                if launch_profile is not None:
+                    pending_map = gui_settings.load_gui_settings().get(
+                        "flip_priority_pending", {}
+                    )
+                    crash_check_pending = bool(
+                        pending_map.get(launch_profile.profile_name)
+                    )
+                    if crash_check_pending:
+                        pre_launch_crash_dumps = crash_dump_names(
+                            launch_profile.anomaly
+                        )
             self._proc = launch_detached(
                 command, env, cwd, log_path=log_path, registry=self._registry
             )
+            self._launch_wrapper_pid = self._proc.pid
+            self._stall_warned = False
+            # Not "Open MO2" - that opens the mod manager, not the game.
+            is_game_session = label != "Mod Organizer 2"
+            self._launch_started_at = time.monotonic() if is_game_session else None
+            if is_game_session:
+                gui_state = gui_settings.load_gui_settings()
+                if gui_state.get("discord_rpc_enabled") and gui_state.get(
+                    "discord_client_id"
+                ):
+                    self._discord_rpc = start_presence(gui_state["discord_client_id"])
+                    update_presence(self._discord_rpc, "Playing S.T.A.L.K.E.R. GAMMA")
             self._monitoring_mo2 = monitoring_mo2
             self._mo2_seen = False
             self._handoff_checks = 0
             self._pre_launch_mo2_pids = pre_launch_mo2_pids
             self._mo2_launch_pids = set()
+            self._game_exe_name = game_exe_name
+            self._pre_launch_game_pids = pre_launch_game_pids
+            self._game_seen = False
+            self._crash_check_pending = crash_check_pending
+            self._pre_launch_crash_dumps = pre_launch_crash_dumps
+            applog.get_logger().info(
+                "play: launch label=%s monitoring_mo2=%s game_exe_name=%s",
+                label, monitoring_mo2, game_exe_name,
+            )
         except LaunchError as exc:
             self._abort_launch(f"Could not launch: {exc}")
             QMessageBox.warning(self, tr("Could not launch"), str(exc))
@@ -1074,6 +1293,71 @@ class PlayPage(QWidget):
             timer.deleteLater()
         self._launch_timer = None
 
+    def _break_crash_loop(self, log_path: Path) -> None:
+        """Stop a Wine crash loop, then say what it was and how to fix it."""
+        self._abort_launch(
+            tr("Wine crashed repeatedly while starting Mod Organizer - stopped before it could exhaust memory.")
+        )
+        _kill_stray_debuggers()
+        message = tr(
+            "Wine crashed on every process it started, and COMMANDER stopped "
+            "the launch before it could exhaust your memory."
+        )
+        foreign: list[str] = []
+        try:
+            runner = self._runner()
+            prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
+            if prefix:
+                foreign = prefix_foreign_dlls(prefix, runner)
+        except LaunchError:
+            pass
+        if foreign:
+            message += "\n\n" + tr(
+                "The cause is in the Wine prefix: {files} were written by a "
+                "different Wine build, so nothing Proton starts can load. "
+                "Repair the prefix now? Afterwards, reinstall the dependencies "
+                "from the Install page.",
+                files=", ".join(foreign),
+            )
+            reply = QMessageBox.question(
+                self,
+                tr("Wine Prefix Damaged"),
+                message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._repair_prefix()
+            return
+        detail = "\n".join(read_log_tail(log_path, 4096).rstrip().splitlines()[-8:])
+        QMessageBox.warning(
+            self,
+            tr("Launch Failed"),
+            message + "\n\n" + tr("Last log lines:") + "\n" + detail,
+        )
+
+    def _repair_prefix(self) -> None:
+        """Put the runner's own DLLs back and tell the user what comes next."""
+        from ..repair import repair_prefix_foreign_dlls
+
+        try:
+            runner = self._runner()
+            prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
+            repaired = repair_prefix_foreign_dlls(prefix, runner) if prefix else []
+        except (LaunchError, OSError) as exc:
+            QMessageBox.warning(self, tr("Repair Failed"), str(exc))
+            return
+        QMessageBox.information(
+            self,
+            tr("Prefix Repaired"),
+            tr(
+                "{count} files were restored to the runner's own versions.\n\n"
+                "Now open the Install page and run Install Dependencies - the "
+                "runtimes it had installed were among the files overwritten.",
+                count=len(repaired),
+            ),
+        )
+
     def _abort_launch(self, message: str) -> None:
         """Kill any spawned wrapper, release the launch lock, and report."""
         proc = self._proc
@@ -1082,6 +1366,13 @@ class PlayPage(QWidget):
             # The launcher wrapper failed or the setup after spawn raised;
             # terminate its process group so no orphaned Wine processes linger.
             self._registry.cleanup(proc)
+        elif self._launch_wrapper_pid is not None:
+            # The wrapper itself already exited (MO2 keeps running
+            # independently of it after handoff), but the whole tree
+            # still shares its original process group - killing by that
+            # remembered pid still reaches MO2/the game.
+            _terminate_process_group(self._launch_wrapper_pid)
+        self._launch_wrapper_pid = None
         self._monitoring_mo2 = False
         self._stop_launch_timer()
         self._set_result(message, error=True)
@@ -1091,8 +1382,124 @@ class PlayPage(QWidget):
         # another page while the game was running.
         self._refresh_preview()
 
+    def _record_playtime(self) -> None:
+        """Add this session's elapsed time to the active profile's total.
+
+        Only called from a "closed normally" path - a launch that never
+        got as far as actually running (or crashed immediately) has
+        nothing meaningful to add, and that distinction is exactly what
+        _launch_started_at being None (see _launch(), "Open MO2" is
+        excluded too) or unset already encodes.
+        """
+        started_at = self._launch_started_at
+        self._launch_started_at = None
+        if started_at is None:
+            applog.get_logger().info("play: record_playtime no-op (started_at is None)")
+            return
+        profile = self.window.settings.active_profile
+        if profile is None:
+            applog.get_logger().info("play: record_playtime no-op (no active profile)")
+            return
+        elapsed = time.monotonic() - started_at
+        if elapsed <= 0:
+            applog.get_logger().info(
+                "play: record_playtime no-op (elapsed=%.1fs)", elapsed
+            )
+            return
+        gui_state = gui_settings.load_gui_settings()
+        playtime = dict(gui_state.get("playtime_seconds", {}))
+        playtime[profile.profile_name] = playtime.get(profile.profile_name, 0.0) + elapsed
+        last_played = dict(gui_state.get("last_played_ts", {}))
+        last_played[profile.profile_name] = time.time()
+        gui_settings.save_gui_settings(
+            playtime_seconds=playtime, last_played_ts=last_played
+        )
+        applog.get_logger().info(
+            "play: recorded %.1fs playtime for profile %s", elapsed, profile.profile_name
+        )
+        self._update_playtime_label()
+
+    def _cancel_crash_poll(self) -> None:
+        if self._crash_poll_timer is not None:
+            self._crash_poll_timer.stop()
+            self._crash_poll_timer = None
+
+    def _check_flip_priority_crash(self) -> None:
+        """Warn if a crash dump appears after a recent Flip Priority.
+
+        A new X-Ray minidump (.mdmp) in the Anomaly install's log folder
+        reliably indicates a native engine crash, regardless of whether
+        the session went through MO2 or a direct launch - checking for
+        one this way sidesteps needing this app's own (unreliable,
+        MO2-mediated) process-exit-code tracking. Only checked when Flip
+        Priority was used since the last completed session, to avoid
+        false-positive noise on every ordinary crash; the pending flag
+        is consumed (cleared) here regardless of outcome, so only the
+        first launch after a flip gets attributed to it. The actual
+        dump-file check is a bounded poll (_poll_for_flip_priority_crash),
+        not a single immediate check, since X-Ray can take a while to
+        finish writing it after the session is already reported closed.
+        """
+        if not self._crash_check_pending:
+            return
+        self._crash_check_pending = False
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        pending_map = dict(
+            gui_settings.load_gui_settings().get("flip_priority_pending", {})
+        )
+        pending_map.pop(profile.profile_name, None)
+        gui_settings.save_gui_settings(flip_priority_pending=pending_map)
+        self._cancel_crash_poll()
+        self._crash_poll_anomaly = profile.anomaly
+        self._crash_poll_baseline = self._pre_launch_crash_dumps
+        self._crash_poll_attempts_left = _CRASH_POLL_MAX_ATTEMPTS
+        self._poll_for_flip_priority_crash()
+
+    def _poll_for_flip_priority_crash(self) -> None:
+        new_dumps = (
+            crash_dump_names(self._crash_poll_anomaly) - self._crash_poll_baseline
+        )
+        if new_dumps:
+            self._crash_poll_timer = None
+            message = tr(
+                "The game appears to have crashed (a new crash log was found), and you recently used Flip Priority on the Mod Manager page.\n\nAn incompatible mod load order can cause crashes like this - if it keeps happening, consider flipping the priority order back."
+            )
+            QMessageBox.warning(self, tr("Possible Crash After Flip Priority"), message)
+            is_active = getattr(self.window, "isActiveWindow", lambda: True)()
+            if not is_active:
+                notify_desktop(tr("Possible Crash After Flip Priority"), message)
+            return
+        self._crash_poll_attempts_left -= 1
+        if self._crash_poll_attempts_left <= 0:
+            self._crash_poll_timer = None
+            return
+        self._crash_poll_timer = QTimer(self)
+        self._crash_poll_timer.setSingleShot(True)
+        self._crash_poll_timer.timeout.connect(self._poll_for_flip_priority_crash)
+        self._crash_poll_timer.start(_CRASH_POLL_INTERVAL_MS)
+
+    def _update_playtime_label(self) -> None:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            self.playtime_label.setText("")
+            return
+        playtime_seconds = gui_settings.load_gui_settings().get(
+            "playtime_seconds", {}
+        ).get(profile.profile_name, 0.0)
+        self.playtime_label.setText(
+            tr("Total playtime: {arg}", arg=format_playtime(playtime_seconds))
+        )
+
+    def _stop_discord_presence(self) -> None:
+        stop_presence(self._discord_rpc)
+        self._discord_rpc = None
+
     def _finish_launch(self, message: str, *, error: bool = False) -> None:
         """Release the launch lock, stop monitoring, and show a final status."""
+        self._stop_discord_presence()
+        self._launch_wrapper_pid = None
         self._monitoring_mo2 = False
         self._stop_launch_timer()
         self._set_launch_button_state(False)
@@ -1102,6 +1509,26 @@ class PlayPage(QWidget):
 
     def _on_launch_check(self, label: str, command: list[str], log_path: Path) -> None:
         """Check the wrapper and, for MO2, the handoff process."""
+        # Crash-loop breaker, checked before anything else on every tick. A
+        # prefix carrying another Wine's ntdll makes every process fault;
+        # Wine answers each fault by starting winedbg, whose process faults
+        # too. Left alone that is a fork bomb that exhausts memory in about
+        # two minutes and freezes the machine - the stall warning below fires
+        # at three, which is why it never saved anyone. Kill it the moment
+        # the pattern is recognisable.
+        if runner_crash_loop(read_log_tail(log_path)):
+            self._break_crash_loop(log_path)
+            return
+        if (
+            not self._stall_warned
+            and not self._mo2_seen
+            and not self._game_seen
+            and self._launch_started_at is not None
+            and time.monotonic() - self._launch_started_at >= _STALL_WARNING_SECONDS
+        ):
+            self._stall_warned = True
+            self._prompt_possible_stall()
+            return
         proc = getattr(self, "_proc", None)
         if proc is None:
             if self._monitoring_mo2:
@@ -1121,16 +1548,62 @@ class PlayPage(QWidget):
                         # handoff quickly; MO2 can stay open for hours after.
                         self._launch_timer.setInterval(2000)
                         self._set_result("MO2 is running...")
+                        applog.get_logger().info(
+                            "play: mo2 handoff detected pids=%s", new_pids
+                        )
                         return
                     if self._handoff_checks < 10:
                         self._handoff_checks += 1
                         return
-                    self._finish_launch(
-                        f"{label} launcher exited before MO2 was detected.",
-                        error=True,
+                    # On some runner setups (confirmed via commander.log on
+                    # a real system: umu-run/GE-Proton here) the wrapper
+                    # process does not detach after starting MO2 - it
+                    # blocks until the whole Wine session, MO2 included,
+                    # has already closed. By the time the wrapper's own
+                    # exit gets us here, MO2 genuinely is not running
+                    # anymore (it already came and went together with the
+                    # wrapper), not "still starting up" - treating that as
+                    # an error left every such session's playtime
+                    # unrecorded. A real launch failure before MO2 ever
+                    # started would have shown up as a non-zero wrapper
+                    # exit code already, handled separately above.
+                    applog.get_logger().info(
+                        "play: wrapper exited without a separate MO2 "
+                        "process ever appearing - treating as a normal "
+                        "close (pre_launch_mo2_pids=%s)",
+                        self._pre_launch_mo2_pids,
                     )
+                    self._record_playtime()
+                    self._check_flip_priority_crash()
+                    self._finish_launch(f"{label} closed normally.")
                     return
+                if self._game_exe_name:
+                    # MO2 stays running after the game it launched closes,
+                    # so wait for the game itself to exit rather than MO2
+                    # to record playtime that actually reflects play time.
+                    new_game_pids = (
+                        exe_pids(self._game_exe_name) - self._pre_launch_game_pids
+                    )
+                    if new_game_pids and not self._game_seen:
+                        self._game_seen = True
+                        applog.get_logger().info(
+                            "play: game process detected exe=%s pids=%s",
+                            self._game_exe_name, new_game_pids,
+                        )
+                    elif not new_game_pids and self._game_seen:
+                        applog.get_logger().info(
+                            "play: game process gone exe=%s, recording playtime",
+                            self._game_exe_name,
+                        )
+                        self._record_playtime()
+                        self._game_exe_name = None
                 if not (mo2_pids() & self._mo2_launch_pids):
+                    applog.get_logger().info(
+                        "play: mo2 exited, finishing launch (game_seen=%s)",
+                        self._game_seen,
+                    )
+                    self._record_playtime()
+                    self._check_flip_priority_crash()
                     self._finish_launch(f"{label} closed normally.")
                     return
                 self._set_result("MO2 is running...")
@@ -1142,17 +1615,26 @@ class PlayPage(QWidget):
             proc_code = proc.returncode
             self._proc = None
             self._registry.discard(proc)
+            applog.get_logger().info(
+                "play: wrapper exited code=%s monitoring_mo2=%s",
+                proc_code, self._monitoring_mo2,
+            )
             if proc_code == 0 and self._monitoring_mo2:
                 self._set_result("Launcher exited; waiting for MO2...")
                 return
+            self._launch_wrapper_pid = None
             self._monitoring_mo2 = False
             self._stop_launch_timer()
             self._set_launch_button_state(False)
             self._refresh_preview()
+            self._stop_discord_presence()
             code = proc_code
             if code == 0:
+                self._record_playtime()
+                self._check_flip_priority_crash()
                 self._set_result(f"{label} closed normally.")
             else:
+                self._check_flip_priority_crash()
                 detail = self._log_tail(log_path)
                 msg = f"{label} exited with an error (code {code})"
 
@@ -1200,15 +1682,60 @@ class PlayPage(QWidget):
                     )
                 else:
                     QMessageBox.warning(self, tr("Launch failed"), msg)
+                self._offer_crash_report()
             self._launch_status_clear_timer.start(3000)
 
+    def _offer_crash_report(self) -> None:
+        """Offer to bundle logs into a report right after a failed launch.
+
+        Turns "the game crashed" straight into a ready-to-share bug report
+        with one extra click, reusing the same log-dump/ASSISTANT pieces
+        Utilities' "Create Log Dump" button already uses - nothing new to
+        maintain, just a second entry point at the moment it's most useful.
+        """
+        answer = QMessageBox.question(
+            self,
+            tr("Create Bug Report?"),
+            tr(
+                "Create a log dump for this failure? It bundles logs and system info you can attach when reporting a bug."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        task = BackgroundTask(create_log_dump, parent=self)
+        self._crash_report_task = task
+        task.result.connect(self._on_crash_report_done)
+        task.error.connect(self._on_crash_report_error)
+        task.start()
+
+    def _on_crash_report_done(self, result: object) -> None:
+        self._crash_report_task = None
+        if not isinstance(result, (tuple, list)) or len(result) != 2:
+            return
+        path, _stats = result
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(tr("Log Dump Created"))
+        dialog.setText(tr("Saved to:\n{path}", path=str(path)))
+        open_button = dialog.addButton(
+            tr("Open in ASSISTANT"), QMessageBox.ButtonRole.AcceptRole
+        )
+        dialog.addButton(QMessageBox.StandardButton.Close)
+        dialog.exec()
+        if dialog.clickedButton() is open_button:
+            try:
+                launch_assistant(path)
+            except AssistantLaunchError as exc:
+                QMessageBox.information(self, tr("ASSISTANT Unavailable"), str(exc))
+
+    def _on_crash_report_error(self, message: str) -> None:
+        self._crash_report_task = None
+        QMessageBox.warning(self, tr("Log Dump Failed"), message)
+
     def _log_tail(self, path: Path, limit: int = 12) -> str:
-        try:
-            lines = (
-                path.read_text(encoding="utf-8", errors="replace").rstrip().splitlines()
-            )
-        except OSError:
-            return ""
+        # Bounded read: a crash loop grows launcher.log by megabytes, and this
+        # must never be the thing that makes COMMANDER itself heavy.
+        lines = read_log_tail(path).rstrip().splitlines()
         return "\n".join(lines[-limit:])
 
     def _set_result(self, text: str, *, error: bool = False) -> None:
@@ -1251,7 +1778,20 @@ class PlayPage(QWidget):
 
     def _set_launch_button_state(self, launching: bool) -> None:
         self._launching = launching
-        self.launch_button.setEnabled(not launching)
+        # Stays clickable while launching - it becomes "Quit Game" so the
+        # user always has a way to force-close a launch (MO2, the game,
+        # or a hung wrapper) instead of it running unbounded.
+        #
+        # install_hover_grow_text() (see common.py) clears this button's
+        # own .text() permanently and paints an overlay label instead -
+        # plain setText() has no visible effect and would also silently
+        # re-populate the button's real text, showing both the overlay's
+        # stale text and the new real text at once. set_hover_grow_text()
+        # updates the overlay, which is what's actually visible.
+        set_hover_grow_text(
+            self.launch_button, tr("Quit Game") if launching else tr("Launch Game")
+        )
+        self.launch_button.setEnabled(True)
         self.open_mo2_button.setEnabled(not launching)
         self.direct_button.setEnabled(not launching)
         self.shortcut_button.setEnabled(not launching)

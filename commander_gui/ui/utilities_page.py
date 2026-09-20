@@ -14,6 +14,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -34,7 +35,7 @@ from ..assistant_launcher import (
 )
 from ..atomic import write_text
 from ..cli_runner import cli_command
-from ..integrity import format_size, verify_cache_archives
+from ..integrity import CacheArchiveVerifyResult, format_size, verify_cache_archives
 from ..log_dump import create_log_dump
 from ..parsers import (
     parse_prune_archive,
@@ -47,10 +48,8 @@ from .common import (
     OutputPane,
     ProgressArea,
     StreamTask,
-    anomaly_installed,
     assistant_token,
     dir_size,
-    gamma_installed,
     info_label,
     make_card,
     mo2_running,
@@ -238,6 +237,92 @@ def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
     return wiped
 
 
+#: Per-category, how many affected filenames to list before collapsing
+#: the rest into a "... and N more" line - a large cache could otherwise
+#: produce a dialog with hundreds of names.
+_CACHE_PREFLIGHT_NAMES_SHOWN = 15
+
+
+def _cache_preflight_summary_html(
+    result: CacheArchiveVerifyResult, include_anomaly: bool
+) -> str:
+    """Build the GAMMA/Fresh Reset cache-preflight confirmation as HTML.
+
+    A plain QMessageBox (as this dialog used to be) renders with this
+    app's proportional UI font - space-padded numbers never actually
+    line up in one - so the stat counts are laid out as a real HTML
+    table instead. The intro paragraph also has to say plainly that
+    "reusable" only ever means "won't need re-downloading" - the reset
+    still deletes and freshly re-extracts every mod regardless, which a
+    bare "392 reusable" count reads as contradicting.
+    """
+    if include_anomaly:
+        intro = (
+            "Fresh Reset deletes and reinstalls both Anomaly and the "
+            "GAMMA modpack from scratch - everything still gets freshly "
+            "extracted either way."
+        )
+    else:
+        intro = (
+            "GAMMA Reset deletes and reinstalls the GAMMA modpack - "
+            "Anomaly itself is not touched. Every mod still gets freshly "
+            "extracted from its archive either way."
+        )
+    intro += (
+        " This check only looks at whether files already in your "
+        "download cache are still valid, so the reinstall can skip "
+        "re-downloading those specifically."
+    )
+
+    rows = (
+        ("Already downloaded, valid", len(result.verified)),
+        ("Need downloading", len(result.missing)),
+        ("Outdated - official list changed", len(result.mismatched)),
+        ("Unreadable", len(result.unreadable)),
+    )
+    table_rows = "".join(
+        f"<tr><td>{escape(label)}</td>"
+        f"<td align='right'><b>{count}</b></td></tr>"
+        for label, count in rows
+    )
+    table = f"<table cellspacing='4'>{table_rows}</table>"
+
+    sections = []
+    for label, explanation, names in (
+        (
+            "Need downloading",
+            "Not currently in your cache - they'll simply be downloaded, same as a normal install.",
+            result.missing,
+        ),
+        (
+            "Outdated",
+            "Differ from the current official list (e.g. after a GAMMA update) - not evidence anything is broken. They'll be redownloaded automatically.",
+            result.mismatched,
+        ),
+        (
+            "Unreadable",
+            "Couldn't be verified (e.g. corrupted) - they'll be redownloaded automatically.",
+            result.unreadable,
+        ),
+    ):
+        if not names:
+            continue
+        shown_names = names[:_CACHE_PREFLIGHT_NAMES_SHOWN]
+        items = "".join(f"<li>{escape(name)}</li>" for name in shown_names)
+        if len(names) > len(shown_names):
+            items += f"<li>... and {len(names) - len(shown_names)} more</li>"
+        sections.append(
+            f"<p><b>{escape(label)}:</b> {explanation}</p><ul>{items}</ul>"
+        )
+
+    return (
+        f"<p>{intro}</p>"
+        f"{table}"
+        f"{''.join(sections)}"
+        "<p><b>Continue with the reset?</b></p>"
+    )
+
+
 def _copy_dir_tree(src: Path, dst: Path, report, cancel_event=None) -> None:
     """Copy *src* into *dst*, streaming progress via *report*."""
     if not src.is_dir():
@@ -419,7 +504,9 @@ def _move_folders(
 
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Move cancelled")
-        for (label, src, _dst), (_original, backup) in zip(destinations, backups):
+        for (label, src, _dst), (_original, _backup) in zip(
+            destinations, backups, strict=True
+        ):
             report(f"Removing original {label}: {src}")
             shutil.rmtree(src)
 
@@ -517,6 +604,32 @@ def _rewrite_mo2_ini_paths(
     return ini
 
 
+class _MoveDialog(QDialog):
+    """The "Move Installation" popup - refuses to close while a move is
+
+    actively copying files. Every other Tools/Reset button (including
+    this dialog's own "Move Installation" row) shares one "only one task
+    at a time" lock (see UtilitiesPage._tasks_idle()), so closing this
+    away mid-move would leave no way back in to see progress or cancel
+    until the move finishes on its own.
+    """
+
+    def __init__(self, page: UtilitiesPage, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._page = page
+
+    def closeEvent(self, event) -> None:
+        if self._page._move_task is not None:
+            QMessageBox.information(
+                self,
+                tr("Move In Progress"),
+                tr("Cancel the move first if you want to close this window."),
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class UtilitiesPage(QWidget):
     def __init__(self, window) -> None:
         super().__init__()
@@ -548,16 +661,6 @@ class UtilitiesPage(QWidget):
         outer.setContentsMargins(24, 24, 24, 20)
         outer.setSpacing(12)
 
-        title = section_label(tr("UTILITIES"), level=1)
-        title.setWordWrap(True)
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        outer.addWidget(title)
-        outer.addWidget(
-            info_label(
-                tr("Maintenance tools for Anomaly and GAMMA: manage the download and shader caches, fix GOG paths, create a log dump, and safely reset or remove folders.")
-            )
-        )
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -570,9 +673,12 @@ class UtilitiesPage(QWidget):
         root.setSpacing(14)
         scroll.setWidget(content)
 
+        # Built once here (not added to `root` - it's a popup, opened via
+        # its own "Run" row in _tools_card()) so _refresh_move_paths() is
+        # always safe to call from refresh(), same as before.
+        self._move_dialog = self._build_move_dialog()
         root.addWidget(self._tools_card())
         root.addWidget(self._destructive_card())
-        root.addWidget(self._move_card())
         root.addStretch(1)
 
         self.refresh()
@@ -628,6 +734,20 @@ class UtilitiesPage(QWidget):
                 self._gog_fix,
             ),
             (
+                tr("Repair Wine prefix"),
+                tr(
+                    "Restore the runner's own system DLLs if another Wine has "
+                    "written into the game's prefix. Use this when every launch "
+                    "crashes immediately, then reinstall the dependencies."
+                ),
+                self._repair_prefix,
+            ),
+            (
+                tr("Move Installation"),
+                tr("Move the Anomaly, GAMMA, and cache folders to another drive. Files are copied and checked before the originals are removed."),
+                self._open_move_dialog,
+            ),
+            (
                 tr("Create Log Dump"),
                 tr(
                     "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
@@ -642,6 +762,81 @@ class UtilitiesPage(QWidget):
             rows.addWidget(self._tool_row(title, description, slot))
         layout.addLayout(rows)
         return card
+
+    def _repair_prefix(self) -> None:
+        """Undo another Wine's writes into the runner's prefix."""
+        from ..gui_settings import configured_runner
+        from ..launcher import LaunchError
+        from ..repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
+
+        if self.window.install_busy:
+            QMessageBox.warning(self, tr("Busy"), tr("An install is already running."))
+            return
+        if mo2_running(force=True):
+            QMessageBox.warning(
+                self,
+                tr("Mod Organizer is running"),
+                tr("Close Mod Organizer and the game before repairing the prefix."),
+            )
+            return
+        try:
+            runner = configured_runner()
+        except LaunchError as exc:
+            QMessageBox.warning(self, tr("Repair Failed"), str(exc))
+            return
+        prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
+        if not prefix:
+            QMessageBox.information(
+                self,
+                tr("Nothing to repair"),
+                tr("The selected runner does not use a Proton prefix."),
+            )
+            return
+        foreign = foreign_prefix_dlls(prefix, runner)
+        if not foreign:
+            QMessageBox.information(
+                self,
+                tr("Nothing to repair"),
+                tr("No files from another Wine were found in {prefix}.", prefix=prefix),
+            )
+            return
+        names = sorted({item.name for item, _replacement in foreign})
+        shown = ", ".join(names[:8]) + (tr(" and {count} more", count=len(names) - 8) if len(names) > 8 else "")
+        reply = QMessageBox.question(
+            self,
+            tr("Repair Wine prefix"),
+            tr(
+                "{count} DLLs in {prefix} were written by a different Wine build "
+                "({names}).\n\nThey will be restored to the runner's own versions. "
+                "Nothing else in the prefix is touched, but the runtimes "
+                "Install Dependencies had added were among them, so run it "
+                "again afterwards.\n\nRepair now?",
+                count=len(foreign),
+                prefix=prefix,
+                names=shown,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            repaired = repair_prefix_foreign_dlls(prefix, runner)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Repair Failed"), str(exc))
+            return
+        self.output.append_line(f"Repaired {len(repaired)} DLLs in {prefix}")
+        for name in repaired:
+            self.output.append_line(f"  restored {name}")
+        QMessageBox.information(
+            self,
+            tr("Prefix Repaired"),
+            tr(
+                "{count} files were restored to the runner's own versions.\n\n"
+                "Now open the Install page and run Install Dependencies.",
+                count=len(repaired),
+            ),
+        )
 
     def _open_assistant(self) -> None:
         """Open the bundled or installed ASSISTANT application."""
@@ -778,7 +973,7 @@ class UtilitiesPage(QWidget):
         layout.addWidget(caution)
 
         self.fresh_reset_hint = info_label(
-            tr("Fresh Reset requires Anomaly and GAMMA; GAMMA Reset requires GAMMA.")
+            tr("Fresh Reset and Full Uninstall need at least the Anomaly or GAMMA folder to exist; GAMMA Reset needs the GAMMA folder.")
         )
         layout.addWidget(self.fresh_reset_hint)
         self._add_console(layout)
@@ -809,9 +1004,16 @@ class UtilitiesPage(QWidget):
         return panel, button
 
     # ----- move game -----
-    def _move_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Move installation"), level=2))
+    def _open_move_dialog(self) -> None:
+        self._refresh_move_paths()
+        self._move_dialog.show()
+        self._move_dialog.raise_()
+        self._move_dialog.activateWindow()
+
+    def _build_move_dialog(self) -> QDialog:
+        dialog = _MoveDialog(self, parent=self)
+        dialog.setWindowTitle(tr("Move Installation"))
+        layout = QVBoxLayout(dialog)
         layout.addWidget(
             info_label(
                 tr("Move the Anomaly, GAMMA, and cache folders to another drive. Files are copied and checked before the originals are removed.")
@@ -880,7 +1082,7 @@ class UtilitiesPage(QWidget):
             show_table=False, show_log=True, log_max_height=110
         )
         layout.addWidget(self._move_progress)
-        return card
+        return dialog
 
     def _browse_move_dest(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -1083,6 +1285,12 @@ class UtilitiesPage(QWidget):
         # Now that paths, INI, and verification have settled, release the lock.
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
+        # Re-run now that the lock is released: the _refresh_move_paths() call
+        # above ran while install_busy was still True, so it left the Move
+        # button disabled, and _set_buttons_enabled() does not touch that
+        # button - nothing else would re-enable it until the user navigated
+        # away and back. _on_move_error() already refreshes in this order.
+        self._refresh_move_paths()
         self._move_profile_name = None
         self._move_sources = []
 
@@ -1152,24 +1360,28 @@ class UtilitiesPage(QWidget):
         self._refresh_move_paths()
 
     def _update_fresh_reset_enabled(self) -> None:
+        """Gate Reset/Uninstall on "is there anything here to wipe", not
+        "is this a complete, working install" - an interrupted/crashed
+        download can leave folders that exist but never finished, and
+        _wipe_folders() already handles that shape fine (it just skips
+        whatever isn't there), so the gate uses the same
+        _resolved_wipe_target() check that function itself uses, instead
+        of anomaly_installed()/gamma_installed()'s stricter completeness
+        check - which stays correct for other callers (Dashboard, System
+        Check) where "is this a working install" is the right question.
+        """
         profile = self.window.settings.active_profile
-        installed = (
-            profile is not None
-            and anomaly_installed(profile.anomaly)
-            and gamma_installed(profile.gamma, profile.mo2_profile)
-        )
-        fresh_reset_enabled = installed and not self.window.install_busy
+        anomaly_present = profile is not None and _resolved_wipe_target(profile.anomaly) is not None
+        gamma_present = profile is not None and _resolved_wipe_target(profile.gamma) is not None
+        cache_present = profile is not None and _resolved_wipe_target(profile.cache) is not None
+        busy = self.window.install_busy
+        fresh_reset_enabled = (anomaly_present or gamma_present) and not busy
+        gamma_reset_enabled = gamma_present and not busy
         full_uninstall_enabled = (
-            profile is not None
-            and gamma_installed(profile.gamma, profile.mo2_profile)
-            and not self.window.install_busy
+            (anomaly_present or gamma_present or cache_present) and not busy
         )
         self.fresh_reset_button.setEnabled(fresh_reset_enabled)
-        self.gamma_reset_button.setEnabled(
-            profile is not None
-            and gamma_installed(profile.gamma, profile.mo2_profile)
-            and not self.window.install_busy
-        )
+        self.gamma_reset_button.setEnabled(gamma_reset_enabled)
         self.full_uninstall_button.setEnabled(full_uninstall_enabled)
         self.fresh_reset_hint.setVisible(
             not (fresh_reset_enabled or full_uninstall_enabled)
@@ -1420,22 +1632,20 @@ class UtilitiesPage(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
         else:
-            lines = result.lines()
-            for line in lines:
+            for line in result.lines():
                 self.output.append_line(line)
-            # Cap the dialog body: a large cache could produce hundreds of
-            # lines and blow the message box off the screen.
-            shown = lines[:40]
-            if len(lines) > len(shown):
-                shown.append(f"... and {len(lines) - len(shown)} more line(s)")
-            answer = QMessageBox.question(
-                self,
-                self._wipe_title,
-                "Cache preflight complete.\n\n"
-                + "\n".join(shown)
-                + "\n\nContinue with the reset?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            box = QMessageBox(self)
+            box.setWindowTitle(self._wipe_title)
+            box.setTextFormat(Qt.TextFormat.RichText)
+            box.setText(
+                _cache_preflight_summary_html(
+                    result, self._reset_includes_anomaly
+                )
             )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            answer = box.exec()
         if answer != QMessageBox.StandardButton.Yes:
             self.window.set_install_busy(False)
             self._set_buttons_enabled(True)
@@ -1496,8 +1706,11 @@ class UtilitiesPage(QWidget):
             self.summary.setText(tr("Folders wiped. Reinstalling Anomaly and GAMMA..."))
         else:
             self.summary.setText(tr("GAMMA folder wiped. Reinstalling GAMMA..."))
-        install_page = self.window._pages["install"]
+        # set_page() first: pages are built lazily on first visit, and this
+        # is the first time this flow touches the Install page if the user
+        # never opened that tab themselves.
         self.window.set_page("install")
+        install_page = self.window._pages["install"]
         if not install_page.start_auto_install(
             include_anomaly=self._reset_includes_anomaly,
             preserve_user=self._reset_preserve_user,
@@ -1532,8 +1745,15 @@ class UtilitiesPage(QWidget):
         if not self._require_profile():
             return
         profile = self.window.settings.active_profile
-        if not gamma_installed(profile.gamma, profile.mo2_profile):
-            QMessageBox.information(self, tr("Not Installed"), tr("GAMMA is not installed."))
+        nothing_to_remove = (
+            _resolved_wipe_target(profile.anomaly) is None
+            and _resolved_wipe_target(profile.gamma) is None
+            and _resolved_wipe_target(profile.cache) is None
+        )
+        if nothing_to_remove:
+            QMessageBox.information(
+                self, tr("Not Installed"), tr("Nothing found to uninstall.")
+            )
             self._update_fresh_reset_enabled()
             return
 
@@ -1603,6 +1823,22 @@ class UtilitiesPage(QWidget):
         self._wipe_task = None
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
+        profile = self.window.settings.active_profile
+        # The actual wipe already used the paths captured at start (safe
+        # regardless), but the success message/refresh below act on
+        # whatever profile is active NOW - if the user switched profiles
+        # while a long uninstall was still running, say so plainly instead
+        # of silently praising the wrong profile's install as gone.
+        if profile is None or (
+            profile.anomaly,
+            profile.gamma,
+            profile.cache,
+        ) != self._full_uninstall_targets:
+            self.summary.setText(
+                tr("Uninstall finished, but the active profile changed while it was running.")
+            )
+            self.refresh()
+            return
         self.summary.setText(tr("Anomaly and GAMMA completely uninstalled"))
         self.refresh()
         # Immediately clear the Install page bars and Dashboard rows that

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -21,9 +23,15 @@ from PySide6.QtWidgets import (
 )
 
 from ..modlist import seed_new_mo2_profile
+from ..profile_bundle import (
+    ProfileBundleError,
+    export_profile_bundle,
+    read_profile_bundle,
+)
 from ..settings import CliProfile, cli_ok, run_config_command
 from .common import (
     BackgroundTask,
+    activate_profile,
     info_label,
     make_card,
     mo2_running,
@@ -54,15 +62,6 @@ class ProfilesPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        title = section_label(tr("PROFILES"), level=1)
-        title.setWordWrap(True)
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(title)
-        subtitle = info_label(
-            tr("Create and manage COMMANDER profiles. Each one keeps its Anomaly, GAMMA, and download-cache folders.")
-        )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(subtitle)
 
         top = QHBoxLayout()
         top.setSpacing(16)
@@ -101,6 +100,21 @@ class ProfilesPage(QWidget):
         for b in (self.new_button, self.active_button, self.delete_button):
             btn_row.addWidget(b)
         list_layout.addLayout(btn_row)
+
+        bundle_row = QHBoxLayout()
+        self.export_button = QPushButton(tr("Export Profile"))
+        self.export_button.setToolTip(
+            tr("Save this profile's settings (and modlist.txt, if any) to a file you can back up or share.")
+        )
+        self.export_button.clicked.connect(self._export_profile)
+        self.import_button = QPushButton(tr("Import Profile"))
+        self.import_button.setToolTip(
+            tr("Load settings from a previously exported profile bundle into a new profile.")
+        )
+        self.import_button.clicked.connect(self._import_profile)
+        for b in (self.export_button, self.import_button):
+            bundle_row.addWidget(b)
+        list_layout.addLayout(bundle_row)
 
         # ----- form -----
         form_layout.addWidget(section_label(tr("Profile details")))
@@ -373,10 +387,15 @@ class ProfilesPage(QWidget):
 
     def _update_busy_state(self) -> None:
         busy = self.window.install_busy
-        for button in (self.new_button, self.active_button, self.delete_button, self.save_button):
-            button.setEnabled(
-                not busy and (button is self.new_button or self.profile_list.count() > 0)
-            )
+        # Save/Create and New must stay available with an empty list: the
+        # save button is also how the FIRST profile is created, so gating it
+        # on the list already having an entry made that impossible.
+        for button in (self.new_button, self.save_button):
+            button.setEnabled(not busy)
+        for button in (self.active_button, self.delete_button):
+            button.setEnabled(not busy and self.profile_list.count() > 0)
+        self.import_button.setEnabled(not busy)
+        self.export_button.setEnabled(not busy and self.profile_list.count() > 0)
         for edit in (
             self.name_edit, self.anomaly_edit, self.gamma_edit, self.cache_edit,
             self.mo2_edit, self.threads_spin, self.modpack_edit, self.modlist_edit,
@@ -420,6 +439,28 @@ class ProfilesPage(QWidget):
                 self,
                 tr("Name In Use"),
                 tr("A profile named '{name}' already exists. Choose a different name.", name=name),
+            )
+            return
+        # Two differently-named profiles pointing at the identical
+        # Anomaly/GAMMA/cache folders would alias the same on-disk install -
+        # switching "active" between them, editing mods under one, or an
+        # incomplete-install warning tracked for one would silently affect
+        # the other too.
+        candidate = self._form_values()
+        path_collision = any(
+            p.profile_name != self._form_state
+            and p.anomaly == candidate.anomaly
+            and p.gamma == candidate.gamma
+            and p.cache == candidate.cache
+            for p in self.settings.profiles
+        )
+        if path_collision:
+            QMessageBox.warning(
+                self,
+                tr("Folders In Use"),
+                tr(
+                    "Another profile already uses these exact Anomaly/GAMMA/cache folders. Each profile needs its own install location."
+                ),
             )
             return
         if editing_existing:
@@ -623,6 +664,92 @@ class ProfilesPage(QWidget):
             return None
         return item.data(Qt.ItemDataRole.UserRole)
 
+    def _export_profile(self) -> None:
+        """Save the selected profile's portable settings (+ modlist.txt) to a file.
+
+        Install folder paths are never included - they're machine-specific
+        and meaningless to reuse on another machine/after a fresh OS
+        install. See ``profile_bundle.py`` for exactly what travels.
+        """
+        if self._busy_guard():
+            return
+        name = self._selected_profile_name()
+        if name is None:
+            return
+        profile = next(
+            (p for p in self.settings.profiles if p.profile_name == name), None
+        )
+        if profile is None:
+            return
+        suggested = f"{name}.commander-profile.zip"
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, tr("Export Profile"), suggested, tr("COMMANDER Profile Bundle (*.zip)")
+        )
+        if not path_str:
+            return
+        try:
+            export_profile_bundle(profile, Path(path_str))
+        except ProfileBundleError as exc:
+            QMessageBox.warning(self, tr("Export Failed"), str(exc))
+            return
+        QMessageBox.information(
+            self, tr("Profile Exported"), tr("Saved to:\n{path}", path=path_str)
+        )
+
+    def _import_profile(self) -> None:
+        """Pre-fill the New Profile form from a previously exported bundle.
+
+        Install folders are always chosen fresh - never taken from the
+        bundle - the same as creating any new profile from scratch. A
+        bundled modlist.txt (if present) is extracted next to the bundle
+        for the user to copy into place manually once GAMMA is installed
+        at the profile's chosen path, rather than being written directly
+        into an install location that may not exist yet.
+        """
+        if self._busy_guard():
+            return
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, tr("Import Profile"), "", tr("COMMANDER Profile Bundle (*.zip)")
+        )
+        if not path_str:
+            return
+        try:
+            bundle = read_profile_bundle(Path(path_str))
+        except ProfileBundleError as exc:
+            QMessageBox.warning(self, tr("Import Failed"), str(exc))
+            return
+        imported = CliProfile()
+        bundle.apply_to(imported)
+        self._new_profile()
+        self.mo2_edit.setText(imported.mo2_profile)
+        self.threads_spin.setValue(imported.download_threads)
+        self.modpack_edit.setText(imported.mod_pack_maker_url)
+        self.modlist_edit.setText(imported.mod_list_url)
+        self.gs_url.setText(imported.gamma_setup_repo_url)
+        self.gs_branch.setText(imported.gamma_setup_repo_branch)
+        self.sg_url.setText(imported.stalker_gamma_repo_url)
+        self.sg_branch.setText(imported.stalker_gamma_repo_branch)
+        self.glf_url.setText(imported.gamma_large_files_repo_url)
+        self.glf_branch.setText(imported.gamma_large_files_repo_branch)
+        self.tg_url.setText(imported.teivaz_anomaly_gunslinger_repo_url)
+        self.tg_branch.setText(imported.teivaz_anomaly_gunslinger_repo_branch)
+        message = tr(
+            "Settings loaded. Choose a name and install folders, then create the profile."
+        )
+        if bundle.modlist_text is not None:
+            modlist_out = Path(path_str).with_suffix("").with_suffix(".modlist.txt")
+            try:
+                modlist_out.write_text(bundle.modlist_text, encoding="utf-8")
+                message += "\n\n" + tr(
+                    "This bundle also included a modlist.txt, extracted to:\n{path}\n"
+                    "Copy it into <GAMMA>/profiles/<MO2 profile>/modlist.txt after "
+                    "installing GAMMA to restore its load order.",
+                    path=str(modlist_out),
+                )
+            except OSError:
+                pass
+        QMessageBox.information(self, tr("Profile Imported"), message)
+
     def _warn_if_active_profile_running(self, name: str, message: str) -> bool:
         """Ask to continue when MO2/the game is up and ``name`` is active.
 
@@ -664,30 +791,17 @@ class ProfilesPage(QWidget):
         if self._busy_guard():
             return
         self._set_buttons_enabled(False)
-        self._task = BackgroundTask(
-            run_config_command, ["use", name], timeout=300, parent=self
-        )
-        self._task.result.connect(lambda res: self._on_set_active_done(name, *res))
-        self._task.error.connect(self._on_task_error)
-        self._task.start()
 
-    def _on_set_active_done(self, name: str, rc: int, out: str, err: str) -> None:
-        self._task = None
-        self._set_buttons_enabled(True)
-        if not cli_ok(rc, out, err):
-            QMessageBox.warning(
-                self, tr("Failed"), (out + "\n" + err).strip() or "config use failed"
-            )
-            return
-        self.window.refresh_settings()
-        active = self.window.settings.active_profile
-        if active is None or active.profile_name != name:
-            QMessageBox.warning(
-                self, tr("Failed"), tr("Profile '{name}' could not be activated.", name=name)
-            )
-            return
-        self.refresh()
-        QMessageBox.information(self, tr("Activated"), tr("Profile '{name}' is now active.", name=name))
+        def _done(success: bool) -> None:
+            self._task = None
+            self._set_buttons_enabled(True)
+            if success:
+                self.refresh()
+                QMessageBox.information(
+                    self, tr("Activated"), tr("Profile '{name}' is now active.", name=name)
+                )
+
+        self._task = activate_profile(self.window, self, name, on_done=_done)
 
     def _delete_profile(self) -> None:
         if self._busy_guard():

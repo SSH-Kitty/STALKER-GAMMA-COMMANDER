@@ -42,7 +42,15 @@ def write_text(path: Path, text: str) -> None:
                 )
             except OSError:
                 pass
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            try:
+                stream = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                # fdopen failed before taking ownership of the descriptor -
+                # close it directly or it leaks (the except block below only
+                # unlinks the already-created temp file, not this fd).
+                os.close(fd)
+                raise
+            with stream:
                 stream.write(text)
                 stream.flush()
                 os.fsync(stream.fileno())

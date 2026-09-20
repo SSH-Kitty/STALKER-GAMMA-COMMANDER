@@ -21,7 +21,15 @@ import re
 import sys
 from pathlib import Path
 
-UI_DIR = Path(__file__).resolve().parent.parent / "commander_gui" / "ui"
+#: Every directory whose user-facing strings get wrapped. Steam Deck Mode
+#: shares commander_gui's tr() and its locale tables, so its strings belong
+#: in the same manifest translators work from.
+_ROOT = Path(__file__).resolve().parent.parent
+UI_DIRS = [
+    _ROOT / "commander_gui" / "ui",
+    _ROOT / "Steamdeck",
+    _ROOT / "Steamdeck" / "screens",
+]
 MANIFEST_PATH = Path(__file__).resolve().parent.parent / "i18n_manifest.json"
 
 #: Call() targets: function/method name -> tuple of positional arg indices
@@ -33,6 +41,13 @@ _FUNC_TARGETS = {
     "QGroupBox": (0,),
     "section_label": (0,),
     "info_label": (0,),
+    # Steam Deck Mode's own constructors (Steamdeck/widgets.py).
+    "deck_label": (0,),
+    "deck_button": (0,),
+    "deck_chip": (0,),
+    "DeckRow": (0,),
+    "DeckToggleRow": (0,),
+    "DeckStatusRow": (0,),
 }
 _METHOD_TARGETS = {
     "setText": (0,),
@@ -50,7 +65,7 @@ _CSS_HINT_RE = re.compile(
 
 
 class _Span:
-    __slots__ = ("start", "end", "replacement")
+    __slots__ = ("end", "replacement", "start")
 
     def __init__(self, start: int, end: int, replacement: str) -> None:
         self.start = start
@@ -113,9 +128,7 @@ def _slug(expr: ast.expr, used: set[str]) -> str:
 def _is_prose(text: str) -> bool:
     if not text.strip():
         return False
-    if _CSS_HINT_RE.search(text):
-        return False
-    return True
+    return not _CSS_HINT_RE.search(text)
 
 
 def _template_and_kwargs(node: ast.JoinedStr, source: str) -> tuple[str, str] | None:
@@ -251,11 +264,12 @@ def main() -> int:
     dry_run = "--dry-run" in sys.argv
     strings: set[str] = set()
     total = 0
-    for path in sorted(UI_DIR.glob("*.py")):
-        count = process_file(path, strings, dry_run=dry_run)
-        if count:
-            print(f"{path.name}: wrapped {count} string(s)")
-        total += count
+    for directory in UI_DIRS:
+        for path in sorted(directory.glob("*.py")):
+            count = process_file(path, strings, dry_run=dry_run)
+            if count:
+                print(f"{path.name}: wrapped {count} string(s)")
+            total += count
     print(f"TOTAL wrapped: {total}, distinct strings: {len(strings)}")
     manifest = {s: s for s in sorted(strings)}
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

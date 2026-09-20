@@ -450,7 +450,7 @@ class MainWindow(QMainWindow):
         worker.error.connect(thread.quit)
         thread.started.connect(worker.run)
 
-        def _cleanup(thread=thread) -> None:
+        def _cleanup(thread=thread, worker=worker) -> None:
             # on_result may have already chained a second stage (a new
             # thread) before this stage's own finished signal is delivered -
             # only clear tracking / restore the cursor if nothing else has
@@ -459,11 +459,34 @@ class MainWindow(QMainWindow):
                 self._bg_thread = None
                 self._bg_worker = None
                 self._set_busy(False)
+            # Neither is ever reused after its one run - nothing else holds
+            # a reference once _bg_thread/_bg_worker are cleared (or were
+            # already replaced by a chained second stage), so both are safe
+            # to schedule for deletion here regardless of which branch above
+            # ran; leaving this out leaked one QThread + one _Worker per
+            # dump opened/analyzed for the life of the app.
+            worker.deleteLater()
+            thread.deleteLater()
 
         thread.finished.connect(_cleanup)
         self._bg_thread = thread
         self._bg_worker = worker
         thread.start()
+
+    def closeEvent(self, event) -> None:
+        """Block a still-running background analysis from being torn down.
+
+        _run_in_background()'s worker runs fn() synchronously on the
+        QThread (no cooperative cancellation), so quit() alone can't stop
+        it mid-analysis - closing the window while it's in flight would
+        otherwise destroy a still-running QThread out from under it. A
+        dump analysis is bounded (256 MB decode cap in dump.py) and
+        normally fast, so blocking briefly here is an acceptable trade
+        against a crash-on-quit.
+        """
+        if self._bg_thread is not None and self._bg_thread.isRunning():
+            self._bg_thread.wait(10_000)
+        super().closeEvent(event)
 
     def _set_busy(self, busy: bool) -> None:
         if busy:

@@ -20,7 +20,8 @@ PY_SERIES=3.12
 PY_FULL=3.12.14
 PY_ABI=cp312
 PY_PLATFORM=manylinux_2_28_x86_64
-QT_PACKAGE="PySide6-Essentials==6.11.1"   # app only needs QtCore/QtGui/QtWidgets
+QT_PACKAGE="PySide6-Essentials==6.11.1"   # QtCore/QtGui/QtWidgets
+QT_ADDONS_PACKAGE="PySide6-Addons==6.11.1"   # QtMultimedia - Essentials does not include it
 APP_NAME="STALKER-GAMMA-COMMANDER"
 APP_TITLE="STALKER GAMMA Commander"
 APP_ID="stalker-gamma-commander"
@@ -100,9 +101,9 @@ PYLIB="$APPDIR/opt/python$PY_SERIES/lib/python$PY_SERIES"
 SITE="$PYLIB/site-packages"
 [ -x "$PY" ] || die "bundled interpreter not found at $PY"
 
-log "installing $QT_PACKAGE"
+log "installing $QT_PACKAGE and $QT_ADDONS_PACKAGE"
 "$PY" -m pip install --no-cache-dir -q --upgrade pip
-"$PY" -m pip install --no-cache-dir -q "$QT_PACKAGE"
+"$PY" -m pip install --no-cache-dir -q "$QT_PACKAGE" "$QT_ADDONS_PACKAGE"
 
 # ------------------------------------------------------------------- prune
 # Everything removed here is unreachable for a QtWidgets-only application.
@@ -114,8 +115,19 @@ QTLIB="$PS/Qt/lib"
 # Uses find's own -name filters rather than piping to xargs: the project path
 # may contain spaces, which xargs would split into broken (silently ignored)
 # arguments, leaving the bindings in place.
+# QtNetwork.abi3.so must survive alongside QtMultimedia.abi3.so even
+# though this app never imports QtNetwork itself - confirmed directly
+# that `import PySide6.QtMultimedia` unconditionally imports
+# PySide6.QtNetwork as part of its own module init, so its absence made
+# QtMultimedia itself fail to import inside the AppImage with
+# "libshiboken: could not import module 'PySide6.QtNetwork'" (silently
+# swallowed by play_click_sound()'s own broad except clause).
+# The Steam Deck Mode icon (commander_gui/ui/deck_icon.py) is painted with
+# QPainterPath rather than loaded from an SVG precisely because QtSvg is
+# deleted here - adding an SVG-based asset means adding its binding back.
 find "$PS" -maxdepth 1 -name '*.abi3.so' \
      ! -name 'QtCore.abi3.so' ! -name 'QtGui.abi3.so' ! -name 'QtWidgets.abi3.so' \
+     ! -name 'QtMultimedia.abi3.so' ! -name 'QtNetwork.abi3.so' \
      -delete
 find "$PS" -maxdepth 1 -name '*.pyi' -delete
 
@@ -130,15 +142,57 @@ done
 # Qt feature sets with no path from QtWidgets.
 rm -rf "$PS/Qt/qml" "$PS/Qt/translations" "$PS/Qt/libexec" \
        "$PS/Qt/metatypes" "$PS/Qt/modules" "$PS/Qt/typesystems"
+# PySide6-Addons (installed above for QtMultimedia) brings in a lot more
+# than just Multimedia - WebEngine, Qt3D, Bluetooth/NFC/serial-port/etc -
+# none of which this app touches, so the delete pattern below now also
+# covers those (it previously only had to account for Essentials).
+#
+# Quick/Qml (and its QmlMeta/QmlModels/QmlWorkerScript siblings, all
+# caught by the same '*Qml*' glob) and Concurrent are deliberately NOT
+# in this list even though this app never uses QML/Concurrent itself -
+# the ffmpeg-backed multimedia plugin binary
+# (Qt/plugins/multimedia/libffmpegmediaplugin.so) links against all of
+# them internally regardless, confirmed via `readelf -d`'s NEEDED
+# entries. Deleting the bundled copies doesn't remove the dependency,
+# it just makes the plugin loader fall back to the *host's* system Qt6
+# if one happens to exist - which almost never matches this bundle's
+# exact Qt point-release on its private (no compatibility guarantee)
+# ABI, so the plugin fails to load with an "undefined symbol" error on
+# most machines, and with a plain "not found" on any machine with no
+# system Qt6 at all (i.e. most real end users of this AppImage).
 find "$QTLIB" -maxdepth 1 -name 'libQt6*' \
-  \( -name '*Quick*'  -o -name '*Qml*'    -o -name '*Designer*' -o -name '*Test*' \
-  -o -name '*Sql*'    -o -name '*Help*'   -o -name '*Charts*'   -o -name '*Multimedia*' \
-  -o -name '*WebSockets*' -o -name '*UiTools*' -o -name '*Concurrent*' \
-  -o -name '*Labs*'   -o -name '*Lottie*' \) -delete
-for plug in qmltooling sqldrivers designer assetimporters multimedia renderers \
-            help qmllint scenegraph texttospeech webview position sensors; do
+  \( -name '*Designer*' -o -name '*Test*' \
+  -o -name '*Sql*'    -o -name '*Help*'   -o -name '*Charts*' \
+  -o -name '*WebSockets*' -o -name '*UiTools*' \
+  -o -name '*Labs*'   -o -name '*Lottie*' \
+  -o -name '*WebEngine*' -o -name '*3D*'  -o -name '*Bluetooth*' \
+  -o -name '*Nfc*'    -o -name '*Positioning*' -o -name '*SerialPort*' \
+  -o -name '*RemoteObjects*' -o -name '*Scxml*' -o -name '*StateMachine*' \
+  -o -name '*NetworkAuth*' -o -name '*DataVisualization*' -o -name '*Pdf*' \
+  -o -name '*SpatialAudio*' -o -name '*ShaderTools*' \) -delete
+# QtMultimedia itself (and its plugins folder) stays - used for the
+# launch-button click sound (commander_gui/ui/common.py:play_click_sound).
+for plug in qmltooling sqldrivers designer assetimporters renderers \
+            help qmllint scenegraph texttospeech webview position sensors \
+            webengine sceneparsers geometryloaders; do
   rm -rf "$PS/Qt/plugins/$plug"
 done
+
+# Orphaned WebEngine resource data (~25 MB) - QtWebEngine's own .so files
+# are already deleted above, so these Chromium/V8 resource blobs
+# (qtwebengine_*.pak, WebEngine's own separate icudtl.dat copy,
+# v8_context_snapshot.bin) can never be loaded by anything.
+rm -rf "$PS/Qt/resources"
+
+# Build-time-only pip tooling that ended up in site-packages but is never
+# imported by commander_gui/assistant at runtime.
+rm -rf "$SITE/build" "$SITE/pyproject_hooks" "$SITE/packaging" \
+       "$SITE"/build-*.dist-info "$SITE"/pyproject_hooks-*.dist-info \
+       "$SITE"/packaging-*.dist-info
+
+# Python's own C headers - only needed if pip has to compile something
+# from source, which nothing does after this point.
+rm -rf "$APPDIR/opt/python$PY_SERIES/include"
 
 # Stdlib a bundled GUI app cannot use, plus pip now that installing is done.
 rm -rf "$PYLIB/test" "$PYLIB/idlelib" "$PYLIB/tkinter" "$PYLIB/lib2to3" \
@@ -202,18 +256,31 @@ PAYLOAD="$APPDIR/opt/$APP_ID"
 mkdir -p "$PAYLOAD"
 cp -r "$PROJECT_DIR/commander_gui" "$PAYLOAD/"
 cp -r "$PROJECT_DIR/assistant" "$PAYLOAD/"
+# Steam Deck Mode. Importable because AppRun puts $PAYLOAD on PYTHONPATH;
+# without this, launching with --deck dies with ModuleNotFoundError inside
+# gamescope, where there is no terminal to read the traceback in.
+cp -r "$PROJECT_DIR/Steamdeck" "$PAYLOAD/"
 cp -r "$PROJECT_DIR/cli" "$PAYLOAD/"
 [ -f "$PROJECT_DIR/README.md" ] && cp "$PROJECT_DIR/README.md" "$PAYLOAD/"
 [ -f "$PROJECT_DIR/LICENSE" ] && cp "$PROJECT_DIR/LICENSE" "$PAYLOAD/"
 find "$PAYLOAD/commander_gui" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PAYLOAD/assistant" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PAYLOAD/assistant" -name '*.pyc' -delete 2>/dev/null || true
+find "$PAYLOAD/Steamdeck" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$PAYLOAD/Steamdeck" -name '*.pyc' -delete 2>/dev/null || true
 
-# Verify the bundled analyzer imports with the exact interpreter that will ship.
-# Do not let this check recreate bytecode after the payload cleanup above.
+# Verify the bundled analyzer and Deck Mode import with the exact interpreter
+# that will ship. Do not let this check recreate bytecode after the payload
+# cleanup above.
+#
+# This runs with no display, which is why Steamdeck/__init__.py must stay
+# free of Qt imports - do not reach for Steamdeck.window here.
 env -u PYTHONPATH PYTHONPATH="$PAYLOAD" PYTHONDONTWRITEBYTECODE=1 "$PY" -s -P -c \
-  'import assistant; from assistant.dump import DumpArchive; print(assistant.__version__)' \
-  || die "bundled ASSISTANT package failed its import check"
+  'import assistant; from assistant.dump import DumpArchive
+import Steamdeck
+from commander_gui.deck_launch import relaunch_argv, is_steam_deck
+print(assistant.__version__, Steamdeck.__version__)' \
+  || die "bundled application payload failed its import check"
 
 # ---------------------------------------------------- AppRun / desktop / icon
 log "writing AppRun, desktop entry and icons"

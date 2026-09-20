@@ -59,15 +59,6 @@ class HelpPage(QWidget):
         root.setSpacing(14)
         scroll.setWidget(content)
 
-        _title = section_label(tr("HELP"), level=1)
-        _title.setWordWrap(True)
-        _title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(_title)
-        _sub = info_label(
-            tr("This guide explains each COMMANDER page. A default profile is created automatically; select an installation directory, install Anomaly and GAMMA, pick a GE-Proton runner, then launch through MO2.")
-        )
-        _sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(_sub)
 
         root.addWidget(self._quickstart_card())
         root.addWidget(self._snapshot_card())

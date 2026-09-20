@@ -74,4 +74,17 @@ def tr(text: str, **kwargs: object) -> str:
     placeholders (e.g. ``tr("Could not create {name}", name=name)``).
     """
     translated = _TRANSLATIONS.get(_ACTIVE, {}).get(text, text)
-    return translated.format(**kwargs) if kwargs else translated
+    if not kwargs:
+        return translated
+    try:
+        return translated.format(**kwargs)
+    except (KeyError, IndexError, ValueError):
+        # A translation whose placeholders don't exactly match the English
+        # source (a typo'd {name}, a missing one) must not crash the
+        # caller - this module's own docstring promises nothing can break
+        # over a translation issue. Fall back to the English source text,
+        # which the call site is already guaranteed to have gotten right.
+        try:
+            return text.format(**kwargs)
+        except (KeyError, IndexError, ValueError):
+            return translated

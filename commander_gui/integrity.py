@@ -20,18 +20,63 @@ from pathlib import Path
 
 from .atomic import write_text
 from .modlist import entries, read_lines
-from .network import read_response_bytes, urlopen
+from .network import read_response_bytes
+from .network import urlopen_with_retry as urlopen
 
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
 MANIFEST_FILENAME = "gamma-md5.txt"
 
 _ANOMALY_STATUS_RE = re.compile(r"\|\s*(OK|CORRUPT|NOT FOUND)\s*$")
+_ANOMALY_LINE_RE = re.compile(r"^(?P<path>.*?)\s*\|\s*(?P<status>OK|CORRUPT|NOT FOUND)\s*$")
+
+#: Files GAMMA's own install deliberately overwrites with patched
+#: versions (its replacement engine executables, plus its own
+#: fsgame.ltx) - confirmed against a real GAMMA install: every one of
+#: these, and only these, mismatches ``anomaly check``'s baseline
+#: (``anomaly/tools/checksums.md5``, which only ever knows vanilla
+#: Anomaly's own hashes - it has no concept of "GAMMA-patched"). A
+#: CORRUPT verdict on exactly one of these is expected, not a defect.
+GAMMA_OVERLAY_FILES = frozenset(
+    {
+        "fsgame.ltx",
+        "bin/anomalydx8.exe",
+        "bin/anomalydx8avx.exe",
+        "bin/anomalydx9.exe",
+        "bin/anomalydx9avx.exe",
+        "bin/anomalydx10.exe",
+        "bin/anomalydx10avx.exe",
+        "bin/anomalydx11.exe",
+        "bin/anomalydx11avx.exe",
+    }
+)
 
 
 def anomaly_status(line: str) -> str | None:
     """Extract the status from an ``anomaly check`` output line, if any."""
     match = _ANOMALY_STATUS_RE.search(line.strip())
     return match.group(1) if match else None
+
+
+def is_expected_gamma_overlay_corrupt(line: str, anomaly_path: str) -> bool:
+    """True if ``line`` is a CORRUPT verdict for one of GAMMA's own
+
+    overlay files (see GAMMA_OVERLAY_FILES) - expected to mismatch
+    ``anomaly check``'s vanilla-only baseline by design, not a real
+    problem. False for OK/NOT FOUND on the same path: a missing overlay
+    file means GAMMA's own overwrite never happened, which is a real
+    problem worth flagging.
+    """
+    if not anomaly_path:
+        return False
+    match = _ANOMALY_LINE_RE.match(line.strip())
+    if match is None or match.group("status") != "CORRUPT":
+        return False
+    root = str(Path(anomaly_path).expanduser()).replace("\\", "/").rstrip("/") + "/"
+    path_text = match.group("path").strip().replace("\\", "/")
+    if not path_text.lower().startswith(root.lower()):
+        return False
+    rel = path_text[len(root) :]
+    return rel.lower() in GAMMA_OVERLAY_FILES
 
 
 def format_size(num_bytes: int) -> str:
@@ -328,13 +373,20 @@ class CacheArchiveVerifyResult:
                 "GAMMA cache: "
                 f"{len(self.verified)} reusable, "
                 f"{len(self.missing)} missing, "
-                f"{len(self.mismatched)} outdated/corrupt, "
+                f"{len(self.mismatched)} outdated, "
                 f"{len(self.unreadable)} unreadable"
             )
         ]
+        if self.mismatched:
+            lines.append(
+                "  Outdated archives just differ from the current official "
+                "list (e.g. after a GAMMA update) - not evidence anything "
+                "is broken. They will be redownloaded automatically the "
+                "next time they're needed."
+            )
         for label, values in (
             ("Missing", self.missing),
-            ("Outdated/corrupt", self.mismatched),
+            ("Outdated", self.mismatched),
             ("Unreadable", self.unreadable),
         ):
             if values:
@@ -407,6 +459,25 @@ def _write_manifest(path: Path, mapping: dict[str, str]) -> None:
     write_text(path, "\n".join(lines) + "\n")
 
 
+def invalidate_baseline(gamma_dir: str) -> None:
+    """Discard the MD5 baseline after a legitimate change to ``gamma/mods``.
+
+    Anything that adds/changes/removes mod files outside Verify
+    Integrity's own repair pipeline (a GAMMA update, a Fresh/GAMMA
+    Reset, a Mod Manager install/delete) must call this - otherwise the
+    next Verify Integrity run compares against a now-stale baseline and
+    reports every legitimately-changed file as "corrupt". Re-establishing
+    truth is Verify Integrity's own job (it already knows how to create a
+    fresh baseline on a "missing manifest" run and tells the user to run
+    it again to detect changes), so this deliberately just removes the
+    file rather than trying to recompute it here.
+    """
+    try:
+        (Path(gamma_dir) / MANIFEST_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 @dataclass
 class Md5ScanResult:
     """Result of a full MD5 scan of ``gamma/mods`` against a baseline."""
@@ -474,10 +545,22 @@ class Md5ScanResult:
         return f"MD5: {self.problems} change(s) since baseline"
 
 
+#: Must match repair.py's _QUARANTINE_DIRNAME - not imported directly to
+#: avoid a circular import (repair.py already imports from this module).
+_QUARANTINE_DIRNAME = ".verify-quarantine"
+
+
 def _iter_mod_files(mods: Path):
     """Yield safe mod files in stable order without materializing the tree."""
     root_path = mods.resolve()
     for root, dirs, names in os.walk(mods):
+        if root == str(mods) and _QUARANTINE_DIRNAME in dirs:
+            # repair.py's own quarantine holding area, sitting directly
+            # under mods/ - never real mod content, and if left behind by
+            # a failed purge/restore it must never be hashed into the
+            # baseline (that would bake orphaned duplicate files in, and
+            # later cleanup would then look like mass "removed" files).
+            dirs.remove(_QUARANTINE_DIRNAME)
         dirs.sort()
         names.sort()
         for name in names:
@@ -529,8 +612,24 @@ def scan_mods_md5(
         if cancel is not None and cancel.is_set():
             result.cancelled = True
             break
-        digest = _md5_file(path)
         rel = path.relative_to(base).as_posix()
+        if "\n" in rel or "\r" in rel:
+            # The baseline manifest is a plain "<md5>  <relpath>\n" text
+            # file (one entry per line): a relative path carrying an
+            # embedded newline/CR would split into extra lines on write,
+            # either making _read_manifest reject the whole baseline as
+            # corrupt or - worse - desyncing a digest from a truncated
+            # path. repair.py's classify_problems() then derives the mod
+            # folder to quarantine straight from these same relative
+            # paths, so a desynced entry could point repair at the wrong
+            # folder. Such filenames are legal on Linux and can arrive via
+            # a third-party archive (mod_install.py only rejects symlinks
+            # and path traversal, not control characters in entry names),
+            # so this is reachable, not just hypothetical - report it as
+            # unreadable rather than ever writing it into the baseline.
+            result.errors.append(rel)
+            continue
+        digest = _md5_file(path)
         if digest is None:
             result.errors.append(rel)
         else:

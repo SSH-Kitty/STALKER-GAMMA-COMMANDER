@@ -566,6 +566,12 @@ class SystemCheckPage(QWidget):
         self._refresh_start: float = 0.0
         self._last_check_ts: float = 0.0
         self._min_check_seconds: float = 2.0
+        #: True while a finished check is waiting out the minimum-display
+        #: delay (_pending_timer) - self._task is already None during that
+        #: window, so showEvent()'s "was the last check stale?" trigger
+        #: needs this too, or it can start a redundant second check before
+        #: _last_check_ts has been updated to reflect the one that just ran.
+        self._settling = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -580,15 +586,6 @@ class SystemCheckPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
-
-        title = section_label(tr("SYSTEM CHECK"), level=1)
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(title)
-        subtitle = info_label(
-            tr("Verify that all required tools, runners, and dependencies are installed before setting up the game.")
-        )
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        root.addWidget(subtitle)
 
         self.summary = QLabel(tr("Checking system readiness..."))
         self.summary.setObjectName("accent")
@@ -681,7 +678,7 @@ class SystemCheckPage(QWidget):
         """Re-run checks when revisiting the page if the last run is stale."""
         super().showEvent(event)
         last = getattr(self, "_last_check_ts", 0.0)
-        if self._task is None and time.monotonic() - last > 60:
+        if self._task is None and not self._settling and time.monotonic() - last > 60:
             self.refresh()
 
     def refresh(self) -> None:
@@ -732,6 +729,7 @@ class SystemCheckPage(QWidget):
         # first load already shows "Scanning..." placeholders.
         if self._last_check_ts and elapsed < self._min_check_seconds:
             self._pending_result = result
+            self._settling = True
             delay_ms = int((self._min_check_seconds - elapsed) * 1000)
             self._pending_timer = QTimer(self)
             self._pending_timer.setSingleShot(True)
@@ -745,6 +743,7 @@ class SystemCheckPage(QWidget):
         result = self._pending_result
         self._pending_result = None
         self._pending_timer = None
+        self._settling = False
         if result is None:
             return
         self.refresh_button.setEnabled(True)
@@ -895,7 +894,7 @@ class SystemCheckPage(QWidget):
                 lambda _checked=False, value=command, btn=copy_button: (
                     QGuiApplication.clipboard().setText(value),
                     btn.setText(tr("Copied!")),
-                    QTimer.singleShot(1500, lambda b=btn: b.setText(tr("Copy install command"))),
+                    QTimer.singleShot(1500, lambda b=btn: self._revert_copy_button(b)),
                 )
             )
             row.addWidget(copy_button, 0, 2)
@@ -905,6 +904,21 @@ class SystemCheckPage(QWidget):
             row.addWidget(sep, 0, 3)
         row.addWidget(state, 0, 4, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(row)
+
+    @staticmethod
+    def _revert_copy_button(button: QPushButton) -> None:
+        """Restore a "Copy install command" button's label after the delay.
+
+        A refresh() that lands while this timer is still pending rebuilds
+        every row via clear_layout(), which schedules deleteLater() on the
+        old buttons - if the C++ object is already gone by the time this
+        fires, touching it would raise RuntimeError instead of being a
+        harmless no-op.
+        """
+        try:
+            button.setText(tr("Copy install command"))
+        except RuntimeError:
+            pass
 
     def _add_override_row(
         self, layout: QVBoxLayout, key: str, label: str, directory: bool
@@ -969,7 +983,7 @@ class SystemCheckPage(QWidget):
             edit.setText(self._detected_overrides.get(key) or "")
         else:
             value = edit.text().strip()
-            if value and value != "Not detected":
+            if value:
                 overrides[key] = value
             else:
                 # Empty means "no override" everywhere; a stored "" would be
@@ -1007,8 +1021,13 @@ class SystemCheckPage(QWidget):
     def _show_error(self, message: str) -> None:
         self._task = None
         elapsed = time.monotonic() - self._refresh_start
-        if elapsed < self._min_check_seconds:
+        # Mirrors _show_checks: the artificial minimum only applies once a
+        # previous result is on screen to avoid flashing away from - the
+        # very first load already shows "Scanning..." placeholders, so an
+        # error on that first run should be shown immediately.
+        if self._last_check_ts and elapsed < self._min_check_seconds:
             self._pending_error = message
+            self._settling = True
             delay_ms = int((self._min_check_seconds - elapsed) * 1000)
             self._pending_timer = QTimer(self)
             self._pending_timer.setSingleShot(True)
@@ -1022,6 +1041,7 @@ class SystemCheckPage(QWidget):
             message = self._pending_error
         self._pending_error = None
         self._pending_timer = None
+        self._settling = False
         if message is None:
             return
         self.refresh_button.setEnabled(True)

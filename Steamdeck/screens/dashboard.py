@@ -1,0 +1,235 @@
+"""The at-a-glance state of the install.
+
+Deck Mode's other screens each do one thing. This one answers the question
+you actually have when you pick the device up: is everything still where I
+left it - installed, up to date, enough space, which profile am I on.
+
+It is a hub as well as a readout. The rows that have somewhere to go are
+focusable and go there; the rows that are pure status are skipped by the
+D-pad, so holding a direction walks between the things you can act on
+rather than stopping on every line.
+
+Nothing here computes anything the other screens don't. Install status,
+update status and mod counts come from the same backend calls those screens
+make; the one thing this screen owns is the storage total, because nowhere
+else in Deck Mode reports it.
+"""
+
+from __future__ import annotations
+
+import time
+
+from PySide6.QtCore import Qt
+
+from commander_gui import gui_settings
+from commander_gui.dependencies import check_all_dependencies
+from commander_gui.i18n import tr
+from commander_gui.ui.common import (
+    BackgroundTask,
+    anomaly_installed,
+    count_active_mods,
+    dir_size,
+    format_last_played,
+    format_playtime,
+    free_space_bytes,
+    gamma_installed,
+    human_size,
+)
+from commander_gui.updates import check_updates, format_version
+
+from ..widgets import DeckRow, DeckStatusRow, deck_label
+from .base import DeckScreen
+
+#: Directory sizes mean walking the whole install tree, which on a Deck's SD
+#: card is slow enough to notice. The desktop Dashboard caches for the same
+#: reason and by the same margin.
+_SIZE_CACHE_S = 30.0
+
+
+class DashboardScreen(DeckScreen):
+    def build(self) -> None:
+        # Seven rows plus the footer is twelve pixels more than the standard
+        # gap leaves room for, and this is the one screen where seeing
+        # everything at once is the entire point - so it gives the gap back
+        # rather than making the user scroll for the last line.
+        self.body.setSpacing(8)
+
+        self._update_task: BackgroundTask | None = None
+        self._deps_task: BackgroundTask | None = None
+        self._size_task: BackgroundTask | None = None
+        self._sizes_at = 0.0
+
+        self.profile_row = DeckRow(tr("Active profile"))
+        self.profile_row.activated.connect(
+            lambda: self.window.set_page("profile")
+        )
+        self.body.addWidget(self.profile_row)
+
+        self.anomaly_row = DeckStatusRow(tr("STALKER Anomaly"))
+        self.gamma_row = DeckStatusRow(tr("GAMMA Modpack"))
+        self.deps_row = DeckStatusRow(tr("Dependencies"))
+        for row in (self.anomaly_row, self.gamma_row, self.deps_row):
+            self.body.addWidget(row)
+
+        self.update_row = DeckRow(tr("Updates"))
+        self.update_row.activated.connect(lambda: self.window.set_page("update"))
+        self.body.addWidget(self.update_row)
+
+        self.mods_row = DeckRow(tr("Mods"))
+        self.mods_row.activated.connect(lambda: self.window.set_page("mods"))
+        self.body.addWidget(self.mods_row)
+
+        self.storage_row = DeckRow(tr("Storage usage"), chevron=False)
+        # Pure readout - nothing to activate, so keep it off the D-pad's path.
+        self.storage_row.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.body.addWidget(self.storage_row)
+
+        self.footer = deck_label("", role="caption", wrap=True)
+        self.body.addWidget(self.footer)
+        self.body.addStretch(1)
+
+    # -- state ------------------------------------------------------------
+    def refresh(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            self.profile_row.set_value(tr("No Profile"))
+            for row in (self.anomaly_row, self.gamma_row, self.deps_row):
+                row.set_status(tr("No Profile"), "warn")
+            self.update_row.set_value("")
+            self.mods_row.set_value("")
+            self.storage_row.set_value("")
+            self.footer.setText(
+                tr("Create or activate a profile first (Profiles page).")
+            )
+            return
+
+        self.profile_row.set_value(profile.profile_name or tr("No Profile"))
+
+        anomaly = anomaly_installed(profile.anomaly)
+        gamma = gamma_installed(profile.gamma, profile.mo2_profile)
+        self.anomaly_row.set_status(
+            tr("Installed") if anomaly else tr("Not installed"),
+            "ok" if anomaly else "bad",
+        )
+        self.gamma_row.set_status(
+            tr("Installed") if gamma else tr("Not installed"),
+            "ok" if gamma else "bad",
+        )
+
+        counts = count_active_mods(profile.gamma, profile.mo2_profile)
+        self.mods_row.set_value(
+            f"{counts[0]} / {counts[1]}" if counts else tr("Not installed")
+        )
+
+        self._render_footer(profile)
+        self._start_dependency_check()
+        self._start_update_check(profile)
+        self._start_size_check(profile)
+
+    def on_busy_changed(self, busy: bool) -> None:
+        # An install rewrites everything this screen reports on.
+        if not busy:
+            self.refresh()
+
+    # -- dependencies -----------------------------------------------------
+    def _start_dependency_check(self) -> None:
+        if self._deps_task is not None:
+            return
+        self.deps_row.set_status(tr("Checking..."), "warn")
+        self._deps_task = BackgroundTask(check_all_dependencies, parent=self)
+        self._deps_task.result.connect(self._on_dependencies)
+        self._deps_task.error.connect(lambda _m: self._on_dependencies(None))
+        self._deps_task.start()
+
+    def _on_dependencies(self, missing: object) -> None:
+        self._deps_task = None
+        if missing is None:
+            self.deps_row.set_status(tr("Unknown"), "warn")
+            return
+        names = list(missing)
+        if names:
+            self.deps_row.set_status(tr("{count} missing", count=len(names)), "bad")
+            self.deps_row.setToolTip(", ".join(str(name) for name in names))
+        else:
+            self.deps_row.set_status(tr("Ready"), "ok")
+            self.deps_row.setToolTip("")
+
+    # -- updates ----------------------------------------------------------
+    def _start_update_check(self, profile) -> None:
+        if self._update_task is not None:
+            return
+        self.update_row.set_value(tr("Checking..."))
+        self._update_task = BackgroundTask(check_updates, profile, parent=self)
+        self._update_task.result.connect(self._on_update_checked)
+        self._update_task.error.connect(
+            lambda _m: self._finish_update(tr("status unavailable"))
+        )
+        self._update_task.start()
+
+    def _on_update_checked(self, status: object) -> None:
+        if getattr(status, "error", None):
+            self._finish_update(tr("status unavailable"))
+            return
+        installed = format_version(
+            getattr(status, "installed", None),
+            getattr(status, "installed_human", None),
+        )
+        if getattr(status, "update_available", False):
+            latest = format_version(
+                getattr(status, "latest", None),
+                getattr(status, "latest_human", None),
+            )
+            self._finish_update(f"{installed}  →  {latest}")
+        else:
+            self._finish_update(tr("Up to date") + f"  ({installed})")
+
+    def _finish_update(self, text: str) -> None:
+        self._update_task = None
+        self.update_row.set_value(text)
+
+    # -- storage ----------------------------------------------------------
+    def _start_size_check(self, profile) -> None:
+        if self._size_task is not None:
+            return
+        if time.monotonic() - self._sizes_at < _SIZE_CACHE_S:
+            return
+        self.storage_row.set_value(tr("Checking..."))
+        paths = [profile.anomaly, profile.gamma, profile.cache]
+
+        def measure() -> tuple[int, int | None]:
+            total = sum(dir_size(path) for path in paths if path)
+            free = free_space_bytes(profile.gamma or profile.anomaly or ".")
+            return total, free
+
+        self._size_task = BackgroundTask(measure, parent=self)
+        self._size_task.result.connect(self._on_sizes)
+        self._size_task.error.connect(lambda _m: self._on_sizes(None))
+        self._size_task.start()
+
+    def _on_sizes(self, result: object) -> None:
+        self._size_task = None
+        self._sizes_at = time.monotonic()
+        if not result:
+            self.storage_row.set_value(tr("status unavailable"))
+            return
+        total, free = result
+        text = human_size(total)
+        if free is not None:
+            text += "   ·   " + tr("{free} free", free=human_size(free))
+        self.storage_row.set_value(text)
+
+    # -- footer -----------------------------------------------------------
+    def _render_footer(self, profile) -> None:
+        state = gui_settings.load_gui_settings()
+        name = profile.profile_name or ""
+        playtime = (state.get("playtime_seconds") or {}).get(name, 0.0)
+        last = (state.get("last_played_ts") or {}).get(name)
+        self.footer.setText(
+            tr("Total playtime")
+            + ": "
+            + format_playtime(playtime)
+            + "   ·   "
+            + tr("Last played")
+            + ": "
+            + format_last_played(last)
+        )

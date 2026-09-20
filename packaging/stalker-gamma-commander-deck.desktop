@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=STALKER COMMANDER (Deck Mode)
+X-GNOME-Name=STALKER COMMANDER (Deck Mode)
+GenericName=STALKER GAMMA Mod Manager
+Comment=Controller- and touch-friendly GAMMA launcher for the Steam Deck
+Exec=stalker-gamma-commander --deck
+Icon=stalker-gamma-commander
+StartupWMClass=stalker-gamma-commander-deck
+Terminal=false
+Categories=Game;
+Keywords=stalker;anomaly;gamma;mods;modorganizer;steamdeck;deck;

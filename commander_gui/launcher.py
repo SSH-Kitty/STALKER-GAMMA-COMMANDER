@@ -92,6 +92,49 @@ RUNNER_GRAPHICS_ERROR_MARKERS = (
 )
 
 
+#: Wine prints this once per crashed process. A launch that manages to start
+#: MO2 prints it zero times; a launch into a prefix with a foreign ntdll prints
+#: it once per process, and every one of those spawns a winedbg that crashes
+#: the same way. Counting lets a single genuine crash stay a crash.
+RUNNER_CRASH_LOOP_MARKER = "starting debugger..."
+RUNNER_CRASH_LOOP_THRESHOLD = 6
+
+#: How much of launcher.log a watcher reads per tick. A crash loop writes
+#: megabytes; the diagnosis is always in the last few lines.
+LOG_TAIL_BYTES = 64 * 1024
+
+#: A real Windows DLL is never this small; Proton's placeholders for DLLs it
+#: does not copy are a few hundred bytes.
+_PLACEHOLDER_DLL_BYTES = 8 * 1024
+
+
+def runner_crash_loop(log_text: str) -> bool:
+    """True when the log shows Wine crashing over and over.
+
+    The pattern this catches: every process faults on start, Wine answers each
+    fault by running ``winedbg``, and the debugger's own process faults too.
+    Left alone that is a fork bomb, and it takes a machine down in about two
+    minutes. Six occurrences in one tail is well past "a crash".
+    """
+    return log_text.count(RUNNER_CRASH_LOOP_MARKER) >= RUNNER_CRASH_LOOP_THRESHOLD
+
+
+def read_log_tail(path: str | Path, limit: int = LOG_TAIL_BYTES) -> str:
+    """The last ``limit`` bytes of ``path``, or "" if it cannot be read.
+
+    Bounded on purpose: this is polled several times a second while a launch
+    is in flight, and a crash loop grows the log without limit.
+    """
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def runner_prefix_error(log_text: str) -> bool:
     """Return whether launcher output indicates a runner/prefix mismatch."""
     text = log_text.lower()
@@ -212,12 +255,136 @@ def _terminate_process_group(
             pass
 
 
+def runner_build_dir(runner: Runner) -> Path | None:
+    """The Proton build directory a runner uses, or None for plain Wine."""
+    proton_path = runner.env.get("PROTONPATH")
+    if proton_path:
+        return Path(proton_path)
+    if runner.kind == "proton" and runner.wrapper:
+        # wrapper is [<build>/proton, "run"]
+        return Path(runner.wrapper[0]).parent
+    return None
+
+
+def host_wine_lib_dirs() -> list[Path]:
+    """``lib/wine`` directories of every Wine installed on the host.
+
+    Used to recognise a Proton prefix that another Wine has written into:
+    a DLL in the prefix that is byte-for-byte one of these builds' builtins
+    was put there by that build, never by Proton.
+    """
+    roots: list[Path] = []
+    for binary in (configured_tool("wine"), shutil.which("wine")):
+        if not binary:
+            continue
+        try:
+            roots.append(Path(binary).resolve().parent.parent)
+        except (OSError, RuntimeError):
+            continue
+    roots += [Path("/usr"), Path("/usr/local"), Path("/opt/wine-cachyos"), Path("/opt/wine-staging")]
+    found: list[Path] = []
+    for root in roots:
+        for lib in ("lib/wine", "lib32/wine", "lib64/wine"):
+            candidate = root / lib
+            if candidate.is_dir() and candidate not in found:
+                found.append(candidate)
+    return found
+
+
+def _same_file_contents(left: Path, right: Path) -> bool:
+    try:
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        with open(left, "rb") as a, open(right, "rb") as b:
+            while True:
+                chunk_a = a.read(1 << 16)
+                chunk_b = b.read(1 << 16)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
+
+
+def prefix_foreign_dlls(prefix: str | Path, runner: Runner) -> list[str]:
+    """Real ``ntdll.dll`` copies in the prefix that were put there by a Wine
+    that is not any Proton/GE-Proton build - i.e. genuinely corrupting.
+
+    Checks byte identity against every Wine installed on the *host*
+    (``host_wine_lib_dirs()``), not against the selected runner's own copy.
+    That distinction is the whole point: switching from one Proton build to
+    another in the same prefix is completely normal - Proton re-syncs its
+    own files on the next launch and nothing crashes from it - so a prefix
+    carrying a *different Proton build's* ntdll must never be flagged here.
+    Only a copy that matches system wine (or another Wine on the host, e.g.
+    a Lutris runner) is the real hazard this exists to catch: that is what a
+    stray ``winetricks``/``wine`` invocation against the prefix leaves
+    behind, and it is what makes every process fault on its first thread.
+
+    An earlier version of this function compared against the selected
+    runner's own ntdll instead, which flagged a perfectly healthy prefix as
+    corrupted the moment the user picked a different (but equally valid)
+    Proton build - refusing a launch, and the Repair Prefix action, that had
+    nothing to fix.
+
+    Only ntdll is checked: it is the one file that cannot be wrong without
+    nothing working at all, and checking every DLL on every launch is
+    needless I/O on a Steam Deck. A placeholder-sized file is fine; that is
+    Proton's normal state for DLLs it does not copy.
+
+    Returns the relative paths of the mismatched files, empty when the
+    prefix is healthy, unknown, or the runner is plain Wine (which owns its
+    prefix outright and has nothing to be compared against).
+    """
+    build = runner_build_dir(runner)
+    if build is None:
+        return []
+    root = Path(prefix).expanduser()
+    if runner.kind == "proton":
+        root = root / "pfx"
+    windows = root / "drive_c" / "windows"
+    host_dirs = [d for d in host_wine_lib_dirs() if build not in d.parents and d != build]
+    if not host_dirs:
+        return []
+    foreign: list[str] = []
+    for relative, arch in (
+        ("system32/ntdll.dll", "x86_64-windows"),
+        ("syswow64/ntdll.dll", "i386-windows"),
+    ):
+        actual = windows / relative
+        try:
+            if actual.is_symlink() or actual.stat().st_size < _PLACEHOLDER_DLL_BYTES:
+                continue
+        except OSError:
+            continue
+        if any(
+            _same_file_contents(actual, host / arch / "ntdll.dll")
+            for host in host_dirs
+            if (host / arch / "ntdll.dll").is_file()
+        ):
+            foreign.append(relative)
+    return foreign
+
+
 def ensure_runner_prefix(runner: Runner) -> None:
     """Create and record a runner prefix, rejecting ownership conflicts."""
     raw = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
     if not raw:
         return
     prefix = Path(raw).expanduser()
+    # Refuse before spawning anything. A prefix carrying another Wine's ntdll
+    # does not fail cleanly - it fork-bombs winedbg until the machine freezes.
+    foreign = prefix_foreign_dlls(prefix, runner)
+    if foreign and os.environ.get("COMMANDER_SKIP_PREFIX_GUARD") != "1":
+        raise LaunchError(
+            f"The Wine prefix at {prefix} contains system files from a "
+            f"different Wine build ({', '.join(foreign)}), so Mod Organizer "
+            "cannot start - every process would crash on launch.\n\n"
+            "This happens when another Wine touches a Proton prefix. Use "
+            "Repair Prefix on the Utilities page, then reinstall the "
+            "dependencies from the Install page."
+        )
     marker = prefix / ".commander-runner"
     owner = f"{runner.kind}:{runner.label}"
     try:
@@ -268,12 +435,24 @@ def ensure_runner_prefix(runner: Runner) -> None:
                 os.close(fd)
                 raise LaunchError(f"Runner marker is not a regular file: {marker}")
             if created:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                try:
+                    stream = os.fdopen(fd, "w", encoding="utf-8")
+                except BaseException:
+                    # fdopen failed before taking ownership of the descriptor.
+                    os.close(fd)
+                    raise
+                with stream:
                     stream.write(owner + "\n")
                     stream.flush()
                     os.fsync(stream.fileno())
             else:
-                with os.fdopen(fd, encoding="utf-8") as stream:
+                try:
+                    stream = os.fdopen(fd, encoding="utf-8")
+                except BaseException:
+                    # fdopen failed before taking ownership of the descriptor.
+                    os.close(fd)
+                    raise
+                with stream:
                     saved_owner = stream.read().strip()
                 saved_kind = saved_owner.split(":", 1)[0] if saved_owner else ""
                 if saved_kind and saved_kind != runner.kind:
@@ -473,35 +652,6 @@ def find_extra_protons() -> list[tuple[str, str]]:
     return sorted((label, path) for path, label in found.items())
 
 
-def find_wine_versions() -> list[tuple[str, str]]:
-    """Discover Wine builds: Lutris/Bottles runners and ``/opt/wine*`` installs.
-
-    Returns ``(label, bin/wine path)`` pairs, sorted by label. System Wine is
-    intentionally omitted - it is already covered by the plain ``wine`` preset.
-    """
-    found: dict[str, str] = {}
-    candidates: list[Path] = []
-    lutris = Path.home() / ".local" / "share" / "lutris" / "runners" / "wine"
-    bottles = Path.home() / ".local" / "share" / "bottles" / "runners"
-    if lutris.is_dir():
-        try:
-            candidates += sorted(lutris.iterdir())
-        except OSError:
-            pass
-    if bottles.is_dir():
-        try:
-            candidates += sorted(bottles.iterdir())
-        except OSError:
-            pass
-    for entry in candidates:
-        wine = entry / "bin" / "wine"
-        if entry.is_dir() and wine.is_file():
-            found.setdefault(str(wine.resolve()), f"Wine ({entry.name})")
-    for entry in sorted(Path("/opt").glob("wine*")):
-        wine = entry / "bin" / "wine"
-        if entry.is_dir() and wine.is_file():
-            found.setdefault(str(wine.resolve()), f"Wine ({entry.name})")
-    return sorted((label, path) for path, label in found.items())
 
 
 def _proton_runner(proton_script: str, prefix: str = "") -> Runner:
@@ -794,15 +944,28 @@ def write_desktop_shortcut(
     return path
 
 
-#: Roll launcher.log over once it passes this size; it is append-only and is
-#: read back tail-first to diagnose failed launches.
+#: Kept for backward compatibility with anything inspecting it; rotation
+#: itself is no longer size-gated (see _rotate_log's docstring).
 MAX_LOG_BYTES = 1 << 20
 
 
 def _rotate_log(path: Path) -> None:
-    """Roll ``path`` to ``path.1`` once it grows past :data:`MAX_LOG_BYTES`."""
+    """Roll ``path`` to ``path.1`` unconditionally, at the start of a launch.
+
+    Was size-gated (only past :data:`MAX_LOG_BYTES`) until a real incident
+    showed why that is wrong: the crash-loop breaker in play_page.py now
+    kills a bad launch after a few dozen lines, so a repeatedly-crashing
+    prefix never produces a megabyte of output and this never rotated - the
+    *next* launch attempt appended onto the same file, and its very first
+    poll read a tail that was still full of the *previous* attempt's
+    "starting debugger..." lines and aborted before the new attempt had
+    written a single line of its own. The user could not get a launch to
+    even try again. Every launch's log must start empty, full stop - a size
+    threshold that can go arbitrarily long without being crossed is not a
+    bound at all.
+    """
     try:
-        if path.is_file() and path.stat().st_size > MAX_LOG_BYTES:
+        if path.is_file():
             path.replace(path.with_name(path.name + ".1"))
     except OSError:
         pass
