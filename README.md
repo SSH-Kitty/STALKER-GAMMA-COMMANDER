@@ -244,9 +244,9 @@ in that file's header for the exact steps.
 ## Credits
 
 - **[FaithBeam](https://github.com/FaithBeam)** — [`stalker-gamma-cli`](https://github.com/FaithBeam/stalker-gamma-cli), the installer this GUI drives and bundles. All installation, download and checksum logic is theirs.
+- **[dnttnd](https://github.com/dnttnd)** — testing implementations, dev builds, bug reports, and helping polish the UI.
 - **[Grokitach](https://github.com/Grokitach)** and the GAMMA team — [the mod pack itself](https://github.com/Grokitach/Stalker_GAMMA).
 - **[GSC Game World](https://www.gsc-game.com/)** and the Anomaly team, for the game.
-- **[dnttnd](https://github.com/dnttnd)** — testing implementations, dev builds, bug reports, and helping polish the UI.
 
 ## License
 
