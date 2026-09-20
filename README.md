@@ -12,6 +12,16 @@
 
 </div>
 
+<p align="center">
+  <a href="#what-this-is">What this is</a> •
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#first-run">First run</a> •
+  <a href="#contributing-a-translation">Contributing</a> •
+  <a href="#credits">Credits</a> •
+  <a href="#license">License</a>
+</p>
+
 <img width="1340" height="1010" alt="1 Dashboard" src="https://github.com/user-attachments/assets/c5efc039-73a5-49a7-aa8f-a3399b20b0da" />
 
 ## What this is
