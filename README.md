@@ -9,6 +9,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#from-source)
 [![Qt](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt%206-41cd52)](https://doc.qt.io/qtforpython-6/)
 [![Release](https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?include_prereleases&label=release)](https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/6A9psrtYhh)
 
 </div>
 
@@ -19,7 +20,8 @@
   <a href="#first-run">First run</a> •
   <a href="#contributing-a-translation">Contributing</a> •
   <a href="#credits">Credits</a> •
-  <a href="#license">License</a>
+  <a href="#license">License</a> •
+  <a href="https://discord.gg/6A9psrtYhh">Discord</a>
 </p>
 
 <img width="1340" height="1010" alt="1 Dashboard" src="https://github.com/user-attachments/assets/c5efc039-73a5-49a7-aa8f-a3399b20b0da" />
@@ -120,39 +122,90 @@ A toolbox for maintenance and recovery:
 - Interface font family (6 options) and size (9–22 px), both applied live.
 - Startup page, default runner, an "Always use GameMode" toggle, an Open Winecfg shortcut, and MO2 Display Scale presets (100–200%) for readable text in Mod Organizer.
 - Desktop autostart, launching COMMANDER automatically on login.
+- **Add to Steam** — writes COMMANDER and Deck Mode straight into your Steam library as non-Steam games, no manual "Add a Non-Steam Game" dialog needed.
 
 
 ### Steam Deck Mode
 
-A second, minimal interface built for the Deck's 1280x800 screen, its D-pad
-and its touchscreen. Open it from the small Steam Deck icon on the
-**Dashboard**, next to *Quick actions* — COMMANDER closes and reopens in Deck
-Mode. **Exit Deck Mode**, on Deck Mode's settings screen, brings you back the
-same way.
+A second interface built for the Deck's 1280x800 screen, its controls and its
+touchscreen. Open it from the small Steam Deck icon on the **Dashboard**, next
+to *Quick actions* — COMMANDER closes and reopens in Deck Mode. **Exit Deck
+Mode**, on Deck Mode's Settings screen (or the ☰ Menu button), brings you back
+the same way.
 
-It covers what you would actually do while holding the device. **Dashboard**
-is the overview — active profile, what's installed, whether an update is
-waiting, mod count, disk usage and playtime — and doubles as a hub, since
-its rows jump to the screen behind them. Then **Play** (launch target,
-runner, playtime), **Install** (Anomaly + GAMMA with a live progress bar,
-and the Wine/Proton dependencies), **Update**, **Mods** (search, enable,
-disable), **Profile** switching, **System check** and a short settings list. Everything else — profile editing, mod reordering,
-integrity repair, the maintenance tools — stays in the full interface, one
-restart away.
+- **First-run setup.** With no profile yet, Deck Mode asks one question —
+  internal storage or SD card — and creates the profile for you, then sends
+  you to Install.
+- Tabs, in handheld order: **Dashboard · Play · Mods · Update · Install ·
+  Utilities · System · Settings**.
+- **Dashboard** answers "can I play?" in one banner with the one button that
+  moves things forward (Play, Install, Resume, Update), with playtime right
+  under it, then Anomaly · GAMMA · Dependencies side by side, updates, mods,
+  storage, and your **profiles**: switch, create, or edit a profile's name
+  and its Anomaly / GAMMA / cache folders with a built-in folder browser.
+- **Play** (launch target, runner, session timer, and **Force Stop Game** for
+  a game that hangs — the Deck has no Alt+F4), **Mods** (the desktop Mod
+  Manager's category tree as a full-screen list, in MO2 order with priority
+  numbers; fold categories, filter, search, enable/disable a whole category),
+  **Update** (every added / modified / removed mod, plus scrollable patch
+  notes), **Install** (Anomaly, GAMMA, dependencies, GE-Proton, install
+  options, and **Resume** after an interrupted install), **Utilities** (cache,
+  shader cache, ReShade, GOG fix, prefix repair, move install, log dump, and
+  the Uninstall / Reinstall resets), **System** check (with a *Copy install
+  command* button on each missing item) and **Settings**.
+- **Handheld-aware.** The Deck is kept awake while an install, update or move
+  runs, you're warned before a long download on battery, the header shows
+  the battery, and the footer shows the active profile and the time.
+- **Any screen size.** On the Deck it fills the panel; on a bigger window —
+  maximised on a monitor, or docked to a TV — the whole interface scales up
+  with it.
 
-Rows are 72px, primary buttons 96px, and every control has a visible focus
-ring, so the Deck's default desktop controller layout drives the whole thing
-with no extra setup: **D-pad** moves, **A** activates, **B** goes back,
-**Y** toggles, the right trackpad is a mouse, and the screen is a touchscreen.
-All six themes and all ten languages work exactly as they do on the desktop,
+**Controls.** The controller works in Game Mode out of the box — COMMANDER
+reads the gamepad directly, so Steam's default layout is fine — and in
+Desktop Mode's keyboard layout as well:
+
+| Button | Action |
+|---|---|
+| D-pad / left stick | Move (hold to repeat) |
+| A | Select / toggle |
+| B | Back |
+| X | The screen's main action (below) |
+| Y | The screen's second action / search |
+| L1 / R1 | Previous / next tab |
+| L2 / R2 | Page up / down |
+| ☰ Menu | Exit Deck Mode or quit |
+| ⧉ View | Controls help |
+
+| Screen | X | Y |
+|---|---|---|
+| Dashboard | What the banner says (Play / Install / Resume / Update) | Re-check |
+| Play | Play GAMMA (Force Stop while running) | Open MO2 |
+| Mods | Category menu | Search |
+| Update | Check / Apply updates | Show changes |
+| Install | Install or resume GAMMA | Install dependencies |
+| System | Re-check | — |
+
+The ☰ Menu button opens a quick menu from anywhere: **Play GAMMA**, **Exit
+Deck Mode** or **Quit**.
+
+Text fields have a built-in on-screen keyboard (Y), touch works everywhere
+(tap to select, drag to scroll), and every screen shows its buttons in the
+footer. All six themes and all ten languages work as they do on the desktop,
 and the text size has its own 80–150% scale.
 
 On a real Steam Deck, COMMANDER offers Deck Mode the first time it starts and
-remembers your answer (changeable later under **Settings → Steam Deck Mode on
-startup**). On any other machine it opens as an ordinary 1280x800 window, so
-you can try it out.
+remembers your answer (changeable later under **Settings → When COMMANDER
+starts**); in Game Mode it opens Deck Mode without asking. On any other machine it
+opens as an ordinary 1280x800 window, so you can try it out.
 
-**Adding Deck Mode to Steam** so it works in Game Mode:
+**Adding Deck Mode to Steam** so it works in Game Mode: in Desktop Mode, use
+**Add COMMANDER to Steam** (desktop **Settings → Steam**, or Deck Mode's
+**Settings**) —
+this writes both **STALKER COMMANDER** and **STALKER COMMANDER DECK**
+straight into your Steam library. If Steam is running it is closed first,
+the shortcuts are written, and Steam is started again. If you'd rather do it by hand,
+or the button can't tell which Steam account to use, the manual route still
+works:
 
 - *AUR / from source*: in Desktop Mode, **Add a Non-Steam Game** and pick
   **STALKER COMMANDER (Deck Mode)**.
