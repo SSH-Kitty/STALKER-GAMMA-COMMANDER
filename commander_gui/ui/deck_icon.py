@@ -5,86 +5,95 @@ Deliberately hand-painted rather than loaded from an SVG file.
 QtWidgets, QtMultimedia and QtNetwork, so ``PySide6.QtSvg`` does not exist
 in a shipped AppImage - a QSvgRenderer-based icon would work in a source
 checkout and fail only for released builds. QPainterPath needs nothing that
-is not already bundled, and painting the outline ourselves also means the
+is not already bundled, and painting the shape ourselves also means the
 icon takes whatever colour the active theme asks for.
 
 This is the first image asset in the GUI. Every other "icon" in COMMANDER is
 a Unicode glyph styled through QSS (the settings cog at
 ``ui/main_window.py``, the status dots in ``ui/common.py``); there is no
 Steam Deck glyph in any font we can rely on, hence this module.
+
+The glyph is a solid silhouette with the screen, thumbsticks and trackpads
+cut out of it, not an outline: at the 22-28px the Dashboard uses, a stroked
+outline of several overlapping shapes turned into a tangle of lines, while
+a filled shape with holes still reads as "handheld" at a glance. The screen
+is tinted at low opacity so it looks like a display rather than a hole.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import (
-    QColor,
-    QIcon,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QTransform,
-)
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 
-#: The path is authored in a 24x24 unit box and scaled by the caller, so one
-#: definition serves every icon size without re-tuning proportions.
+#: Shapes are authored in a 24x24 unit box and scaled to the target size
+#: *before* the boolean operations run. Qt flattens curves to polygons when
+#: it unites/subtracts paths, so doing that at 24 units and scaling up
+#: afterwards left visibly faceted corners.
 _UNITS = 24.0
 
+#: How strongly the screen is tinted inside its cut-out.
+_SCREEN_ALPHA = 0.35
 
-def deck_path(size: float = _UNITS) -> QPainterPath:
-    """A Steam Deck outline: body, grips, screen, thumbsticks.
 
-    Proportions follow the real device - a wide centre screen with a grip
-    lobe bulging below each end - abstracted far enough to stay readable at
-    22px, which is the size the Dashboard button uses.
+def _rect(scale: float, x: float, y: float, w: float, h: float) -> QRectF:
+    return QRectF(x * scale, y * scale, w * scale, h * scale)
+
+
+def deck_paths(size: float = _UNITS) -> tuple[QPainterPath, QPainterPath]:
+    """``(body, screen)`` for a Steam Deck ``size`` pixels wide.
+
+    ``body`` is the shell with every cut-out already removed; ``screen`` is
+    the display that sits inside the largest cut-out.
     """
-    scale = size / _UNITS
-    path = QPainterPath()
-    # Body: the full width of the shell, with the screen bezel's flat top.
-    path.addRoundedRect(QRectF(1.0, 5.5, 22.0, 13.0), 3.6, 3.6)
-    # Grip lobes, one under each hand.
-    path.addEllipse(QRectF(0.6, 9.0, 6.4, 9.4))
-    path.addEllipse(QRectF(17.0, 9.0, 6.4, 9.4))
-    # Screen.
-    path.addRoundedRect(QRectF(7.4, 8.2, 9.2, 7.6), 1.1, 1.1)
-    # Thumbsticks.
-    path.addEllipse(QRectF(2.9, 11.0, 3.4, 3.4))
-    path.addEllipse(QRectF(17.7, 11.0, 3.4, 3.4))
-    if scale == 1.0:
-        return path
-    # QPainterPath cannot be scaled in place, so map it through a transform
-    # rather than recomputing every rectangle for each icon size.
-    return QTransform().scale(scale, scale).map(path)
+    s = size / _UNITS
+    body = QPainterPath()
+    # The shell: one wide rounded bar...
+    body.addRoundedRect(_rect(s, 0.8, 6.2, 22.4, 10.6), 5.3 * s, 5.3 * s)
+    # ...with a grip dropping below each end, merged into one outline.
+    for x in (0.8, 16.4):
+        grip = QPainterPath()
+        grip.addRoundedRect(_rect(s, x, 8.5, 6.8, 10.3), 3.4 * s, 3.4 * s)
+        body = body.united(grip)
+
+    holes = QPainterPath()
+    # The bezel gap around the screen.
+    holes.addRoundedRect(_rect(s, 6.2, 7.4, 11.6, 8.2), 1.4 * s, 1.4 * s)
+    # Thumbsticks, high on each side like the real device...
+    for cx in (4.1, 19.9):
+        holes.addEllipse(_rect(s, cx - 1.75, 9.3, 3.5, 3.5))
+    # ...and the square trackpads under them.
+    for x in (2.6, 18.4):
+        holes.addRoundedRect(_rect(s, x, 14.0, 3.0, 2.6), 0.6 * s, 0.6 * s)
+
+    screen = QPainterPath()
+    screen.addRoundedRect(_rect(s, 7.0, 8.2, 10.0, 6.6), 0.9 * s, 0.9 * s)
+    return body.subtracted(holes), screen
 
 
-def deck_icon(color: QColor, size: int = 24, *, filled: bool = False) -> QIcon:
-    """Render :func:`deck_path` into a transparent QIcon in ``color``.
-
-    ``filled`` swaps the outline for a solid silhouette, for cases where a
-    stroke would disappear (very small sizes, or a busy background).
-    """
-    pixmap = QPixmap(size, size)
+def _render(color: QColor, size: int, ratio: float) -> QPixmap:
+    pixels = max(1, round(size * ratio))
+    pixmap = QPixmap(pixels, pixels)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        path = deck_path(float(size))
-        if filled:
-            painter.fillPath(path, color)
-        else:
-            # Stroke width scales with the icon so the outline keeps the same
-            # visual weight from 16px up to 48px.
-            width = max(1.0, 1.6 * size / _UNITS)
-            pen = QPen(
-                color,
-                width,
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-                Qt.PenJoinStyle.RoundJoin,
-            )
-            painter.setPen(pen)
-            painter.drawPath(path)
+        body, screen = deck_paths(float(pixels))
+        painter.fillPath(body, color)
+        tint = QColor(color)
+        tint.setAlphaF(_SCREEN_ALPHA * color.alphaF())
+        painter.fillPath(screen, tint)
     finally:
         painter.end()
-    return QIcon(pixmap)
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
+def deck_icon(color: QColor, size: int = 24) -> QIcon:
+    """The Steam Deck glyph in ``color`` as a QIcon.
+
+    Rendered at 1x and 2x so it stays sharp on a scaled (HiDPI) desktop.
+    """
+    icon = QIcon()
+    for ratio in (1.0, 2.0):
+        icon.addPixmap(_render(color, size, ratio))
+    return icon

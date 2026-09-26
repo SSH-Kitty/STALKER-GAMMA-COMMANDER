@@ -7,7 +7,9 @@ allowing per-mod status changes and deletion.
 
 from __future__ import annotations
 
+import re
 import shutil
+from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 
@@ -224,19 +226,95 @@ def find_enabled_mod_file_conflicts(
         for status, name in entries(lines)
         if status == "Enabled" and separator_name(name) is None
     ]
+    # Keyed case-insensitively: the game and MO2's virtual filesystem treat
+    # "gamedata/Scripts/x" and "gamedata/scripts/x" as the same file, so
+    # two mods shipping them do conflict. The first spelling seen is shown.
     file_owners: dict[str, list[str]] = {}
+    display: dict[str, str] = {}
     for name in enabled_names:
         mod_dir = mods_dir / name
-        if not mod_dir.is_dir():
+        try:
+            if not mod_dir.is_dir():
+                continue
+            children = list(mod_dir.iterdir())
+        except OSError:
             continue
-        for child in mod_dir.iterdir():
+        for child in children:
+            try:
+                if not child.is_dir() or child.name.lower() not in _CONFLICT_SCAN_ROOTS:
+                    continue
+                files = [path for path in child.rglob("*") if path.is_file()]
+            except OSError:
+                # An unreadable folder in one mod must not abort the scan.
+                continue
+            for path in files:
+                rel = f"{child.name}/{path.relative_to(child).as_posix()}"
+                key = rel.lower()
+                display.setdefault(key, rel)
+                owners = file_owners.setdefault(key, [])
+                if name not in owners:
+                    owners.append(name)
+    return [
+        (display[key], owners) for key, owners in file_owners.items() if len(owners) > 1
+    ]
+
+
+def _mod_game_files(mod_dir: Path) -> dict[str, str]:
+    """A mod's game-visible files: lower-cased key -> path as spelled."""
+    files: dict[str, str] = {}
+    try:
+        children = list(mod_dir.iterdir()) if mod_dir.is_dir() else []
+    except OSError:
+        return files
+    for child in children:
+        try:
             if not child.is_dir() or child.name.lower() not in _CONFLICT_SCAN_ROOTS:
                 continue
-            for path in child.rglob("*"):
-                if path.is_file():
-                    rel = f"{child.name}/{path.relative_to(child).as_posix()}"
-                    file_owners.setdefault(rel, []).append(name)
-    return [(rel, owners) for rel, owners in file_owners.items() if len(owners) > 1]
+            paths = [path for path in child.rglob("*") if path.is_file()]
+        except OSError:
+            continue
+        for path in paths:
+            rel = f"{child.name}/{path.relative_to(child).as_posix()}"
+            files.setdefault(rel.lower(), rel)
+    return files
+
+
+def mod_conflicts(
+    lines: list[str], mods_dir: str | Path, name: str
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """What one mod overrides, and what overrides it.
+
+    Returns ``(overrides, overridden_by)``: other mod name -> the shared
+    files, sorted. Compared against every enabled mod; ``name`` itself is
+    included even when disabled, so the answer says what enabling it would
+    do. Priority is file order - earlier in modlist.txt wins (see
+    find_enabled_mod_file_conflicts()).
+    """
+    mods_dir = Path(mods_dir)
+    order = [
+        (status, mod)
+        for status, mod in entries(lines)
+        if separator_name(mod) is None
+    ]
+    position = {mod: index for index, (_status, mod) in enumerate(order)}
+    if name not in position:
+        return {}, {}
+    own = _mod_game_files(mods_dir / name)
+    overrides: dict[str, list[str]] = {}
+    overridden_by: dict[str, list[str]] = {}
+    if not own:
+        return overrides, overridden_by
+    for status, other in order:
+        if other == name or status != "Enabled":
+            continue
+        shared = sorted(own[key] for key in own.keys() & _mod_game_files(mods_dir / other).keys())
+        if not shared:
+            continue
+        if position[other] < position[name]:
+            overridden_by[other] = shared
+        else:
+            overrides[other] = shared
+    return overrides, overridden_by
 
 
 def summarize_mod_conflicts(
@@ -382,7 +460,68 @@ def save_lines(path: str | Path, lines: list[str]) -> None:
     is written alongside the target so ``replace`` stays on one filesystem.
     """
     path = Path(path)
-    write_text(path, "\n".join(lines) + "\n")
+    # Keep the file's own line endings: MO2 writes CRLF, and rewriting it
+    # as LF on every edit changed every line of the file for no reason.
+    newline = "\n"
+    try:
+        with open(path, "rb") as handle:
+            if b"\r\n" in handle.read(65536):
+                newline = "\r\n"
+    except OSError:
+        pass
+    write_text(path, newline.join(lines) + newline)
+    ensure_separator_folders(path, lines)
+
+
+#: What MO2 itself writes into a separator's folder.
+_SEPARATOR_META_INI = (
+    "[General]\n"
+    "modid=0\n"
+    "version=\n"
+    "newestVersion=\n"
+    "category=0\n"
+    "installationFile=\n"
+    "\n"
+    "[installedFiles]\n"
+    "size=0\n"
+)
+
+
+def ensure_separator_folders(modlist: str | Path, lines: list[str]) -> list[Path]:
+    """Give every separator in ``lines`` the folder MO2 needs; return new ones.
+
+    To Mod Organizer a separator is not just a line in modlist.txt: it is a
+    mod, a ``mods/<name>_separator`` folder holding a meta.ini. A line with
+    no folder behind it is an entry MO2 cannot find, and it drops that entry
+    the next time it saves the list - which is how "Custom Mods" vanished
+    after the first game launch, leaving the mods installed into it filed
+    under the next category down ("G.A.M.M.A. End of List"). Any category
+    COMMANDER creates or renames is written through here, so this covers
+    all of them. Best-effort: a list outside a GAMMA install (no ``mods``
+    folder beside ``profiles``) or an unwritable folder is left alone.
+    """
+    modlist = Path(modlist)
+    mods = modlist.parent.parent.parent / "mods"
+    if modlist.parent.parent.name != "profiles" or not mods.is_dir():
+        return []
+    created: list[Path] = []
+    for line in lines:
+        try:
+            info = _line_info(line)
+        except ValueError:
+            continue
+        if info is None or separator_name(info[1]) is None:
+            continue
+        folder = mods / info[1]
+        if folder.exists():
+            continue
+        try:
+            folder.mkdir()
+            (folder / "meta.ini").write_text(_SEPARATOR_META_INI, encoding="utf-8")
+        except OSError:
+            continue
+        created.append(folder)
+    return created
 
 
 def modlist_path_for(gamma: str, mo2_profile: str) -> Path | None:
@@ -483,7 +622,7 @@ def add_mod(
     any category afterward. It lands in the file's trailing "nothing
     closes it" zone, which grouped() already renders as "Uncategorized"
     with no special-casing needed - and stays correct even after the file
-    is later reordered (e.g. by Flip Priority).
+    is later reordered.
 
     With an explicit *category*, the mod is added as a member of that
     category: a category's members sit immediately above its separator
@@ -723,10 +862,9 @@ def move_mod(
 _PINNED_FIRST_CATEGORY = "g.a.m.m.a. end of list"
 
 #: Reserved category add_custom_mod() files "Install Mod" installs into.
-#: Sits directly under _PINNED_FIRST_CATEGORY on screen (file-order just
-#: before it - see _PINNED_FIRST_CATEGORIES), so a user's own installed
-#: mods always keep the highest priority in the list, immune to Flip
-#: Priority. Not created up front - only once a mod is actually
+#: Sits at the very bottom on screen (file-start - see add_custom_mod()),
+#: so a user's own installed mods always keep the highest priority in the
+#: list, immune to a whole-list reversal. Not created up front - only once a mod is actually
 #: installed via add_custom_mod(). Lowercase - only for the
 #: case-insensitive comparisons _PINNED_FIRST_CATEGORIES is used for;
 #: the separator actually written to the file uses the properly-cased
@@ -739,8 +877,75 @@ _CUSTOM_MODS_CATEGORY_DISPLAY = "Custom Mods"
 _PINNED_FIRST_CATEGORIES = (_CUSTOM_MODS_CATEGORY, _PINNED_FIRST_CATEGORY)
 
 
+#: The one pristine copy kept beside modlist.txt, shared by the desktop Mod
+#: Manager, Deck Mode and the Play page's load-order fix.
+BACKUP_SUFFIX = ".gammagui.bak"
+
+
+def timestamped_backup_path(modlist: Path) -> Path:
+    """``modlist-YYYYmmdd-HHMMSS.bak`` beside ``modlist``, never an existing one."""
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    candidate = modlist.with_name(f"{modlist.stem}-{stamp}.bak")
+    suffix = 2
+    while candidate.exists():
+        candidate = modlist.with_name(f"{modlist.stem}-{stamp}-{suffix}.bak")
+        suffix += 1
+    return candidate
+
+
+def backup_before_change(modlist: Path) -> None:
+    """Keep the pristine copy (once) and a timestamped one before a rewrite."""
+    backup = modlist.with_name(modlist.name + BACKUP_SUFFIX)
+    if not backup.exists():
+        shutil.copy2(modlist, backup)
+    shutil.copy2(modlist, timestamped_backup_path(modlist))
+
+
+#: A numbered GAMMA category separator ("224- Newly added addons").
+_NUMBERED_CATEGORY_RE = re.compile(r"(\d+)- ")
+
+
+def looks_flipped(lines: list[str]) -> bool:
+    """True when a GAMMA load order has been reversed end to end.
+
+    GAMMA numbers its categories, and in a correct ``modlist.txt`` they run
+    downward in file order ("224- ..." first, "1- Audio" last). The old
+    Flip Priority button reversed the whole list, which makes them run
+    upward - and crashes the game on startup, because patches then load
+    before what they patch. Needs at least 3 numbered categories, so a
+    list without GAMMA's own categories is never reported. 80% rather than
+    all pairs: a user may have moved a category or two since.
+    """
+    numbers: list[int] = []
+    for line in lines:
+        info = _line_info(line)
+        if info is None:
+            continue
+        category = separator_name(info[1])
+        if category is None:
+            continue
+        match = _NUMBERED_CATEGORY_RE.match(category)
+        if match:
+            numbers.append(int(match.group(1)))
+    if len(numbers) < 3:
+        return False
+    rising = sum(1 for a, b in pairwise(numbers) if b > a)
+    return rising >= 0.8 * (len(numbers) - 1)
+
+
+def unflip(lines: list[str]) -> list[str]:
+    """Undo a whole-list reversal. :func:`flip_priority` is its own inverse
+    (pinned categories stay put both ways), so this restores the list the
+    reversal started from, exactly."""
+    return flip_priority(lines)
+
+
 def flip_priority(lines: list[str]) -> list[str]:
     """Reverse the entire mod load order in ``lines``, matching MO2 semantics.
+
+    No longer offered as a button - reversing GAMMA's load order crashes the
+    game - but kept as the exact inverse that :func:`unflip` uses to repair a
+    list the old button reversed.
 
     A category (a separator entry plus every line up to the next separator,
     including any comments/blanks) is treated as one contiguous block.
@@ -802,7 +1007,7 @@ def flip_priority(lines: list[str]) -> list[str]:
         ]
         records = [block[index] for index in mod_positions]
         new_block = list(block)
-        for index, record in zip(mod_positions, reversed(records)):
+        for index, record in zip(mod_positions, reversed(records), strict=True):
             new_block[index] = record
         return new_block
 
@@ -963,25 +1168,6 @@ def _block_start_index(lines: list[str], separator_index: int) -> int:
     return 0
 
 
-def _pinned_category_start(lines: list[str], pinned_name: str) -> int | None:
-    """Index where the (case-insensitively matched) *pinned_name* block
-
-    begins, or None if no such category exists. *pinned_name* must
-    already be lowercase, matching _PINNED_FIRST_CATEGORIES' own values -
-    real modlist.txt separators keep whatever case GAMMA/the user gave
-    them (e.g. "G.A.M.M.A. End of List"), so an exact-string lookup like
-    _category_separator_index() would miss it.
-    """
-    for index, line in enumerate(lines):
-        info = _line_info(line)
-        if info is None:
-            continue
-        name = separator_name(info[1])
-        if name is not None and name.strip().lower() == pinned_name:
-            return _block_start_index(lines, index)
-    return None
-
-
 def add_custom_mod(lines: list[str], name: str, *, enabled: bool = False) -> list[str]:
     """Add a mod installed via the "Install Mod" button to "Custom Mods".
 
@@ -996,10 +1182,14 @@ def add_custom_mod(lines: list[str], name: str, *, enabled: bool = False) -> lis
     filed into an ordinary category by hand (e.g. via drag-and-drop), so
     "Install Mod" uses this instead of add_mod().
 
-    If "Custom Mods" doesn't exist yet, it's created directly before
-    _PINNED_FIRST_CATEGORY's own block (or at file-start if that category
-    is missing too) - never at file-end, where add_category()/add_mod()
-    would otherwise put a brand-new category.
+    "Custom Mods" always sits at the very start of the file - the on-screen
+    bottom, the highest priority, where MO2 itself puts a new mod - after
+    only the file's leading comment lines. Categories the user made in MO2
+    below "G.A.M.M.A. End of List" live there too, so a "Custom Mods"
+    created directly before GAMMA's anchor would land in the middle of the
+    list, under the user's own categories. A missing category is created at
+    that spot, and an existing one found anywhere else is moved there, with
+    its mods, before the new mod is added.
     """
     if not _valid_name(name):
         raise ValueError("Mod names cannot contain path separators or control characters")
@@ -1010,18 +1200,43 @@ def add_custom_mod(lines: list[str], name: str, *, enabled: bool = False) -> lis
         raise ValueError(f"Mod {name!r} is already in the modlist")
     line = ("+" if enabled else "-") + name
 
-    sep_idx = _category_separator_index(lines, _CUSTOM_MODS_CATEGORY_DISPLAY)
-    if sep_idx is not None:
-        # Category exists: insert as its last member, right before its
-        # separator (members sit above their separator, not below).
-        out = list(lines)
-        out.insert(sep_idx, line)
-        return out
-
-    insert_at = _pinned_category_start(lines, _PINNED_FIRST_CATEGORY) or 0
+    top = _first_entry_index(lines)
     out = list(lines)
-    out[insert_at:insert_at] = [line, f"-{_CUSTOM_MODS_CATEGORY_DISPLAY}_separator"]
+    sep_idx = _custom_mods_separator_index(out)
+    if sep_idx is None:
+        out[top:top] = [line, f"-{_CUSTOM_MODS_CATEGORY_DISPLAY}_separator"]
+        return out
+    start = _block_start_index(out, sep_idx)
+    if start > top:
+        block = out[start : sep_idx + 1]
+        del out[start : sep_idx + 1]
+        out[top:top] = block
+        sep_idx = top + len(block) - 1
+    # Insert as the category's last member, right before its separator
+    # (members sit above their separator, not below).
+    out.insert(sep_idx, line)
     return out
+
+
+def _first_entry_index(lines: list[str]) -> int:
+    """Index of the first mod or separator line - past the file's header
+    comments (MO2 writes "# This file was automatically generated...")."""
+    for index, line in enumerate(lines):
+        if _line_info(line) is not None:
+            return index
+    return len(lines)
+
+
+def _custom_mods_separator_index(lines: list[str]) -> int | None:
+    """The "Custom Mods" separator's line, matched case-insensitively."""
+    for index, line in enumerate(lines):
+        info = _line_info(line)
+        if info is None:
+            continue
+        name = separator_name(info[1])
+        if name is not None and name.strip().lower() == _CUSTOM_MODS_CATEGORY:
+            return index
+    return None
 
 
 def custom_mod_names(lines: list[str]) -> set[str]:

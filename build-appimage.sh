@@ -13,6 +13,12 @@
 #
 # Usage:  ./build-appimage.sh [output-dir]
 #
+# Rebuilds are quick: the Qt wheels, the appimagetool runtime and the whole
+# pruned Python + Qt base are cached under .appimage-build/cache, so a normal
+# build only copies the application payload and packages it. The base is
+# rebuilt automatically when its part of this script changes; set
+# REBUILD_BASE=1 to force it (e.g. after the host's xcb libraries updated).
+#
 set -euo pipefail
 
 # ----------------------------------------------------------------- settings
@@ -36,6 +42,7 @@ APPDIR="$BUILD_DIR/AppDir"
 BASE_APPIMAGE="python${PY_FULL}-${PY_ABI}-${PY_ABI}-${PY_PLATFORM}.AppImage"
 BASE_URL="https://github.com/niess/python-appimage/releases/download/python${PY_SERIES}/${BASE_APPIMAGE}"
 TOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
+RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH}"
 
 # xcb/xkb helper libraries. Qt hard-requires these but stock Ubuntu/Debian
 # often ship without them, which is the classic "could not load the Qt
@@ -89,27 +96,60 @@ fetch() { # url dest
 }
 fetch "$TOOL_URL" "$CACHE_DIR/appimagetool"
 fetch "$BASE_URL" "$CACHE_DIR/$BASE_APPIMAGE"
+# appimagetool would otherwise download this on every single run.
+fetch "$RUNTIME_URL" "$CACHE_DIR/runtime-$ARCH"
 
+PY="$APPDIR/opt/python$PY_SERIES/bin/python$PY_SERIES"
+PYLIB="$APPDIR/opt/python$PY_SERIES/lib/python$PY_SERIES"
+SITE="$PYLIB/site-packages"
+PS="$SITE/PySide6"
+QTLIB="$PS/Qt/lib"
+
+# The Python + Qt base (everything from here to the payload section) does
+# not depend on the project, so it is built once and reused. Its cache key
+# is this script's settings and base sections themselves: edit either and
+# the next build makes a fresh base.
+BASE_KEY="$(sed -n '/^# -* settings$/,/^# -* fetch tools$/p; /^# -* base python -> AppDir$/,/^# -* payload$/p' \
+  "${BASH_SOURCE[0]}" | sha256sum | cut -c1-16)"
+BASE_CACHE="$CACHE_DIR/base-$BASE_KEY"
+if [ "${REBUILD_BASE:-0}" = 1 ]; then
+  rm -rf "$BASE_CACHE"
+fi
+
+if [ -d "$BASE_CACHE" ]; then
+  log "reusing cached Python + Qt base ($BASE_KEY)"
+  cp -a --reflink=auto "$BASE_CACHE" "$APPDIR"
+  if [ -s "$BASE_CACHE.skipped" ]; then
+    log "NOT bundled - users must have these from their distro:"
+    sed 's/^/      /' "$BASE_CACHE.skipped"
+  fi
+else
 # --------------------------------------------------- base python -> AppDir
 log "extracting manylinux Python base"
 ( cd "$BUILD_DIR" && rm -rf squashfs-root \
   && "$CACHE_DIR/$BASE_APPIMAGE" --appimage-extract >/dev/null \
   && mv squashfs-root "$APPDIR" )
 
-PY="$APPDIR/opt/python$PY_SERIES/bin/python$PY_SERIES"
-PYLIB="$APPDIR/opt/python$PY_SERIES/lib/python$PY_SERIES"
-SITE="$PYLIB/site-packages"
 [ -x "$PY" ] || die "bundled interpreter not found at $PY"
 
+# Wheels are kept in the cache: PySide6-Addons alone is a few hundred MB,
+# and downloading it on every build was most of the build time. Offline
+# install first; only a missing wheel goes to the network.
+WHEEL_DIR="$CACHE_DIR/wheels"
+mkdir -p "$WHEEL_DIR"
 log "installing $QT_PACKAGE and $QT_ADDONS_PACKAGE"
-"$PY" -m pip install --no-cache-dir -q --upgrade pip
-"$PY" -m pip install --no-cache-dir -q "$QT_PACKAGE" "$QT_ADDONS_PACKAGE"
+if ! "$PY" -m pip install --no-cache-dir -q --no-index --find-links "$WHEEL_DIR" \
+       "$QT_PACKAGE" "$QT_ADDONS_PACKAGE" 2>/dev/null; then
+  log "downloading Qt wheels into the cache"
+  "$PY" -m pip install --no-cache-dir -q --upgrade pip
+  "$PY" -m pip download --no-cache-dir -q -d "$WHEEL_DIR" "$QT_PACKAGE" "$QT_ADDONS_PACKAGE"
+  "$PY" -m pip install --no-cache-dir -q --no-index --find-links "$WHEEL_DIR" \
+    "$QT_PACKAGE" "$QT_ADDONS_PACKAGE"
+fi
 
 # ------------------------------------------------------------------- prune
 # Everything removed here is unreachable for a QtWidgets-only application.
 log "pruning unused Qt modules and stdlib"
-PS="$SITE/PySide6"
-QTLIB="$PS/Qt/lib"
 
 # Python bindings for Qt modules the app never imports.
 # Uses find's own -name filters rather than piping to xargs: the project path
@@ -122,12 +162,14 @@ QTLIB="$PS/Qt/lib"
 # QtMultimedia itself fail to import inside the AppImage with
 # "libshiboken: could not import module 'PySide6.QtNetwork'" (silently
 # swallowed by play_click_sound()'s own broad except clause).
-# The Steam Deck Mode icon (commander_gui/ui/deck_icon.py) is painted with
-# QPainterPath rather than loaded from an SVG precisely because QtSvg is
-# deleted here - adding an SVG-based asset means adding its binding back.
+# QtSvg stays too: the Welcome screen's GitHub/Discord logos and the Deck
+# Mode achievement icons are SVGs (commander_gui/ui/brand_icons.py). Its
+# absence made the Welcome screen fail to import and never open in the
+# AppImage while working fine from source.
 find "$PS" -maxdepth 1 -name '*.abi3.so' \
      ! -name 'QtCore.abi3.so' ! -name 'QtGui.abi3.so' ! -name 'QtWidgets.abi3.so' \
      ! -name 'QtMultimedia.abi3.so' ! -name 'QtNetwork.abi3.so' \
+     ! -name 'QtSvg.abi3.so' \
      -delete
 find "$PS" -maxdepth 1 -name '*.pyi' -delete
 
@@ -248,6 +290,15 @@ if [ ${#SKIPPED_LIBS[@]} -gt 0 ]; then
   printf '      %s\n' "${SKIPPED_LIBS[@]}"
 fi
 
+# Keep the finished base for the next build (older bases are dropped).
+rm -rf "$CACHE_DIR"/base-* "$BASE_CACHE.tmp"
+cp -a --reflink=auto "$APPDIR" "$BASE_CACHE.tmp"
+mv "$BASE_CACHE.tmp" "$BASE_CACHE"
+if [ ${#SKIPPED_LIBS[@]} -gt 0 ]; then
+  printf '%s\n' "${SKIPPED_LIBS[@]}" > "$BASE_CACHE.skipped"
+fi
+fi
+
 # --------------------------------------------------------------- payload
 # Laid out so config.py's project_root() (parents[1] of the package) lands on
 # opt/$APP_ID, making cli/usr/bin/stalker-gamma resolve with no code changes.
@@ -279,8 +330,17 @@ env -u PYTHONPATH PYTHONPATH="$PAYLOAD" PYTHONDONTWRITEBYTECODE=1 "$PY" -s -P -c
   'import assistant; from assistant.dump import DumpArchive
 import Steamdeck
 from commander_gui.deck_launch import relaunch_argv, is_steam_deck
-print(assistant.__version__, Steamdeck.__version__)' \
+print(Steamdeck.__version__)' \
   || die "bundled application payload failed its import check"
+
+# Every Qt binding the UI imports must have survived the prune above - a
+# missing one only shows up at runtime, as a feature that silently never
+# appears (the Welcome screen, without QtSvg). No display needed: this
+# imports the bindings, it creates no widgets.
+env -u PYTHONPATH PYTHONPATH="$PAYLOAD" PYTHONDONTWRITEBYTECODE=1 "$PY" -s -P -c \
+  'import PySide6.QtCore, PySide6.QtGui, PySide6.QtWidgets, PySide6.QtSvg, PySide6.QtMultimedia
+import commander_gui.ui.brand_icons, commander_gui.ui.welcome_overlay, commander_gui.ui.smooth_scroll' \
+  || die "a Qt module the UI needs was pruned from the bundle"
 
 # ---------------------------------------------------- AppRun / desktop / icon
 log "writing AppRun, desktop entry and icons"
@@ -363,13 +423,19 @@ OUTPUT="$OUT_DIR/${APP_NAME}-${VERSION}-${ARCH}.AppImage"
 log "packaging $(basename "$OUTPUT")  (AppDir: $(du -sh "$APPDIR" | cut -f1))"
 rm -f "$OUTPUT"
 env APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$ARCH" VERSION="$VERSION" \
-    "$CACHE_DIR/appimagetool" --comp zstd --no-appstream "$APPDIR" "$OUTPUT" \
+    "$CACHE_DIR/appimagetool" --comp zstd --no-appstream \
+    --runtime-file "$CACHE_DIR/runtime-$ARCH" "$APPDIR" "$OUTPUT" \
   || { log "zstd failed, retrying with default compression"
        rm -f "$OUTPUT"
        env APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$ARCH" VERSION="$VERSION" \
-           "$CACHE_DIR/appimagetool" --no-appstream "$APPDIR" "$OUTPUT"; }
+           "$CACHE_DIR/appimagetool" --no-appstream \
+           --runtime-file "$CACHE_DIR/runtime-$ARCH" "$APPDIR" "$OUTPUT"; }
 
 [ -f "$OUTPUT" ] || die "appimagetool failed to produce $OUTPUT"
 
 chmod +x "$OUTPUT"
+# Upload this next to the AppImage in the GitHub release: COMMANDER's
+# self-updater verifies the download against it before replacing anything.
+( cd "$(dirname "$OUTPUT")" && sha512sum "$(basename "$OUTPUT")" > "$(basename "$OUTPUT").sha512sum" )
 log "done: $OUTPUT ($(du -h "$OUTPUT" | cut -f1))"
+log "checksum: $OUTPUT.sha512sum - attach it to the release alongside the AppImage"

@@ -172,8 +172,11 @@ def load_settings(path: Path | None = None) -> CliSettings:
         settings.save(path)
         return settings
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        # utf-8-sig: a BOM (Windows editors add one) is not corruption.
+        # ValueError also covers UnicodeDecodeError on non-UTF-8 bytes,
+        # which used to escape this handler.
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (ValueError, OSError):
         # Back up corrupt file and start fresh.
         return _reset_settings(path, _corrupt_backup_path(path))
     if not isinstance(data, dict):

@@ -64,26 +64,34 @@ class UpdateStatus:
 
     @property
     def update_available(self) -> bool:
+        # The version marker is fetched even when the addon list fails, so
+        # a newer version is an update whatever went wrong with the list -
+        # checking the error first hid it exactly when the list was down.
+        if self.latest and self.installed and self.latest != self.installed:
+            return True
         if self.error:
             return False
-        if self.diffs:
-            return True
-        return bool(self.latest and self.installed and self.latest != self.installed)
+        return bool(self.diffs)
 
 
 def format_version(
-    build: str | None, human: str | None, missing: str = "Not installed"
+    build: str | None,
+    human: str | None,
+    missing: str = "Not installed",
+    *,
+    show_build: bool = True,
 ) -> str:
     """Render a version as ``"0.9.5 (build 920)"``.
 
-    The build number is always kept because the human label is coarse and only
-    known for the latest release; an outdated install falls back to the bare
-    build number (``"build 910"``).
+    The build number is kept by default because the human label is coarse and
+    only known for the latest release; an outdated install falls back to the
+    bare build number (``"build 910"``). ``show_build=False`` drops it where a
+    label is known (``"0.9.5"``) - the fallback still shows the build.
     """
     if not build:
         return missing
     if human:
-        return f"{human} (build {build})"
+        return f"{human} (build {build})" if show_build else human
     return f"build {build}"
 
 
@@ -92,7 +100,7 @@ def status_summary(status: UpdateStatus) -> tuple[str, str]:
 
     ``objectName`` is one of ``accent`` (green), ``warn`` (amber) or ``dim``.
     """
-    if status.error:
+    if status.error and not status.update_available:
         return status.error, "warn"
     if status.installed is None:
         return tr("GAMMA is not installed yet - run a full install first."), "warn"
@@ -107,6 +115,9 @@ def status_summary(status: UpdateStatus) -> tuple[str, str]:
             text = tr("Mod updates available")
         if status.diffs:
             text += " " + tr("- {count} change(s)", count=len(status.diffs))
+        if status.error:
+            # The version is newer, but the per-addon list couldn't be read.
+            text += "\n" + status.error
         return text, "accent"
     return tr("GAMMA is up to date"), "accent"
 
@@ -135,6 +146,9 @@ def _repo_owner_and_name(profile) -> tuple[str, str]:
     parts = repo_url.rstrip("/").split("/") if repo_url else []
     owner = parts[-2] if len(parts) >= 2 else "Grokitach"
     repo = parts[-1] if parts and parts[-1] else "Stalker_GAMMA"
+    # A clone URL ("…/Stalker_GAMMA.git") names the same repo, but
+    # raw.githubusercontent.com 404s on the ".git" suffix.
+    repo = repo.removesuffix(".git") or "Stalker_GAMMA"
     return owner, repo
 
 
@@ -246,7 +260,17 @@ def latest_version_human(profile) -> str | None:
     Taken from the repo's ``Patchnotes.md`` heading (``# **GAMMA 0.9.5**``),
     falling back to the README badge ``gamma-v0.9.5``. None if unreachable.
     """
-    version = _version_from_text(fetch_latest_patchnotes(profile))
+    return _version_from_patchnotes_or_readme(profile, fetch_latest_patchnotes(profile))
+
+
+def _version_from_patchnotes_or_readme(profile, patchnotes: str | None) -> str | None:
+    """The version from already-fetched patch notes, else from the README.
+
+    Takes the patch notes as fetched by the caller, so a check that already
+    has them (or already failed to get them) doesn't download them again -
+    offline, the repeat fetch alone added a full timeout-and-retry cycle.
+    """
+    version = _version_from_text(patchnotes)
     if version:
         return version
     try:
@@ -269,8 +293,13 @@ _COMMANDER_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
 #: release. Without capturing it, "1.2.9H1" and "1.2.9H2" both reduced to
 #: the same (1, 2, 9) tuple and compared as equal, so a hotfix release
 #: never looked newer than the one before it.
+#:
+#: Unstable builds (GitHub pre-releases) add "-unstable" and an optional
+#: counter: "1.3.1-unstable", "1.3.1-unstable2", ...
 _VERSION_NUMERIC_RE = re.compile(
     r"(?P<base>[0-9]+(?:\.[0-9]+)*)(?:[Hh](?P<hotfix>[0-9]+))?"
+    r"(?:-unstable(?P<unstable>[0-9]*))?",
+    re.IGNORECASE,
 )
 
 
@@ -279,22 +308,44 @@ def _numeric_version_tuple(text: str) -> tuple[int, ...] | None:
     if not match:
         return None
     base = tuple(int(part) for part in match.group("base").split("."))
-    return base + (int(match.group("hotfix") or 0),)
+    # Padded to major.minor.patch before the hotfix is appended: otherwise
+    # "v1.3H5" -> (1, 3, 5) outranked "1.3.2" -> (1, 3, 2, 0), and "1.3"
+    # vs "1.3.0" compared unequal.
+    base = (base + (0, 0, 0))[:3] if len(base) < 3 else base
+    # Then (stage, n): a stable build is (1, 0) and "-unstableN" is (0, N),
+    # so 1.3.1-unstable < 1.3.1-unstable2 < 1.3.1 < 1.3.1H1.
+    unstable = match.group("unstable")
+    stage = (1, 0) if unstable is None else (0, int(unstable or 1))
+    return base + (int(match.group("hotfix") or 0),) + stage
 
 
-def check_commander_update(current_version: str) -> str | None:
-    """Return the newer COMMANDER release tag, or None if up to date/unreachable.
+def is_unstable_version(text: str) -> bool:
+    """True for an unstable build's version or tag ("1.3.1-unstable2")."""
+    version = _numeric_version_tuple(text or "")
+    return version is not None and version[-2] == 0
 
-    Deliberately avoids api.github.com/repos/.../releases/latest - like the
-    GAMMA checks above, that endpoint is rate-limited to 60 requests/hour
-    per IP and frequently 403s. GitHub's own "/releases/latest" HTML page
-    redirects (302) to "/releases/tag/<name>" without touching the REST
-    API at all - a HEAD request just needs the resolved URL, not the page
-    body, to read the tag name off it.
+
+def effective_update_channel(saved: str | None, current_version: str) -> str:
+    """The update channel to check: always "unstable" on an unstable build.
+
+    Someone who installed an unstable AppImage by hand, with the setting
+    still on "stable", would otherwise never hear about newer unstable
+    builds - or about the stable release that supersedes theirs.
     """
-    current = _numeric_version_tuple(current_version)
-    if current is None:
-        return None
+    if is_unstable_version(current_version):
+        return "unstable"
+    return saved if saved in UPDATE_CHANNELS else "stable"
+
+
+#: Update channels for COMMANDER itself (gui setting ``update_channel``).
+UPDATE_CHANNELS = ("stable", "unstable")
+#: The release feed can list many entries; it is only ever a few KB.
+_MAX_FEED_BYTES = 1_000_000
+_FEED_TAG_RE = re.compile(r"/releases/tag/([^\"'<>\s]+)")
+
+
+def _latest_stable_tag() -> str | None:
+    """The tag GitHub marks as "latest" (never a pre-release)."""
     try:
         req = urllib.request.Request(
             f"{_COMMANDER_REPO}/releases/latest",
@@ -306,13 +357,136 @@ def check_commander_update(current_version: str) -> str | None:
     except (OSError, ValueError):
         return None
     match = re.search(r"/releases/tag/([^/]+)/?$", final_url)
-    if not match:
+    return urllib.parse.unquote(match.group(1)) if match else None
+
+
+def _feed_tags() -> list[str]:
+    """Every release tag in the repository's Atom feed, pre-releases included.
+
+    ``/releases.atom`` is a plain page like ``/releases/latest``, not the
+    rate-limited REST API, and - unlike "latest" - it lists pre-releases.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{_COMMANDER_REPO}/releases.atom", headers={"User-Agent": USER_AGENT}
+        )
+        with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            text = read_response_bytes(resp, _MAX_FEED_BYTES).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return []
+    return [urllib.parse.unquote(tag) for tag in _FEED_TAG_RE.findall(text)]
+
+
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+
+def fetch_latest_release_notes(channel: str = "stable") -> tuple[str, str] | None:
+    """The newest COMMANDER release's title and patch notes (HTML).
+
+    Read from the same ``/releases.atom`` feed as :func:`_feed_tags` - each
+    entry carries the release body already rendered to HTML. "stable" picks
+    the entry GitHub marks as latest (never a pre-release), "unstable" the
+    newest entry of all; either falls back to the first entry. None when
+    the feed can't be fetched or parsed.
+    """
+    from . import safe_xml
+
+    try:
+        req = urllib.request.Request(
+            f"{_COMMANDER_REPO}/releases.atom", headers={"User-Agent": USER_AGENT}
+        )
+        with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            data = read_response_bytes(resp, _MAX_FEED_BYTES)
+        # Remote XML: parsed without entity expansion (see safe_xml).
+        entries = safe_xml.parse_bytes(data, namespaces=True).findall(f"{_ATOM_NS}entry")
+    except (ValueError, *safe_xml.XML_ERRORS):
         return None
-    tag = urllib.parse.unquote(match.group(1))
-    remote = _numeric_version_tuple(tag)
-    if remote is None or remote <= current:
+    if not entries:
+        return None
+    chosen = entries[0]
+    if channel != "unstable":
+        stable = _latest_stable_tag()
+        for entry in entries:
+            link = entry.find(f"{_ATOM_NS}link")
+            href = link.get("href", "") if link is not None else ""
+            if stable and urllib.parse.unquote(href).rstrip("/").endswith(f"/{stable}"):
+                chosen = entry
+                break
+    title = (chosen.findtext(f"{_ATOM_NS}title") or "").strip()
+    body = (chosen.findtext(f"{_ATOM_NS}content") or "").strip()
+    return title, body
+
+
+def latest_stable_tag() -> str | None:
+    """The tag of the release GitHub marks as latest (never a pre-release)."""
+    return _latest_stable_tag()
+
+
+def latest_unstable_tag() -> str | None:
+    """The newest "-unstable" pre-release tag in the release feed, or None."""
+    best: tuple[tuple[int, ...], str] | None = None
+    for tag in _feed_tags():
+        if not is_unstable_version(tag):
+            continue
+        version = _numeric_version_tuple(tag)
+        if version is not None and (best is None or version > best[0]):
+            best = (version, tag)
+    return best[1] if best else None
+
+
+def newer_unstable_tag(current_version: str) -> str | None:
+    """The unstable build worth switching to, or None.
+
+    Only one that is newer than both the running build and the latest
+    stable release counts: an unstable 1.3.1-unstable2 is offered over
+    1.3.0, but never once stable 1.3.1 is out.
+    """
+    tag = latest_unstable_tag()
+    if tag is None:
+        return None
+    version = _numeric_version_tuple(tag)
+    floor = [_numeric_version_tuple(current_version)]
+    stable = _latest_stable_tag()
+    if stable:
+        floor.append(_numeric_version_tuple(stable))
+    if version is None or any(v is not None and version <= v for v in floor):
         return None
     return tag
+
+
+def check_commander_update(current_version: str, channel: str = "stable") -> str | None:
+    """Return the newer COMMANDER release tag, or None if up to date/unreachable.
+
+    ``channel`` "stable" (the default) only ever looks at the release GitHub
+    marks as latest, which is never a pre-release - stable users are not
+    moved onto an unstable build. "unstable" also considers pre-releases
+    and offers the highest version of all of them, falling back to the
+    stable check when the feed can't be read.
+
+    Deliberately avoids api.github.com/repos/.../releases/latest - like the
+    GAMMA checks above, that endpoint is rate-limited to 60 requests/hour
+    per IP and frequently 403s. GitHub's own "/releases/latest" HTML page
+    redirects (302) to "/releases/tag/<name>" without touching the REST
+    API at all - a HEAD request just needs the resolved URL, not the page
+    body, to read the tag name off it.
+    """
+    current = _numeric_version_tuple(current_version)
+    if current is None:
+        return None
+    candidates: list[str] = []
+    if channel == "unstable":
+        candidates = _feed_tags()
+    if not candidates:
+        tag = _latest_stable_tag()
+        candidates = [tag] if tag else []
+    best: tuple[tuple[int, ...], str] | None = None
+    for tag in candidates:
+        version = _numeric_version_tuple(tag)
+        if version is not None and (best is None or version > best[0]):
+            best = (version, tag)
+    if best is None or best[0] <= current:
+        return None
+    return best[1]
 
 
 def _records_by_dl_link(
@@ -329,6 +503,16 @@ def _records_by_dl_link(
         key = (record.dl_link or "").strip() or record.folder_name
         by_link.setdefault(key, record)
     return by_link
+
+
+def _json_text(entry: dict, key: str) -> str:
+    """``entry[key]`` as stripped text; a number/list/null is not text.
+
+    A non-string value (a hand-edited or newer-format list) used to raise
+    AttributeError on ``.strip()``, which nothing here caught.
+    """
+    value = entry.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def local_modpack_records(
@@ -356,17 +540,17 @@ def local_modpack_records(
             for counter, entry in enumerate(entries, start=1):
                 if not isinstance(entry, dict):
                     continue
-                addon = (entry.get("addonName") or "").strip()
+                addon = _json_text(entry, "addonName")
                 if not addon:
                     continue
                 record = ModPackRecord(
                     counter=counter,
                     addon_name=addon,
-                    patch=(entry.get("patch") or "").strip(),
-                    dl_link=(entry.get("dlLink") or "").strip(),
-                    mod_db_url=(entry.get("modDbUrl") or "").strip(),
-                    zip_name=(entry.get("zipName") or "").strip(),
-                    md5_mod_db=(entry.get("md5ModDb") or "").strip(),
+                    patch=_json_text(entry, "patch"),
+                    dl_link=_json_text(entry, "dlLink"),
+                    mod_db_url=_json_text(entry, "modDbUrl"),
+                    zip_name=_json_text(entry, "zipName"),
+                    md5_mod_db=_json_text(entry, "md5ModDb"),
                     instructions="",
                 )
                 records[record.folder_name] = record
@@ -485,9 +669,7 @@ def check_updates(profile) -> UpdateStatus:
     # New" panel - latest_version_human()'s own README fallback is only
     # used if this single Patchnotes.md fetch didn't yield a match.
     status.patchnotes = fetch_latest_patchnotes(profile)
-    status.latest_human = _version_from_text(status.patchnotes) or latest_version_human(
-        profile
-    )
+    status.latest_human = _version_from_patchnotes_or_readme(profile, status.patchnotes)
     # The human label is only reliable for the latest release; an installed
     # build that is not current keeps its bare build number instead.
     if status.installed and status.latest and status.installed == status.latest:

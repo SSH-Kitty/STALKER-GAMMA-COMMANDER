@@ -27,37 +27,52 @@ def switch_mode(window, *, deck: bool) -> None:
     this process is replaced and never comes back.
     """
     parent = window if isinstance(window, QWidget) else None
+    # Deck Mode's window asks its questions as in-window overlays (it has no
+    # window manager to place a QMessageBox under gamescope); the desktop
+    # window has no confirm()/notify() and gets real message boxes.
+    overlays = callable(getattr(window, "confirm", None)) and callable(
+        getattr(window, "notify", None)
+    )
 
     # A running install drives a stalker-gamma child process that is writing
     # into the install tree. execve would orphan it mid-write with no UI left
     # to report progress or failure, so this is a refusal, not a confirmation.
     if getattr(window, "install_busy", False):
-        QMessageBox.warning(
-            parent,
-            tr("Busy"),
-            tr(
-                "An install, update or dependency download is still running. "
-                "Wait for it to finish before switching interface."
-            ),
+        message = tr(
+            "An install, update or dependency download is still running. "
+            "Wait for it to finish before switching interface."
         )
+        if overlays:
+            window.notify(message, 6000)
+        else:
+            QMessageBox.warning(parent, tr("Busy"), message)
         return
 
     # The game itself survives the restart - it was launched detached into its
     # own process group - but the timer that tracks the session dies with this
     # process, so the playtime for it is lost.
     if mo2_running():
+        title = tr("Mod Organizer is running")
+        message = tr(
+            "COMMANDER will restart. Your game keeps running, but the "
+            "current session's playtime will not be recorded.\n\nContinue?"
+        )
+        if overlays:
+            window.confirm(title, message, lambda: _restart(window, deck=deck))
+            return
         answer = QMessageBox.question(
             parent,
-            tr("Mod Organizer is running"),
-            tr(
-                "COMMANDER will restart. Your game keeps running, but the "
-                "current session's playtime will not be recorded.\n\nContinue?"
-            ),
+            title,
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+    _restart(window, deck=deck)
 
+
+def _restart(window, *, deck: bool) -> None:
+    """The unconditional half of :func:`switch_mode`, after its guards."""
     # close() runs the window's own closeEvent, which may veto (MainWindow
     # refuses while an install is running) and which persists the desktop
     # window geometry.
@@ -65,10 +80,12 @@ def switch_mode(window, *, deck: bool) -> None:
     if window.isVisible():
         return
 
+    # execve would drop the IPC socket anyway, but clear the activity first
+    # so Discord doesn't keep showing it until it notices the dead socket.
     try:
-        from ..discord_rpc import stop_presence
-
-        stop_presence()
+        play = getattr(window, "_pages", {}).get("play")
+        if play is not None:
+            play._stop_discord_presence()
     except Exception:  # noqa: BLE001, S110 - presence must never block a restart
         pass
 

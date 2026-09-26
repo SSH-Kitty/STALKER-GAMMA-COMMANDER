@@ -64,7 +64,9 @@ class WriteDesktopShortcutTest(unittest.TestCase):
             exec_line = next(
                 l for l in path.read_text().splitlines() if l.startswith("Exec=")
             )
-            self.assertIn('"C:\\\\dir with \\"quotes\\"\\\\app.exe"', exec_line)
+            # Quote-level escaping (\\ for a backslash, \" for a quote), then
+            # every backslash doubled again for the string-value layer.
+            self.assertIn('"C:\\\\\\\\dir with \\\\"quotes\\\\"\\\\\\\\app.exe"', exec_line)
 
 
 if __name__ == "__main__":

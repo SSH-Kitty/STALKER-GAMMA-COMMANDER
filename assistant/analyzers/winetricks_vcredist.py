@@ -20,8 +20,8 @@ REQUIRED_VERBS: tuple[str, ...] = (
     "vcrun2022",
 )
 
-_EXIT_CODE_RE = re.compile(r"exit code[:= ]+(\d+)", re.IGNORECASE)
-_STATUS_CODE_RE = re.compile(r"installation success or error status:\s*(\d+)", re.IGNORECASE)
+_EXIT_CODE_RE = re.compile(r"exit code[:= ]+(\d{1,10})\b", re.IGNORECASE)
+_STATUS_CODE_RE = re.compile(r"installation success or error status:\s*(\d{1,10})\b", re.IGNORECASE)
 _HISTORY_VERB_RE = re.compile(
     r"(?<![\w-])(" + "|".join(map(re.escape, REQUIRED_VERBS)) + r")(?![\w-])",
     re.IGNORECASE,

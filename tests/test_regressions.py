@@ -12,6 +12,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import Mock, patch
 
 from commander_gui import assistant_launcher, autostart, gui_settings, network
@@ -112,6 +113,8 @@ from commander_gui.winetricks import (
     winetricks_install_command,
 )
 
+#: The first bytes of a real type-2 AppImage: ELF magic, then "AI\\x02" at 8.
+_FAKE_APPIMAGE_HEADER = b"\x7fELF\x02\x01\x01\x00AI\x02\x00\x00\x00\x00\x00"
 
 class AssistantLauncherTests(unittest.TestCase):
     def test_bundled_assistant_command_uses_payload_python(self):
@@ -437,7 +440,9 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertEqual(
             _desktop_exec(["/bin/app", "cost$5&more"]),
-            '/bin/app "cost\\$5&more"',
+            # String-level escaping doubles the quote-level backslash (the
+            # spec's own example writes `\\\\$`); GLib rejects a bare `\\$`.
+            '/bin/app "cost\\\\$5&more"',
         )
         # Plain arguments with nothing reserved stay unquoted.
         self.assertEqual(
@@ -1660,6 +1665,30 @@ class RegressionTests(unittest.TestCase):
             page._on_profiles_loaded(result, page._profiles_task, 1)
 
         self.assertEqual(page.profile_combo.currentText(), "G.A.M.M.A")
+
+    def test_selected_label_elides_long_mo2_profile_name(self):
+        """A long name must not stretch the "MO2 uses:" label across the page;
+        the full name stays in the tooltip."""
+        from unittest.mock import MagicMock
+
+        from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton
+
+        from commander_gui.ui.mod_manager_page import ModManagerPage
+
+        QApplication.instance() or QApplication([])
+        page = ModManagerPage.__new__(ModManagerPage)
+        page.profile_combo = QComboBox()
+        page.profile_combo.addItems(["G.A.M.M.A"])
+        page.selected_label = QLabel()
+        page.set_selected_button = QPushButton()
+        page.window = MagicMock()
+        page._mo2_selected_profile = "X" * 120
+
+        page._sync_selected_status()
+
+        self.assertLess(len(page.selected_label.text()), 60)
+        self.assertTrue(page.selected_label.text().endswith("…"))
+        self.assertIn("X" * 120, page.selected_label.toolTip())
 
     def test_successful_install_records_name_for_tree_focus(self):
         """A successful install must remember the mod name for _finish_install
@@ -2890,6 +2919,32 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(child_env["Visible"], "override")
         self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
+    @patch("commander_gui.launcher.subprocess.Popen")
+    def test_game_launched_from_a_steam_shortcut_keeps_that_shortcuts_id(self, popen):
+        """Regression test: the controller did nothing in game (Game Mode).
+
+        gamescope and Steam Input follow the app ID on each window. With
+        SteamGameId stripped, umu-run gave the game a placeholder ID of its
+        own, so the game's window belonged to no app Steam had started.
+        """
+        popen.return_value = Mock()
+        appid = 3123456789
+        with patch.dict(
+            "os.environ",
+            {
+                "SteamGameId": str((appid << 32) | 0x02000000),
+                "SteamAppId": "0",
+                "STEAM_COMPAT_DATA_PATH": "/stale/compat",
+            },
+            clear=True,
+        ):
+            launch_detached(["not-a-real-launch"], {}, ".")
+        child_env = popen.call_args.kwargs["env"]
+        self.assertEqual(child_env["SteamGameId"], str(appid))
+        self.assertEqual(child_env["SteamAppId"], str(appid))
+        self.assertEqual(child_env["GAMEID"], f"umu-{appid}")
+        self.assertNotIn("STEAM_COMPAT_DATA_PATH", child_env)
+
     @patch("commander_gui.assistant_launcher.subprocess.Popen")
     def test_assistant_launch_uses_devnull_stdin_and_rejects_duplicate(self, popen):
         process = Mock()
@@ -2981,6 +3036,7 @@ class RegressionTests(unittest.TestCase):
         page._offer_crash_report = Mock()
         page._record_playtime = Mock()
         page._discord_rpc = None
+        page._discord_wanted = False
         return page
 
     @patch("commander_gui.ui.play_page.mo2_pids", return_value={111})
@@ -3803,6 +3859,59 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("timed out after 2s", output)
 
     @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
+    @patch("commander_gui.cli_runner.subprocess.Popen")
+    def test_run_sync_drops_steam_overlay_preload_and_its_loader_errors(
+        self, popen, _binary
+    ):
+        """Started from Steam, the wrong-bitness gameoverlayrenderer.so made
+        ld.so print an error into every quick query - which Mod Manager then
+        read as part of MO2's selected profile name."""
+        from commander_gui.cli_runner import run_sync
+
+        noise = (
+            "ERROR: ld.so: object '/home/u/.local/share/Steam/ubuntu12_32/"
+            "gameoverlayrenderer.so' from LD_PRELOAD cannot be preloaded "
+            "(wrong ELF class: ELFCLASS32): ignored."
+        )
+        process = Mock()
+        process.returncode = 0
+        process.communicate.return_value = ("G.A.M.M.A\n", noise + "\nreal error\n")
+        popen.return_value = process
+        preload = "/a/gameoverlayrenderer.so:/lib/keep.so /b/gameoverlayrenderer.so"
+        with patch.dict(os.environ, {"LD_PRELOAD": preload}):
+            rc, output = run_sync(["mo2", "config", "get", "selected-profile"])
+
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ld.so", output)
+        self.assertIn("G.A.M.M.A", output)
+        self.assertIn("real error", output)
+        self.assertEqual(popen.call_args.kwargs["env"]["LD_PRELOAD"], "/lib/keep.so")
+
+    @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
+    @patch("commander_gui.cli_runner.subprocess.Popen")
+    def test_run_sync_unsets_preload_holding_only_the_overlay(self, popen, _binary):
+        from commander_gui.cli_runner import run_sync
+
+        process = Mock()
+        process.returncode = 0
+        process.communicate.return_value = ("", "")
+        popen.return_value = process
+        with patch.dict(os.environ, {"LD_PRELOAD": "/a/gameoverlayrenderer.so"}):
+            run_sync(["status"])
+
+        self.assertNotIn("LD_PRELOAD", popen.call_args.kwargs["env"])
+
+    def test_query_mo2_profiles_takes_only_first_line_as_selected(self):
+        from commander_gui.ui import mod_manager_page
+
+        outputs = iter([(0, "G.A.M.M.A\nSolo\n"), (0, "G.A.M.M.A\n\nsome stderr line\n")])
+        with patch.object(mod_manager_page, "run_sync", side_effect=lambda *a, **k: next(outputs)):
+            names, selected = mod_manager_page._query_mo2_profiles()
+
+        self.assertEqual(names, ["G.A.M.M.A", "Solo"])
+        self.assertEqual(selected, "G.A.M.M.A")
+
+    @patch("commander_gui.cli_runner.cli_binary_path", return_value=Path("/cli/stalker-gamma"))
     def test_cli_command_constructs_base_and_progress_arguments(self, _binary):
         from commander_gui.cli_runner import cli_command
 
@@ -4362,6 +4471,38 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             delete_category(["+ModA", "-Foo_separator"], "Nope")
 
+    def test_saving_a_new_category_gives_mo2_its_separator_folder(self):
+        """Regression test: "Custom Mods" vanished after the first launch.
+
+        MO2 treats a separator as a mod with its own folder, and drops a
+        modlist entry it has no folder for the next time it saves - so a
+        category written only as a line was lost, and the mods installed
+        into it fell into "G.A.M.M.A. End of List" below.
+        """
+        from commander_gui.modlist import add_custom_mod, save_lines
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "mods" / "G.A.M.M.A. End of List_separator").mkdir(parents=True)
+        modlist = root / "profiles" / "G.A.M.M.A" / "modlist.txt"
+        modlist.parent.mkdir(parents=True)
+        lines = ["+ModA", "-G.A.M.M.A. End of List_separator"]
+        save_lines(modlist, lines)
+        save_lines(modlist, add_custom_mod(lines, "MyMod"))
+        folder = root / "mods" / "Custom Mods_separator"
+        self.assertTrue((folder / "meta.ini").is_file())
+        self.assertIn("[General]", (folder / "meta.ini").read_text(encoding="utf-8"))
+        # Existing separators are left exactly as they were.
+        self.assertFalse((root / "mods" / "G.A.M.M.A. End of List_separator" / "meta.ini").exists())
+
+    def test_saving_outside_a_gamma_install_creates_no_folders(self):
+        from commander_gui.modlist import save_lines
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        save_lines(root / "modlist.txt", ["+ModA", "-Custom Mods_separator"])
+        self.assertEqual([p for p in root.iterdir() if p.is_dir()], [])
+
     def test_add_custom_mod_creates_the_category_directly_before_end_of_list(self):
         """Regression test for a real reported crash: mods installed via
 
@@ -4412,6 +4553,51 @@ class RegressionTests(unittest.TestCase):
         out = add_custom_mod(["+ModA", "-Foo_separator"], "NewMod")
         names = [name for name, _mods in grouped(out)]
         self.assertEqual(names, ["Custom Mods", "Foo"])
+
+    def test_add_custom_mod_lands_below_the_users_own_mo2_categories(self):
+        """Categories made in MO2 below "G.A.M.M.A. End of List" sit at
+        file-start too; a new install must still land at the very bottom
+        (file-start), under them - not wedged in above them."""
+        from commander_gui.modlist import add_custom_mod, grouped
+
+        lines = [
+            "# This file was automatically generated by Mod Organizer.",
+            "+PadMod",
+            "-gamepad_separator",
+            "+AnomalyTogether",
+            "-G.A.M.M.A. End of List_separator",
+            "+ModA",
+            "-Foo_separator",
+        ]
+        out = add_custom_mod(lines, "NewMod")
+        self.assertEqual(out[0], lines[0])
+        names = [name for name, _mods in grouped(out)]
+        self.assertEqual(
+            names, ["Custom Mods", "gamepad", "G.A.M.M.A. End of List", "Foo"]
+        )
+
+    def test_add_custom_mod_moves_an_existing_custom_mods_to_the_bottom(self):
+        from commander_gui.modlist import add_custom_mod, grouped
+
+        lines = [
+            "# header",
+            "+PadMod",
+            "-gamepad_separator",
+            "+OldCustom",
+            "-Custom Mods_separator",
+            "+AnomalyTogether",
+            "-G.A.M.M.A. End of List_separator",
+        ]
+        out = add_custom_mod(lines, "NewMod")
+        self.assertEqual(out[0], "# header")
+        groups = grouped(out)
+        self.assertEqual(
+            [name for name, _mods in groups],
+            ["Custom Mods", "gamepad", "G.A.M.M.A. End of List"],
+        )
+        self.assertEqual(
+            [n for _s, n, _i in groups[0][1]], ["OldCustom", "NewMod"]
+        )
 
     def test_add_custom_mod_rejects_a_duplicate_name(self):
         from commander_gui.modlist import add_custom_mod
@@ -5061,6 +5247,9 @@ class ModCounterTests(unittest.TestCase):
             with (
                 patch.object(DashboardPage, "_play_gamma", lambda self: None),
                 patch("commander_gui.ui.dashboard.play_click_sound") as mock_sound,
+                # No background checks: one still writing into the temporary
+                # config folder raced its cleanup ("Directory not empty").
+                patch("commander_gui.ui.dashboard.BackgroundTask.start"),
             ):
                 page = DashboardPage(FakeWindow())
                 page._play_button.clicked.emit()
@@ -5156,7 +5345,7 @@ class ModCounterTests(unittest.TestCase):
             combo = page.profile_card.findChildren(NoWheelComboBox)[0]
 
             with (
-                patch("commander_gui.ui.dashboard.mo2_running", return_value=True),
+                patch("commander_gui.ui.dashboard.game_running", return_value=True),
                 patch.object(
                     QMessageBox, "question",
                     return_value=QMessageBox.StandardButton.No,
@@ -5167,6 +5356,29 @@ class ModCounterTests(unittest.TestCase):
 
             mock_activate.assert_not_called()
             self.assertEqual(combo.currentText(), "Mine")
+
+    def test_game_running_sees_a_game_started_without_mo2(self):
+        """Play Anomaly runs the game with no Mod Organizer: the profile
+        switch guard must still see it."""
+        from types import SimpleNamespace
+
+        from commander_gui.ui import common
+
+        with (
+            patch.object(common, "mo2_running", return_value=False),
+            patch.object(common.shutil, "which", return_value="/usr/bin/pgrep"),
+            patch.object(
+                common.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run,
+        ):
+            self.assertTrue(common.game_running(force=True))
+        self.assertIn("Anomaly", run.call_args.args[0][-1])
+        with (
+            patch.object(common, "mo2_running", return_value=False),
+            patch.object(common.shutil, "which", return_value="/usr/bin/pgrep"),
+            patch.object(common.subprocess, "run", return_value=SimpleNamespace(returncode=1)),
+        ):
+            self.assertFalse(common.game_running(force=True))
 
     def test_dashboard_profile_switch_callback_survives_the_card_being_rebuilt(self):
         """Regression test: the Dashboard's profile switcher kept the combo
@@ -5206,7 +5418,7 @@ class ModCounterTests(unittest.TestCase):
                 combo = page.profile_card.findChildren(NoWheelComboBox)[0]
                 with (
                     patch(
-                        "commander_gui.ui.dashboard.mo2_running", return_value=False
+                        "commander_gui.ui.dashboard.game_running", return_value=False
                     ),
                     patch(
                         "commander_gui.ui.dashboard.activate_profile",
@@ -5259,7 +5471,7 @@ class ModCounterTests(unittest.TestCase):
                 window.install_busy = True
                 with (
                     patch(
-                        "commander_gui.ui.dashboard.mo2_running", return_value=False
+                        "commander_gui.ui.dashboard.game_running", return_value=False
                     ),
                     patch(
                         "commander_gui.ui.dashboard.activate_profile"
@@ -5418,61 +5630,6 @@ class ModCounterTests(unittest.TestCase):
                 (page.actions_card.y(), page.actions_card.height())
             )
         self.assertEqual(len(set(geometries)), 1)
-
-    def test_flat_value_combo_click_opens_the_popup_without_immediately_closing_it(
-        self,
-    ):
-        """Regression test: clicking the (right-aligned) text of a
-
-        _FlatValueCombo opens the popup via an event filter on its
-        internal line edit. Calling showPopup() from the *press* handler
-        (the first attempt at this fix) started the popup's own mouse
-        grab while the same click was still in progress, so Qt read the
-        click's own release - landing back on the line edit, outside the
-        popup's list - as the native combo box's press-drag-release
-        gesture cancelling with nothing picked, closing the popup the
-        instant it opened. It must open on *release* instead, once the
-        click that triggered it has fully finished - press is still
-        swallowed (so the line edit itself never reacts to it), but must
-        not itself call showPopup().
-        """
-        from PySide6.QtCore import QEvent, QPoint, Qt
-        from PySide6.QtGui import QMouseEvent
-        from PySide6.QtWidgets import QApplication
-
-        from commander_gui.ui.dashboard import _FlatValueCombo
-
-        QApplication.instance() or QApplication([])
-        combo = _FlatValueCombo()
-        combo.addItem("A")
-        combo.addItem("B")
-
-        with (
-            patch.object(combo, "showPopup") as mock_show,
-            patch.object(combo, "hidePopup") as mock_hide,
-        ):
-            pos = QPoint(5, 5)
-            press = QMouseEvent(
-                QEvent.Type.MouseButtonPress,
-                pos,
-                pos,
-                Qt.MouseButton.LeftButton,
-                Qt.MouseButton.LeftButton,
-                Qt.KeyboardModifier.NoModifier,
-            )
-            release = QMouseEvent(
-                QEvent.Type.MouseButtonRelease,
-                pos,
-                pos,
-                Qt.MouseButton.LeftButton,
-                Qt.MouseButton.NoButton,
-                Qt.KeyboardModifier.NoModifier,
-            )
-            self.assertTrue(combo.eventFilter(combo.lineEdit(), press))
-            mock_show.assert_not_called()
-            self.assertTrue(combo.eventFilter(combo.lineEdit(), release))
-            mock_show.assert_called_once()
-            mock_hide.assert_not_called()
 
     def test_dashboard_runner_combo_lists_auto_and_installed_protons(self):
         from PySide6.QtWidgets import QApplication
@@ -5987,7 +6144,6 @@ class ModCounterTests(unittest.TestCase):
                     pass
 
             page = PlayPage(FakeWindow())
-            page._proton_labels = ["GE-Proton9-20", "GE-Proton9-15"]
 
             page._build_chips(
                 ok=True,
@@ -6795,12 +6951,10 @@ class UserModsTrackerTests(unittest.TestCase):
                 self.assertTrue(button.isEnabled())
                 self.assertIn(WARN.name(), button.styleSheet())
 
-                with patch(
-                    "commander_gui.ui.main_window.QDesktopServices.openUrl"
-                ) as mock_open:
+                with patch("commander_gui.ui.main_window.open_url") as mock_open:
                     button.click()
                 mock_open.assert_called_once()
-                opened_url = mock_open.call_args.args[0].toString()
+                opened_url = mock_open.call_args.args[0]
                 self.assertIn(
                     "SSH-Kitty/STALKER-GAMMA-COMMANDER/releases", opened_url
                 )
@@ -6864,9 +7018,16 @@ class UserModsTrackerTests(unittest.TestCase):
                     for child in container.findChildren(QLabel)
                     if "|" in child.text()
                 )
+                discord_button = next(
+                    child
+                    for child in container.findChildren(QPushButton)
+                    if child.objectName() == "discordLink"
+                )
                 window.show()
+                # COMMANDER is up to date | Discord | GitHub
                 self.assertLess(update_button.x(), separator.x())
-                self.assertLess(separator.x(), github_button.x())
+                self.assertLess(separator.x(), discord_button.x())
+                self.assertLess(discord_button.x(), github_button.x())
             finally:
                 window.close()
 
@@ -6924,12 +7085,10 @@ class UserModsTrackerTests(unittest.TestCase):
             try:
                 window._on_commander_update_status_checked("v9.9.9")
                 button = window._update_status_button
-                with patch(
-                    "commander_gui.ui.main_window.QDesktopServices.openUrl"
-                ) as mock_open:
+                with patch("commander_gui.ui.main_window.open_url") as mock_open:
                     button.click()
                 mock_open.assert_called_once()
-                opened_url = mock_open.call_args.args[0].toString()
+                opened_url = mock_open.call_args.args[0]
                 self.assertIn(
                     "SSH-Kitty/STALKER-GAMMA-COMMANDER/releases", opened_url
                 )
@@ -6960,7 +7119,7 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_download_commander_update_writes_the_file_next_to_the_running_appimage(
         self,
     ):
-        body = b"fake appimage bytes"
+        body = _FAKE_APPIMAGE_HEADER + b"fake appimage bytes"
 
         class FakeResponse:
             def __init__(self, data: bytes, headers: dict | None = None):
@@ -6981,6 +7140,9 @@ class UserModsTrackerTests(unittest.TestCase):
                 return False
 
         def fake_urlopen(request, timeout=None):
+            if request.full_url.endswith(".sha512sum"):
+                # Releases before checksums were published.
+                raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
             return FakeResponse(body, {"Content-Length": str(len(body))})
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7005,7 +7167,7 @@ class UserModsTrackerTests(unittest.TestCase):
         progress_cb closes that gap the same way proton_installer.py's
         install_proton() already does.
         """
-        body = b"x" * 300
+        body = _FAKE_APPIMAGE_HEADER + b"x" * 300
 
         class FakeResponse:
             def __init__(self, data: bytes, headers: dict | None = None):
@@ -7026,6 +7188,9 @@ class UserModsTrackerTests(unittest.TestCase):
                 return False
 
         def fake_urlopen(request, timeout=None):
+            if request.full_url.endswith(".sha512sum"):
+                # Releases before checksums were published.
+                raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
             return FakeResponse(body, {"Content-Length": str(len(body))})
 
         calls = []
@@ -7122,13 +7287,84 @@ class UserModsTrackerTests(unittest.TestCase):
             running_path.chmod(0o644)
 
             downloaded = Path(tmp) / ".Commander.AppImage.new"
-            downloaded.write_bytes(b"new bytes")
+            downloaded.write_bytes(_FAKE_APPIMAGE_HEADER + b"new bytes")
 
             install_commander_update(downloaded, running_path)
 
-            self.assertEqual(running_path.read_bytes(), b"new bytes")
+            self.assertEqual(running_path.read_bytes(), _FAKE_APPIMAGE_HEADER + b"new bytes")
             self.assertFalse(downloaded.exists())
             self.assertTrue(os.access(running_path, os.X_OK))
+
+    def _serve(self, body, headers, checksum=None):
+        class FakeResponse:
+            def __init__(self, data, hdrs):
+                self._data = data
+                self.headers = hdrs
+
+            def read(self, size=-1):
+                if size < 0 or size >= len(self._data):
+                    chunk, self._data = self._data, b""
+                    return chunk
+                chunk, self._data = self._data[:size], self._data[size:]
+                return chunk
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            if request.full_url.endswith(".sha512sum"):
+                if checksum is None:
+                    raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+                return FakeResponse(checksum, {})
+            return FakeResponse(body, headers)
+
+        return patch("commander_gui.self_update.urllib.request.urlopen", side_effect=fake_urlopen)
+
+    def test_self_update_rejects_a_truncated_download(self):
+        """Regression test: a dropped connection ends HTTPResponse.read()
+        with b"" instead of an error, and the partial file replaced the
+        working AppImage."""
+        body = _FAKE_APPIMAGE_HEADER + b"x" * 100
+        with tempfile.TemporaryDirectory() as tmp:
+            running_path = Path(tmp) / "Commander.AppImage"
+            running_path.write_bytes(b"old")
+            with self._serve(body, {"Content-Length": str(len(body) * 3)}), self.assertRaisesRegex(
+                CommanderSelfUpdateError, "incomplete"
+            ):
+                download_commander_update("v9.9.9", running_path)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["Commander.AppImage"])
+
+    def test_self_update_rejects_a_non_appimage(self):
+        body = b"<html>rate limited</html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            running_path = Path(tmp) / "Commander.AppImage"
+            running_path.write_bytes(b"old")
+            with self._serve(body, {"Content-Length": str(len(body))}), self.assertRaisesRegex(
+                CommanderSelfUpdateError, "not a valid AppImage"
+            ):
+                download_commander_update("v9.9.9", running_path)
+            self.assertEqual(running_path.read_bytes(), b"old")
+
+    def test_self_update_checks_a_published_checksum(self):
+        import hashlib
+
+        body = _FAKE_APPIMAGE_HEADER + b"payload"
+        good = hashlib.sha512(body).hexdigest().encode() + b"  X.AppImage\n"
+        bad = hashlib.sha512(b"other").hexdigest().encode() + b"  X.AppImage\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            running_path = Path(tmp) / "Commander.AppImage"
+            running_path.write_bytes(b"old")
+            with self._serve(body, {"Content-Length": str(len(body))}, checksum=good):
+                downloaded = download_commander_update("v9.9.9", running_path)
+            self.assertEqual(downloaded.read_bytes(), body)
+            downloaded.unlink()
+            with self._serve(body, {"Content-Length": str(len(body))}, checksum=bad), self.assertRaisesRegex(
+                CommanderSelfUpdateError, "checksum"
+            ):
+                download_commander_update("v9.9.9", running_path)
 
     def test_download_and_install_commander_update_requires_an_appimage(self):
         with (
@@ -7247,6 +7483,7 @@ class UserModsTrackerTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+            patch("commander_gui.ui.settings_page.probe_discord", return_value=False),
         ):
             profile = CliProfile(active=True, profile_name="Test")
 
@@ -7260,14 +7497,25 @@ class UserModsTrackerTests(unittest.TestCase):
                     pass
 
             page = SettingsPage(FakeWindow())
+            # Works without any ID: the built-in one is used, the field stays empty.
+            self.assertEqual(page._discord_client_id_edit.text(), "")
+            self.assertFalse(page._discord_mods_check.isEnabled())
             page._discord_enable_check.setChecked(True)
             self.assertTrue(gui_settings.load_gui_settings()["discord_rpc_enabled"])
+            self.assertTrue(page._discord_mods_check.isEnabled())
+
+            page._discord_mods_check.setChecked(False)
+            self.assertFalse(gui_settings.load_gui_settings()["discord_show_mods"])
+            page._discord_playtime_check.setChecked(False)
+            self.assertFalse(gui_settings.load_gui_settings()["discord_show_playtime"])
 
             page._discord_client_id_edit.setText("123456789")
             page._discord_client_id_edit.editingFinished.emit()
             self.assertEqual(
                 gui_settings.load_gui_settings()["discord_client_id"], "123456789"
             )
+            page._on_discord_client_id_reset()
+            self.assertEqual(gui_settings.load_gui_settings()["discord_client_id"], "")
 
             # refresh() must load it back onto the widgets too.
             gui_settings.save_gui_settings(
@@ -7276,6 +7524,165 @@ class UserModsTrackerTests(unittest.TestCase):
             page.refresh()
             self.assertFalse(page._discord_enable_check.isChecked())
             self.assertEqual(page._discord_client_id_edit.text(), "987654321")
+            self.assertTrue(page._discord_advanced_button.isChecked())
+
+    def test_settings_page_shows_discord_status(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.settings_page import SettingsPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+            patch("commander_gui.ui.settings_page.probe_discord", return_value=False),
+        ):
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[])
+
+                def switch_language(self):
+                    pass
+
+                def apply_theme(self):
+                    pass
+
+            page = SettingsPage(FakeWindow())
+            page._set_discord_status(True)
+            self.assertIn("ready", page._discord_status_label.text())
+            self.assertTrue(page._discord_test_button.isEnabled())
+            page._set_discord_status(False)
+            self.assertIn("not found", page._discord_status_label.text())
+            self.assertFalse(page._discord_test_button.isEnabled())
+
+    def test_add_to_steam_offers_a_picker_for_multiple_accounts(self):
+        """Regression test: with more than one Steam account found, the
+
+        Settings page must let the user choose which one to use (Steam's
+        own loginusers.vdf fields proved unreliable for guessing this),
+        not just refuse with a dead-end warning.
+        """
+        from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
+
+        from commander_gui.ui.settings_page import SettingsPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            steam_root = Path(tmp) / "Steam"
+            first = steam_root / "userdata" / "111" / "config"
+            second = steam_root / "userdata" / "222" / "config"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+
+            profile = CliProfile(active=True, profile_name="Test")
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                _pages: ClassVar[dict] = {}
+
+                def switch_language(self):
+                    pass
+
+                def apply_theme(self, *_a):
+                    pass
+
+            page = SettingsPage(FakeWindow())
+            with (
+                patch(
+                    "commander_gui.ui.settings_page.find_shortcuts_vdf",
+                    return_value=None,
+                ),
+                patch(
+                    "commander_gui.launcher.STEAM_ROOT_CANDIDATES", (steam_root,)
+                ),
+                patch.object(
+                    QInputDialog,
+                    "getItem",
+                    return_value=("Account 222", True),
+                ) as mock_picker,
+                patch.object(QMessageBox, "information"),
+                patch(
+                    "commander_gui.ui.settings_page.steam_running",
+                    return_value=False,
+                ),
+            ):
+                page._on_add_to_steam()
+            mock_picker.assert_called_once()
+            self.assertTrue((second / "shortcuts.vdf").is_file())
+            self.assertFalse((first / "shortcuts.vdf").is_file())
+
+    def test_add_to_steam_offers_to_restart_steam_when_it_is_running(self):
+        """Regression test: Steam only picks up a new shortcut at its own
+
+        startup, so after a successful add while Steam is running, the
+        user must be offered a restart - not just told to do it manually.
+        """
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        from commander_gui.ui.settings_page import SettingsPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            steam_root = Path(tmp) / "Steam"
+            config = steam_root / "userdata" / "111" / "config"
+            config.mkdir(parents=True)
+
+            profile = CliProfile(active=True, profile_name="Test")
+
+            class _StatusBar:
+                def showMessage(self, *_a, **_k):
+                    pass
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                _pages: ClassVar[dict] = {}
+
+                def switch_language(self):
+                    pass
+
+                def apply_theme(self, *_a):
+                    pass
+
+                def statusBar(self):
+                    return _StatusBar()
+
+            page = SettingsPage(FakeWindow())
+            with (
+                patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (steam_root,)),
+                patch(
+                    "commander_gui.ui.settings_page.steam_running",
+                    return_value=True,
+                ),
+                patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ) as mock_question,
+                patch(
+                    "commander_gui.ui.settings_page.add_to_steam"
+                ) as mock_add,
+            ):
+                page._on_add_to_steam()
+                app = QApplication.instance()
+                deadline = time.monotonic() + 5
+                while not mock_add.called and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                for _ in range(20):
+                    app.processEvents()
+            mock_question.assert_called_once()
+            # Steam is closed, written to and restarted as one step - never
+            # written first while the running client could overwrite it.
+            mock_add.assert_called_once_with(
+                steam_root / "userdata" / "111" / "config" / "shortcuts.vdf",
+                restart=True,
+            )
 
     def test_settings_page_reset_playtime_zeroes_the_active_profile_only(self):
         from PySide6.QtWidgets import QApplication, QMessageBox
@@ -7292,7 +7699,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
             class FakeWindow:
                 settings = CliSettings(profiles=[profile])
-                _pages: dict = {}
+                _pages: ClassVar[dict] = {}
 
                 def switch_language(self):
                     pass
@@ -7326,7 +7733,7 @@ class UserModsTrackerTests(unittest.TestCase):
         ):
             class FakeWindow:
                 settings = CliSettings(profiles=[])
-                _pages: dict = {}
+                _pages: ClassVar[dict] = {}
 
                 def switch_language(self):
                     pass
@@ -7408,29 +7815,149 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(page._font_size_combo.currentData(), 21)
             self.assertEqual(page._font_family_combo.currentData(), "Liberation Sans")
 
-    def test_discord_presence_is_a_noop_without_pypresence_installed(self):
-        """Regression test: pypresence is NOT a hard dependency of this app -
+    def _fake_discord(self, runtime_dir: str, *, answer: bool = True):
+        """A one-connection stand-in for the Discord client's IPC socket.
 
-        every discord_rpc function must degrade silently when it isn't
-        installed, never raise ImportError up into a launch.
+        Returns (thread, received frames). With ``answer=False`` it accepts
+        the connection but never replies, like a wedged client.
         """
-        import builtins
+        import json
+        import socket
+        import struct
+        import threading
 
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(os.path.join(runtime_dir, "discord-ipc-0"))
+        server.listen(1)
+        frames: list[tuple[int, dict]] = []
+
+        def recv_exact(conn, size):
+            data = b""
+            while len(data) < size:
+                chunk = conn.recv(size - len(data))
+                if not chunk:
+                    raise ConnectionError
+                data += chunk
+            return data
+
+        def send(conn, op, payload):
+            body = json.dumps(payload).encode()
+            conn.sendall(struct.pack("<II", op, len(body)) + body)
+
+        def serve():
+            conn, _ = server.accept()
+            conn.settimeout(5)
+            try:
+                while True:
+                    op, length = struct.unpack("<II", recv_exact(conn, 8))
+                    frames.append((op, json.loads(recv_exact(conn, length))))
+                    if not answer or op == 2:
+                        if op == 2:
+                            break
+                        continue
+                    if op == 0:
+                        send(conn, 1, {"cmd": "DISPATCH", "evt": "READY"})
+                    else:
+                        send(conn, 1, {"cmd": "SET_ACTIVITY", "evt": None})
+            except (ConnectionError, OSError, struct.error):
+                pass
+            finally:
+                conn.close()
+                server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return thread, frames
+
+    def test_discord_presence_speaks_the_ipc_protocol(self):
+        """Regression test: Rich Presence must work with no third-party
+        package (the AppImage never bundled pypresence) and without the
+        user creating a Discord application - the built-in ID is used."""
+        from commander_gui import discord_rpc
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp, "TMPDIR": tmp}),
+        ):
+            thread, frames = self._fake_discord(tmp)
+            client_id = discord_rpc.effective_client_id("")
+            rpc = discord_rpc.start_presence(client_id)
+            self.assertIsNotNone(rpc)
+            discord_rpc.update_presence(
+                rpc, "Playing S.T.A.L.K.E.R. GAMMA", 1000.0, state="312 Mods"
+            )
+            discord_rpc.stop_presence(rpc)
+            thread.join(5)
+
+        self.assertEqual(frames[0], (0, {"v": 1, "client_id": discord_rpc.DEFAULT_CLIENT_ID}))
+        activity = frames[1][1]["args"]["activity"]
+        self.assertEqual(frames[1][1]["cmd"], "SET_ACTIVITY")
+        self.assertEqual(activity["details"], "Playing S.T.A.L.K.E.R. GAMMA")
+        self.assertEqual(activity["state"], "312 Mods")
+        self.assertEqual(activity["timestamps"], {"start": 1000})
+        self.assertEqual(
+            activity["assets"]["large_text"], f"COMMANDER {discord_rpc.__version_label__}"
+        )
+        self.assertEqual(
+            activity["buttons"],
+            [{"label": "Get COMMANDER", "url": discord_rpc.PROJECT_URL}],
+        )
+        self.assertIsNone(frames[2][1]["args"]["activity"])  # cleared on stop
+        self.assertEqual(frames[3][0], 2)  # then closed
+
+    def test_discord_presence_state_combines_mods_and_playtime(self):
+        from commander_gui.ui.common import discord_presence_state
+
+        profile = CliProfile(active=True, profile_name="Test")
+        played = {"playtime_seconds": {"Test": 3600 * 142 + 60 * 30}}
+        with patch("commander_gui.ui.common.count_active_mods", return_value=(312, 400)):
+            self.assertEqual(
+                discord_presence_state(profile, played),
+                "312 Mods · Total playtime: 142h 30m",
+            )
+            self.assertEqual(
+                discord_presence_state(profile, {**played, "discord_show_mods": False}),
+                "Total playtime: 142h 30m",
+            )
+            # Under a minute played: nothing worth showing yet.
+            self.assertEqual(discord_presence_state(profile, {}), "312 Mods")
+            self.assertIsNone(
+                discord_presence_state(
+                    profile,
+                    {**played, "discord_show_mods": False, "discord_show_playtime": False},
+                )
+            )
+            self.assertIsNone(discord_presence_state(None, played))
+        # No modlist found (GAMMA not installed yet): the count is left out.
+        with patch("commander_gui.ui.common.count_active_mods", return_value=None):
+            self.assertEqual(
+                discord_presence_state(profile, played), "Total playtime: 142h 30m"
+            )
+
+    def test_discord_effective_client_id_prefers_a_valid_override(self):
+        from commander_gui.discord_rpc import DEFAULT_CLIENT_ID, effective_client_id
+
+        self.assertEqual(effective_client_id(""), DEFAULT_CLIENT_ID)
+        self.assertEqual(effective_client_id(None), DEFAULT_CLIENT_ID)
+        self.assertEqual(effective_client_id(" 123 "), "123")
+        self.assertEqual(effective_client_id("not-a-number"), DEFAULT_CLIENT_ID)
+
+    def test_discord_presence_is_a_noop_without_discord_running(self):
         from commander_gui.discord_rpc import (
+            probe_discord,
             start_presence,
             stop_presence,
             update_presence,
         )
 
-        real_import = builtins.__import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "pypresence":
-                raise ImportError("no module named pypresence")
-            return real_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=fake_import):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp, "TMPDIR": tmp}),
+            patch("commander_gui.discord_rpc._candidate_sockets",
+                  return_value=[Path(tmp) / "discord-ipc-0"]),
+        ):
             rpc = start_presence("123456789")
+            self.assertFalse(probe_discord())
         self.assertIsNone(rpc)
         update_presence(rpc, "Playing S.T.A.L.K.E.R. GAMMA")  # must not raise
         stop_presence(rpc)  # must not raise
@@ -7440,13 +7967,19 @@ class UserModsTrackerTests(unittest.TestCase):
 
         self.assertIsNone(start_presence(""))
 
-    def test_discord_presence_swallows_connection_failures(self):
-        from commander_gui.discord_rpc import start_presence
+    def test_discord_presence_gives_up_on_a_client_that_never_answers(self):
+        from commander_gui import discord_rpc
 
-        fake_module = Mock()
-        fake_module.Presence.side_effect = OSError("no discord IPC socket")
-        with patch.dict("sys.modules", {"pypresence": fake_module}):
-            self.assertIsNone(start_presence("123456789"))
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp, "TMPDIR": tmp}),
+            patch("commander_gui.discord_rpc._candidate_sockets",
+                  return_value=[Path(tmp) / "discord-ipc-0"]),
+            patch.object(discord_rpc, "_TIMEOUT_SECONDS", 0.2),
+        ):
+            thread, _frames = self._fake_discord(tmp, answer=False)
+            self.assertIsNone(discord_rpc.start_presence("123456789"))
+            thread.join(6)
 
     def test_format_playtime_renders_hours_and_minutes(self):
         from commander_gui.ui.common import format_playtime
@@ -7567,11 +8100,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page._record_playtime()
             self.assertIn("1h", page.playtime_label.text())
 
-    def test_check_flip_priority_crash_skips_the_filesystem_when_not_pending(self):
-        """No Flip Priority since the last session - must not even look
-
-        for crash dumps, so this stays free for every ordinary launch.
-        """
+    def test_crash_check_skips_the_filesystem_when_not_pending(self):
+        """No game session to check (e.g. only MO2 was opened) - must not
+        even look for crash dumps."""
         from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui.play_page import PlayPage
@@ -7595,20 +8126,15 @@ class UserModsTrackerTests(unittest.TestCase):
                 ) as mock_crash_dumps,
                 patch("commander_gui.ui.play_page.QMessageBox.warning") as mock_warn,
             ):
-                page._check_flip_priority_crash()
+                page._check_for_crash()
 
             mock_crash_dumps.assert_not_called()
             mock_warn.assert_not_called()
 
-    def test_check_flip_priority_crash_warns_when_a_new_dump_appears(self):
-        """Regression test: a new crash dump appearing after a Flip
-
-        Priority-flagged session must warn the user it may be the cause,
-        and the pending flag must be cleared afterward regardless.
-        """
+    def test_crash_check_warns_when_a_new_dump_appears(self):
+        """A new crash dump after a session offers crash analysis."""
         from PySide6.QtWidgets import QApplication
 
-        from commander_gui import gui_settings
         from commander_gui.ui.play_page import PlayPage
 
         QApplication.instance() or QApplication([])
@@ -7624,9 +8150,6 @@ class UserModsTrackerTests(unittest.TestCase):
                 settings = CliSettings(profiles=[profile])
 
             page = PlayPage(FakeWindow())
-            gui_settings.save_gui_settings(
-                flip_priority_pending={"Mine": True}
-            )
             page._crash_check_pending = True
             page._pre_launch_crash_dumps = set()
 
@@ -7635,27 +8158,19 @@ class UserModsTrackerTests(unittest.TestCase):
                     "commander_gui.ui.play_page.crash_dump_names",
                     return_value={"xray_steamuser_09-15-26_02-52-03.mdmp"},
                 ),
-                patch("commander_gui.ui.play_page.QMessageBox.warning") as mock_warn,
+                patch.object(page, "_ask_analyze_crash", return_value=False) as mock_warn,
             ):
-                page._check_flip_priority_crash()
+                page._check_for_crash()
 
             mock_warn.assert_called_once()
-            self.assertIn("Flip Priority", mock_warn.call_args.args[2])
+            self.assertIn("crashed", mock_warn.call_args.args[1])
             self.assertFalse(page._crash_check_pending)
-            self.assertEqual(
-                gui_settings.load_gui_settings()["flip_priority_pending"], {}
-            )
 
-    def test_check_flip_priority_crash_stays_quiet_after_the_poll_window_ends(self):
-        """Pending flag set, but no new crash dump ever appears - no
-
-        warning once the bounded poll (see _poll_for_flip_priority_crash)
-        gives up, and the flag is still consumed so a later, unrelated
-        crash isn't mis-attributed to this same flip.
-        """
+    def test_crash_check_stays_quiet_after_the_poll_window_ends(self):
+        """No new crash dump ever appears - no warning once the bounded
+        poll (see _poll_for_crash) gives up."""
         from PySide6.QtWidgets import QApplication
 
-        from commander_gui import gui_settings
         from commander_gui.ui.play_page import PlayPage
 
         QApplication.instance() or QApplication([])
@@ -7672,7 +8187,6 @@ class UserModsTrackerTests(unittest.TestCase):
                 settings = CliSettings(profiles=[profile])
 
             page = PlayPage(FakeWindow())
-            gui_settings.save_gui_settings(flip_priority_pending={"Mine": True})
             page._crash_check_pending = True
             page._pre_launch_crash_dumps = {"old.mdmp"}
 
@@ -7681,24 +8195,21 @@ class UserModsTrackerTests(unittest.TestCase):
                     "commander_gui.ui.play_page.crash_dump_names",
                     return_value={"old.mdmp"},
                 ),
-                patch("commander_gui.ui.play_page.QMessageBox.warning") as mock_warn,
+                patch.object(page, "_ask_analyze_crash", return_value=False) as mock_warn,
             ):
-                page._check_flip_priority_crash()
+                page._check_for_crash()
                 # First attempt found nothing - a real timer is now
                 # armed for the next one; drive it directly instead of
                 # waiting on the real clock.
                 self.assertIsNotNone(page._crash_poll_timer)
                 page._crash_poll_timer.stop()
-                page._poll_for_flip_priority_crash()
+                page._poll_for_crash()
 
             mock_warn.assert_not_called()
             self.assertIsNone(page._crash_poll_timer)
             self.assertFalse(page._crash_check_pending)
-            self.assertEqual(
-                gui_settings.load_gui_settings()["flip_priority_pending"], {}
-            )
 
-    def test_check_flip_priority_crash_catches_a_dump_that_appears_late(self):
+    def test_crash_check_catches_a_dump_that_appears_late(self):
         """Regression test for a real crash: X-Ray took 39s to finish
 
         writing the .mdmp after the session was already reported closed,
@@ -7707,7 +8218,6 @@ class UserModsTrackerTests(unittest.TestCase):
         """
         from PySide6.QtWidgets import QApplication
 
-        from commander_gui import gui_settings
         from commander_gui.ui.play_page import PlayPage
 
         QApplication.instance() or QApplication([])
@@ -7723,7 +8233,6 @@ class UserModsTrackerTests(unittest.TestCase):
                 settings = CliSettings(profiles=[profile])
 
             page = PlayPage(FakeWindow())
-            gui_settings.save_gui_settings(flip_priority_pending={"Mine": True})
             page._crash_check_pending = True
             page._pre_launch_crash_dumps = set()
 
@@ -7736,15 +8245,15 @@ class UserModsTrackerTests(unittest.TestCase):
                         {"xray_steamuser_09-15-26_05-00-57.mdmp"},
                     ],
                 ),
-                patch("commander_gui.ui.play_page.QMessageBox.warning") as mock_warn,
+                patch.object(page, "_ask_analyze_crash", return_value=False) as mock_warn,
             ):
-                page._check_flip_priority_crash()
+                page._check_for_crash()
                 mock_warn.assert_not_called()
                 page._crash_poll_timer.stop()
-                page._poll_for_flip_priority_crash()
+                page._poll_for_crash()
                 mock_warn.assert_not_called()
                 page._crash_poll_timer.stop()
-                page._poll_for_flip_priority_crash()
+                page._poll_for_crash()
 
             mock_warn.assert_called_once()
             self.assertIsNone(page._crash_poll_timer)
@@ -8281,135 +8790,6 @@ class UserModsTrackerTests(unittest.TestCase):
         submenu = next(a.menu() for a in menu.actions() if a.menu() is not None)
         offered = [a.text() for a in submenu.actions()]
         self.assertEqual(offered, ["Gameplay"])
-
-    def test_flip_priority_warns_instead_of_silently_doing_nothing_while_mo2_runs(self):
-        """Regression test: _on_flip_priority()'s own top-of-handler guard
-
-        used to also check _mo2_running() and return with zero feedback -
-        no dialog, no status change - whenever MO2/the game happened to
-        be running (a completely normal state while tuning mod order),
-        making the button appear to do nothing. _write_lines() already
-        has the correct handling for this exact condition (a proper "Mod
-        Organizer is running" warning) - the click must reach it instead
-        of being silently swallowed one level up.
-        """
-        from PySide6.QtWidgets import QApplication
-
-        from commander_gui.ui.mod_manager_page import ModManagerPage
-
-        QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as tmp:
-            gamma = Path(tmp) / "gamma"
-            profiles_dir = gamma / "profiles" / "G.A.M.M.A"
-            profiles_dir.mkdir(parents=True)
-            (profiles_dir / "modlist.txt").write_text("+ModA\n+ModB\n", encoding="utf-8")
-            profile = CliProfile(
-                active=True,
-                profile_name="Test",
-                anomaly=str(Path(tmp) / "anomaly"),
-                gamma=str(gamma),
-                cache=str(Path(tmp) / "cache"),
-                mo2_profile="G.A.M.M.A",
-            )
-
-            class FakeWindow:
-                settings = CliSettings(profiles=[profile])
-                install_busy = False
-
-                def refresh_settings(self):
-                    pass
-
-                def update_mod_counter(self):
-                    pass
-
-            with patch(
-                "commander_gui.ui.mod_manager_page.mo2_running", return_value=False
-            ):
-                page = ModManagerPage(FakeWindow())
-            if page.profile_combo.count() == 0:
-                page.profile_combo.addItem("G.A.M.M.A")
-            page._lines = ["+ModA", "+ModB"]
-            page._reorder_warned = True  # skip the "reverse load order?" confirm
-
-            with (
-                patch(
-                    "commander_gui.ui.mod_manager_page.mo2_running", return_value=True
-                ),
-                patch(
-                    "commander_gui.ui.mod_manager_page.QMessageBox.warning"
-                ) as mock_warn,
-            ):
-                page._on_flip_priority()
-
-            # _write_lines()'s own guard now correctly fires its "Mod
-            # Organizer is running" warning (previously never reached at
-            # all); _on_flip_priority()'s failure branch also shows its
-            # own generic "Flip Failed" after write_lines() reports
-            # failure - two dialogs is pre-existing behavior for any
-            # write failure reason, not something this fix changes. The
-            # point under test is that the MO2 warning is no longer
-            # silently skipped.
-            self.assertTrue(mock_warn.called)
-            first_call_message = mock_warn.call_args_list[0].args[1]
-            self.assertIn("Mod Organizer", first_call_message)
-
-    def test_flip_priority_marks_the_profile_for_a_crash_check(self):
-        """Regression test: a successful Flip Priority must flag the
-
-        active profile so the Play page can warn if the very next
-        session ends in a crash (see PlayPage._check_flip_priority_crash).
-        """
-        from PySide6.QtWidgets import QApplication
-
-        from commander_gui import gui_settings
-        from commander_gui.ui.mod_manager_page import ModManagerPage
-
-        QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as tmp:
-            gamma = Path(tmp) / "gamma"
-            profiles_dir = gamma / "profiles" / "G.A.M.M.A"
-            profiles_dir.mkdir(parents=True)
-            (profiles_dir / "modlist.txt").write_text("+ModA\n+ModB\n", encoding="utf-8")
-            profile = CliProfile(
-                active=True,
-                profile_name="Test",
-                anomaly=str(Path(tmp) / "anomaly"),
-                gamma=str(gamma),
-                cache=str(Path(tmp) / "cache"),
-                mo2_profile="G.A.M.M.A",
-            )
-
-            class FakeWindow:
-                settings = CliSettings(profiles=[profile])
-                install_busy = False
-
-                def refresh_settings(self):
-                    pass
-
-                def update_mod_counter(self):
-                    pass
-
-            with (
-                tempfile.TemporaryDirectory() as xdg,
-                patch.dict(os.environ, {"XDG_CONFIG_HOME": xdg}),
-                patch(
-                    "commander_gui.ui.mod_manager_page.mo2_running", return_value=False
-                ),
-            ):
-                page = ModManagerPage(FakeWindow())
-                if page.profile_combo.count() == 0:
-                    page.profile_combo.addItem("G.A.M.M.A")
-                page._lines = ["+ModA", "+ModB"]
-                page._reorder_warned = True
-
-                self.assertEqual(
-                    gui_settings.load_gui_settings().get("flip_priority_pending", {}),
-                    {},
-                )
-                page._on_flip_priority()
-                self.assertTrue(
-                    gui_settings.load_gui_settings()["flip_priority_pending"]["Test"]
-                )
 
     def test_rename_category_ui_writes_the_renamed_separator_and_reloads(self):
         """Regression test: the Mod Manager page's new "Rename Category..."
@@ -9294,7 +9674,9 @@ class UserModsTrackerTests(unittest.TestCase):
         with patch(
             "commander_gui.updates.urllib.request.urlopen", return_value=response
         ):
-            self.assertIsNone(check_commander_update("1.2.9-unstable"))
+            self.assertIsNone(check_commander_update("1.2.9"))
+            # An unstable build of the same version is older than the release.
+            self.assertEqual(check_commander_update("1.2.9-unstable"), "v1.2.9")
 
     def test_check_commander_update_detects_a_newer_hotfix(self):
         """Regression test: v1.2.9H1 running against a v1.2.9H2 release must
@@ -9423,6 +9805,77 @@ class UserModsTrackerTests(unittest.TestCase):
                 ValueError, "special file"
             ):
                 _safe_extract(tf, destination)
+
+    def _proton_tar(self, tmp: Path, links: list[tuple[str, str, bytes]]) -> Path:
+        archive = tmp / "proton.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            data = b"library"
+            info = tarfile.TarInfo("GE-Proton11-5-x86_64/files/lib/libfoo.so.0.0.0")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+            for name, target, kind in links:
+                link = tarfile.TarInfo(name)
+                link.type = kind
+                link.linkname = target
+                tf.addfile(link)
+        return archive
+
+    def test_proton_archive_allows_internal_library_symlinks(self):
+        """Regression test: every GE-Proton 11 build failed to install with
+        "Refusing unsafe link" - they ship ordinary relative .so symlinks,
+        and the extractor refused every link outright."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            archive = self._proton_tar(
+                tmp,
+                [("GE-Proton11-5-x86_64/files/lib/libfoo.so.0", "libfoo.so.0.0.0", tarfile.SYMTYPE)],
+            )
+            destination = tmp / "out"
+            destination.mkdir()
+            with tarfile.open(archive, "r:gz") as tf:
+                _safe_extract(tf, destination)
+            link = destination / "GE-Proton11-5-x86_64/files/lib/libfoo.so.0"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.read_bytes(), b"library")
+
+    def test_proton_archive_still_refuses_escaping_links(self):
+        for name, target, kind in (
+            ("GE-Proton11-5-x86_64/evil", "/etc/passwd", tarfile.SYMTYPE),
+            ("GE-Proton11-5-x86_64/evil", "../../../outside", tarfile.SYMTYPE),
+            ("GE-Proton11-5-x86_64/evil", "../../other-tool/x", tarfile.SYMTYPE),
+            ("GE-Proton11-5-x86_64/evil", "/etc/passwd", tarfile.LNKTYPE),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                archive = self._proton_tar(tmp, [(name, target, kind)])
+                destination = tmp / "out"
+                destination.mkdir()
+                with tarfile.open(archive, "r:gz") as tf, self.assertRaises(ValueError):
+                    _safe_extract(tf, destination)
+
+    def test_proton_assets_match_the_host_architecture(self):
+        """Releases ship x86_64 and aarch64 builds; the tarball and its
+        checksum must both be this machine's, whatever GitHub's order."""
+        from commander_gui.proton_installer import _pick_assets
+
+        def asset(name):
+            return {"name": name, "browser_download_url": f"https://x/{name}"}
+
+        assets = [
+            asset("GE-Proton11-5-x86_64.tar.gz"),
+            asset("GE-Proton11-5-x86_64.sha512sum"),
+            asset("GE-Proton11-5-aarch64.tar.gz"),
+            asset("GE-Proton11-5-aarch64.sha512sum"),
+        ]
+        for arch in ("x86_64", "aarch64"):
+            _tar_url, sum_url, name = _pick_assets(assets, arch)
+            self.assertEqual(name, f"GE-Proton11-5-{arch}.tar.gz")
+            self.assertTrue(sum_url.endswith(f"GE-Proton11-5-{arch}.sha512sum"))
+        # Older releases: one archive with no architecture suffix.
+        _tar_url, sum_url, name = _pick_assets(
+            [asset("GE-Proton9-20.tar.gz"), asset("GE-Proton9-20.sha512sum")], "x86_64"
+        )
+        self.assertEqual(name, "GE-Proton9-20.tar.gz")
 
     def test_install_proton_cancel_after_replace_cleans_up(self):
         """A cancel signaled right after the rename must not orphan the build.
@@ -11131,7 +11584,7 @@ class UserModsTrackerTests(unittest.TestCase):
             page._verify_counts = {"OK": 10, "CORRUPT": 9, "NOT FOUND": 0}
             with (
                 patch.object(
-                    QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+                    QMessageBox, "exec", return_value=QMessageBox.StandardButton.Yes
                 ),
                 patch.object(page, "_advance_repair_pipeline"),
             ):
@@ -11156,7 +11609,7 @@ class UserModsTrackerTests(unittest.TestCase):
             page._verify_counts = {"OK": 10, "CORRUPT": 9, "NOT FOUND": 0}
             with (
                 patch.object(
-                    QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+                    QMessageBox, "exec", return_value=QMessageBox.StandardButton.Yes
                 ),
                 patch.object(page, "_advance_repair_pipeline"),
             ):
@@ -11205,12 +11658,19 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_on_repair_install_success_purges_the_quarantine(self):
         with tempfile.TemporaryDirectory() as tmp:
             page, profile = self._make_install_page_for_repair(tmp)
+            from commander_gui.repair import SettleResult
+
             with (
                 patch("commander_gui.ui.install_page.restore_from_quarantine") as mock_restore,
                 patch("commander_gui.ui.install_page.purge_quarantine") as mock_purge,
+                patch(
+                    "commander_gui.ui.install_page.settle_quarantine",
+                    return_value=SettleResult(reinstalled=["a", "b"]),
+                ) as mock_settle,
                 patch.object(page, "_start_post_scan"),
             ):
                 page._on_repair_install_finished(0, "Repair finished cleanly.")
+            mock_settle.assert_called_once_with(["record-a", "record-b"])
             mock_restore.assert_not_called()
             mock_purge.assert_called_once_with(profile.gamma)
             self.assertEqual(page._quarantine_records, [])
@@ -11640,3 +12100,859 @@ class ProfileBundleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditFixTests(unittest.TestCase):
+    """Regression tests for the full-app audit's findings."""
+
+    def test_settings_json_with_a_bom_keeps_its_profiles(self):
+        from commander_gui.settings import load_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_bytes(
+                b"\xef\xbb\xbf" + json.dumps({"Profiles": [{"ProfileName": "Mine", "Active": True}]}).encode()
+            )
+            settings = load_settings(path)
+            self.assertEqual([p.profile_name for p in settings.profiles], ["Mine"])
+
+    def test_undecodable_gui_settings_do_not_crash_startup(self):
+        from commander_gui import gui_settings
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+            path = gui_settings.gui_settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\xff\xfe garbage \x80")
+            gui_settings._cache = None
+            data = gui_settings.load_gui_settings()
+            self.assertEqual(data["runner"], "auto")
+            gui_settings.save_gui_settings(theme="gamma")
+            self.assertTrue(path.with_suffix(".json.corrupt").is_file())
+            gui_settings._cache = None
+
+    def test_update_is_reported_even_when_the_addon_list_fails(self):
+        from commander_gui.updates import UpdateStatus, status_summary
+
+        status = UpdateStatus(installed="900", latest="920", error="list down")
+        self.assertTrue(status.update_available)
+        text, kind = status_summary(status)
+        self.assertIn("Update available", text)
+        self.assertEqual(kind, "accent")
+        self.assertFalse(UpdateStatus(installed="920", latest="920", error="x").update_available)
+
+    def test_version_tuples_pad_before_the_hotfix(self):
+        from commander_gui.updates import _numeric_version_tuple as version
+
+        self.assertLess(version("v1.3H5"), version("1.3.2"))
+        self.assertEqual(version("1.3"), version("v1.3.0"))
+        self.assertGreater(version("1.3.0"), version("v1.2.9H3"))
+
+    def test_fomod_folder_without_destination_keeps_its_folder(self):
+        from commander_gui.fomod import FomodFile, _place_item
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, dest = Path(tmp) / "root", Path(tmp) / "dest"
+            (root / "gamedata" / "scripts").mkdir(parents=True)
+            (root / "gamedata" / "scripts" / "a.script").write_text("x")
+            dest.mkdir()
+            _place_item(FomodFile(source="gamedata", destination=None, is_folder=True), root.resolve(), dest.resolve())
+            self.assertTrue((dest / "gamedata" / "scripts" / "a.script").is_file())
+
+    def test_fomod_windows_paths_trailing_separator_and_case(self):
+        from commander_gui.fomod import FomodFile, _place_item
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, dest = Path(tmp) / "root", Path(tmp) / "dest"
+            (root / "gamedata" / "scripts").mkdir(parents=True)
+            (root / "gamedata" / "scripts" / "a.script").write_text("x")
+            dest.mkdir()
+            _place_item(
+                FomodFile(source="Gamedata\\Scripts\\A.script", destination="gamedata\\scripts\\", is_folder=False),
+                root.resolve(),
+                dest.resolve(),
+            )
+            self.assertTrue((dest / "gamedata" / "scripts" / "a.script").is_file())
+            _place_item(
+                FomodFile(source="gamedata/scripts/a.script", destination="gamedata/scripts/a.script", is_folder=False),
+                root.resolve(),
+                dest.resolve(),
+            )
+            self.assertFalse((dest / "gamedata" / "scripts" / "a.script" / "a.script").exists())
+
+    def test_wipe_refuses_a_folder_that_is_not_an_install(self):
+        from commander_gui.ui.utilities_page import _validate_wipe_paths
+
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            games = Path(tmp) / "Games"
+            games.mkdir()
+            (games / "OtherGame").mkdir()
+            (games / "notes.odt").write_text("x")
+            with self.assertRaisesRegex(ValueError, "does not look like"):
+                _validate_wipe_paths([("Anomaly", str(games))])
+            with self.assertRaisesRegex(ValueError, "does not look like"):
+                _validate_wipe_paths([("Cache", str(games))])
+            anomaly = Path(tmp) / "Anomaly"
+            (anomaly / "bin").mkdir(parents=True)
+            cache = Path(tmp) / "cache"
+            cache.mkdir()
+            (cache / "mod.7z").write_bytes(b"7z")
+            self.assertEqual(len(_validate_wipe_paths([("Anomaly", str(anomaly)), ("Cache", str(cache))])), 2)
+
+    def test_wipe_refuses_hidden_home_folders(self):
+        from commander_gui.ui.utilities_page import _safe_wipe_path
+
+        config = Path.home() / ".config"
+        self.assertFalse(_safe_wipe_path(str(config), config))
+
+    def test_unreadable_files_are_not_reported_as_removed(self):
+        from commander_gui import integrity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            mod = gamma / "mods" / "A"
+            mod.mkdir(parents=True)
+            (mod / "x.txt").write_text("x")
+            integrity.scan_mods_md5(str(gamma))  # records the baseline
+            with patch.object(integrity, "_md5_file", return_value=None):
+                result = integrity.scan_mods_md5(str(gamma))
+            self.assertEqual(result.errors, ["mods/A/x.txt"])
+            self.assertEqual(result.removed, [])
+
+    def test_child_environment_drops_appimage_internals_only(self):
+        from commander_gui.config import child_environment
+
+        base = {
+            "APPDIR": "/tmp/.mount_abc",
+            "APPIMAGE": "/home/u/C.AppImage",
+            "PYTHONPATH": "/tmp/.mount_abc/opt/app",
+            "SSL_CERT_FILE": "/tmp/.mount_abc/opt/_internal/certs.pem",
+            "PYTHONNOUSERSITE": "1",
+            "HOME": "/home/u",
+        }
+        self.assertEqual(child_environment(base), {"HOME": "/home/u"})
+        mine = dict(base, SSL_CERT_FILE="/etc/ssl/mine.pem")
+        self.assertEqual(child_environment(mine)["SSL_CERT_FILE"], "/etc/ssl/mine.pem")
+        outside = {"PYTHONPATH": "/x", "HOME": "/h"}
+        self.assertEqual(child_environment(outside), outside)
+
+    def test_bundle_sources_are_detected_and_resettable(self):
+        from commander_gui.profile_bundle import non_default_sources, reset_sources
+
+        profile = CliProfile()
+        self.assertEqual(non_default_sources(profile), [])
+        profile.gamma_large_files_repo_url = "https://github.com/evil/fork"
+        self.assertEqual(
+            non_default_sources(profile), [("gamma_large_files_repo_url", "https://github.com/evil/fork")]
+        )
+        reset_sources(profile)
+        self.assertEqual(non_default_sources(profile), [])
+
+    def test_bundle_with_infinite_threads_and_bad_manifest(self):
+        import zipfile
+
+        from commander_gui.profile_bundle import ProfileBundleError, read_profile_bundle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(tmp) / "a.zip"
+            with zipfile.ZipFile(good, "w") as zf:
+                zf.writestr("profile.json", '{"settings": {"download_threads": Infinity}}')
+            profile = CliProfile()
+            read_profile_bundle(good).apply_to(profile)
+            self.assertEqual(profile.download_threads, CliProfile().download_threads)
+            bad = Path(tmp) / "b.zip"
+            with zipfile.ZipFile(bad, "w") as zf:
+                zf.writestr("profile.json", "[1, 2]")
+            with self.assertRaises(ProfileBundleError):
+                read_profile_bundle(bad)
+
+    def test_option_like_profile_values_are_refused(self):
+        from commander_gui.ui.profiles_page import create_profile_args
+
+        profile = CliProfile(profile_name="--gamma")
+        with self.assertRaises(ValueError):
+            create_profile_args(profile)
+
+    def test_desktop_shortcut_refuses_newlines(self):
+        from commander_gui.launcher import LaunchError, write_desktop_shortcut
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(LaunchError):
+            write_desktop_shortcut("Game\nExec=evil", ["/bin/true"], {}, "/tmp", directory=Path(tmp))
+
+    def test_meta_ini_strips_control_characters(self):
+        from commander_gui.mod_install import write_basic_meta_ini
+
+        with tempfile.TemporaryDirectory() as tmp:
+            write_basic_meta_ini(Path(tmp), "mod.7z\n[General]\nevil=1")
+            lines = (Path(tmp) / "meta.ini").read_text().splitlines()
+            self.assertEqual(lines.count("[General]"), 1)
+            self.assertNotIn("evil=1", lines)
+
+    def test_truncated_shortcuts_vdf_is_refused(self):
+        from commander_gui.steam_shortcuts import ShortcutsFileError, read_shortcuts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shortcuts.vdf"
+            path.write_bytes(b"\x00shortcuts\x00\x00" + b"0\x00" + b"\x02appid\x00\x01\x02")
+            with self.assertRaises(ShortcutsFileError):
+                read_shortcuts(path)
+
+    def test_mo2_executables_only_from_their_section_and_unquoted(self):
+        from commander_gui.launcher import parse_mo2_executables
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "ModOrganizer.ini").write_text(
+                "[customExecutables]\n"
+                "1\\title=Game\n"
+                '1\\binary="Z:/Games/A, B/game.exe"\n'
+                "size=1\n"
+                "[Plugins]\n"
+                "2\\title=NotAnExecutable\n",
+                encoding="utf-8",
+            )
+            executables = parse_mo2_executables(tmp)
+            self.assertEqual([e.title for e in executables], ["Game"])
+            self.assertTrue(executables[0].binary.endswith("A, B/game.exe"))
+            self.assertNotIn('"', executables[0].binary)
+
+    def test_mod_conflicts_ignore_case(self):
+        from commander_gui.modlist import find_enabled_mod_file_conflicts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mods = Path(tmp)
+            (mods / "A" / "gamedata" / "Scripts").mkdir(parents=True)
+            (mods / "A" / "gamedata" / "Scripts" / "x.script").write_text("a")
+            (mods / "B" / "gamedata" / "scripts").mkdir(parents=True)
+            (mods / "B" / "gamedata" / "scripts" / "x.script").write_text("b")
+            conflicts = find_enabled_mod_file_conflicts(["+A", "+B"], mods)
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(sorted(conflicts[0][1]), ["A", "B"])
+
+    def test_archive_listing_skips_the_gzip_header_and_catches_links(self):
+        from subprocess import CompletedProcess
+
+        from commander_gui.mod_install import ModInstallError, _list_archive_paths
+
+        gzip_listing = (
+            "--\nPath = /abs/mod.tar.gz\nType = gzip\nHeaders Size = 10\n\n"
+            "----------\nPath = mod.tar\nSize = 10240\n"
+        )
+        with patch(
+            "commander_gui.mod_install.subprocess.run",
+            return_value=CompletedProcess([], 0, gzip_listing, ""),
+        ):
+            self.assertEqual(_list_archive_paths(Path("/7zz"), Path("/m.tar.gz")), ["mod.tar"])
+        link_listing = "----------\nPath = gamedata/link\nAttributes = A lrwxrwxrwx\n"
+        with (
+            patch(
+                "commander_gui.mod_install.subprocess.run",
+                return_value=CompletedProcess([], 0, link_listing, ""),
+            ),
+            self.assertRaisesRegex(ModInstallError, "symlink"),
+        ):
+            _list_archive_paths(Path("/7zz"), Path("/m.7z"))
+
+    def test_configured_prefix_follows_the_resolved_runner(self):
+        from commander_gui import gui_settings
+        from commander_gui.launcher import Runner
+
+        proton = Runner(kind="proton", label="p", env={"STEAM_COMPAT_DATA_PATH": "/games/proton"})
+        with patch.object(gui_settings, "configured_runner", return_value=proton):
+            self.assertEqual(gui_settings.configured_wine_prefix(), "/games/proton/pfx")
+        umu = Runner(kind="umu", label="u", env={"WINEPREFIX": "/games/umu"})
+        with patch.object(gui_settings, "configured_runner", return_value=umu):
+            self.assertEqual(gui_settings.configured_wine_prefix(), "/games/umu")
+
+
+class RepairSafetyTests(unittest.TestCase):
+    """Verify & Repair must never leave a mod deleted."""
+
+    def test_archive_names_match_what_the_cli_caches(self):
+        from commander_gui.repair import ModPackRecord
+
+        def record(dl_link, zip_name=""):
+            return ModPackRecord(1, "X", "", dl_link, "", zip_name, "", "")
+
+        # GitHub: always <repo>.zip, whatever the URL ends in or ZipName says.
+        self.assertEqual(
+            record("https://github.com/ahuyn/anomaly-exo/archive/refs/tags/latest.zip").archive_names(),
+            ["anomaly-exo.zip"],
+        )
+        self.assertEqual(
+            record(
+                "https://github.com/Grokitach/winchester_1892_billwa_stalker_anomaly/archive/refs/tags/1.0.zip",
+                "winchester_1892_billwa_stalker_anomaly-1.0.zip",
+            ).archive_names(),
+            ["winchester_1892_billwa_stalker_anomaly.zip"],
+        )
+        # ZipName with a checksum glued on.
+        self.assertEqual(
+            record("https://www.moddb.com/addons/start/1", "mod.7z 9b60acaf").archive_names(),
+            ["mod.7z"],
+        )
+
+    def _quarantined(self, gamma: Path, folder: str):
+        from commander_gui.repair import quarantine_mod_and_archive
+
+        mod = gamma / "mods" / folder
+        (mod / "gamedata").mkdir(parents=True)
+        (mod / "gamedata" / "a.script").write_text("original")
+        return quarantine_mod_and_archive(str(gamma), folder)
+
+    def test_a_mod_the_installer_did_not_bring_back_is_restored(self):
+        """Regression test: the installer can succeed without recreating a
+        mod (hash-matching archive -> extraction skipped); the old copy was
+        then purged and the mod was gone, breaking the game."""
+        from commander_gui.repair import settle_quarantine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            record = self._quarantined(gamma, "12- Some Mod")
+            self.assertFalse((gamma / "mods" / "12- Some Mod").exists())
+            result = settle_quarantine([record])
+            self.assertEqual(result.restored, ["12- Some Mod"])
+            self.assertEqual(
+                (gamma / "mods" / "12- Some Mod" / "gamedata" / "a.script").read_text(), "original"
+            )
+
+    def test_a_reinstalled_mod_keeps_the_new_copy(self):
+        from commander_gui.repair import settle_quarantine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            record = self._quarantined(gamma, "12- Some Mod")
+            fresh = gamma / "mods" / "12- Some Mod" / "gamedata"
+            fresh.mkdir(parents=True)
+            (fresh / "a.script").write_text("reinstalled")
+            result = settle_quarantine([record])
+            self.assertEqual(result.reinstalled, ["12- Some Mod"])
+            self.assertEqual((fresh / "a.script").read_text(), "reinstalled")
+            self.assertFalse(record.items[0].quarantined.exists())
+
+    def test_an_empty_folder_left_by_the_installer_is_replaced(self):
+        from commander_gui.repair import settle_quarantine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            record = self._quarantined(gamma, "12- Some Mod")
+            (gamma / "mods" / "12- Some Mod").mkdir()
+            result = settle_quarantine([record])
+            self.assertEqual(result.restored, ["12- Some Mod"])
+            self.assertTrue((gamma / "mods" / "12- Some Mod" / "gamedata" / "a.script").is_file())
+
+
+class RepairModlistTests(unittest.TestCase):
+    """The repair's installer rewrites modlist.txt; the user's must survive."""
+
+    def test_users_modlist_is_restored_when_the_modpack_did_not_change(self):
+        from commander_gui.repair import restore_modlist_after_repair, snapshot_modlist
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modlist.txt"
+            path.write_text("+My Own Mod\n-Gamma Mod\n+Other Mod\n", encoding="utf-8")
+            snapshot = snapshot_modlist(path)
+            # What the installer writes: the official list, own mod gone.
+            path.write_text("+Gamma Mod\n+Other Mod\n", encoding="utf-8")
+            note = restore_modlist_after_repair(path, snapshot)
+            self.assertIn("Restored", note)
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), "+My Own Mod\n-Gamma Mod\n+Other Mod\n"
+            )
+            self.assertFalse(snapshot.exists())
+
+    def test_a_repair_that_also_updated_keeps_the_new_list(self):
+        from commander_gui.repair import restore_modlist_after_repair, snapshot_modlist
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "modlist.txt"
+            path.write_text("+Gamma Mod\n", encoding="utf-8")
+            snapshot = snapshot_modlist(path)
+            path.write_text("+Brand New GAMMA Mod\n+Gamma Mod\n", encoding="utf-8")
+            note = restore_modlist_after_repair(path, snapshot)
+            self.assertIn("newer GAMMA mods", note)
+            self.assertIn("Brand New GAMMA Mod", path.read_text(encoding="utf-8"))
+            self.assertTrue(snapshot.exists())
+
+
+class OverlayRevertTests(unittest.TestCase):
+    def test_reverted_engine_files_are_detected(self):
+        import hashlib
+
+        from commander_gui.integrity import reverted_gamma_overlay
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tools").mkdir()
+            (root / "bin").mkdir()
+            vanilla = b"vanilla engine"
+            (root / "bin" / "AnomalyDX11.exe").write_bytes(vanilla)
+            (root / "fsgame.ltx").write_bytes(b"gamma fsgame")
+            (root / "tools" / "checksums.md5").write_text(
+                f"{hashlib.md5(vanilla).hexdigest()} *bin/AnomalyDX11.exe\n"
+                f"{hashlib.md5(b'vanilla fsgame').hexdigest()} *fsgame.ltx\n"
+            )
+            self.assertEqual(reverted_gamma_overlay(str(root)), ["bin/AnomalyDX11.exe"])
+
+
+class OverlayRestoreTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_reverted_engine_file_is_put_back_from_the_cached_repo(self):
+        import hashlib
+
+        from commander_gui.integrity import (
+            restore_gamma_overlay,
+            reverted_gamma_overlay,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            patch_bin = work / "G.A.M.M.A" / "modpack_patches" / "bin"
+            patch_bin.mkdir(parents=True)
+            gamma_exe = b"MZ gamma engine"
+            (patch_bin / "AnomalyDX11.exe").write_bytes(gamma_exe)
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "x"]):
+                subprocess.run(["git", *args], cwd=work, env=env, check=True)
+            cache = root / "cache"
+            cache.mkdir()
+            subprocess.run(
+                ["git", "clone", "-q", "--bare", str(work), str(cache / "Stalker_GAMMA.git")],
+                env=env, check=True,
+            )
+            anomaly = root / "anomaly"
+            (anomaly / "bin").mkdir(parents=True)
+            (anomaly / "tools").mkdir()
+            vanilla = b"MZ vanilla engine"
+            (anomaly / "bin" / "AnomalyDX11.exe").write_bytes(vanilla)
+            (anomaly / "tools" / "checksums.md5").write_text(
+                f"{hashlib.md5(vanilla).hexdigest()} *bin/AnomalyDX11.exe\n"
+            )
+            reverted = reverted_gamma_overlay(str(anomaly))
+            result = restore_gamma_overlay(anomaly, cache, [*reverted, "fsgame.ltx"])
+            self.assertEqual(result.restored, ["bin/AnomalyDX11.exe"])
+            self.assertEqual(result.failed, ["fsgame.ltx"])
+            self.assertEqual((anomaly / "bin" / "AnomalyDX11.exe").read_bytes(), gamma_exe)
+            self.assertEqual(reverted_gamma_overlay(str(anomaly)), [])
+
+    def test_missing_repo_restores_nothing(self):
+        from commander_gui.integrity import restore_gamma_overlay
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = restore_gamma_overlay(tmp, tmp, ["bin/AnomalyDX11.exe"])
+        self.assertEqual(result.restored, [])
+        self.assertTrue(result.reason)
+
+
+class AssistantThemeParityTests(unittest.TestCase):
+    def test_assistant_offers_every_commander_theme(self) -> None:
+        """A theme picked in COMMANDER must exist in ASSISTANT too - both read
+        the same saved "theme" key, and ASSISTANT fell back to GAMMA for
+        Reactor because it was never added there."""
+        from assistant.ui import theme as assistant_theme
+        from commander_gui.themes import THEME_INFO
+
+        commander = [key for key, *_rest in THEME_INFO]
+        self.assertEqual([key for key, _label in assistant_theme.THEME_INFO], commander)
+        for key in commander:
+            self.assertIn(key, assistant_theme.THEMES)
+            self.assertEqual(
+                set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key
+            )
+
+
+class RepairPreviewTests(unittest.TestCase):
+    def test_preview_lists_every_mod_with_its_file_counts(self):
+        from commander_gui.integrity import Md5ScanResult
+        from commander_gui.repair import classify_problems, repair_preview
+
+        names = [f"{n}- Mod{n} - Author" for n in range(1, 13)]
+        scan = Md5ScanResult(
+            changed=[f"mods/{name}/gamedata/a.script" for name in names]
+            + [f"mods/{names[0]}/gamedata/b.script"],
+            removed=[f"mods/{names[1]}/gamedata/c.ltx"],
+            added=["mods/Mine/extra.ltx"],
+        )
+        with patch("commander_gui.repair.find_record_for_folder") as find:
+            find.side_effect = lambda folder, _records: (
+                None if folder == names[-1] else Mock(archive_names=lambda: ["x.zip"])
+            )
+            plan = classify_problems(scan, {})
+        text = repair_preview(plan, ["C:/anomaly/bin/x.dll | CORRUPT"])
+        self.assertIn("GAMMA mods to re-install (11)", text)
+        self.assertIn(f"{names[0]}  (2 changed)", text)
+        self.assertIn(f"{names[1]}  (1 changed, 1 missing)", text)
+        self.assertIn(names[10], text)  # no "... and N more" cut-off
+        self.assertIn("no download source (1)", text)
+        self.assertIn("Mine", text)
+        self.assertIn("x.dll | CORRUPT", text)
+
+
+class CrashAnalyzeTests(unittest.TestCase):
+    def test_any_new_crash_dump_offers_analysis_and_opens_assistant(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.play_page import PlayPage
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            profile = CliProfile(
+                active=True, profile_name="Mine", anomaly=str(Path(tmp) / "anomaly")
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+
+                def isActiveWindow(self):
+                    return True
+
+            page = PlayPage(FakeWindow())
+            page._crash_check_pending = True
+            page._pre_launch_crash_dumps = set()
+            with (
+                patch(
+                    "commander_gui.ui.play_page.crash_dump_names",
+                    return_value={"new.mdmp"},
+                ),
+                patch.object(page, "_ask_analyze_crash", return_value=True) as ask,
+                patch.object(page, "_start_crash_report") as start,
+            ):
+                page._check_for_crash()
+            self.assertEqual(ask.call_args.args[0], "Game Crashed")
+            start.assert_called_once_with(open_assistant=True)
+
+            page._crash_report_opens_assistant = True
+            with patch("commander_gui.ui.play_page.launch_assistant") as launch:
+                page._on_crash_report_done((Path(tmp) / "dump.zip", {}))
+            launch.assert_called_once_with(Path(tmp) / "dump.zip")
+
+
+class AssistantThemeFollowTests(unittest.TestCase):
+    def test_assistant_follows_a_theme_saved_by_commander(self):
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            from assistant.ui import theme
+            from assistant.ui.main_window import MainWindow
+
+            theme.apply_theme(app, "gamma")
+            window = MainWindow()
+            try:
+                window._theme_watch.stop()
+                path = theme.config_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"theme": "reactor"}', encoding="utf-8")
+                os.utime(path, (time.time() + 5, time.time() + 5))
+                window._follow_saved_theme()
+                self.assertEqual(theme.active_theme(), "reactor")
+                self.assertEqual(window.theme_combo.currentData(), "reactor")
+            finally:
+                theme.apply_theme(app, "gamma")
+                window.close()
+                window.deleteLater()
+
+
+class CreateInstallFoldersConfirmationTests(unittest.TestCase):
+    def _page(self, tmp, profile):
+        from commander_gui.ui.install_page import InstallPage
+
+        page = InstallPage.__new__(InstallPage)
+        page._persisting = False
+        page.window = Mock()
+        page.window.install_busy = False
+        page.window.settings = Mock(active_profile=profile, save=Mock())
+        page.root_card_edit = Mock(text=Mock(return_value=tmp))
+        texts = {}
+        for name in ("anomaly_edit", "gamma_edit", "cache_edit"):
+            edit = Mock()
+            edit.setText.side_effect = lambda value, n=name: texts.__setitem__(n, value)
+            edit.text.side_effect = lambda n=name: texts.get(n, "")
+            setattr(page, name, edit)
+        page._update_cache_info = Mock()
+        page._update_install_status = Mock()
+        page.refresh = Mock()
+        return page
+
+    def test_creating_the_folders_confirms_with_a_popup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(anomaly="old-a", gamma="old-g", cache="old-c")
+            page = self._page(tmp, profile)
+            with patch("commander_gui.ui.install_page.QMessageBox.information") as info:
+                page._create_install_folders()
+            for name in ("anomaly", "gamma", "cache"):
+                self.assertTrue((Path(tmp) / name).is_dir())
+            info.assert_called_once()
+            self.assertIn("Step 3 and Step 4", info.call_args.args[2])
+            self.assertEqual(profile.gamma, str(Path(tmp) / "gamma"))
+
+    def test_no_confirmation_when_the_folders_could_not_be_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._page(tmp, None)  # no active profile
+            with (
+                patch("commander_gui.ui.install_page.QMessageBox.information") as info,
+                patch("commander_gui.ui.install_page.QMessageBox.warning") as warning,
+            ):
+                page._create_install_folders()
+            info.assert_not_called()
+            warning.assert_called_once()
+
+
+class UpdateChannelTests(unittest.TestCase):
+    def test_stable_never_offers_a_prerelease(self):
+        from commander_gui import updates
+
+        with (
+            patch.object(updates, "_latest_stable_tag", return_value="v1.2.9H3"),
+            patch.object(updates, "_feed_tags", return_value=["v1.3.0", "v1.2.9H3"]) as feed,
+        ):
+            self.assertIsNone(updates.check_commander_update("1.2.9H3", "stable"))
+        feed.assert_not_called()
+
+    def test_unstable_offers_the_newest_prerelease(self):
+        from commander_gui import updates
+
+        with patch.object(
+            updates, "_feed_tags", return_value=["v1.2.9H3", "v1.3.0H1", "v1.3.0"]
+        ):
+            self.assertEqual(updates.check_commander_update("1.3.0", "unstable"), "v1.3.0H1")
+            self.assertEqual(updates.check_commander_update("1.2.9H3", "unstable"), "v1.3.0H1")
+            self.assertIsNone(updates.check_commander_update("1.3.0H1", "unstable"))
+
+    def test_unstable_falls_back_to_stable_when_the_feed_fails(self):
+        from commander_gui import updates
+
+        with (
+            patch.object(updates, "_feed_tags", return_value=[]),
+            patch.object(updates, "_latest_stable_tag", return_value="v1.3.1"),
+        ):
+            self.assertEqual(updates.check_commander_update("1.3.0", "unstable"), "v1.3.1")
+
+    def test_feed_tags_are_read_from_the_atom_links(self):
+        from commander_gui import updates
+
+        feed = (
+            b'<feed><entry><link rel="alternate" type="text/html" '
+            b'href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/tag/v1.3.0"/></entry>'
+            b'<entry><link href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/tag/v1.2.9H3"/></entry></feed>'
+        )
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with (
+            patch.object(updates, "urlopen", return_value=response),
+            patch.object(updates, "read_response_bytes", return_value=feed),
+        ):
+            self.assertEqual(updates._feed_tags(), ["v1.3.0", "v1.2.9H3"])
+
+    def test_unknown_channel_setting_falls_back_to_stable(self):
+        from commander_gui import gui_settings
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+            path = Path(tmp) / "stalker-gamma" / "gui-settings.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"update_channel": "nightly"}')
+            self.assertEqual(gui_settings.load_gui_settings()["update_channel"], "stable")
+
+
+class UpdateStatusRecheckTests(unittest.TestCase):
+    def test_rechecking_does_not_stack_click_handlers(self):
+        from PySide6.QtWidgets import QApplication, QPushButton
+
+        from commander_gui.ui.main_window import MainWindow
+
+        QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        button = QPushButton()
+        window._update_status_button = button
+        clicks = []
+        with (
+            patch("commander_gui.ui.main_window.commander_appimage_path", return_value=Path("/x.AppImage")),
+            patch.object(MainWindow, "_offer_commander_self_update", lambda self, tag: clicks.append(tag)),
+        ):
+            window._on_commander_update_status_checked("v1.3.0")
+            window._on_commander_update_status_checked("v1.3.0H1")
+            button.click()
+        self.assertEqual(clicks, ["v1.3.0H1"])
+
+
+class AboutDiscordLinkTests(unittest.TestCase):
+    def test_about_page_links_to_the_discord_invite(self):
+        from PySide6.QtWidgets import QApplication, QPushButton
+
+        from commander_gui.ui import about_page
+
+        QApplication.instance() or QApplication([])
+        page = about_page.AboutPage.__new__(about_page.AboutPage)
+        about_page.QWidget.__init__(page)
+        card = page._links_card()
+        buttons = [b for b in card.findChildren(QPushButton) if b.text() == "Join the Discord"]
+        self.assertEqual(len(buttons), 1)
+        with patch.object(about_page, "open_url") as open_url:
+            buttons[0].click()
+        self.assertEqual(open_url.call_args.args[0], "https://discord.gg/6A9psrtYhh")
+
+
+
+class OpenUrlTests(unittest.TestCase):
+    def test_links_open_quietly_with_a_clean_environment(self):
+        """The browser opener's own warnings (KDE's "Icon theme not found")
+        must not land in COMMANDER's terminal."""
+        import subprocess
+
+        from commander_gui.ui import common
+
+        with (
+            patch.object(common.sys, "platform", "linux"),
+            patch.object(common.shutil, "which", return_value="/usr/bin/xdg-open"),
+            patch.object(common.subprocess, "Popen") as popen,
+        ):
+            self.assertTrue(common.open_url("https://discord.gg/6A9psrtYhh"))
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], ["/usr/bin/xdg-open", "https://discord.gg/6A9psrtYhh"])
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+        self.assertIn("env", kwargs)
+
+
+class UnstableBuildTests(unittest.TestCase):
+    def test_unstable_versions_order_below_their_release(self):
+        from commander_gui.updates import _numeric_version_tuple as version
+        from commander_gui.updates import is_unstable_version
+
+        ordered = ["1.3.0", "1.3.1-unstable", "1.3.1-unstable2", "1.3.1", "1.3.1H1", "v1.3.2-unstable"]
+        self.assertEqual(sorted(ordered, key=version), ordered)
+        self.assertEqual(version("1.3.1-unstable"), version("v1.3.1-unstable1"))
+        self.assertTrue(is_unstable_version("v1.3.1-unstable2"))
+        self.assertFalse(is_unstable_version("1.3.1H1"))
+
+    def test_latest_unstable_tag_ignores_stable_releases(self):
+        from commander_gui import updates
+
+        tags = ["v1.3.1", "v1.3.2-unstable", "v1.3.2-unstable3", "v1.3.2-unstable2"]
+        with patch.object(updates, "_feed_tags", return_value=tags):
+            self.assertEqual(updates.latest_unstable_tag(), "v1.3.2-unstable3")
+        with patch.object(updates, "_feed_tags", return_value=["v1.3.1"]):
+            self.assertIsNone(updates.latest_unstable_tag())
+
+    def test_only_an_unstable_build_newer_than_stable_is_offered(self):
+        from commander_gui import updates
+
+        def offer(current, unstable, stable):
+            with (
+                patch.object(updates, "latest_unstable_tag", return_value=unstable),
+                patch.object(updates, "_latest_stable_tag", return_value=stable),
+            ):
+                return updates.newer_unstable_tag(current)
+
+        self.assertEqual(offer("1.3.0", "v1.3.1-unstable", "v1.3.0"), "v1.3.1-unstable")
+        self.assertIsNone(offer("1.3.0", None, "v1.3.0"))
+        # Stable 1.3.1 is out: its unstable builds are older now.
+        self.assertIsNone(offer("1.3.0", "v1.3.1-unstable2", "v1.3.1"))
+        self.assertIsNone(offer("1.3.1", "v1.3.1-unstable2", None))
+
+    def test_channel_follows_an_unstable_build(self):
+        from commander_gui.updates import effective_update_channel
+
+        self.assertEqual(effective_update_channel("stable", "1.3.1-unstable"), "unstable")
+        self.assertEqual(effective_update_channel("stable", "1.3.0"), "stable")
+        self.assertEqual(effective_update_channel("unstable", "1.3.0"), "unstable")
+        self.assertEqual(effective_update_channel(None, "1.3.0"), "stable")
+
+    def test_unstable_users_are_offered_the_release_that_supersedes_them(self):
+        from commander_gui import updates
+
+        with patch.object(updates, "_feed_tags", return_value=["v1.3.1", "v1.3.1-unstable2"]):
+            self.assertEqual(updates.check_commander_update("1.3.1-unstable2", "unstable"), "v1.3.1")
+        with patch.object(updates, "_feed_tags", return_value=["v1.3.0", "v1.3.1-unstable2"]):
+            self.assertEqual(updates.check_commander_update("1.3.1-unstable", "unstable"), "v1.3.1-unstable2")
+
+    def test_unstable_asset_url_matches_the_build_script_name(self):
+        from commander_gui.self_update import commander_update_asset_url
+
+        self.assertTrue(
+            commander_update_asset_url("v1.3.1-unstable").endswith(
+                "/releases/download/v1.3.1-unstable/STALKER-GAMMA-COMMANDER-1.3.1-unstable-x86_64.AppImage"
+            )
+        )
+
+    def test_switch_installs_the_right_tag_and_may_downgrade(self):
+        from commander_gui import self_update, updates
+
+        with (
+            patch.dict(os.environ, {"APPIMAGE": "/tmp/COMMANDER.AppImage"}),
+            patch.object(updates, "newer_unstable_tag", return_value="v1.3.1-unstable2"),
+            patch.object(updates, "latest_stable_tag", return_value="v1.2.9H3"),
+            patch.object(
+                self_update, "download_and_install_commander_update", return_value=Path("/x")
+            ) as install,
+        ):
+            self.assertEqual(self_update.switch_commander_build("unstable")[1], "v1.3.1-unstable2")
+            self.assertEqual(install.call_args.args[0], "v1.3.1-unstable2")
+            # Reverting installs the latest stable even though it is older.
+            self.assertEqual(self_update.switch_commander_build("stable")[1], "v1.2.9H3")
+
+    def test_switch_refuses_without_a_build_or_an_appimage(self):
+        from commander_gui import self_update, updates
+
+        with (
+            patch.dict(os.environ, {"APPIMAGE": ""}),
+            self.assertRaises(self_update.CommanderSelfUpdateError),
+        ):
+            self_update.switch_commander_build("unstable")
+        with (
+            patch.dict(os.environ, {"APPIMAGE": "/tmp/COMMANDER.AppImage"}),
+            patch.object(updates, "newer_unstable_tag", return_value=None),
+            self.assertRaisesRegex(self_update.CommanderSelfUpdateError, "no unstable build newer"),
+        ):
+            self_update.switch_commander_build("unstable")
+
+    def test_settings_offers_the_other_build(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui import settings_page
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp, "APPIMAGE": "/tmp/C.AppImage"}),
+        ):
+            class FakeWindow:
+                settings = CliSettings(profiles=[CliProfile(active=True, profile_name="T")])
+                switched: ClassVar[list] = []
+
+                def switch_commander_build(self, target):
+                    self.switched.append(target)
+
+            window = FakeWindow()
+            with (
+                patch.object(settings_page, "__version__", "1.3.0"),
+                patch.object(settings_page, "newer_unstable_tag", return_value=None),
+            ):
+                page = settings_page.SettingsPage(window)
+                # No unstable build newer than stable: not clickable.
+                page._unstable_checked, page._unstable_offer = True, None
+                page._render_build()
+                self.assertIn("unstable build", page._switch_build_button.text())
+                self.assertFalse(page._switch_build_button.isEnabled())
+                self.assertIn("no unstable build newer", page._build_note.text())
+                page._unstable_offer = "v1.3.1-unstable"
+                page._render_build()
+                self.assertTrue(page._switch_build_button.isEnabled())
+                self.assertIn("1.3.1-unstable", page._build_note.text())
+                page._switch_build_button.click()
+            with patch.object(settings_page, "__version__", "1.3.1-unstable"):
+                page._render_build()
+                self.assertIn("stable build", page._switch_build_button.text())
+                page._switch_build_button.click()
+            self.assertEqual(window.switched, ["unstable", "stable"])
+            with patch.dict(os.environ, {"APPIMAGE": ""}):
+                page._render_build()
+                self.assertFalse(page._switch_build_button.isEnabled())
+                self.assertIn("git switch", page._build_note.text())

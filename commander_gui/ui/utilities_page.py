@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
 import uuid
@@ -35,6 +36,7 @@ from ..assistant_launcher import (
 )
 from ..atomic import write_text
 from ..cli_runner import cli_command
+from ..game_backup import BackupError, backup_before_wipe, mark_settings_restore
 from ..integrity import CacheArchiveVerifyResult, format_size, verify_cache_archives
 from ..log_dump import create_log_dump
 from ..parsers import (
@@ -160,7 +162,68 @@ def _safe_wipe_path(raw: str, resolved: Path) -> bool:
     # already followed it, so inspect the pre-resolution path itself.
     if Path(raw).expanduser().is_symlink():
         return False
+    # A hidden folder straight under home is config (~/.config, ~/.ssh,
+    # ~/.local ...), never an install folder.
+    if resolved.parent == home and resolved.name.startswith("."):
+        return False
+    # A whole mounted drive (/mnt/data, an SD card root) is not a folder
+    # COMMANDER made; its install folders live inside it.
+    try:
+        if os.path.ismount(resolved):
+            return False
+    except OSError:
+        return False
     return len(resolved.parts) >= 3
+
+
+#: Names whose presence (case-insensitively, at the top level) shows a folder
+#: really is that part of a GAMMA install.
+_INSTALL_MARKERS = {
+    "Anomaly": {"anomalylauncher.exe", "bin", "db", "gamedata", "fsgame.ltx"},
+    "GAMMA": {"modorganizer.ini", "modorganizer.exe", "mods", "profiles", "downloads"},
+}
+#: A download cache holds archives (and the CLI's part files / manifests).
+_CACHE_SUFFIXES = (
+    ".7z", ".zip", ".rar", ".tar", ".gz", ".xz", ".zst", ".part",
+    ".download", ".tmp", ".json", ".md5", ".txt",
+)
+
+
+def _looks_like_install(label: str, folder: Path) -> bool:
+    """True if ``folder`` plausibly is the ``label`` folder of an install.
+
+    The path checks above only rule out the obviously dangerous; pointing
+    the Anomaly or Cache field at an existing folder such as ~/Games or
+    ~/Documents passed them, and Reset/Uninstall then deleted it whole. So a
+    non-empty folder must also *look like* what it is supposed to be.
+    """
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return False
+    if not entries:
+        return True
+    names = {entry.name.lower() for entry in entries}
+    markers = _INSTALL_MARKERS.get(label)
+    if markers is not None:
+        return bool(names & markers)
+    # Cache: every top-level file must be archive-like, and there must be
+    # at least one archive somewhere in the first two levels.
+    has_archive = False
+    for entry in entries:
+        if entry.is_file():
+            if not entry.name.lower().endswith(_CACHE_SUFFIXES):
+                return False
+            has_archive = True
+        elif entry.is_dir() and not has_archive:
+            try:
+                has_archive = any(
+                    child.is_file() and child.name.lower().endswith(_CACHE_SUFFIXES)
+                    for child in entry.iterdir()
+                )
+            except OSError:
+                pass
+    return has_archive
 
 
 def _validate_wipe_paths(paths: list[tuple[str, str]]) -> list[tuple[str, Path]]:
@@ -172,6 +235,11 @@ def _validate_wipe_paths(paths: list[tuple[str, str]]) -> list[tuple[str, Path]]
             continue
         if not _safe_wipe_path(path, resolved):
             raise ValueError(f"Refusing to wipe unsafe path: {resolved}")
+        if resolved.is_dir() and not _looks_like_install(label, resolved):
+            raise ValueError(
+                f"Refusing to wipe {resolved}: it does not look like a {label} "
+                "folder. Check the profile's folders before resetting."
+            )
         resolved_paths.append((label, resolved))
 
     for index, (label, path) in enumerate(resolved_paths):
@@ -235,6 +303,25 @@ def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
         wiped.append(str(resolved))
         report(f"{label} folder deleted.")
     return wiped
+
+
+def _backup_then_wipe(profile, paths: list[tuple[str, str]], reason: str, report):
+    """Back up saves, user.ltx and MCM settings, then :func:`_wipe_folders`.
+
+    If the backup cannot be written nothing is deleted: the error stops the
+    whole task. Returns ``(wiped folders, BackupInfo or None)``.
+    """
+    _validate_wipe_paths(paths)
+    if profile is None:
+        raise ValueError("No active profile - nothing was deleted.")
+    present = {label for label, path in paths if _resolved_wipe_target(path) is not None}
+    try:
+        info = backup_before_wipe(profile, present, reason, report)
+    except (BackupError, OSError) as exc:
+        raise ValueError(f"Backup failed, so nothing was deleted: {exc}") from exc
+    if info is not None:
+        report(f"Backup saved: {info.path}")
+    return _wipe_folders(paths, report), info
 
 
 #: Per-category, how many affected filenames to list before collapsing
@@ -419,11 +506,14 @@ def _move_folders(
     # for the safety backup taken there (as a sibling folder) before the
     # original is removed - that backup does not land on the destination.
     try:
-        dest_needed = sum(
-            dir_size(src)
+        # Measured once, uncapped: a capped count under-reports a big
+        # install and lets a move start that cannot finish.
+        sizes = {
+            src: dir_size(src, max_entries=None)
             for _label, src in resolved_sources
             if src.is_dir()
-        )
+        }
+        dest_needed = sum(sizes.values())
         if dest_needed > 0:
             free = shutil.disk_usage(dest_parent).free
             if free < dest_needed:
@@ -440,7 +530,7 @@ def _move_folders(
             if not src.is_dir():
                 continue
             device = src.stat().st_dev
-            source_needed[device] = source_needed.get(device, 0) + dir_size(src)
+            source_needed[device] = source_needed.get(device, 0) + sizes[src]
             source_sample.setdefault(device, src)
         for device, needed in source_needed.items():
             free = shutil.disk_usage(source_sample[device]).free
@@ -643,6 +733,7 @@ class UtilitiesPage(QWidget):
         self._reset_wipe_paths: list[tuple[str, str]] = []
         self._reset_folders = ""
         self._reset_includes_anomaly = True
+        self._reset_profile = None
         self._wipe_title = "Fresh Reset"
         self._reset_preserve_user = False
         self._reset_preserve_mcm = False
@@ -706,6 +797,15 @@ class UtilitiesPage(QWidget):
         rows.setSpacing(8)
         tools = [
             (
+                tr("Saves & Settings Backup"),
+                tr(
+                    "Back up or restore your saves, user.ltx (keybinds) and MCM "
+                    "settings. A backup is also made automatically before every "
+                    "reset or uninstall."
+                ),
+                self._open_backups,
+            ),
+            (
                 tr("Preview cache cleanup"),
                 tr(
                     "List out-of-date addon archives in the cache with the total "
@@ -762,6 +862,17 @@ class UtilitiesPage(QWidget):
             rows.addWidget(self._tool_row(title, description, slot))
         layout.addLayout(rows)
         return card
+
+    def _open_backups(self) -> None:
+        if not self._require_profile():
+            return
+        from .backup_dialog import BackupDialog
+
+        dialog = BackupDialog(self.window, self)
+        dialog.exec()
+        # It refuses to close while a backup/restore runs, so nothing is
+        # still using it here.
+        dialog.deleteLater()
 
     def _repair_prefix(self) -> None:
         """Undo another Wine's writes into the runner's prefix."""
@@ -967,7 +1078,12 @@ class UtilitiesPage(QWidget):
         layout.addLayout(panels)
 
         caution = info_label(
-            tr("All reset and uninstall actions refuse to operate on system paths, home directories or symlinks, and re-check that the profile still points where it did before deleting anything.")
+            tr(
+                "Use these to start over when an install is broken. They only ever "
+                "delete the active profile's Anomaly, GAMMA and download cache folders, "
+                "never anything else on your system, and your saves, keybinds and MCM "
+                "settings are backed up first."
+            )
         )
         caution.setObjectName("warn")
         layout.addWidget(caution)
@@ -1538,7 +1654,8 @@ class UtilitiesPage(QWidget):
             "&nbsp;&nbsp;• MO2 SETTINGS<br>"
             "&nbsp;&nbsp;• MCM SETTINGS<br>"
             "&nbsp;&nbsp;• ANY ADDITIONAL MODS YOU ADDED<br><br>"
-            "Please back up anything you want to keep before continuing.<br><br>"
+            "Your saves, user.ltx and MCM settings are backed up automatically first "
+            "(Utilities &gt; Saves &amp; Settings Backup). Mods you added yourself are not.<br><br>"
             f"Are you sure you want to run a {title}?</body></html>"
         )
         if include_anomaly:
@@ -1575,6 +1692,7 @@ class UtilitiesPage(QWidget):
             return
 
         self._reset_wipe_paths = wipe_paths
+        self._reset_profile = dataclasses.replace(profile)
         self._reset_folders = folders
         self._start_cache_preflight()
 
@@ -1669,8 +1787,11 @@ class UtilitiesPage(QWidget):
         )
         self.output.clear()
         self._set_buttons_enabled(False)
+        profile = self._reset_profile
+        paths = list(self._reset_wipe_paths)
+        reason = "fresh-reset" if self._reset_includes_anomaly else "gamma-reset"
         task = StreamTask(
-            lambda report: _wipe_folders(self._reset_wipe_paths, report),
+            lambda report: _backup_then_wipe(profile, paths, reason, report),
             parent=self,
         )
         self._wipe_task = task
@@ -1679,8 +1800,9 @@ class UtilitiesPage(QWidget):
         task.error.connect(self._on_wipe_error)
         task.start()
 
-    def _on_wipe_done(self, _wiped: object) -> None:
+    def _on_wipe_done(self, result: object) -> None:
         self._wipe_task = None
+        backup = result[1] if isinstance(result, tuple) and len(result) == 2 else None
         self._set_buttons_enabled(True)
         profile = self.window.settings.active_profile
         if profile is None:
@@ -1702,6 +1824,15 @@ class UtilitiesPage(QWidget):
                 tr("The active profile's install folders changed during the wipe. Re-install aborted so nothing is installed to the wrong location."),
             )
             return
+        if backup is not None and not self._reset_includes_anomaly:
+            # The CLI's own "preserve" can't keep what the wipe already
+            # deleted; put the settings back after the reinstall instead.
+            mark_settings_restore(
+                profile.profile_name,
+                backup,
+                user_ltx=self._reset_preserve_user,
+                mcm=self._reset_preserve_mcm,
+            )
         if self._reset_includes_anomaly:
             self.summary.setText(tr("Folders wiped. Reinstalling Anomaly and GAMMA..."))
         else:
@@ -1788,7 +1919,8 @@ class UtilitiesPage(QWidget):
             "&nbsp;&nbsp;• DOWNLOAD CACHE<br><br>"
             "The configured Wine/Proton prefix and its Winetricks configuration "
             "will not be deleted.<br><br>"
-            "Please back up anything you want to keep before continuing.<br><br>"
+            "Your saves, user.ltx and MCM settings are backed up automatically first "
+            "(Utilities &gt; Saves &amp; Settings Backup). Mods you added yourself are not.<br><br>"
             "Are you sure you want to completely uninstall Anomaly and GAMMA?</body></html>",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -1806,11 +1938,9 @@ class UtilitiesPage(QWidget):
         self.summary.setText(tr("Removing Anomaly, GAMMA, and cache folders..."))
         self.output.clear()
         self._set_buttons_enabled(False)
+        snapshot = dataclasses.replace(profile)
         task = StreamTask(
-            lambda report: _wipe_folders(
-                uninstall_paths,
-                report,
-            ),
+            lambda report: _backup_then_wipe(snapshot, uninstall_paths, "uninstall", report),
             parent=self,
         )
         self._wipe_task = task

@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -26,24 +27,45 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import __version__, __version_label__, gui_settings
 from ..config import logs_dir
 from ..deck_launch import steam_deck_model
+from ..discord_rpc import (
+    DEFAULT_CLIENT_ID,
+    DETAILS_TEXT,
+    effective_client_id,
+    probe_discord,
+    start_presence,
+    stop_presence,
+    update_presence,
+)
 from ..i18n import LANGUAGE_INFO
 from ..launcher import (
     LaunchError,
     build_runner_tool_command,
     find_extra_protons,
     launch_detached,
-    resolve_runner,
+)
+from ..self_update import commander_appimage_path
+from ..steam_shortcuts import (
+    ShortcutsFileError,
+    add_to_steam,
+    find_shortcuts_vdf,
+    list_steam_accounts,
 )
 from ..themes import THEME_INFO, active_theme
+from ..updates import is_unstable_version, newer_unstable_tag
 from .common import (
+    OK_GREEN,
+    WARN,
+    BackgroundTask,
     NoWheelComboBox,
+    discord_presence_state,
     info_label,
     make_card,
     mo2_running,
     section_label,
+    steam_running,
     tr,
 )
 
@@ -103,6 +125,7 @@ class SettingsPage(QWidget):
         root.addWidget(self._themes_card())
         root.addWidget(self._discord_card())
         root.addWidget(self._playtime_card())
+        root.addWidget(self._steam_card())
         root.addWidget(self._diagnostics_card())
         root.addStretch(1)
 
@@ -117,22 +140,20 @@ class SettingsPage(QWidget):
         self._start_page_combo.currentIndexChanged.connect(self._on_start_page)
         layout.addLayout(_option_row(tr("Page on startup:"), self._start_page_combo))
 
-        # Only shown on Steam Deck hardware. Deck Mode offers itself on the
-        # first launch there, and answering "no, remember that" needs a way
-        # back that is not editing gui-settings.json by hand.
-        self._deck_mode_combo: NoWheelComboBox | None = None
-        if steam_deck_model() is not None:
-            self._deck_mode_combo = NoWheelComboBox()
-            for label, value in (
-                (tr("Ask each time"), "ask"),
-                (tr("Always"), "always"),
-                (tr("Never"), "never"),
-            ):
-                self._deck_mode_combo.addItem(label, value)
-            self._deck_mode_combo.currentIndexChanged.connect(self._on_deck_mode)
-            layout.addLayout(
-                _option_row(tr("Steam Deck Mode on startup:"), self._deck_mode_combo)
-            )
+        # Shown on every machine, not only Deck hardware: Deck Mode's "When
+        # COMMANDER starts" can set "Always" on a desktop PC too, and this
+        # is the way back from the full interface.
+        self._deck_mode_combo = NoWheelComboBox()
+        # The same two choices as Deck Mode's "When COMMANDER starts".
+        for label, value in (
+            (tr("Steam Deck"), "always"),
+            (tr("Desktop"), "never"),
+        ):
+            self._deck_mode_combo.addItem(label, value)
+        self._deck_mode_combo.currentIndexChanged.connect(self._on_deck_mode)
+        layout.addLayout(
+            _option_row(tr("When COMMANDER starts:"), self._deck_mode_combo)
+        )
 
         self._autostart_check = QCheckBox(tr("Start COMMANDER when I log in"))
         self._autostart_check.setToolTip(
@@ -140,7 +161,109 @@ class SettingsPage(QWidget):
         )
         self._autostart_check.toggled.connect(self._on_autostart_toggled)
         layout.addWidget(self._autostart_check)
+
+        self._welcome_check = QCheckBox(tr("Show the Welcome screen on startup"))
+        self._welcome_check.setToolTip(
+            tr("The latest COMMANDER patch notes and links to GitHub, Discord and the credits.")
+        )
+        self._welcome_check.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(welcome_hidden=not on)
+        )
+        layout.addWidget(self._welcome_check)
+
+        self._update_notify_check = QCheckBox(tr("Notify me about GAMMA and COMMANDER updates"))
+        self._update_notify_check.setToolTip(
+            tr("A desktop notification when a new GAMMA or COMMANDER version comes out - once per version, checked in the background while COMMANDER is open.")
+        )
+        self._update_notify_check.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(update_notifications=on)
+        )
+        layout.addWidget(self._update_notify_check)
+
+        # Stable or unstable COMMANDER: which one is running, and one button
+        # to move to the other. The update channel follows the build.
+        build_row = QHBoxLayout()
+        build_row.addWidget(QLabel(tr("COMMANDER build:")))
+        self._build_label = QLabel()
+        build_row.addWidget(self._build_label, 1)
+        self._switch_build_button = QPushButton()
+        self._switch_build_button.setMinimumWidth(240)
+        self._switch_build_button.clicked.connect(self._on_switch_build)
+        #: The unstable tag worth switching to (newer than stable), once the
+        #: background check has answered; None while unknown or none.
+        self._unstable_offer: str | None = None
+        self._unstable_checked = False
+        self._unstable_task: BackgroundTask | None = None
+        build_row.addWidget(self._switch_build_button)
+        layout.addLayout(build_row)
+        self._build_note = info_label("")
+        layout.addWidget(self._build_note)
+        self._render_build()
         return card
+
+    def _render_build(self) -> None:
+        unstable = is_unstable_version(__version__)
+        kind = tr("Unstable") if unstable else tr("Stable")
+        self._build_label.setText(f"{__version_label__}   ·   {kind}")
+        self._build_label.setStyleSheet(
+            f"color: {(WARN if unstable else OK_GREEN).name()}; font-weight: bold;"
+        )
+        appimage = commander_appimage_path() is not None
+        if unstable:
+            self._switch_build_button.setText(tr("Go back to the stable build"))
+            self._switch_build_button.setEnabled(appimage)
+            note = tr(
+                "You're on an unstable build: new features sooner, less tested. "
+                "Going back installs the latest stable release."
+            )
+        else:
+            self._switch_build_button.setText(tr("Try the unstable build"))
+            # Only when a published unstable build is newer than stable.
+            self._switch_build_button.setEnabled(appimage and bool(self._unstable_offer))
+            if self._unstable_offer:
+                note = tr(
+                    "Unstable build {tag} is available: new features sooner, less "
+                    "tested. You can go back to the stable build at any time.",
+                    tag=self._unstable_offer.removeprefix("v"),
+                )
+            elif not self._unstable_checked:
+                note = tr("Checking for an unstable build...")
+            else:
+                note = tr(
+                    "There's no unstable build newer than the stable one right now."
+                )
+            if appimage and not self._unstable_checked:
+                self._check_unstable()
+        if not appimage:
+            self._switch_build_button.setEnabled(False)
+            note += "\n" + tr(
+                "Only the AppImage can switch builds itself. Running from source: "
+                "use 'git switch unstable' or 'git switch main'. The AUR package "
+                "is stable only."
+            )
+        self._build_note.setText(note)
+
+    def _check_unstable(self) -> None:
+        if self._unstable_task is not None:
+            return
+        task = BackgroundTask(newer_unstable_tag, __version__, parent=self)
+        self._unstable_task = task
+
+        def done(tag: object) -> None:
+            self._unstable_task = None
+            self._unstable_checked = True
+            self._unstable_offer = tag if isinstance(tag, str) and tag else None
+            self._render_build()
+
+        task.result.connect(done)
+        task.error.connect(lambda _m: done(None))
+        task.start()
+
+    def _on_switch_build(self) -> None:
+        target = "stable" if is_unstable_version(__version__) else "unstable"
+        switch = getattr(self.window, "switch_commander_build", None)
+        if callable(switch):
+            switch(target)
 
     def _launcher_card(self) -> QWidget:
         card, layout = make_card()
@@ -265,18 +388,61 @@ class SettingsPage(QWidget):
         layout.addWidget(section_label(tr("Discord Rich Presence"), level=2))
         layout.addWidget(
             info_label(
-                tr('Optional: show "Playing S.T.A.L.K.E.R. GAMMA" on your Discord profile while the game runs. Off by default, and does nothing without your own free Application Client ID from https://discord.com/developers/applications.')
+                tr("Show that you're playing S.T.A.L.K.E.R. GAMMA on your Discord profile while the game runs. Just have the Discord app open - no setup needed.")
             )
         )
-        self._discord_enable_check = QCheckBox(tr("Enable Discord Rich Presence"))
+        self._discord_enable_check = QCheckBox(tr("Show my game activity on Discord"))
         self._discord_enable_check.toggled.connect(self._on_discord_enabled_toggled)
         layout.addWidget(self._discord_enable_check)
-        self._discord_client_id_edit = QLineEdit()
-        self._discord_client_id_edit.setPlaceholderText(tr("Discord Application Client ID"))
-        self._discord_client_id_edit.editingFinished.connect(self._on_discord_client_id_changed)
-        layout.addLayout(
-            _option_row(tr("Client ID:"), self._discord_client_id_edit)
+        self._discord_mods_check = QCheckBox(tr("Include the mod count"))
+        self._discord_mods_check.toggled.connect(self._on_discord_mods_toggled)
+        layout.addWidget(self._discord_mods_check)
+        self._discord_playtime_check = QCheckBox(tr("Include the total playtime"))
+        self._discord_playtime_check.toggled.connect(self._on_discord_playtime_toggled)
+        layout.addWidget(self._discord_playtime_check)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        self._discord_status_label = QLabel()
+        self._discord_status_label.setWordWrap(True)
+        status_row.addWidget(self._discord_status_label, 1)
+        self._discord_check_button = QPushButton(tr("Check again"))
+        self._discord_check_button.clicked.connect(self._check_discord)
+        status_row.addWidget(self._discord_check_button)
+        self._discord_test_button = QPushButton(tr("Test"))
+        self._discord_test_button.setToolTip(
+            tr("Show the activity on your Discord profile for 15 seconds.")
         )
+        self._discord_test_button.clicked.connect(self._on_discord_test)
+        status_row.addWidget(self._discord_test_button)
+        layout.addLayout(status_row)
+        self._discord_task: BackgroundTask | None = None
+        self._discord_test_rpc = None
+
+        self._discord_advanced_button = QPushButton(tr("Advanced"))
+        self._discord_advanced_button.setCheckable(True)
+        self._discord_advanced_button.setFlat(True)
+        self._discord_advanced_button.toggled.connect(self._on_discord_advanced_toggled)
+        layout.addWidget(self._discord_advanced_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self._discord_advanced = QWidget()
+        advanced = QVBoxLayout(self._discord_advanced)
+        advanced.setContentsMargins(0, 0, 0, 0)
+        advanced.addWidget(
+            info_label(
+                tr("Only if you want the activity to come from your own Discord application. Leave empty to use COMMANDER's.")
+            )
+        )
+        self._discord_client_id_edit = QLineEdit()
+        self._discord_client_id_edit.setPlaceholderText(DEFAULT_CLIENT_ID)
+        self._discord_client_id_edit.editingFinished.connect(self._on_discord_client_id_changed)
+        id_row = _option_row(tr("Application ID:"), self._discord_client_id_edit)
+        reset = QPushButton(tr("Reset to default"))
+        reset.clicked.connect(self._on_discord_client_id_reset)
+        id_row.addWidget(reset)
+        advanced.addLayout(id_row)
+        self._discord_advanced.setVisible(False)
+        layout.addWidget(self._discord_advanced)
+        self._set_discord_status(None)
         return card
 
     def _playtime_card(self) -> QWidget:
@@ -291,6 +457,25 @@ class SettingsPage(QWidget):
         reset_btn.setObjectName("secondary")
         reset_btn.clicked.connect(self._on_reset_playtime)
         layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        return card
+
+    def _steam_card(self) -> QWidget:
+        card, layout = make_card()
+        layout.addWidget(section_label(tr("Steam"), level=2))
+        layout.addWidget(
+            info_label(
+                tr(
+                    "Add COMMANDER and its Deck Mode to your Steam library, "
+                    "so you can launch either one straight from Steam "
+                    "(including Big Picture and Game Mode) without using "
+                    "Steam's own \"Add a Non-Steam Game\" dialog."
+                )
+            )
+        )
+        add_btn = QPushButton(tr("Add COMMANDER to Steam"))
+        add_btn.setObjectName("secondary")
+        add_btn.clicked.connect(self._on_add_to_steam)
+        layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
         return card
 
     def _diagnostics_card(self) -> QWidget:
@@ -336,6 +521,74 @@ class SettingsPage(QWidget):
             if page is not None and hasattr(page, "refresh"):
                 page.refresh()
 
+    def _on_add_to_steam(self) -> None:
+        vdf_path = find_shortcuts_vdf()
+        if vdf_path is None:
+            accounts = list_steam_accounts()
+            if not accounts:
+                QMessageBox.warning(
+                    self,
+                    tr("Add to Steam"),
+                    tr("Could not find a Steam installation on this machine."),
+                )
+                return
+            labels = [label for label, _path in accounts]
+            label, ok = QInputDialog.getItem(
+                self,
+                tr("Add to Steam"),
+                tr(
+                    "More than one Steam account was found on this machine. "
+                    "Choose which one to add COMMANDER to:"
+                ),
+                labels,
+                0,
+                False,
+            )
+            if not ok:
+                return
+            vdf_path = dict(accounts)[label]
+
+        added = tr(
+            "Added \"STALKER COMMANDER\" and \"STALKER COMMANDER DECK\" to "
+            "your Steam library."
+        )
+        if not steam_running():
+            try:
+                add_to_steam(vdf_path, restart=False)
+            except (OSError, ShortcutsFileError) as exc:
+                QMessageBox.warning(self, tr("Add to Steam"), str(exc))
+                return
+            QMessageBox.information(self, tr("Add to Steam"), added)
+            return
+
+        # Steam must be closed while the file is written: a running client
+        # keeps its own copy of the shortcut list and can save it back over
+        # the new one on exit. So the only safe offer is close-write-restart.
+        answer = QMessageBox.question(
+            self,
+            tr("Add to Steam"),
+            tr(
+                "Steam is running. To add the shortcuts it has to close and "
+                "start again - this closes anything currently running "
+                "through Steam. Restart Steam now?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._steam_restart_task = BackgroundTask(
+            add_to_steam, vdf_path, restart=True, parent=self
+        )
+        self._steam_restart_task.result.connect(
+            lambda _r: self.window.statusBar().showMessage(added, 6000)
+        )
+        self._steam_restart_task.error.connect(
+            lambda err: QMessageBox.warning(self, tr("Add to Steam"), err)
+        )
+        self._steam_restart_task.start()
+        self.window.statusBar().showMessage(tr("Restarting Steam..."), 0)
+
     def _on_start_page(self, *_args) -> None:
         key = self._start_page_combo.currentData()
         if key:
@@ -363,11 +616,90 @@ class SettingsPage(QWidget):
 
     def _on_discord_enabled_toggled(self, checked: bool) -> None:
         gui_settings.save_gui_settings(discord_rpc_enabled=bool(checked))
+        self._discord_mods_check.setEnabled(bool(checked))
+        self._discord_playtime_check.setEnabled(bool(checked))
+
+    def _on_discord_mods_toggled(self, checked: bool) -> None:
+        gui_settings.save_gui_settings(discord_show_mods=bool(checked))
+
+    def _on_discord_playtime_toggled(self, checked: bool) -> None:
+        gui_settings.save_gui_settings(discord_show_playtime=bool(checked))
+
+    def _on_discord_advanced_toggled(self, checked: bool) -> None:
+        self._discord_advanced.setVisible(checked)
+
+    def _discord_client_id(self) -> str:
+        return effective_client_id(self._discord_client_id_edit.text())
 
     def _on_discord_client_id_changed(self) -> None:
-        gui_settings.save_gui_settings(
-            discord_client_id=self._discord_client_id_edit.text().strip()
+        text = self._discord_client_id_edit.text().strip()
+        if text and not text.isdigit():
+            QMessageBox.warning(
+                self,
+                tr("Discord Rich Presence"),
+                tr("An Application ID is a number. Leave the field empty to use COMMANDER's."),
+            )
+            return
+        gui_settings.save_gui_settings(discord_client_id=text)
+        self._check_discord()
+
+    def _on_discord_client_id_reset(self) -> None:
+        self._discord_client_id_edit.clear()
+        self._on_discord_client_id_changed()
+
+    def _set_discord_status(self, connected: bool | None) -> None:
+        if connected is None:
+            text, color = tr("Looking for Discord..."), None
+        elif connected:
+            text, color = tr("● Discord is running - ready"), OK_GREEN
+        else:
+            text, color = (
+                tr("○ Discord not found - open the Discord app, then press Check again"),
+                WARN,
+            )
+        self._discord_status_label.setText(text)
+        self._discord_status_label.setStyleSheet(
+            f"color: {color.name()}; font-weight: bold;" if color else ""
         )
+        self._discord_test_button.setEnabled(bool(connected))
+
+    def _check_discord(self) -> None:
+        if self._discord_task is not None:
+            return
+        self._set_discord_status(None)
+        self._discord_check_button.setEnabled(False)
+        task = BackgroundTask(probe_discord, self._discord_client_id(), parent=self)
+        self._discord_task = task
+
+        def done(result: object) -> None:
+            self._discord_task = None
+            self._discord_check_button.setEnabled(True)
+            self._set_discord_status(result is True)
+
+        task.result.connect(done)
+        task.error.connect(lambda _m: done(False))
+        task.start()
+
+    def _on_discord_test(self) -> None:
+        if self._discord_test_rpc is not None:
+            return
+        rpc = start_presence(self._discord_client_id())
+        if rpc is None:
+            self._set_discord_status(False)
+            return
+        profile = getattr(getattr(self.window, "settings", None), "active_profile", None)
+        state = discord_presence_state(profile, gui_settings.load_gui_settings())
+        update_presence(rpc, DETAILS_TEXT, state=state)
+        self._discord_test_rpc = rpc
+        self._discord_test_button.setEnabled(False)
+        self._discord_test_button.setText(tr("Showing on Discord..."))
+        QTimer.singleShot(15_000, self._end_discord_test)
+
+    def _end_discord_test(self) -> None:
+        stop_presence(self._discord_test_rpc)
+        self._discord_test_rpc = None
+        self._discord_test_button.setText(tr("Test"))
+        self._discord_test_button.setEnabled(True)
 
     def _on_runner_changed(self, *_args) -> None:
         runner = self._runner_combo.currentData()
@@ -383,12 +715,11 @@ class SettingsPage(QWidget):
                 tr("Mod Organizer / the game is currently running.\n\nClose it before opening Winecfg."),
             )
             return
-        state = gui_settings.load_gui_settings()
-        kind = state.get("runner") or "auto"
-        prefixes = state.get("prefixes") or {}
-        prefix = prefixes.get(kind) or state.get("wine_prefix") or ""
         try:
-            runner = resolve_runner(kind, prefix)
+            # The same runner and prefix a launch uses (see
+            # gui_settings.saved_prefix_for) - otherwise this can act on a
+            # different prefix than the one MO2 runs in.
+            runner = gui_settings.configured_runner()
             profile = self.window.settings.active_profile
             cwd = profile.gamma if profile is not None else str(Path.home())
             command, env, cwd = build_runner_tool_command(runner, "winecfg", cwd=cwd)
@@ -415,12 +746,11 @@ class SettingsPage(QWidget):
                 tr("Mod Organizer / the game is currently running.\n\nClose it before applying a display scale change."),
             )
             return
-        state = gui_settings.load_gui_settings()
-        kind = state.get("runner") or "auto"
-        prefixes = state.get("prefixes") or {}
-        prefix = prefixes.get(kind) or state.get("wine_prefix") or ""
         try:
-            runner = resolve_runner(kind, prefix)
+            # The same runner and prefix a launch uses (see
+            # gui_settings.saved_prefix_for) - otherwise this can act on a
+            # different prefix than the one MO2 runs in.
+            runner = gui_settings.configured_runner()
             profile = self.window.settings.active_profile
             cwd = profile.gamma if profile is not None else str(Path.home())
             command, env, cwd = build_runner_tool_command(
@@ -502,8 +832,6 @@ class SettingsPage(QWidget):
 
     # ---------------------------------------------------------------- refresh
     def _on_deck_mode(self, _index: int) -> None:
-        if self._deck_mode_combo is None:
-            return
         gui_settings.save_gui_settings(
             deck_mode_preference=self._deck_mode_combo.currentData() or "ask"
         )
@@ -524,13 +852,23 @@ class SettingsPage(QWidget):
         self._start_page_combo.setCurrentIndex(start_index)
         self._start_page_combo.blockSignals(False)
 
-        if self._deck_mode_combo is not None:
-            self._deck_mode_combo.blockSignals(True)
-            index = self._deck_mode_combo.findData(
-                state.get("deck_mode_preference") or "ask"
-            )
-            self._deck_mode_combo.setCurrentIndex(max(index, 0))
-            self._deck_mode_combo.blockSignals(False)
+        self._welcome_check.blockSignals(True)
+        self._welcome_check.setChecked(not state.get("welcome_hidden", False))
+        self._welcome_check.blockSignals(False)
+        self._update_notify_check.blockSignals(True)
+        self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
+        self._update_notify_check.blockSignals(False)
+
+        self._render_build()
+
+        self._deck_mode_combo.blockSignals(True)
+        preference = state.get("deck_mode_preference") or "ask"
+        if preference == "ask":
+            # Unsettled: shown as what startup does with it on this machine.
+            preference = "always" if steam_deck_model() is not None else "never"
+        index = self._deck_mode_combo.findData(preference)
+        self._deck_mode_combo.setCurrentIndex(max(index, 0))
+        self._deck_mode_combo.blockSignals(False)
 
         self._runner_combo.blockSignals(True)
         self._runner_combo.clear()
@@ -581,9 +919,21 @@ class SettingsPage(QWidget):
         self._discord_enable_check.blockSignals(True)
         self._discord_enable_check.setChecked(bool(state.get("discord_rpc_enabled")))
         self._discord_enable_check.blockSignals(False)
+        self._discord_mods_check.blockSignals(True)
+        self._discord_mods_check.setChecked(bool(state.get("discord_show_mods", True)))
+        self._discord_mods_check.blockSignals(False)
+        self._discord_mods_check.setEnabled(self._discord_enable_check.isChecked())
+        self._discord_playtime_check.blockSignals(True)
+        self._discord_playtime_check.setChecked(bool(state.get("discord_show_playtime", True)))
+        self._discord_playtime_check.blockSignals(False)
+        self._discord_playtime_check.setEnabled(self._discord_enable_check.isChecked())
         self._discord_client_id_edit.blockSignals(True)
-        self._discord_client_id_edit.setText(str(state.get("discord_client_id") or ""))
+        custom_id = str(state.get("discord_client_id") or "")
+        self._discord_client_id_edit.setText(custom_id)
         self._discord_client_id_edit.blockSignals(False)
+        if custom_id:
+            self._discord_advanced_button.setChecked(True)
+        self._check_discord()
 
         current = state.get("theme") or "gamma"
         for key, radio in self._radios.items():

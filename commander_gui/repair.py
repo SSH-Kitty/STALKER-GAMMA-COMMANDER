@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import shutil
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterable
@@ -56,14 +57,37 @@ class ModPackRecord:
         return name
 
     def archive_names(self) -> list[str]:
-        names: list[str] = []
-        if self.zip_name:
-            names.append(self.zip_name)
-        elif "github" in self.dl_link.lower():
-            repo = self.dl_link.rstrip("/").split("/")[-1]
-            if repo:
-                names.append(f"{repo}.zip")
-        return names
+        """The file name(s) this addon's archive has in the download cache.
+
+        Must match what the CLI actually writes, or Verify's repair moves the
+        mod folder aside but not its archive - the reinstall then finds a
+        hash-matching archive, skips extracting it, and the mod is gone.
+
+        * GitHub downloads are cached as ``<repo>.zip`` (github.com/<owner>/
+          <repo>/archive/...) whatever the URL ends in - taking the URL's
+          last segment gave "latest.zip.zip" / "main.zip.zip", and the
+          list's ZipName column is unreliable for them (it can be a stale
+          release name, or carry a checksum after the name).
+        * Everything else uses ZipName, cut at the first whitespace for the
+          same reason.
+        """
+        repo = _github_repo(self.dl_link)
+        if repo:
+            return [f"{repo}.zip"]
+        name = self.zip_name.split()[0] if self.zip_name.strip() else ""
+        return [name] if name else []
+
+
+def _github_repo(url: str) -> str:
+    """``repo`` from a github.com/<owner>/<repo>/... URL, else ""."""
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+    except ValueError:
+        return ""
+    if not parsed.netloc.lower().endswith("github.com"):
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[1] if len(parts) >= 2 else ""
 
 
 def parse_modpack_records(text: str) -> dict[str, ModPackRecord]:
@@ -165,6 +189,8 @@ class RepairPlan:
     #: folder -> the record it was actually matched against (possibly via
     #: the name-only fallback), for every entry in ``repairable``.
     matched_records: dict[str, ModPackRecord] = field(default_factory=dict)
+    #: folder -> (changed files, removed files) the scan found in it.
+    file_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def has_repairable(self) -> bool:
@@ -198,6 +224,15 @@ def classify_problems(
             return parts[1]
         return None
 
+    for key, rels in (("changed", scan.changed), ("removed", scan.removed)):
+        for rel in set(rels):
+            folder = folder_of(rel)
+            if folder is None:
+                continue
+            changed, removed = plan.file_counts.get(folder, (0, 0))
+            plan.file_counts[folder] = (
+                (changed + 1, removed) if key == "changed" else (changed, removed + 1)
+            )
     broken_folders = {folder_of(rel) for rel in set(scan.changed) | set(scan.removed)}
     broken_folders.discard(None)
     broken_folders.update(extra_broken_folders)
@@ -221,6 +256,47 @@ def classify_problems(
         if folder is not None and folder not in plan.added_only:
             plan.added_only.append(folder)
     return plan
+
+
+def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()) -> str:
+    """The full, plain-text list of what a repair will do - shown behind
+    "Show Details..." in the repair prompt, so nothing it touches is hidden
+    behind a "... and N more"."""
+    out: list[str] = []
+    anomaly_problems = list(anomaly_problems)
+    if anomaly_problems:
+        out.append(f"Anomaly files to re-install ({len(anomaly_problems)}):")
+        out.extend(f"  {line}" for line in anomaly_problems)
+        out.append("")
+    if plan is not None and plan.repairable:
+        out.append(f"GAMMA mods to re-install ({len(plan.repairable)}):")
+        for folder in plan.repairable:
+            changed, removed = plan.file_counts.get(folder, (0, 0))
+            parts = []
+            if changed:
+                parts.append(f"{changed} changed")
+            if removed:
+                parts.append(f"{removed} missing")
+            detail = ", ".join(parts) or "missing or empty"
+            record = plan.matched_records.get(folder)
+            archives = ", ".join(record.archive_names()) if record is not None else ""
+            out.append(f"  {folder}  ({detail})" + (f"  <- {archives}" if archives else ""))
+        out.append("")
+    if plan is not None and plan.unrepairable:
+        out.append(f"Left as they are - no download source ({len(plan.unrepairable)}):")
+        out.extend(f"  {name}" for name in plan.unrepairable)
+        out.append("")
+    if plan is not None and plan.added_only:
+        out.append(
+            f"Mods with extra files you added - not touched ({len(plan.added_only)}):"
+        )
+        out.extend(f"  {name}" for name in plan.added_only)
+        out.append("")
+    out.append("Also kept safe:")
+    out.append("  - your modlist.txt (order, enabled/disabled, your own mods) is restored afterwards")
+    out.append("  - user.ltx and MCM settings are backed up first (a repair never touches saves)")
+    out.append("  - mod folders are set aside, not deleted, until their reinstall succeeds")
+    return "\n".join(out).rstrip()
 
 
 _QUARANTINE_DIRNAME = ".verify-quarantine"
@@ -324,6 +400,70 @@ def restore_from_quarantine(record: QuarantineRecord) -> list[str]:
         except OSError as exc:
             failures.append(f"{item.quarantined} -> {item.original}: {exc}")
     return failures
+
+
+@dataclass
+class SettleResult:
+    """What ``settle_quarantine`` did with each set-aside mod."""
+
+    reinstalled: list[str] = field(default_factory=list)
+    restored: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+def _mod_item(record: QuarantineRecord) -> QuarantineItem | None:
+    for item in record.items:
+        if item.original.parent.name == "mods":
+            return item
+    return None
+
+
+def _has_content(folder: Path) -> bool:
+    try:
+        return folder.is_dir() and any(folder.iterdir())
+    except OSError:
+        return False
+
+
+def settle_quarantine(records: Iterable[QuarantineRecord]) -> SettleResult:
+    """After a repair install, keep what was reinstalled, undo what wasn't.
+
+    The installer exiting successfully does not prove every set-aside mod
+    came back: when a mod's cached archive was not set aside with it (a
+    name mismatch, an archive shared with another mod), the installer finds
+    a hash-matching archive, skips extracting it, and the mod folder is
+    simply never recreated. Deleting everything set aside at that point
+    (what the repair used to do) left those mods gone for good - a "repair"
+    that broke the game. So each mod is checked: a non-empty folder means
+    its old copy (and archive) can go; anything else is moved back.
+    """
+    result = SettleResult()
+    for record in records:
+        mod_item = _mod_item(record)
+        if mod_item is not None and _has_content(mod_item.original):
+            for item in record.items:
+                try:
+                    if item.quarantined.is_dir() and not item.quarantined.is_symlink():
+                        shutil.rmtree(item.quarantined)
+                    elif item.quarantined.exists() or item.quarantined.is_symlink():
+                        item.quarantined.unlink()
+                except OSError as exc:
+                    # Harmless leftover; the reinstalled copy is in place.
+                    result.failures.append(f"could not remove {item.quarantined}: {exc}")
+            result.reinstalled.append(record.folder)
+            continue
+        # Not reinstalled: an empty folder the installer may have created
+        # would block the restore, so clear it first.
+        if mod_item is not None and mod_item.original.is_dir():
+            try:
+                mod_item.original.rmdir()
+            except OSError:
+                pass
+        failures = restore_from_quarantine(record)
+        result.failures.extend(failures)
+        if not failures:
+            result.restored.append(record.folder)
+    return result
 
 
 def purge_quarantine(gamma_dir: str) -> None:
@@ -468,3 +608,62 @@ def repair_prefix_foreign_dlls(prefix: str | Path, runner: Runner) -> list[str]:
             actual.unlink()
         repaired.append(relative)
     return repaired
+
+
+#: Where the profile's modlist.txt is kept while a repair's installer runs.
+PRE_REPAIR_SUFFIX = ".pre-repair.bak"
+
+
+def snapshot_modlist(modlist_path: Path | None) -> Path | None:
+    """Copy the profile's modlist.txt aside before a repair's installer runs.
+
+    The repair runs the CLI's ``full-install``, which writes the official
+    modlist.txt over the profile's own - dropping mods the user added and
+    resetting every enable/disable choice. Returns the snapshot path, or
+    None when there was nothing to snapshot.
+    """
+    if modlist_path is None or not modlist_path.is_file():
+        return None
+    snapshot = modlist_path.with_name(modlist_path.name + PRE_REPAIR_SUFFIX)
+    try:
+        shutil.copy2(modlist_path, snapshot)
+    except OSError:
+        return None
+    return snapshot
+
+
+def restore_modlist_after_repair(modlist_path: Path, snapshot: Path | None) -> str:
+    """Put the user's modlist.txt back after a repair, when that's safe.
+
+    Safe when the installer's list only contains mods the user's list already
+    had - the repair changed files, not the modpack - so the user's own
+    list (extra mods, order, enabled/disabled) is restored exactly. If the
+    installer's list has new mods, the repair also applied a GAMMA update;
+    the new list is kept (its new mods must stay listed) and the old one is
+    left as the snapshot for the user. Returns a line for the repair log.
+    """
+    from .modlist import entries, read_lines, save_lines
+
+    if snapshot is None or not snapshot.is_file():
+        return ""
+    try:
+        before = read_lines(snapshot)
+        after = read_lines(modlist_path) if modlist_path.is_file() else []
+        before_names = {name for _status, name in entries(before)}
+        after_names = {name for _status, name in entries(after)}
+    except (OSError, ValueError) as exc:
+        return f"Could not compare modlist.txt with its pre-repair copy ({exc}); kept {snapshot}."
+    if after == before:
+        snapshot.unlink(missing_ok=True)
+        return ""
+    if after_names <= before_names:
+        try:
+            save_lines(modlist_path, before)
+        except OSError as exc:
+            return f"Could not restore your modlist.txt ({exc}); your previous copy is {snapshot}."
+        snapshot.unlink(missing_ok=True)
+        return "Restored your own modlist.txt (mod order, extra mods, enabled/disabled)."
+    return (
+        "The repair also brought in newer GAMMA mods, so the installer's "
+        f"modlist.txt was kept. Your previous one is saved as {snapshot.name}."
+    )

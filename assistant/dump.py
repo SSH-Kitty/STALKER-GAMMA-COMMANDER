@@ -123,8 +123,18 @@ class DumpFile:
     short_name: str
     size: int
     is_text: bool
-    lines: list[str] = field(default_factory=list)
     text: str | None = None
+
+    @property
+    def lines(self) -> list[str]:
+        """The text split into lines, built on each access, not stored.
+
+        Keeping a split copy of every file alongside its text roughly
+        doubled the memory a large dump needed (the text cap alone is
+        256 MB). The analyzers read each file's lines once or twice, so
+        only the file being analysed has a split copy at any moment.
+        """
+        return self.text.splitlines() if self.text else []
 
 
 @dataclass
@@ -217,13 +227,16 @@ class DumpArchive:
                             f"Could not read {resolved.name}: {exc}"
                         ) from exc
                     raw = b"".join(chunks)
+                    del chunks  # the joined copy replaces them
                     decoded_text_bytes += len(raw)
                     if decoded_text_bytes > MAX_TOTAL_TEXT_BYTES:
                         raise DumpError(
                             f"{resolved.name} contains too much decoded text."
                         )
                     entry.text = _ANSI_RE.sub("", raw.decode("utf-8", errors="replace"))
-                    entry.lines = entry.text.splitlines()
+                    # Released now rather than at the next file: the raw
+                    # bytes are a second full copy of the text.
+                    del raw
                 if arcname == "MANIFEST.txt":
                     archive.manifest_text = entry.text
                 archive.files.append(entry)

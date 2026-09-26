@@ -22,6 +22,7 @@ at the Deck's 204 PPI is only about a third of a millimetre wide.
 
 from __future__ import annotations
 
+import re
 import string
 
 from commander_gui.themes import (
@@ -36,15 +37,33 @@ from commander_gui.themes import (
 _MIN_FONT_PX = 9
 
 
+_PX_RE = re.compile(r"(?<![\w.])(\d+)px")
+
+
 def build_deck_stylesheet(
     name: str,
     *,
     font_scale: int = 100,
     font_family: str = "Exo 2",
+    ui_scale: float | None = None,
 ) -> str:
-    """Return the Deck QSS for theme ``name`` at ``font_scale`` percent."""
-    tokens = THEMES.get(name) or THEMES["gamma"]
+    """Return the Deck QSS for theme ``name`` at ``font_scale`` percent.
+
+    ``ui_scale`` (default: the current :mod:`Steamdeck.scale` factor)
+    multiplies *every* pixel value - sizes, paddings, radii and fonts - so a
+    bigger window gets a proportionally bigger interface. ``font_scale``
+    then applies on top, to text only.
+    """
+    from .scale import scale
+
+    factor = scale() if ui_scale is None else ui_scale
+    tokens = dict(THEMES.get(name) or THEMES["gamma"])
+    tokens["card_glass"] = _translucent(tokens.get("card", "#141b15"), 240)
     qss = _DECK_TEMPLATE.safe_substitute(tokens)
+    if factor != 1.0:
+        qss = _PX_RE.sub(
+            lambda match: f"{max(1, round(int(match.group(1)) * factor))}px", qss
+        )
     if font_scale != 100:
         qss = _FONT_SIZE_RE.sub(
             lambda match: f"font-size: {max(_MIN_FONT_PX, round(int(match.group(1)) * font_scale / 100))}px",
@@ -53,6 +72,16 @@ def build_deck_stylesheet(
     return qss.replace(
         "%FONT_FAMILY%", _FONT_FAMILY_MAP.get(font_family, _FALLBACK_FONT)
     )
+
+
+def _translucent(color: str, alpha: int) -> str:
+    """``color`` (any form QColor parses) as an ``rgba()`` at ``alpha``."""
+    from PySide6.QtGui import QColor
+
+    parsed = QColor(color)
+    if not parsed.isValid():
+        return color
+    return f"rgba({parsed.red()}, {parsed.green()}, {parsed.blue()}, {alpha})"
 
 
 _DECK_TEMPLATE = string.Template("""
@@ -89,6 +118,41 @@ QWidget#deckNav {
     background-color: $topbar;
     border-top: 1px solid $border;
 }
+/* The button-prompt strip under the nav bar, like Steam's own footer. */
+QWidget#deckFooter {
+    background-color: $topbar;
+}
+QLabel#deckHintButton {
+    font-size: 12px;
+    font-weight: bold;
+    color: $accent_text;
+    background-color: $text_dim;
+    border-radius: 9px;
+    padding: 1px 8px;
+    min-width: 12px;
+    min-height: 20px;
+    max-height: 20px;
+}
+QLabel#deckClock {
+    font-size: 16px;
+    font-weight: bold;
+    color: $text_bright;
+    background: transparent;
+}
+QLabel#deckBatteryLow {
+    font-size: 18px;
+    font-weight: bold;
+    color: $danger_text;
+    background: transparent;
+}
+QLabel#deckAwake {
+    font-size: 14px;
+    color: $accent_strong;
+    border: 1px solid $accent;
+    border-radius: 12px;
+    padding: 2px 10px;
+    background: transparent;
+}
 QLabel#deckTitle {
     font-size: 28px;
     font-weight: bold;
@@ -97,14 +161,14 @@ QLabel#deckTitle {
     letter-spacing: 2px;
 }
 QLabel#deckWordmark {
-    font-size: 26px;
+    font-size: 22px;
     font-weight: bold;
     letter-spacing: 2px;
     color: $accent_strong;
     background: transparent;
 }
 QLabel#deckByline {
-    font-size: 14px;
+    font-size: 13px;
     letter-spacing: 1px;
     color: $accent_strong;
     background: transparent;
@@ -183,6 +247,13 @@ QLabel#deckRowTitle {
     color: $text_bright;
     background: transparent;
 }
+/* A locked achievement's name: same size, dimmed. */
+QLabel#deckRowTitleDim {
+    font-size: 20px;
+    font-weight: 600;
+    color: $text_dim;
+    background: transparent;
+}
 /* The active profile's row title on the Profile screen, matching desktop's
    profiles_page.py giving that one name #accent instead of plain text. */
 QLabel#deckRowTitleAccent {
@@ -199,6 +270,11 @@ QLabel#deckRowValue {
 QLabel#deckRowValueOk {
     font-size: 18px;
     color: #7dc963;
+    background: transparent;
+}
+QLabel#deckRowValueWarn {
+    font-size: 18px;
+    color: $warn;
     background: transparent;
 }
 /* A small numbered pill in front of a step's label, replacing raw inline
@@ -227,6 +303,89 @@ QFrame#deckCard {
     background-color: $card;
     border: 1px solid $border;
     border-radius: 20px;
+}
+/* A tool tile inside a Utilities card, and the section headings above
+   them. */
+QFrame#deckTile {
+    background-color: $mono;
+    border: 1px solid $border;
+    border-radius: 14px;
+}
+QLabel#deckSection {
+    font-size: 15px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: $accent_strong;
+    background: transparent;
+}
+QFrame#deckDangerCard {
+    background-color: $card;
+    border: 1px solid $danger_border;
+    border-radius: 20px;
+}
+QLabel#deckFooterProfile {
+    font-size: 15px;
+    font-weight: bold;
+    color: $text_info;
+    background: transparent;
+}
+/* Utilities' Run buttons: small pills beside each tool's text. */
+QPushButton#deckRunButton,
+QPushButton#deckRunDanger {
+    min-height: 48px;
+    max-height: 48px;
+    padding: 0 12px;
+    font-size: 17px;
+    border-radius: 24px;
+}
+QPushButton#deckRunDanger {
+    background-color: $danger_bg;
+    color: $danger_text;
+    border: 1px solid $danger_border;
+}
+QPushButton#deckRunDanger:hover {
+    background-color: $danger_hover;
+}
+QPushButton#deckRunDanger:focus {
+    border: 2px solid $focus;
+}
+/* System check: the small "Copy install command" button on a row. */
+QPushButton#deckCopyCommand {
+    min-height: 48px;
+    max-height: 48px;
+    padding: 0 14px;
+    font-size: 15px;
+    font-weight: normal;
+    border-radius: 20px;
+}
+/* The Mods screen's magnifier and "search: xyz" chips. */
+QPushButton#deckIconChip {
+    min-height: 48px;
+    padding: 0;
+    border-radius: 24px;
+}
+QPushButton#deckSearchChip {
+    min-height: 44px;
+    padding: 0 18px;
+    font-size: 16px;
+    border-radius: 22px;
+    color: $accent;
+    border-color: $accent;
+    text-align: left;
+}
+QListWidget#deckChanges {
+    font-size: 17px;
+}
+/* The Dashboard's "can I play?" banner - the one card worth an accent edge. */
+QFrame#deckBanner {
+    background-color: $card;
+    border: 2px solid $accent;
+    border-radius: 20px;
+}
+QScrollArea#deckTextPanel {
+    background-color: $card;
+    border: 1px solid $border;
+    border-radius: 14px;
 }
 QFrame#deckDivider {
     background-color: $border;
@@ -263,6 +422,9 @@ QPushButton#deckPrimary {
     color: $accent_text;
     border: 1px solid $accent;
     border-radius: 16px;
+    /* 2px more than the base padding, handed to the thicker focus ring
+       so focusing the button doesn't grow it and shift the layout. */
+    padding: 2px 22px;
     min-height: 96px;
     font-size: 22px;
     letter-spacing: 1px;
@@ -306,6 +468,7 @@ QPushButton#deckDanger {
     background-color: $danger_bg;
     color: $danger_text;
     border: 1px solid $danger_border;
+    padding: 2px 22px;
     min-height: 96px;
 }
 QPushButton#deckDanger:hover {
@@ -342,10 +505,10 @@ QPushButton#deckNavCell {
     background: transparent;
     border: none;
     border-bottom: 3px solid transparent;
-    border-radius: 14px;
-    min-height: 88px;
-    padding: 0;
-    font-size: 15px;
+    border-radius: 12px;
+    min-height: 50px;
+    padding: 0 6px;
+    font-size: 16px;
     font-weight: normal;
     color: $text_nav;
 }
@@ -357,8 +520,45 @@ QPushButton#deckNavCell:hover {
    reads as a highlight under the label instead of a boxed-off cell. */
 QPushButton#deckNavCell[current="true"] {
     color: $accent;
-    background: transparent;
+    background-color: $chip;
     border-bottom: 3px solid $accent;
+    font-weight: bold;
+}
+/* Every button in an overlay's button row shares one height, whatever
+   its role - a primary Install beside a normal Cancel used to be half as
+   tall again. */
+QPushButton[overlayButton="true"],
+QPushButton#deckPrimary[overlayButton="true"],
+QPushButton#deckDanger[overlayButton="true"] {
+    min-height: 64px;
+    max-height: 64px;
+    font-size: 20px;
+}
+/* Primary and danger carry 2px of extra padding plus a 1px border (traded
+   for a 3px ring on focus), so their content box is 4px shorter to land on
+   the same outer height as a plain button's 64px + 1px border. */
+QPushButton#deckPrimary[overlayButton="true"],
+QPushButton#deckDanger[overlayButton="true"] {
+    min-height: 60px;
+    max-height: 60px;
+}
+/* On-screen keyboard keys: compact, no side padding, so ten fit a row. */
+QPushButton#deckKey,
+QPushButton#deckPrimaryKey {
+    min-height: 60px;
+    padding: 0;
+    font-size: 22px;
+    border-radius: 12px;
+}
+QPushButton#deckKey:checked {
+    background-color: $chip;
+    color: $accent;
+    border-color: $accent;
+}
+QPushButton#deckPrimaryKey {
+    background-color: $primary;
+    color: $accent_text;
+    border: 1px solid $accent;
 }
 
 /* ----------------------------------------------------------------- rows */
@@ -370,6 +570,13 @@ QWidget#deckRow {
 QWidget#deckRow:hover {
     background-color: $btn_hover;
     border-color: $border_secondary;
+}
+/* Status cards (Installed / Ready ...) look like rows but are read-only:
+   no hover lift, no focus ring - nothing about them says "press me". */
+QWidget#deckStatusRow {
+    background-color: $card;
+    border: 1px solid $border;
+    border-radius: 14px;
 }
 
 /* ---------------------------------------------------------------- input */
@@ -387,6 +594,10 @@ QLineEdit {
 QLineEdit::placeholder {
     color: $text_dim;
 }
+QLineEdit#deckKeyboardPreview {
+    font-size: 24px;
+    border: 2px solid $accent;
+}
 
 /* ----------------------------------------------------------------- list */
 QListWidget {
@@ -398,12 +609,24 @@ QListWidget {
 }
 QListWidget::item {
     color: $text;
+    padding-left: 14px;
     border: 2px solid transparent;
     border-radius: 12px;
 }
+QListWidget::item:hover {
+    background-color: $btn_hover;
+    color: $text_bright;
+}
+/* The current row keeps a muted outline while focus is elsewhere (on a
+   chip above the list, say), and only gets the full focus ring while the
+   list itself has focus - otherwise two things on screen looked focused. */
 QListWidget::item:selected {
     background-color: $btn_hover;
     color: $text_bright;
+    border: 2px solid $border_strong;
+}
+QListWidget::item:selected:focus,
+QListWidget:focus::item:selected {
     border: 2px solid $focus;
 }
 
@@ -437,23 +660,29 @@ QPlainTextEdit#deckLog {
 QLabel#deckChipOk,
 QLabel#deckChipWarn,
 QLabel#deckChipBad {
-    border-radius: 20px;
-    padding: 6px 12px;
+    border-radius: 16px;
+    padding: 0 14px;
     font-size: 16px;
+    font-weight: 600;
     min-width: 92px;
+    min-height: 32px;
+    max-height: 32px;
 }
+/* Transparent pills: a status sits *on* its row rather than being a box
+   of its own, so the row's hover/focus lift shows straight through it
+   instead of leaving a dark block where the chip is. */
 QLabel#deckChipOk {
-    background-color: $chip;
+    background: transparent;
     color: $chip_ok;
     border: 1px solid $chip_ok_border;
 }
 QLabel#deckChipWarn {
-    background-color: $chip;
+    background: transparent;
     color: $warn;
     border: 1px solid $border_strong;
 }
 QLabel#deckChipBad {
-    background-color: $danger_bg;
+    background: transparent;
     color: $danger_text;
     border: 1px solid $danger_border;
 }
@@ -466,6 +695,88 @@ QFrame#deckOverlayPanel {
     background-color: $card;
     border: 2px solid $border_strong;
     border-radius: 20px;
+}
+/* The Welcome panel: the theme's card colour, slightly see-through, so the
+   screen behind it still shows. */
+QFrame#deckOverlayPanelGlass {
+    background-color: $card_glass;
+    border: 2px solid $border_strong;
+    border-radius: 20px;
+}
+/* Welcome screen: your version -> latest release, on one strip. */
+QFrame#deckVersionBar {
+    background-color: $chip;
+    border: 1px solid $border;
+    border-radius: 12px;
+}
+QPushButton[overlayHeaderButton="true"] {
+    min-height: 48px;
+    max-height: 48px;
+    padding: 0 16px;
+    font-size: 17px;
+}
+QCheckBox#deckCheck {
+    font-size: 16px;
+    color: $text_dim;
+    spacing: 10px;
+    min-height: 48px;
+    padding: 0 8px;
+    border-radius: 10px;
+}
+QCheckBox#deckCheck:focus {
+    color: $text_bright;
+    background-color: $btn_hover;
+}
+QCheckBox#deckCheck::indicator {
+    width: 24px;
+    height: 24px;
+    border: 2px solid $border_strong;
+    border-radius: 6px;
+    background-color: $input;
+}
+QCheckBox#deckCheck::indicator:checked {
+    background-color: $accent;
+    border-color: $accent;
+}
+/* Play GAMMA while the game runs: same size as the hero, danger colours. */
+QPushButton#deckHeroDanger {
+    background-color: $danger_bg;
+    color: $danger_text;
+    border: 2px solid $danger_border;
+    border-radius: 22px;
+    min-height: 168px;
+    font-size: 32px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+QPushButton#deckHeroDanger:hover {
+    background-color: $danger_hover;
+}
+/* COMMANDER update status, far left of the footer. */
+QLabel#deckFooterOk {
+    font-size: 15px;
+    color: #7dc963;
+    background: transparent;
+}
+QLabel#deckFooterWarn {
+    font-size: 15px;
+    font-weight: bold;
+    color: #d9a04c;
+    background: transparent;
+}
+/* Game stats on the Play screen. */
+QLabel#deckStatValue {
+    font-size: 24px;
+    font-weight: bold;
+    color: $accent;
+    background: transparent;
+}
+QLabel#deckSection {
+    font-size: 17px;
+    font-weight: bold;
+    color: $accent;
+    background: transparent;
+    padding-top: 6px;
 }
 QLabel#deckOverlayTitle {
     font-size: 24px;
@@ -538,9 +849,65 @@ QPushButton#deckHero:focus {
     border: 2px solid $focus;
     background-color: $hero_hover1;
 }
+QPushButton#deckPrimaryKey:focus {
+    border: 3px solid $focus;
+}
+/* Primary and danger buttons set their own border by object name, and an
+   ID selector outranks the bare :focus rule above - without these the
+   focused Play GAMMA / Quit COMMANDER looked exactly like unfocused ones.
+   3px, not 2px: their fill is already bright, so a thin ring disappears.
+   The primary ring uses $text, not $focus: in every theme $focus is the
+   same hue as the primary fill and the ring blended into it. */
+QPushButton#deckPrimary:focus {
+    border: 3px solid $text;
+    padding: 0 20px;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 $accent_strong, stop: 1 $primary_hover
+    );
+}
+QPushButton#deckDanger:focus {
+    border: 3px solid $focus;
+    padding: 0 20px;
+    background-color: $danger_hover;
+}
+/* A full ring, not only the underline: the current tab already has an
+   accent underline, and $focus is the same hue, so an underline alone left
+   "focused" and "current" looking identical. */
 QPushButton#deckNavCell:focus {
+    border: 2px solid $focus;
     border-bottom: 3px solid $focus;
     background-color: $btn_hover;
+}
+QPushButton#deckNavCell[current="true"]:focus {
+    border: 2px solid $focus;
+    border-bottom: 3px solid $focus;
+    color: $text_bright;
+}
+/* Checked chips and keys set their border by state, which outranks the bare
+   :focus rule - a focused "Enabled" filter or a Shift that was on showed no
+   ring at all. */
+QPushButton#deckChip:checked:focus,
+QPushButton#deckKey:checked:focus {
+    border: 3px solid $focus;
+}
+/* The Stop button while the game runs: it sets its own border by ID. */
+QPushButton#deckDiscord {
+    background-color: #4E59CF;
+    border: 2px solid #4E59CF;
+    color: #f2f3ff;
+    font-weight: bold;
+}
+QPushButton#deckDiscord:hover {
+    background-color: #5865F2;
+}
+QPushButton#deckDiscord:focus {
+    border: 4px solid $focus;
+    background-color: #5865F2;
+}
+QPushButton#deckHeroDanger:focus {
+    border: 4px solid $focus;
+    background-color: $danger_hover;
 }
 
 /* --------------------------------------------------------- message boxes

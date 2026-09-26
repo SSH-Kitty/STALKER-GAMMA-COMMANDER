@@ -28,6 +28,7 @@ from commander_gui.launcher import (
     default_launch_target,
     ensure_runner_prefix,
     find_extra_protons,
+    kill_stray_debuggers,
     launch_detached,
     parse_mo2_executables,
     read_log_tail,
@@ -36,10 +37,15 @@ from commander_gui.launcher import (
     runner_graphics_error,
     runner_prefix_error,
 )
-from commander_gui.ui.common import exe_pids, mo2_pids
+from commander_gui.ui.common import crash_dump_names, exe_pids, mo2_pids
+from commander_gui.ui.play_page import _CRASH_POLL_INTERVAL_MS, _CRASH_POLL_MAX_ATTEMPTS
 
-#: How often the launch watchdog looks at the log and the process table.
+#: How often the launch watchdog looks at the log and the process table:
+#: fast while the game is starting (a crash loop must be caught within
+#: seconds), slow once it runs - each tick runs pgrep, and doing that four
+#: times a second for a whole session cost CPU and battery on the Deck.
 _POLL_MS = 250
+_RUNNING_POLL_MS = 2000
 
 #: Give up waiting for the game to appear after this long. MO2 itself
 #: starting is confirmation enough that the runner works; past this point
@@ -80,6 +86,8 @@ class DeckLaunchController(QObject):
     status = Signal(str)
     #: (title, message) for a failure worth putting in front of the user.
     failed = Signal(str, str)
+    #: A session ended and X-Ray wrote a new crash dump.
+    crashed = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -89,6 +97,10 @@ class DeckLaunchController(QObject):
         self._timer.timeout.connect(self._poll)
         self._active = False
         self._started_at = 0.0
+        #: When the game itself first appeared - playtime counts from here,
+        #: not from the Play press, so Mod Organizer's own start-up (a minute
+        #: or more on a first launch) is not billed as time played.
+        self._game_started_at = 0.0
         self._game_seen = False
         self._log_path = logs_dir() / "launcher.log"
         self._profile_name = ""
@@ -98,15 +110,63 @@ class DeckLaunchController(QObject):
         # own executable for exactly this reason.
         self._watch_exe: str | None = None
         self._pre_launch_pids: set[int] = set()
+        #: True for Open MO2 (Mod Organizer's own window, no game target):
+        #: the session is MO2 itself, so the screen says so instead of
+        #: "Quit Game".
+        self._mo2_only = False
+        #: The launched runner's environment, to find its prefix's winedbg.
+        self._runner_env: dict[str, str] = {}
+        #: Crash dumps that already existed at launch, and the bounded poll
+        #: that looks for a new one after the session ends (X-Ray can take
+        #: tens of seconds to finish writing it).
+        self._anomaly = ""
+        self._crash_baseline: set[str] = set()
+        self._crash_attempts_left = 0
+        self._crash_timer = QTimer(self)
+        self._crash_timer.setSingleShot(True)
+        self._crash_timer.setInterval(_CRASH_POLL_INTERVAL_MS)
+        self._crash_timer.timeout.connect(self._poll_crash)
 
     def is_active(self) -> bool:
         return self._active
+
+    def mo2_only(self) -> bool:
+        """True while the active session is Mod Organizer alone (Open MO2)."""
+        return self._active and self._mo2_only
+
+    def game_running(self) -> bool:
+        return self._active and self._game_seen
+
+    def session_seconds(self) -> float:
+        """How long the game has been running this session, or 0."""
+        if not self.game_running():
+            return 0.0
+        return max(0.0, time.time() - self._game_started_at)
+
+    def force_stop(self) -> None:
+        """Kill everything this launch started.
+
+        The Deck has no Alt+F4 and Game Mode has no task manager, so a game
+        or Mod Organizer that hangs on exit otherwise leaves the user with
+        nothing but a reboot. The session is still recorded.
+        """
+        if not self._active:
+            return
+        seen = self._game_seen
+        elapsed = self.session_seconds()
+        self._registry.cleanup_all()
+        self._kill_stray_debuggers()
+        self._stop_watching()
+        if seen:
+            self._record_playtime(elapsed)
+        self.status.emit(tr("Stopped"))
 
     # -- launching --------------------------------------------------------
     def launch(self, profile, *, target: str | None, direct=None) -> None:
         """Start the game. ``direct`` bypasses MO2 with an Mo2Executable."""
         if self._active:
             return
+        self._crash_timer.stop()
         state = gui_settings.load_gui_settings()
         kind = state.get("runner") or "auto"
         # The raw saved prefix, as the desktop Play page passes it. Not
@@ -115,6 +175,8 @@ class DeckLaunchController(QObject):
         # produced STEAM_COMPAT_DATA_PATH=<x>/pfx - a prefix inside the prefix.
         prefix = (state.get("prefixes") or {}).get(kind) or state.get("wine_prefix") or ""
 
+        # Set before _set_active(), whose state_changed the screen labels from.
+        self._mo2_only = direct is None and not target
         # Announce before the synchronous work below: resolving a runner and
         # creating a Wine prefix touch the disk, and on a Deck's storage that
         # is long enough to look like a freeze if nothing has been said yet.
@@ -123,6 +185,7 @@ class DeckLaunchController(QObject):
 
         try:
             runner = resolve_runner(kind, prefix)
+            self._runner_env = dict(runner.env)
             if direct is not None:
                 command, env, cwd = build_direct_command(direct, runner)
                 self._watch_exe = Path(direct.binary).name if direct.binary else None
@@ -140,6 +203,8 @@ class DeckLaunchController(QObject):
             self._pre_launch_pids = (
                 exe_pids(self._watch_exe) if self._watch_exe else set()
             )
+            self._anomaly = profile.anomaly or ""
+            self._crash_baseline = crash_dump_names(self._anomaly) if self._anomaly else set()
             launch_detached(
                 command,
                 env,
@@ -158,7 +223,9 @@ class DeckLaunchController(QObject):
 
         self._profile_name = profile.profile_name or ""
         self._started_at = time.time()
+        self._game_started_at = 0.0
         self._game_seen = False
+        self._timer.setInterval(_POLL_MS)
         self.status.emit(tr("Waiting for Mod Organizer..."))
         self._timer.start()
 
@@ -210,7 +277,10 @@ class DeckLaunchController(QObject):
             # Launching MO2 itself: MO2's own window is the session.
             running = bool(mo2_pids())
         if running:
-            self._game_seen = True
+            if not self._game_seen:
+                self._game_seen = True
+                self._game_started_at = time.time()
+                self._timer.setInterval(_RUNNING_POLL_MS)
             self.status.emit(tr("Running"))
             return
         if not self._game_seen and mo2_pids():
@@ -221,7 +291,7 @@ class DeckLaunchController(QObject):
 
         if self._game_seen:
             # Ran and exited: a normal session end.
-            self._finish_session(elapsed)
+            self._finish_session(time.time() - self._game_started_at)
             return
 
         if elapsed < 6.0:
@@ -257,6 +327,20 @@ class DeckLaunchController(QObject):
         self._stop_watching()
         self._record_playtime(elapsed)
         self.status.emit(tr("Ready"))
+        # Only a natural exit: a Force Stop is the user's own doing.
+        if self._anomaly:
+            self._crash_attempts_left = _CRASH_POLL_MAX_ATTEMPTS
+            self._poll_crash()
+
+    def _poll_crash(self) -> None:
+        new_dumps = crash_dump_names(self._anomaly) - self._crash_baseline
+        if new_dumps:
+            self._crash_baseline |= new_dumps
+            self.crashed.emit()
+            return
+        self._crash_attempts_left -= 1
+        if self._crash_attempts_left > 0:
+            self._crash_timer.start()
 
     def _record_playtime(self, elapsed: float) -> None:
         """Add this session to the shared per-profile playtime tally.
@@ -277,21 +361,9 @@ class DeckLaunchController(QObject):
             playtime_seconds=playtime, last_played_ts=last_played
         )
 
-    @staticmethod
-    def _kill_stray_debuggers() -> None:
-        """winedbg instances that escaped the launch's process group."""
-        import subprocess
-
-        try:
-            subprocess.run(
-                ["pkill", "-f", "winedbg"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+    def _kill_stray_debuggers(self) -> None:
+        """winedbg instances of *this* prefix that escaped the process group."""
+        kill_stray_debuggers(self._runner_env)
 
     def _stop_watching(self) -> None:
         self._timer.stop()
@@ -305,3 +377,4 @@ class DeckLaunchController(QObject):
 
     def shutdown(self) -> None:
         self._timer.stop()
+        self._crash_timer.stop()

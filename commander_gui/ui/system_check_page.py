@@ -546,6 +546,38 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     return checks, not required_missing, detected_overrides
 
 
+#: How the checks from _collect_checks() are grouped for display: section
+#: title and the check labels it holds, in order. Shared with Deck Mode's
+#: System screen so both interfaces group them the same way.
+CHECK_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "System",
+        (
+            "Active profile",
+            "Anomaly installation",
+            "GAMMA modpack",
+            "GAMMA CLI",
+            "Linux system",
+        ),
+    ),
+    (
+        "Required Tools",
+        (
+            "Steam",
+            "Wine",
+            "umu-run",
+            "Winetricks",
+            "Protontricks",
+            "Vulkan",
+            "32-bit Vulkan",
+        ),
+    ),
+    ("Runtime Libraries", ("Runtime libraries",)),
+    ("Proton Builds", ("Proton Builds",)),
+    ("Optional Enhancements", ("GameMode", "MangoHud")),
+)
+
+
 class SystemCheckPage(QWidget):
     """Read-only system checks with commands the user can run manually."""
 
@@ -619,13 +651,7 @@ class SystemCheckPage(QWidget):
         check_layout.addWidget(self.checking_bar)
 
         self._sections: dict[str, QVBoxLayout] = {}
-        for section_title in (
-            "System",
-            "Required Tools",
-            "Runtime Libraries",
-            "Proton Builds",
-            "Optional Enhancements",
-        ):
+        for section_title, _labels in CHECK_SECTIONS:
             section = QWidget()
             section.setObjectName("checkSection")
             section_layout = QVBoxLayout(section)
@@ -759,46 +785,10 @@ class SystemCheckPage(QWidget):
             "command": "",
         }
         try:
-            self._update_section(
-                "System",
-                [
-                    by_label.get(label, _missing)
-                    for label in (
-                        "Active profile",
-                        "Anomaly installation",
-                        "GAMMA modpack",
-                        "GAMMA CLI",
-                        "Linux system",
-                    )
-                ],
-            )
-            self._update_section(
-                "Required Tools",
-                [
-                    by_label.get(label, _missing)
-                    for label in (
-                        "Steam",
-                        "Wine",
-                        "umu-run",
-                        "Winetricks",
-                        "Protontricks",
-                        "Vulkan",
-                        "32-bit Vulkan",
-                    )
-                ],
-            )
-            self._update_section(
-                "Runtime Libraries",
-                [by_label.get("Runtime libraries", _missing)],
-            )
-            self._update_section(
-                "Proton Builds",
-                [by_label.get("Proton Builds", _missing)],
-            )
-            self._update_section(
-                "Optional Enhancements",
-                [by_label.get(label, _missing) for label in ("GameMode", "MangoHud")],
-            )
+            for title, labels in CHECK_SECTIONS:
+                self._update_section(
+                    title, [by_label.get(label, _missing) for label in labels]
+                )
         except (KeyError, TypeError, ValueError) as exc:
             self.summary.setText(tr("System check display failed: {exc}", exc=exc))
             self.last_checked_label.setText(
@@ -894,7 +884,7 @@ class SystemCheckPage(QWidget):
                 lambda _checked=False, value=command, btn=copy_button: (
                     QGuiApplication.clipboard().setText(value),
                     btn.setText(tr("Copied!")),
-                    QTimer.singleShot(1500, lambda b=btn: self._revert_copy_button(b)),
+                    QTimer.singleShot(1500, btn, lambda b=btn: self._revert_copy_button(b)),
                 )
             )
             row.addWidget(copy_button, 0, 2)

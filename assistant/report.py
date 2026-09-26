@@ -9,11 +9,11 @@ import tempfile
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 
-from . import __version_label__
+from commander_gui import __version_label__
+
 from .dump import DumpArchive, human_size
 from .findings import (
     CATEGORIES,
-    CATEGORY_INFO,
     SEVERITY_COLOR,
     SEVERITY_LABEL,
     Finding,
@@ -56,7 +56,7 @@ def export_report(
         "",
         f"- **Dump file:** {_code(dump.path.name)}",
         f"- **Analyzed:** {stamp}",
-        f"- **Assistant version:** {__version_label__}",
+        f"- **COMMANDER version:** {__version_label__}",
         (
             f"- **Archive size:** {human_size(dump.size)} · "
             f"{len(dump.files)} files ({len(text_files)} scanned, "
@@ -249,4 +249,3 @@ def _scanned_lists(dump: DumpArchive) -> tuple[list[str], list[str]]:
 
 
 # Re-exported so callers can mention the info category without new imports.
-INFO_CATEGORY = CATEGORY_INFO

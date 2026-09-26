@@ -67,6 +67,9 @@ def _desktop_exec(parts: list[str]) -> str:
     _RESERVED = "\"'\\`$&;<>~|*?#()"
     escaped: list[str] = []
     for part in parts:
+        if any(ord(char) < 32 or ord(char) == 127 for char in part):
+            # A newline would end Exec= early and turn the rest into keys.
+            raise ValueError("Autostart command contains a control character")
         escaped_part = part.replace("%", "%%")
         if any(char.isspace() for char in escaped_part) or any(
             char in escaped_part for char in _RESERVED
@@ -83,7 +86,10 @@ def _desktop_exec(parts: list[str]) -> str:
             escaped.append(f'"{escaped_part}"')
         else:
             escaped.append(escaped_part)
-    return " ".join(escaped)
+    # The general string-value escaping applies on top of the quoting above
+    # (readers undo it first), so every backslash is doubled once more -
+    # a literal backslash in a quoted argument ends up as four.
+    return " ".join(escaped).replace("\\", "\\\\")
 
 
 def autostart_desktop_path() -> Path:
@@ -109,12 +115,17 @@ def enable_autostart() -> bool:
         _LAST_ERROR = "Could not determine the command to autostart."
         return False
     path = autostart_desktop_path()
+    try:
+        exec_line = _desktop_exec(cmd)
+    except ValueError as exc:
+        _LAST_ERROR = str(exc)
+        return False
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=STALKER COMMANDER\n"
         "Comment=Install, update and launch the STALKER Anomaly + GAMMA Modpack\n"
-        f"Exec={_desktop_exec(cmd)}\n"
+        f"Exec={exec_line}\n"
         "Icon=stalker-gamma-commander\n"
         "Terminal=false\n"
         "X-GNOME-Autostart-enabled=true\n"

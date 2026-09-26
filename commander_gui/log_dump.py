@@ -131,6 +131,49 @@ def _walk_candidates(root: Path) -> list[Path]:
     return found
 
 
+#: Inside the Wine prefix, only these are the game's. The default prefix
+#: (~/Games/umu/umu-default) is shared with every other game umu runs, so a
+#: full walk swept up other launchers' logs and raw memory dumps.
+_PREFIX_SUBTREES = ("drive_c/users",)
+_PREFIX_SUBTREE_NAMES = {"modorganizer", "mod organizer 2", "stalker", "gamma", "anomaly"}
+
+
+def _prefix_candidates(root: Path) -> list[Path]:
+    """Game-relevant logs in a Wine prefix: its own top-level logs (e.g.
+    winetricks.log) and any Mod Organizer/Anomaly folder under the users'
+    profile directories - never raw minidumps, which may be another game's
+    process memory."""
+    if not root.is_dir():
+        return []
+    try:
+        top_level = sorted(root.iterdir())
+    except OSError:
+        top_level = []
+    found = [
+        entry
+        for entry in top_level
+        if not entry.is_symlink() and entry.is_file() and _is_candidate(entry)
+    ]
+    for subtree in _PREFIX_SUBTREES:
+        base = root / subtree
+        if not base.is_dir() or base.is_symlink():
+            continue
+        for path in _walk_candidates(base):
+            relative_parts = {part.lower() for part in path.relative_to(base).parts[:-1]}
+            if relative_parts & _PREFIX_SUBTREE_NAMES:
+                found.append(path)
+    return [p for p in found if p.suffix.lower() not in {".dmp", ".mdmp"}]
+
+
+def _scrub(text: str) -> str:
+    """Credential redaction plus the home path, which names the user."""
+    from .diagnostics import _redact
+
+    home = str(Path.home())
+    redacted = _redact(text)
+    return redacted.replace(home, "~") if len(home) > 1 else redacted
+
+
 def _unique_path(directory: Path, name: str) -> Path:
     """Return *name* in *directory*, suffixing -2, -3... on collisions."""
     candidate = directory / name
@@ -175,7 +218,10 @@ def build_log_dump(
                 if not root.is_dir():
                     manifest_lines.append(f"[missing] {label}: {root}")
                     continue
-                for file_path in _walk_candidates(root):
+                candidates = (
+                    _prefix_candidates(root) if label == "wine-prefix" else _walk_candidates(root)
+                )
+                for file_path in candidates:
                     try:
                         size = file_path.stat().st_size
                     except OSError:
@@ -189,13 +235,11 @@ def build_log_dump(
                     relative = file_path.relative_to(root)
                     arcname = f"{safe_label}/{relative.as_posix()}"
                     try:
-                        if file_path.suffix.lower() in {".log", ".crash"}:
-                            from .diagnostics import _redact
-
+                        if file_path.suffix.lower() in {".log", ".crash", ".txt"}:
                             content = file_path.read_bytes().decode(
                                 "utf-8", errors="replace"
                             )
-                            zf.writestr(arcname, _redact(content))
+                            zf.writestr(arcname, _scrub(content))
                         else:
                             zf.write(file_path, arcname)
                     except OSError:
@@ -216,9 +260,7 @@ def build_log_dump(
                     manifest_lines.append(f"[{tag}] {arcname} ({size} bytes)")
             for name, text in sorted((extra_texts or {}).items()):
                 safe_name = _safe_archive_part(name)
-                from .diagnostics import _redact
-
-                zf.writestr(f"report/{safe_name}", _redact(text))
+                zf.writestr(f"report/{safe_name}", _scrub(text))
                 manifest_lines.append(f"[ok] report/{safe_name}")
                 included += 1
             if skipped:
