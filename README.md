@@ -24,7 +24,7 @@
   <a href="https://discord.gg/6A9psrtYhh">Discord</a>
 </p>
 
-<img width="1340" height="1010" alt="1 Dashboard" src="https://github.com/user-attachments/assets/c5efc039-73a5-49a7-aa8f-a3399b20b0da" />
+<img width="1342" height="1010" alt="1-dashboard" src="https://github.com/user-attachments/assets/16576eb6-a9e1-4135-bc3d-9a93a59b7202" />
 
 ## What this is
 
@@ -44,7 +44,7 @@ The landing page. Shows the active profile, install status for Anomaly and GAMMA
 ### Install
 Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent) and an overall completion bar. Pick a base folder and hit **Create folders** to auto-generate the Anomaly/GAMMA/cache layout.
 
-<img width="1340" height="1010" alt="image" src="https://github.com/user-attachments/assets/75a8897d-30ee-48bf-8e13-6bd767e5a080" />
+<img width="1342" height="1010" alt="2-install" src="https://github.com/user-attachments/assets/bacd6e10-0645-4b80-a3f7-819fc8630254" />
 
 - If a download is interrupted, the next launch offers **Resume GAMMA Installation** — cached archives are hash-verified and reused, only missing or changed ones are re-downloaded.
 - **Minimal mode** deletes addon archives after extraction to save ~50 GB of disk space.
@@ -54,7 +54,8 @@ Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table
 ### Play
 Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's executable without the MO2 virtual file system. Targets are read straight from `ModOrganizer.ini`, with `AnomalyLauncher.exe` used as a fallback if none are found.
 
-<img width="1340" height="1008" alt="2 Play Page" src="https://github.com/user-attachments/assets/3da4027e-311e-4f70-9cf3-dc666f7dda5c" />
+<img width="1342" height="1010" alt="3-play" src="https://github.com/user-attachments/assets/fb91b2e0-6422-4517-bd1f-f9a3cd401fbe" />
+
 
 - **Auto runner detection** — the newest installed GE-Proton build is picked automatically and launched through `umu-run`.
 - **Built-in GE-Proton installer** — browse recent GE-Proton releases, download with a progress bar and cancel support, and COMMANDER verifies the SHA-512 checksum and installs it into `compatibilitytools.d` for you. No manual downloading or extracting.
@@ -68,14 +69,14 @@ Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's execut
 ### Updates
 Compares your installed GAMMA version and addon list against the latest official data — without hitting the rate-limited GitHub REST API — and shows exactly what changed: Added, Modified, Removed, and archive-name changes.
 
-<img width="1340" height="1010" alt="3 Updates" src="https://github.com/user-attachments/assets/3b88685a-9275-4a70-991b-e7d24db915aa" />
+<img width="1342" height="1010" alt="4-update" src="https://github.com/user-attachments/assets/6d54ad35-921d-46be-9501-454b8d8a2137" />
 
 Applying updates reuses the same live progress UI as a fresh install, respects the Minimal/preserve-settings options, and holds the global install lock so it can never run alongside another install. A **background check runs at most once a day** even if you never open this page, with a desktop notification if one is found. If an update doesn't go well, **Undo Last Update** restores the `modlist.txt` snapshot taken right before it was applied.
 
 ### Mod Manager
 Direct, careful editing of the active MO2 profile's `modlist.txt` — search, enable/disable, delete and reorder mods, grouped by the `_separator` categories GAMMA ships.
 
-<img width="1340" height="1008" alt="4 Mod Manager" src="https://github.com/user-attachments/assets/d00fa817-fd02-4b20-ada5-ec4405b9bf19" />
+<img width="1342" height="1010" alt="5-modmanager" src="https://github.com/user-attachments/assets/ebfc0f97-bcdd-447e-a81b-5bd66e4df603" />
 
 - **Drag-and-drop reordering** with multi-selection support, plus Move Up/Down.
 - **Reversed load order detection**: a GAMMA load order that has been flipped end to end (which crashes the game on startup) is flagged in the Mod Manager and before launching, with a one-click fix.
@@ -98,12 +99,12 @@ Create, edit, activate and delete CLI profiles — each with its own Anomaly, GA
 ### System Check
 Checks every dependency GAMMA and MO2 need in one place: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the 32-bit loader), each individual Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a copyable install command for your distro, and manual overrides let you point COMMANDER at tools installed in non-standard locations.
 
-<img width="1340" height="1009" alt="5 System Check" src="https://github.com/user-attachments/assets/f33693a0-6aaa-4d39-8d99-e686d8fc7a43" />
+<img width="1342" height="1010" alt="6-systemcheck" src="https://github.com/user-attachments/assets/425ffc07-522d-4a52-a611-3dc0e7c46a4f" />
 
 ### Utilities
 A toolbox for maintenance and recovery:
 
-<img width="1340" height="1009" alt="6 Utilities" src="https://github.com/user-attachments/assets/26ab9f2f-db80-467a-aa40-65aa0d6f55a8" />
+<img width="1342" height="1010" alt="7-utilities" src="https://github.com/user-attachments/assets/114caa0d-24a3-4d56-a38f-c2c1b1890221" />
 
 - **Cache cleanup** — preview which archives are out of date and how much space they'll free, then clean them.
 - **Clear shader cache** and **Remove ReShade** for a clean slate after driver or mod changes.
@@ -114,8 +115,7 @@ A toolbox for maintenance and recovery:
 - **Fresh Reset**, **GAMMA Reset** and **Full Uninstall** — guarded destructive actions that show exactly what will be deleted and what's kept (your Wine prefix always survives) before doing anything.
 - Opens the bundled **COMMANDER ASSISTANT** log analyzer directly from the page.
 
-<img width="1178" height="735" alt="image" src="https://github.com/user-attachments/assets/05d47787-1d36-4ade-9b49-dedf7da53b17" />
-
+<img width="1178" height="735" alt="8-assistant" src="https://github.com/user-attachments/assets/ca097673-6b6f-4c5b-92d5-b14632568efb" />
 
 ### Settings
 - **10 languages** — English, French, Spanish, German, Romanian, Polish, Russian, Ukrainian, Portuguese and Turkish. Switch anytime; it applies instantly with no restart, unless a background task is running.
