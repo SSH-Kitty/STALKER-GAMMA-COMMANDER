@@ -52,9 +52,6 @@ class DropZone(QFrame):
         self.setMaximumHeight(52 if compact else 260)
         self.update()
 
-    def is_compact(self) -> bool:
-        return self._compact
-
     def flash_reject(self) -> None:
         """Paint a red dashed border briefly (custom paintEvent state)."""
         self._reject = True

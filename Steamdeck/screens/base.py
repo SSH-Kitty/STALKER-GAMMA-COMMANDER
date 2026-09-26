@@ -17,9 +17,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
 
-from commander_gui.i18n import tr
-
-from ..widgets import DECK_W, MARGIN_X, MARGIN_Y, ROW_GAP, deck_label
+from ..scale import px
+from ..widgets import MARGIN_X, MARGIN_Y, ROW_GAP, DeckSmoothScrollArea
 
 
 class DeckScreen(QWidget):
@@ -33,7 +32,9 @@ class DeckScreen(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        scroll = QScrollArea()
+        # Glides to a control the D-pad moves to off-screen, instead of
+        # jumping (see DeckSmoothScrollArea).
+        scroll = DeckSmoothScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(
@@ -46,14 +47,14 @@ class DeckScreen(QWidget):
 
         content = QWidget()
         content.setObjectName("deckPageContent")
-        # Horizontal scrolling is off, so any child that insists on being
-        # wider than the viewport is simply clipped off the right-hand edge
-        # with no way to reach it. Cap the content instead.
-        content.setMaximumWidth(DECK_W)
         self.body = QVBoxLayout(content)
-        self.body.setContentsMargins(MARGIN_X, MARGIN_Y, MARGIN_X, MARGIN_Y)
-        self.body.setSpacing(ROW_GAP)
+        self.body.setContentsMargins(px(MARGIN_X), px(MARGIN_Y), px(MARGIN_X), px(MARGIN_Y))
+        self.body.setSpacing(px(ROW_GAP))
         scroll.setWidget(content)
+        self.scroll = scroll
+        from ..focus import enable_kinetic_scroll
+
+        enable_kinetic_scroll(scroll)
 
         self.build()
 
@@ -74,15 +75,28 @@ class DeckScreen(QWidget):
         """Handle B/Escape. Return True if the screen consumed it."""
         return False
 
-    # -- helpers ----------------------------------------------------------
-    def no_profile_notice(self) -> QWidget:
-        """The placeholder shown when no CLI profile is active."""
-        return deck_label(
-            tr("Create or activate a profile first (Profiles page)."),
-            role="body",
-            wrap=True,
-        )
+    def on_action(self, action: str) -> bool:
+        """Handle X/Y/Start/View on this screen. True if consumed."""
+        return False
 
+    def hints(self) -> list[tuple[str, str]] | None:
+        """Footer prompts as (button, English label); None for the default."""
+        return None
+
+    def default_focus(self) -> QWidget | None:
+        """The control focus lands on when arriving here with nothing
+        remembered, or when the focused control disappears (a job's Cancel
+        hiding as it finishes). None: the first control in reading order."""
+        return None
+
+    def update_hints(self) -> None:
+        """Re-read :meth:`hints` into the footer - for screens whose
+        buttons come and go with their state."""
+        updater = getattr(self.window, "update_hints", None)
+        if callable(updater) and getattr(self.window, "current_page", lambda: None)() is self:
+            updater()
+
+    # -- helpers ----------------------------------------------------------
     def profile(self):
         """The active CLI profile, or None."""
         return self.window.settings.active_profile

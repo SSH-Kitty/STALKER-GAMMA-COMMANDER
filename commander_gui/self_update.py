@@ -6,16 +6,28 @@ returns a path) - a source checkout or the AUR package (which installs into
 updating through its own normal channel instead, since replacing a file
 pacman tracks would fight the package manager.
 
-No checksum is published alongside COMMANDER's AppImage releases (unlike
-GE-Proton, which ``proton_installer.py`` verifies via a companion
-``.sha512sum`` asset) - this trusts the HTTPS download the same way the rest
-of the app already trusts mod-archive/GAMMA-repo downloads with no published
-checksum.
+Nothing is swapped in unless the download proves itself first:
+
+* it must be complete - exactly as many bytes as the server announced (a
+  dropped connection otherwise ends the read quietly, and a truncated file
+  used to replace the working AppImage);
+* it must actually be an AppImage (ELF header plus the type-2 AppImage
+  magic), not an HTML error page or a truncated stub;
+* when the release carries a ``<AppImage>.sha512sum`` asset (``build-
+  appimage.sh`` writes one next to every build), the file must match it.
+  Older releases without one fall back to the checks above.
+
+A checksum published in the same release protects against corruption, not
+against someone who controls the release itself; that needs a signing key
+held outside GitHub (minisign/GPG), which the release process does not have
+yet.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +43,51 @@ from .updates import _COMMANDER_REPO
 
 #: Generous but bounded - the real AppImage is a few hundred MB.
 _MAX_APPIMAGE_BYTES = 2 * 1024**3
+_MAX_CHECKSUM_BYTES = 64 * 1024
+
+#: ELF magic, and the AppImage type-2 magic ("AI" + 0x02) that the AppImage
+#: runtime stores in the ELF header's padding at offset 8.
+_ELF_MAGIC = b"\x7fELF"
+_APPIMAGE_MAGIC = b"AI\x02"
+
+
+def verify_appimage_file(path: Path) -> None:
+    """Raise ``CommanderSelfUpdateError`` unless *path* looks like an AppImage."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError as exc:
+        raise CommanderSelfUpdateError(f"Could not read the update: {exc}") from exc
+    if not head.startswith(_ELF_MAGIC) or head[8:11] != _APPIMAGE_MAGIC:
+        raise CommanderSelfUpdateError(
+            "The downloaded update is not a valid AppImage - nothing was changed."
+        )
+
+
+def _published_sha512(url: str) -> str | None:
+    """The release's ``.sha512sum`` digest for *url*, or None if not published."""
+    req = urllib.request.Request(url + ".sha512sum", headers={"User-Agent": USER_AGENT})
+    try:
+        with urlopen(req, timeout=30) as resp:
+            text = resp.read(_MAX_CHECKSUM_BYTES).decode("ascii", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise CommanderSelfUpdateError(f"Could not fetch the update checksum: {exc}") from exc
+    except urllib.error.URLError as exc:
+        raise CommanderSelfUpdateError(f"Could not fetch the update checksum: {exc}") from exc
+    match = re.search(r"\b([0-9a-fA-F]{128})\b", text)
+    if match is None:
+        raise CommanderSelfUpdateError("The update's checksum file is malformed")
+    return match.group(1).lower()
+
+
+def _sha512_file(path: Path) -> str:
+    digest = hashlib.sha512()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class CommanderSelfUpdateError(Exception):
@@ -54,6 +111,10 @@ def commander_update_asset_url(tag: str) -> str:
     ``STALKER-GAMMA-COMMANDER-<version>-x86_64.AppImage``, version without
     a leading "v" even when the release tag has one.
     """
+    # The tag comes from the release feed and lands in a URL path: only a
+    # plain version-like tag, never "/" or ".." that could point elsewhere.
+    if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag) or ".." in tag:
+        raise CommanderSelfUpdateError(f"Unexpected release tag: {tag!r}")
     version = tag.removeprefix("v")
     filename = f"STALKER-GAMMA-COMMANDER-{version}-x86_64.AppImage"
     return f"{_COMMANDER_REPO}/releases/download/{tag}/{filename}"
@@ -143,15 +204,33 @@ def download_commander_update(
         raise CommanderSelfUpdateError(f"Update download failed: {exc}") from exc
     except urllib.error.URLError as exc:
         raise CommanderSelfUpdateError(f"Update download failed: {exc}") from exc
-    if downloaded == 0:
+    try:
+        if downloaded == 0:
+            raise CommanderSelfUpdateError("Downloaded update file was empty")
+        if total is not None and downloaded != total:
+            # HTTPResponse.read() returns b"" on a dropped connection instead
+            # of raising, so a short file is the only sign of it.
+            raise CommanderSelfUpdateError(
+                f"The update download was incomplete ({downloaded} of {total} bytes)"
+                " - nothing was changed. Try again."
+            )
+        verify_appimage_file(tmp_path)
+        expected = _published_sha512(url)
+        if expected is not None and _sha512_file(tmp_path) != expected:
+            raise CommanderSelfUpdateError(
+                "The update does not match its published checksum - nothing was changed."
+            )
+    except Exception:
         tmp_path.unlink(missing_ok=True)
-        raise CommanderSelfUpdateError("Downloaded update file was empty")
+        raise
     return tmp_path
 
 
 def install_commander_update(downloaded: Path, running_path: Path) -> None:
     """Atomically replace *running_path* with *downloaded* (same filesystem)."""
-    os.chmod(downloaded, 0o755)
+    verify_appimage_file(downloaded)
+    # An AppImage must be executable; the file was verified just above.
+    os.chmod(downloaded, 0o755)  # nosec B103
     os.replace(downloaded, running_path)
 
 
@@ -195,3 +274,43 @@ def download_and_install_commander_update(
     )
     install_commander_update(downloaded, running_path)
     return running_path
+
+
+def switch_commander_build(
+    target: str,
+    cancel_event: threading.Event | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> tuple[Path, str]:
+    """Install the newest ``"unstable"`` or ``"stable"`` build over this one.
+
+    Unlike an update, this may go *down* a version: reverting from an
+    unstable build installs the latest stable release even when it is older.
+    Returns the AppImage path and the tag installed.
+    """
+    from . import __version__
+    from .updates import latest_stable_tag, newer_unstable_tag
+
+    if commander_appimage_path() is None:
+        raise CommanderSelfUpdateError(
+            "COMMANDER is not running as an AppImage - it cannot switch builds itself."
+        )
+    if target == "unstable":
+        tag = newer_unstable_tag(__version__)
+        if tag is None:
+            raise CommanderSelfUpdateError(
+                "There is no unstable build newer than the stable one right now "
+                "(or the release list could not be read)."
+            )
+    elif target == "stable":
+        tag = latest_stable_tag()
+        if tag is None:
+            raise CommanderSelfUpdateError(
+                "Could not find the latest stable release - check your connection "
+                "and try again."
+            )
+    else:
+        raise CommanderSelfUpdateError(f"Unknown build channel: {target}")
+    path = download_and_install_commander_update(
+        tag, cancel_event=cancel_event, progress_cb=progress_cb
+    )
+    return path, tag

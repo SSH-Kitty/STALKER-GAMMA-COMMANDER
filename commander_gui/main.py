@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
 import shutil
 import sys
@@ -38,9 +37,11 @@ from .config import (
 from .deck_launch import (
     clear_relaunch_depth,
     deck_requested,
+    in_game_mode,
     steam_deck_model,
     strip_deck_flag,
 )
+from .desktop_integration import ensure_menu_entry, join_app_scope, set_process_title
 from .fonts import load_bundled_font
 from .i18n import set_active_language, tr
 from .themes import build_palette, build_stylesheet, set_active_theme
@@ -48,17 +49,6 @@ from .ui.common import begin_shutdown, shutdown_active_runners
 from .ui.main_window import MainWindow
 
 _INSTANCE_LOCK: QLockFile | None = None
-
-
-def _set_linux_process_name() -> None:
-    """Set the process label used by Linux process monitors."""
-    if os.name != "posix":
-        return
-    try:
-        libc = ctypes.CDLL(None)
-        libc.prctl(15, b"STALKER COMMAND", 0, 0, 0)
-    except (AttributeError, OSError):
-        pass
 
 
 def _is_svg_noise(mode: QtMsgType, message: str | None) -> bool:
@@ -184,6 +174,23 @@ def _cli_binary_problem() -> tuple[str, str] | None:
     return None
 
 
+def startup_wants_deck(preference: str, *, on_deck: bool, ask) -> bool:
+    """Whether to open Deck Mode, from the saved "When COMMANDER starts".
+
+    "always" holds on any machine: it is set from Deck Mode's own settings,
+    which users switching between the two interfaces reach on a desktop PC
+    too - honouring it only on Deck hardware made the choice look like it
+    never saved. "ask" asks only on a Deck (``ask()``; in Game Mode that
+    answers yes without a dialog, since there is nothing to click it
+    with); elsewhere it means the full interface, as it always has.
+    """
+    if preference == "always":
+        return True
+    if preference == "ask" and on_deck:
+        return bool(ask())
+    return False
+
+
 def _ask_deck_mode() -> bool:
     """Offer Deck Mode on detected Steam Deck hardware; remember if asked to.
 
@@ -293,7 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     icon = project_root() / "cli" / "stalker-gamma.png"
     if icon.is_file():
         app.setWindowIcon(QIcon(str(icon)))
-    _set_linux_process_name()
+    set_process_title()
+    if not in_game_mode():
+        # Game Mode has no process monitor or app menu to show up in.
+        join_app_scope()
+        ensure_menu_entry()
     app.setStyle("Fusion")
 
     try:
@@ -339,15 +350,16 @@ def main(argv: list[str] | None = None) -> int:
         QMessageBox.critical(None, problem[0], problem[1])
         return 1
 
-    # Offer Deck Mode on real Deck hardware, unless the user already settled
-    # it. Nothing has been built yet, so a "yes" just changes which window
-    # class gets constructed below - no re-exec is involved on this path.
-    if not deck and steam_deck_model() is not None:
-        preference = _gui.get("deck_mode_preference", "ask")
-        if preference == "always":
-            deck = True
-        elif preference == "ask":
-            deck = _ask_deck_mode()
+    # Honour "When COMMANDER starts", and offer Deck Mode on real Deck
+    # hardware if it is still unsettled. Nothing has been built yet, so a
+    # "yes" just changes which window class gets constructed below - no
+    # re-exec is involved on this path.
+    if not deck:
+        deck = startup_wants_deck(
+            _gui.get("deck_mode_preference", "ask"),
+            on_deck=steam_deck_model() is not None,
+            ask=lambda: True if in_game_mode() else _ask_deck_mode(),
+        )
 
     # If autostart was enabled but the .desktop file no longer exists (e.g.
     # the user removed it externally), sync the setting to False.

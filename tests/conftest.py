@@ -34,8 +34,16 @@ def _block_real_network_calls():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _private_data_home(tmp_path, monkeypatch):
+    """Keep save/settings backups (commander_gui.game_backup) out of the real
+    ``~/.local/share``: installs, updates and repairs now back up settings
+    first, and many tests drive those flows against temporary installs."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+
 def pytest_collection_modifyitems(items):
-    """Run the Steam Deck tests before the rest of the suite.
+    """Run the Steam Deck (and desktop event-loop) tests before the rest.
 
     They are the only tests that drive a real Qt event loop - building
     windows, pumping events, sending key presses. Everything else here
@@ -49,4 +57,19 @@ def pytest_collection_modifyitems(items):
     Nothing depends on the order, so the fix is to let the tests that need a
     healthy process have one.
     """
-    items.sort(key=lambda item: "test_steamdeck.py" not in str(item.path))
+    early = ("test_steamdeck.py", "test_desktop_event_loop.py")
+    items.sort(key=lambda item: item.path.name not in early)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Stop every background thread the suite left running before Python
+    exits. Tests build pages that start QThreads (dependency probes, size
+    scans) and never wait for them; when interpreter teardown then destroys a
+    QThread that is still running, Qt aborts the process ("QThread:
+    Destroyed while thread is still running") and the run ends in a core
+    dump even though every test passed - which a CI job reads as failure."""
+    try:
+        from commander_gui.ui.common import shutdown_active_runners
+    except Exception:  # noqa: BLE001 - never mask the test results
+        return
+    shutdown_active_runners(timeout_ms=15000)

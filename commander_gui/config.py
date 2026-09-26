@@ -111,3 +111,37 @@ def gui_settings_path() -> Path:
 
 def logs_dir() -> Path:
     return settings_dir() / "logs"
+
+
+#: Variables the AppImage's AppRun sets for COMMANDER's *own* interpreter
+#: (see build-appimage.sh). They point into the AppImage's temporary
+#: /tmp/.mount_* directory, which disappears when COMMANDER exits.
+_APPIMAGE_ONLY_VARS = ("APPDIR", "APPIMAGE", "ARGV0", "OWD", "PYTHONNOUSERSITE")
+#: Set by AppRun too, but only stripped when they really point into the
+#: mount - a user's own PYTHONPATH / SSL_CERT_FILE must survive.
+_APPIMAGE_PATH_VARS = ("PYTHONPATH", "PYTHONHOME", "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def child_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``base`` (default: this process's environment) minus AppImage internals.
+
+    For every program COMMANDER starts that is not COMMANDER itself: Wine and
+    the game, umu-run and protontricks (both Python programs, which would
+    otherwise import from COMMANDER's bundled payload), the Steam client it
+    restarts. Detached ones outlive COMMANDER, and inherited paths into the
+    vanished AppImage mount then break them - an SSL_CERT_FILE that no
+    longer exists fails every TLS connection Steam makes.
+    Outside an AppImage this returns ``base`` unchanged.
+    """
+    environ = dict(os.environ if base is None else base)
+    appdir = environ.get("APPDIR", "")
+    if not appdir or not environ.get("APPIMAGE"):
+        return environ
+    for key in _APPIMAGE_ONLY_VARS:
+        environ.pop(key, None)
+    prefix = appdir.rstrip("/") + "/"
+    for key in _APPIMAGE_PATH_VARS:
+        value = environ.get(key)
+        if value and any(part.startswith(prefix) for part in value.split(os.pathsep)):
+            environ.pop(key, None)
+    return environ

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import is_secondary_instance
+from ..config import child_environment, is_secondary_instance
 from ..i18n import tr
 from ..integrity import format_size
 from ..modlist import count_mods, read_lines
@@ -120,6 +121,24 @@ def format_playtime(total_seconds: float) -> str:
     return f"{hours}h {minutes}m" if hours else f"{minutes}m"
 
 
+def discord_presence_state(profile, gui_state: dict) -> str | None:
+    """The small line under the Discord presence: enabled mod count and/or
+    total playtime of the active profile, as enabled in Settings. None when
+    both are off (or there is nothing to show)."""
+    if profile is None:
+        return None
+    parts = []
+    if gui_state.get("discord_show_mods", True):
+        counts = count_active_mods(profile.gamma, profile.mo2_profile)
+        if counts is not None and counts[0]:
+            parts.append(tr("{enabled} Mods", enabled=counts[0]))
+    if gui_state.get("discord_show_playtime", True):
+        seconds = gui_state.get("playtime_seconds", {}).get(profile.profile_name, 0.0)
+        if seconds >= 60:
+            parts.append(tr("Total playtime: {arg}", arg=format_playtime(seconds)))
+    return " · ".join(parts) or None
+
+
 def format_last_played(timestamp: float | None) -> str:
     """Format a last-played unix timestamp as a readable local date/time.
 
@@ -185,6 +204,71 @@ def mo2_running(*, force: bool = False) -> bool:
     _MO2_RUNNING_CACHE = now
     _MO2_RUNNING_RESULT = proc.returncode == 0
     return _MO2_RUNNING_RESULT
+
+
+_GAME_RUNNING_CACHE: float = 0.0
+_GAME_RUNNING_RESULT: bool = False
+
+
+def game_running(*, force: bool = False) -> bool:
+    """True when Mod Organizer or an Anomaly executable is running.
+
+    ``mo2_running()`` alone misses a game started without MO2 (Play Anomaly,
+    or straight from the launcher): the prefix and the profile's folders are
+    still in use then. Anomaly's executables are all ``Anomaly*.exe``
+    (AnomalyDX11.exe, AnomalyDX11AVX.exe, AnomalyLauncher.exe, ...). Cached
+    like ``mo2_running()``.
+    """
+    global _GAME_RUNNING_CACHE, _GAME_RUNNING_RESULT
+
+    import time
+
+    if mo2_running(force=force):
+        return True
+    now = time.monotonic()
+    if not force and now - _GAME_RUNNING_CACHE < _MO2_CACHE_TTL:
+        return _GAME_RUNNING_RESULT
+    exe = shutil.which("pgrep")
+    result = False
+    if exe:
+        try:
+            proc = subprocess.run(
+                [exe, "-if", r"Anomaly[A-Za-z0-9]*\.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            result = proc.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            result = False
+    _GAME_RUNNING_CACHE = now
+    _GAME_RUNNING_RESULT = result
+    return result
+
+
+def steam_running() -> bool:
+    """True when the Steam client is currently running.
+
+    Writing shortcuts.vdf is safe either way - Steam only reads it back at
+    startup - so this is advisory only, for telling the user they'll need
+    to restart Steam to see a shortcut just added, not a guard that blocks
+    the write.
+    """
+    exe = shutil.which("pgrep")
+    if not exe:
+        return False
+    try:
+        proc = subprocess.run(
+            [exe, "-x", "steam"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 def mo2_pids() -> set[int]:
@@ -402,14 +486,49 @@ class InstallStatusRow(QWidget):
         )
         row.addWidget(self._dot)
         row.addWidget(self._status)
+        # Fixed-width status and name columns, so a card's rows line up
+        # into columns whatever their text: every state word fits the first,
+        # every row name the second. Measured in _sync_column_widths(), once
+        # the stylesheet's font is in place.
+        self._status_texts = (
+            "Installed", "Not installed", "Installing", "Incomplete", "Unknown",
+            pending_text,
+        )
+        self._name_lbl: QLabel | None = None
         if name:
-            name_lbl = QLabel(tr(name))
-            name_lbl.setObjectName("dim")
+            self._name_lbl = QLabel(tr(name))
+            self._name_lbl.setObjectName("dim")
             row.addSpacing(6)
-            row.addWidget(name_lbl)
+            row.addWidget(self._name_lbl)
         row.addWidget(self._detail)
         row.addStretch(1)
         self.set_state(ok, detail)
+
+    def _sync_column_widths(self) -> None:
+        self._status.ensurePolished()
+        metrics = self._status.fontMetrics()
+        self._status.setFixedWidth(
+            max(metrics.horizontalAdvance(tr(t)) for t in self._status_texts) + 8
+        )
+        if self._name_lbl is not None:
+            self._name_lbl.ensurePolished()
+            metrics = self._name_lbl.fontMetrics()
+            self._name_lbl.setFixedWidth(
+                max(
+                    metrics.horizontalAdvance(tr(t))
+                    for t in ("STALKER Anomaly", "GAMMA Modpack", "Dependencies")
+                )
+                + 12
+            )
+
+    def event(self, event) -> bool:
+        if event.type() in (
+            QEvent.Type.Show,
+            QEvent.Type.FontChange,
+            QEvent.Type.StyleChange,
+        ):
+            self._sync_column_widths()
+        return super().event(event)
 
     def set_state(
         self, ok: bool | None, detail: str = "", pending_text: str | None = None
@@ -758,7 +877,13 @@ class BackgroundTask(QObject):
         self._worker.moveToThread(self._thread)
         self._worker.result.connect(self._on_result)
         self._worker.error.connect(self._on_error)
-        self._worker.finished.connect(self._thread.quit)
+        # Direct, not queued: QThread.quit() is thread-safe, and a queued
+        # call only runs once the main event loop gets to it - a thread
+        # whose owner never returns to the loop (a modal wait, a test, app
+        # teardown) then idles forever and Qt aborts on destroying it.
+        self._worker.finished.connect(
+            self._thread.quit, Qt.ConnectionType.DirectConnection
+        )
         self._thread.started.connect(self._worker.run)
         self._thread.finished.connect(
             lambda thread=self._thread: self._on_thread_finished(thread)
@@ -825,21 +950,27 @@ def activate_profile(window, parent: QWidget, name: str, on_done=None) -> Backgr
     """
     from ..settings import cli_ok, run_config_command
 
+    def _report(title: str, message: str) -> None:
+        # Deck Mode's window has no room for a QMessageBox (a separate
+        # top-level window under gamescope, unreachable with the gamepad);
+        # it reports through its own in-window toast instead.
+        notify = getattr(window, "notify", None)
+        if callable(notify) and callable(getattr(window, "confirm", None)):
+            notify(f"{title}: {message}", 8000)
+        else:
+            QMessageBox.warning(parent, title, message)
+
     def _finish(result) -> None:
         rc, out, err = result
         if not cli_ok(rc, out, err):
-            QMessageBox.warning(
-                parent, tr("Failed"), (out + "\n" + err).strip() or "config use failed"
-            )
+            _report(tr("Failed"), (out + "\n" + err).strip() or "config use failed")
             if on_done is not None:
                 on_done(False)
             return
         window.refresh_settings()
         active_now = window.settings.active_profile
         if active_now is None or active_now.profile_name != name:
-            QMessageBox.warning(
-                parent, tr("Failed"), tr("Profile '{name}' could not be activated.", name=name)
-            )
+            _report(tr("Failed"), tr("Profile '{name}' could not be activated.", name=name))
             if on_done is not None:
                 on_done(False)
             return
@@ -847,7 +978,7 @@ def activate_profile(window, parent: QWidget, name: str, on_done=None) -> Backgr
             on_done(True)
 
     def _error(msg: str) -> None:
-        QMessageBox.warning(parent, tr("Error"), msg)
+        _report(tr("Error"), msg)
         if on_done is not None:
             on_done(False)
 
@@ -914,7 +1045,13 @@ class StreamTask(QObject):
         self._worker.line.connect(self._on_line)
         self._worker.result.connect(self._on_result)
         self._worker.error.connect(self._on_error)
-        self._worker.finished.connect(self._thread.quit)
+        # Direct, not queued: QThread.quit() is thread-safe, and a queued
+        # call only runs once the main event loop gets to it - a thread
+        # whose owner never returns to the loop (a modal wait, a test, app
+        # teardown) then idles forever and Qt aborts on destroying it.
+        self._worker.finished.connect(
+            self._thread.quit, Qt.ConnectionType.DirectConnection
+        )
         self._thread.started.connect(self._worker.run)
         self._thread.finished.connect(
             lambda thread=self._thread: self._on_thread_finished(thread)
@@ -1222,21 +1359,37 @@ def winetricks_tooltip(status: dict[str, bool]) -> str:
     return "<br>".join(rows)
 
 
-def dir_size(path: str | Path, *, max_entries: int = 200_000) -> int:
+def dir_size(path: str | Path, *, max_entries: int | None = 200_000) -> int:
     """Best-effort total size of a directory tree.
 
     Stops after ``max_entries`` files so a huge or runaway tree cannot stall
-    the caller indefinitely (GAMMA installs hold 100k+ files).
+    the caller indefinitely (GAMMA installs hold 100k+ files). A display can
+    live with that cap; a free-space check must not - it would under-count
+    a big install - so those pass ``max_entries=None``. Walks with
+    ``os.scandir``: the entry type comes with the directory listing, so each
+    file costs one ``lstat`` instead of ``Path.rglob``'s two stat calls and
+    its per-path object overhead - over twice as fast on a real GAMMA tree.
+    Symlinks are neither followed nor counted.
     """
     total = 0
-    try:
-        for count, entry in enumerate(Path(path).rglob("*")):
-            if count >= max_entries:
-                break
-            if entry.is_file():
-                total += entry.stat().st_size
-    except OSError:
-        pass
+    count = 0
+    stack = [os.fspath(path)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            count += 1
+                            if max_entries is not None and count > max_entries:
+                                return total
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
     return total
 
 
@@ -1250,6 +1403,15 @@ def free_space_bytes(path: str | Path) -> int | None:
     unmounted path, ...) rather than raising - a failed check must never
     block the caller (e.g. an install confirmation dialog) from proceeding.
     """
+    usage = disk_usage_bytes(path)
+    return None if usage is None else usage[1]
+
+
+def disk_usage_bytes(path: str | Path) -> tuple[int, int] | None:
+    """``(total, free)`` of the filesystem that would hold ``path``, or None.
+
+    Same lookup as :func:`free_space_bytes`: the nearest existing ancestor.
+    """
     candidate = Path(path).expanduser()
     try:
         candidate = candidate.resolve()
@@ -1258,9 +1420,10 @@ def free_space_bytes(path: str | Path) -> int | None:
     for ancestor in (candidate, *candidate.parents):
         if ancestor.exists():
             try:
-                return shutil.disk_usage(ancestor).free
+                usage = shutil.disk_usage(ancestor)
             except OSError:
                 return None
+            return usage.total, usage.free
     return None
 
 
@@ -1278,6 +1441,40 @@ def crash_dump_names(anomaly_path: str | Path) -> set[str]:
         return {p.name for p in logs_dir.glob("*.mdmp")}
     except OSError:
         return set()
+
+
+def open_url(url: str) -> bool:
+    """Open a web link in the default browser. True if an opener started.
+
+    Started directly rather than through ``QDesktopServices.openUrl``, which
+    runs ``xdg-open`` with COMMANDER's own terminal attached: on Plasma that
+    goes through KDE's opener, and its harmless warnings (e.g.
+    ``kf.iconthemes: Icon theme "gnome" not found``) landed in COMMANDER's
+    output. Also given a clean environment, so an AppImage's own library
+    paths never reach the browser.
+    """
+    if sys.platform.startswith("linux"):
+        for opener in ("xdg-open", "gio"):
+            exe = shutil.which(opener)
+            if not exe:
+                continue
+            command = [exe, url] if opener == "xdg-open" else [exe, "open", url]
+            try:
+                subprocess.Popen(
+                    command,
+                    env=child_environment(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                return True
+            except OSError:
+                continue
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    return QDesktopServices.openUrl(QUrl(url))
 
 
 def open_in_file_manager(path: str | Path) -> bool:

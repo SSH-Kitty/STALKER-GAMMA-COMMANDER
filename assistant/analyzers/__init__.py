@@ -36,12 +36,15 @@ def run_analysis(dump: DumpArchive, partial: bool = False) -> list[Finding]:
         if not entry.is_text:
             continue
         where_label = _where_label(entry)
+        # Split once per file and shared by both scans; released when the
+        # loop moves on (DumpFile keeps only the text).
+        lines = entry.lines
         if not partial:
             for pattern, analyzer in _ROUTES:
                 if pattern.search(entry.arcname):
-                    findings.extend(analyzer(entry.arcname, where_label, entry.lines))
+                    findings.extend(analyzer(entry.arcname, where_label, lines))
                     break
-        findings.extend(generic.scan_generic(entry.arcname, where_label, entry.lines))
+        findings.extend(generic.scan_generic(entry.arcname, where_label, lines))
     return sort_findings(collapse_findings(findings))
 
 

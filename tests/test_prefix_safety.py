@@ -85,9 +85,11 @@ class WinetricksStatusTests(unittest.TestCase):
     def test_reads_the_log_and_spawns_nothing(self):
         """The regression test for the incident itself."""
         (self.tmp / "winetricks.log").write_text("d3dx9\nvcrun2022\nquartz\n")
-        with patch.object(subprocess, "run", side_effect=AssertionError("a process was started")):
-            with patch.object(subprocess, "Popen", side_effect=AssertionError("a process was started")):
-                status = check_winetricks_status(str(self.tmp))
+        with (
+            patch.object(subprocess, "run", side_effect=AssertionError("a process was started")),
+            patch.object(subprocess, "Popen", side_effect=AssertionError("a process was started")),
+        ):
+            status = check_winetricks_status(str(self.tmp))
         self.assertEqual(
             {verb for verb, ok in status.items() if ok}, {"d3dx9", "vcrun2022", "quartz"}
         )

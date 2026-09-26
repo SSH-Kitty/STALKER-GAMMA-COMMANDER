@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from .. import __version__, __version_label__
+from .. import __version__, __version_label__, gui_settings
 from ..config import cli_binary_path, gui_settings_path, logs_dir, settings_path
-from ..updates import check_commander_update
-from .common import BackgroundTask, info_label, make_card, section_label, tr
+from ..updates import check_commander_update, effective_update_channel
+from .common import BackgroundTask, info_label, make_card, open_url, section_label, tr
 
 _GITHUB = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
+#: Permanent invite to the STALKER COMMANDER Discord server (lands on #welcome).
+_DISCORD = "https://discord.gg/6A9psrtYhh"
+
+#: (English) credit lines, shown on this page and on Deck Mode's Welcome
+#: screen; translated with tr() where displayed.
+CREDITS = (
+    "SSH-Kitty — COMMANDER graphical user interface.",
+    "Dnttnd — testing implementations, dev builds, bug reports, and helping polish the UI.",
+    "FaithBeam — the STALKER-GAMMA CLI.",
+    "Grokitach and the GAMMA team — the GAMMA modpack.",
+    "GSC Game World and the Anomaly team — the game.",
+)
 
 
 def _mono(text: str) -> QLabel:
@@ -62,7 +73,7 @@ class AboutPage(QWidget):
     def _hero_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label(tr("STALKER GAMMA COMMANDER"), level=1))
-        version = QLabel(tr("COMMANDER GUI {version_label}", version_label=__version_label__))
+        version = QLabel(tr("COMMANDER {version_label}", version_label=__version_label__))
         version.setObjectName("accent")
         layout.addWidget(version)
         layout.addWidget(
@@ -74,7 +85,7 @@ class AboutPage(QWidget):
         self.update_button.setObjectName("primary")
         self.update_button.hide()
         self.update_button.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(f"{_GITHUB}/releases"))
+            lambda: open_url(f"{_GITHUB}/releases")
         )
         layout.addWidget(self.update_button)
         return card
@@ -86,7 +97,13 @@ class AboutPage(QWidget):
         auto-updater, so there is no elevated-permissions or
         replace-the-running-binary complexity to get right.
         """
-        task = BackgroundTask(check_commander_update, __version__, parent=self)
+        # The channel is read here, on the GUI thread; the worker only fetches.
+        channel = effective_update_channel(
+            gui_settings.load_gui_settings().get("update_channel"), __version__
+        )
+        task = BackgroundTask(
+            check_commander_update, __version__, channel=channel, parent=self
+        )
         task.result.connect(self._on_commander_update_checked)
         task.start()
 
@@ -162,16 +179,8 @@ class AboutPage(QWidget):
     def _credits_card(self) -> QWidget:
         card, layout = make_card()
         layout.addWidget(section_label(tr("Credits"), level=2))
-        for line in (
-            tr("SSH-Kitty — COMMANDER graphical user interface."),
-            tr(
-                "Dnttnd — testing implementations, dev builds, bug reports, and helping polish the UI."
-            ),
-            tr("FaithBeam — the STALKER-GAMMA CLI."),
-            tr("Grokitach and the GAMMA team — the GAMMA modpack."),
-            tr("GSC Game World and the Anomaly team — the game."),
-        ):
-            layout.addWidget(info_label(tr("• {line}", line=line)))
+        for line in CREDITS:
+            layout.addWidget(info_label(tr("• {line}", line=tr(line))))
         return card
 
     def _license_card(self) -> QWidget:
@@ -189,6 +198,7 @@ class AboutPage(QWidget):
         layout.addWidget(section_label(tr("Links"), level=2))
         links = (
             (tr("Project on GitHub"), _GITHUB, "primary"),
+            (tr("Join the Discord"), _DISCORD, "secondary"),
             (tr("Releases"), f"{_GITHUB}/releases", "secondary"),
             (
                 tr("stalker-gamma-cli (FaithBeam)"),
@@ -205,7 +215,7 @@ class AboutPage(QWidget):
             button = QPushButton(text)
             button.setObjectName(style)
             button.clicked.connect(
-                lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target))
+                lambda _checked=False, target=url: open_url(target)
             )
             layout.addWidget(button)
         return card

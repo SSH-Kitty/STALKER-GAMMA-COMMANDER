@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 from .config import cli_binary_path
 
@@ -75,7 +76,10 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
     """Return every member path the archiver reports for ``archive``."""
     try:
         result = subprocess.run(
-            [str(archiver), "l", "-slt", str(archive)],
+            # -p with no password: an encrypted archive fails instead of
+            # waiting for a password on a terminal nobody is looking at.
+            [str(archiver), "l", "-slt", "-p", str(archive)],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             errors="replace",
@@ -90,16 +94,46 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
             f"Could not list archive contents (exit code {result.returncode})\n{detail}"
         )
     paths: list[str] = []
-    for block in result.stdout.split("\n\n"):
-        # The archive-level info block (before the per-entry list starts)
-        # also has a "Path = " line - for the archive file itself - but is
-        # the only block carrying this field, so it's how we skip it.
-        if "Physical Size =" in block:
+    # 7-Zip prints the archive's own header first (its "Path = " is the
+    # archive file itself, an absolute path) and then a "----------" line
+    # before the per-entry blocks. Only what follows that line is entries.
+    # Keying off "Physical Size =" instead missed formats whose header has
+    # no such field (gzip), so every .tar.gz mod was refused as having an
+    # "absolute path entry".
+    lines = result.stdout.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "----------")
+    except StopIteration:
+        start = -1
+    listing = "\n".join(lines[start + 1 :])
+    for block in listing.split("\n\n"):
+        block_lines = block.splitlines()
+        # An archive-level block (the archive itself, or a nested archive's
+        # header) describes a container, not an entry to extract.
+        if any(
+            line.startswith(("Type = ", "Physical Size = ")) for line in block_lines
+        ):
             continue
+        path = None
         for line in block.splitlines():
-            if line.startswith("Path = "):
-                paths.append(line[len("Path = ") :])
-                break
+            if line.startswith("Path = ") and path is None:
+                path = line[len("Path = ") :]
+            elif (
+                line.startswith("Symbolic Link = ") and line.strip() != "Symbolic Link ="
+            ) or (
+                # 7z/zip archives mark links in the Unix mode instead:
+                # "Attributes = A lrwxrwxrwx".
+                line.startswith("Attributes = ")
+                and line.split()[-1].startswith("l")
+                and len(line.split()[-1]) == 10
+            ):
+                # Refused up front, not just after extraction: an older system
+                # 7-Zip (p7zip 16.02, used when the bundled 7zz is missing)
+                # follows a link it has just created, so "link -> ~/x" then
+                # "link/file" writes outside staging before any later check.
+                raise ModInstallError("Archive contains an unsupported symlink")
+        if path is not None:
+            paths.append(path)
     return paths
 
 
@@ -138,10 +172,11 @@ def extract_archive(
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
     staging.mkdir(parents=True, exist_ok=False)
-    command = [str(archiver), "x", str(archive), f"-o{staging}", "-y", "-bsp1"]
+    command = [str(archiver), "x", str(archive), f"-o{staging}", "-y", "-p", "-bsp1"]
     try:
         process = subprocess.Popen(
             command,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -149,9 +184,25 @@ def extract_archive(
         )
     except (OSError, ValueError) as exc:
         raise ModInstallError(f"Could not start archive extractor: {exc}") from exc
+    # 7-Zip's progress uses backspaces, not newlines, so the loop below may
+    # not see a line for minutes; watch the cancel flag on its own thread so
+    # Cancel stops the extractor at once.
+    stop_watching = Event()
+    if cancel_event is not None:
+        def _watch() -> None:
+            while not stop_watching.is_set() and process.poll() is None:
+                if cancel_event.wait(0.2):
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                    return
+
+        Thread(target=_watch, name="extract-cancel", daemon=True).start()
     try:
         output: list[str] = []
-        assert process.stdout is not None
+        if process.stdout is None:
+            raise ModInstallError("Archive extractor produced no output stream")
         for line in process.stdout:
             clean = line.strip()
             if clean:
@@ -169,12 +220,16 @@ def extract_archive(
                 raise ModInstallError("Mod installation cancelled")
         process.stdout.close()
         rc = process.wait()
+        if cancel_event is not None and cancel_event.is_set():
+            raise ModInstallError("Mod installation cancelled")
         if rc != 0:
             detail = "\n".join(output[-8:])
             raise ModInstallError(
                 f"Archive extraction failed (exit code {rc})\n{detail}"
             )
+        _unwrap_tarball(archiver, archive, staging, cancel_event)
         _validate_tree(staging)
+        _make_owner_writable(staging)
     except Exception:
         if process.poll() is None:
             try:
@@ -184,6 +239,73 @@ def extract_archive(
                 pass
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    finally:
+        stop_watching.set()
+
+
+def _make_owner_writable(root: Path) -> None:
+    """Give the owner write access to everything extracted under ``root``.
+
+    Archives made on Linux can store read-only folders (``dr-xr-xr-x``) and
+    7-Zip restores that mode. A read-only folder can't take the files a
+    later FOMOD option copies into the same place - ``copytree`` carries
+    the mode over - and can't be emptied when the staging folder, or later
+    the installed mod, is deleted. Runs after ``_validate_tree``, so there
+    are no symlinks to follow.
+    """
+    for directory, _dirs, files in os.walk(root):
+        path = Path(directory)
+        try:
+            path.chmod(path.stat().st_mode | stat.S_IRWXU)
+        except OSError:
+            continue
+        for name in files:
+            file_path = path / name
+            try:
+                file_path.chmod(file_path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass
+
+
+_COMPRESSED_TAR_SUFFIXES = (".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst")
+
+
+def _unwrap_tarball(
+    archiver: Path, archive: Path, staging: Path, cancel_event: Event | None
+) -> None:
+    """Second pass for a compressed tarball.
+
+    7-Zip unpacks one layer at a time: ``x mod.tar.gz`` yields ``mod.tar``,
+    which used to be installed as the mod - a single tar file MO2 can't use.
+    The inner tar goes through the same listing checks as any archive.
+    """
+    if not archive.name.lower().endswith(_COMPRESSED_TAR_SUFFIXES):
+        return
+    entries = list(staging.iterdir())
+    if len(entries) != 1 or not entries[0].is_file() or entries[0].suffix.lower() != ".tar":
+        return
+    inner = entries[0]
+    _validate_archive_entries(archiver, inner)
+    if cancel_event is not None and cancel_event.is_set():
+        raise ModInstallError("Mod installation cancelled")
+    try:
+        result = subprocess.run(
+            [str(archiver), "x", str(inner), f"-o{staging}", "-y", "-p"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=3600,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ModInstallError(f"Could not unpack the inner tar archive: {exc}") from exc
+    if result.returncode != 0:
+        detail = "\n".join(result.stdout.splitlines()[-8:])
+        raise ModInstallError(
+            f"Archive extraction failed (exit code {result.returncode})\n{detail}"
+        )
+    inner.unlink()
 
 
 #: MO2's own STALKER Anomaly/GAMMA game-support plugin
@@ -272,6 +394,11 @@ def write_basic_meta_ini(destination: Path, installation_file: str) -> None:
     target = destination / "meta.ini"
     if target.exists():
         return
+    # An archive file name is the only outside value here; a newline in it
+    # would start new INI lines (keys or sections) of its own.
+    installation_file = "".join(
+        char for char in installation_file if ord(char) >= 32 and ord(char) != 127
+    )
     target.write_text(
         "[General]\n"
         "gameName=stalkeranomaly\n"

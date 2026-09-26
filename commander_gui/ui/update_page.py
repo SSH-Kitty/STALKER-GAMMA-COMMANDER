@@ -12,8 +12,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..cli_runner import cli_command
+from ..game_backup import backup_settings_before
 from ..integrity import invalidate_baseline
 from ..modlist import modlist_path_for
 from ..parsers import UpdateDiff
@@ -61,6 +62,7 @@ from .common import (
     make_header_row,
     mo2_running,
     notify_desktop,
+    open_url,
     section_label,
     tr,
 )
@@ -134,7 +136,14 @@ class _ReleaseNotesSection(QWidget):
 
         self.body = QTextEdit(self)
         self.body.setReadOnly(True)
-        self.body.setMarkdown(body)
+        # Patch notes come from a repo the profile points at; render their
+        # Markdown but not raw HTML embedded in it (spoofed content, remote
+        # or local image loads).
+        self.body.document().setMarkdown(
+            body,
+            QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+            | QTextDocument.MarkdownFeature.MarkdownNoHTML,
+        )
         self.body.setFixedHeight(_RELEASE_BODY_HEIGHT)
         self.body.setVisible(expanded)
         layout.addWidget(self.body)
@@ -537,7 +546,7 @@ class UpdatePage(QWidget):
         profile = self.window.settings.active_profile
         if profile is None:
             return
-        QDesktopServices.openUrl(QUrl(changelog_web_url(profile)))
+        open_url(changelog_web_url(profile))
 
     def _populate_whats_new(self, patchnotes: str | None) -> None:
         """Rebuild the release list from a fresh check's patchnotes text."""
@@ -750,7 +759,18 @@ class UpdatePage(QWidget):
                 if proceed != QMessageBox.StandardButton.Yes:
                     return
 
+        # Re-checked after the questions above: another page could have
+        # started an install (or MO2 been opened) while they were showing.
+        if self.window.install_busy or mo2_running(force=True):
+            QMessageBox.warning(
+                self,
+                tr("Busy"),
+                tr("An install is running or Mod Organizer is open - try again when it's done."),
+            )
+            return
+
         self._snapshot_modlist_before_update()
+        backup_error = backup_settings_before(profile, "update")
 
         args = ["update", "apply"]
         if self.minimal_cb.isChecked():
@@ -764,6 +784,8 @@ class UpdatePage(QWidget):
         # Holds the global lock for the duration: this writes the install tree.
         self.window.set_install_busy(True, "gamma")
         self.apply_progress.reset()
+        if backup_error:
+            self.apply_progress.log.append_line(f"Settings backup failed: {backup_error}")
         self._apply_runner = CommandRunner(
             cli_command(args, progress_interval_ms=200), parent=self
         )

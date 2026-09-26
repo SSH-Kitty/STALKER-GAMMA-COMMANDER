@@ -334,7 +334,7 @@ def _format_duration(seconds: float) -> str:
 
 def _md5_file(path: Path) -> tuple[str, int] | None:
     """Return (md5, size) for a file, or None if it cannot be read."""
-    digest = hashlib.md5()
+    digest = hashlib.md5(usedforsecurity=False)
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -663,7 +663,10 @@ def scan_mods_md5(
                         result.changed.append(rel)
                 else:
                     result.added.append(rel)
-            result.removed = sorted(set(baseline) - set(current))
+            # A file that exists but couldn't be read is an error, not a
+            # removal: counted as removed it made repair quarantine and
+            # re-download the whole mod over one permission problem.
+            result.removed = sorted(set(baseline) - set(current) - set(result.errors))
             result.changed.sort()
             result.added.sort()
     else:
@@ -673,4 +676,147 @@ def scan_mods_md5(
         except OSError as exc:
             result.errors.append(f"Failed to write manifest: {exc}")
 
+    return result
+
+
+def reverted_gamma_overlay(anomaly_dir: str) -> list[str]:
+    """GAMMA-patched Anomaly files that are currently back to vanilla.
+
+    GAMMA replaces Anomaly's engine executables and fsgame.ltx (see
+    GAMMA_OVERLAY_FILES). An Anomaly repair re-extracts vanilla Anomaly
+    over them; if GAMMA's copies are not put back afterwards, the game
+    starts with the wrong engine and crashes - while every file "verifies
+    OK", because vanilla is exactly what ``anomaly check`` expects. So the
+    test is the reverse: an overlay file whose hash equals Anomaly's own
+    vanilla checksum has been reverted.
+    """
+    root = Path(anomaly_dir).expanduser()
+    checksums = root / "tools" / "checksums.md5"
+    try:
+        lines = checksums.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    reverted: list[str] = []
+    for line in lines:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts[0].lower(), parts[1].lstrip("*").replace("\\", "/")
+        if name.lower() not in GAMMA_OVERLAY_FILES:
+            continue
+        result = _md5_file(root / name)
+        if result is not None and result[0].lower() == digest:
+            reverted.append(name)
+    return reverted
+
+
+#: Where GAMMA keeps the files it lays over Anomaly, inside the cached
+#: ``Stalker_GAMMA`` git repository the CLI clones into the download cache.
+_GAMMA_REPO = "Stalker_GAMMA.git"
+_GAMMA_PATCH_ROOT = "G.A.M.M.A/modpack_patches/"
+
+
+@dataclass
+class OverlayRestore:
+    restored: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+def _gamma_repo(cache_dir: str | Path) -> Path | None:
+    repo = Path(cache_dir).expanduser() / _GAMMA_REPO
+    return repo if (repo / "HEAD").is_file() and (repo / "objects").is_dir() else None
+
+
+def restore_gamma_overlay(
+    anomaly_dir: str | Path, cache_dir: str | Path, names: list[str]
+) -> OverlayRestore:
+    """Put GAMMA's own copies of reverted overlay files back.
+
+    The source is the GAMMA repository already in the download cache (the
+    same files ``full-install`` copies over Anomaly), read with ``git show``
+    so nothing is downloaded. Each file is written atomically, and only
+    after checking it is really GAMMA's: a Windows executable (for the
+    ``.exe`` files) that differs from Anomaly's vanilla copy. Files the
+    repository does not carry (``fsgame.ltx`` is written by the installer,
+    not copied) are reported as failed, never guessed.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    from .config import child_environment
+
+    result = OverlayRestore()
+    if not names:
+        return result
+    git = shutil.which("git")
+    repo = _gamma_repo(cache_dir)
+    if git is None or repo is None:
+        result.failed = list(names)
+        result.reason = (
+            "git is not installed" if git is None else f"no {_GAMMA_REPO} in the download cache"
+        )
+        return result
+    env = child_environment()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        listing = subprocess.run(
+            [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo),
+             "ls-tree", "-r", "--name-only", "HEAD", "--", _GAMMA_PATCH_ROOT],
+            capture_output=True, text=True, timeout=60, env=env, check=True,
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError) as exc:
+        result.failed = list(names)
+        result.reason = f"could not read {_GAMMA_REPO}: {exc}"
+        return result
+    by_name = {
+        item[len(_GAMMA_PATCH_ROOT):].lower(): item
+        for item in listing
+        if item.startswith(_GAMMA_PATCH_ROOT)
+    }
+    root = Path(anomaly_dir).expanduser()
+    vanilla = {}
+    try:
+        for line in (root / "tools" / "checksums.md5").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                vanilla[parts[1].lstrip("*").replace("\\", "/").lower()] = parts[0].lower()
+    except OSError:
+        pass
+    for name in names:
+        key = name.replace("\\", "/").lower()
+        source = by_name.get(key)
+        if key not in GAMMA_OVERLAY_FILES or source is None:
+            result.failed.append(name)
+            continue
+        try:
+            data = subprocess.run(
+                [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo),
+                 "show", f"HEAD:{source}"],
+                capture_output=True, timeout=120, env=env, check=True,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            result.failed.append(name)
+            continue
+        if (key.endswith(".exe") and not data.startswith(b"MZ")) or (
+            hashlib.md5(data, usedforsecurity=False).hexdigest() == vanilla.get(key)
+        ):
+            result.failed.append(name)
+            continue
+        target = root / name
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=".gamma-", dir=target.parent)
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            os.replace(tmp, target)
+        except OSError:
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
+            result.failed.append(name)
+            continue
+        result.restored.append(name)
     return result

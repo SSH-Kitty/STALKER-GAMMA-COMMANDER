@@ -7,8 +7,10 @@ to be re-translated when the language changes, and a module-level constant
 is evaluated once at import.
 
 Dashboard leads, as it does in the desktop window: it is the overview, and
-the hub its rows send you off from. The rest follow how often a Deck user
-reaches for them, Settings last because it is mostly visited once. Leading
+the hub its rows send you off from. The rest follow how often a handheld
+user reaches for them - play, mods and updates every session; install
+once; utilities, the system check and settings when something
+needs fixing. Leading
 the bar is not the same as being the landing screen - ``deck_start_screen``
 still defaults to Play, because picking the device up usually means wanting
 to play.
@@ -27,12 +29,11 @@ from __future__ import annotations
 SCREENS: list[tuple[str, str, str]] = [
     ("dashboard", "Dashboard", "⌂"),
     ("play", "Play", "▶"),
-    ("install", "Install", "↓"),
-    ("update", "Update", "↻"),
     ("mods", "Mods", "☰"),
-    ("profile", "Profile", "●"),
-    ("system", "System", "✓"),
+    ("update", "Update", "↻"),
+    ("install", "Install", "↓"),
     ("utilities", "Utilities", "⚒"),
+    ("system", "System", "✓"),
     ("settings", "Settings", "⚙"),
 ]
 

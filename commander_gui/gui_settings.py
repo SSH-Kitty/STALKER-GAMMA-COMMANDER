@@ -10,6 +10,7 @@ import copy
 import json
 import math
 import shutil
+from pathlib import Path
 
 from .atomic import write_text
 from .config import gui_settings_path
@@ -39,12 +40,16 @@ _DEFAULTS = {
     "window_width": 1080,
     "window_height": 950,
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
+    "update_notifications": True,  # desktop notification when a GAMMA or COMMANDER update comes out
+    "notified_gamma_version": "",  # latest GAMMA version already notified about (notify once per version)
+    "notified_commander_tag": "",  # COMMANDER release tag already notified about
     "playtime_seconds": {},  # accumulated play time per profile name, in seconds
     "last_played_ts": {},  # time.time() a session last ended, per profile name
-    "flip_priority_pending": {},  # profile name -> True after Flip Priority is used, until the next play session ends
     "user_created_categories": {},  # profile name -> list of category names the user created (deletable); official GAMMA categories are never in this list
     "discord_rpc_enabled": False,  # show "Playing S.T.A.L.K.E.R. GAMMA" on Discord
-    "discord_client_id": "",  # user's own Discord Application Client ID (developers.discord.com)
+    "discord_show_mods": True,  # add the enabled mod count under the presence line
+    "discord_show_playtime": True,  # add the profile's total playtime there too
+    "discord_client_id": "",  # optional override; empty = COMMANDER's own Discord app
     # Steam Deck Mode (the separate `Steamdeck` GUI). Deliberately a small,
     # self-contained set: Deck Mode shares runner/prefix/target/theme/language
     # and the playtime tallies with the desktop UI, because switching modes
@@ -53,6 +58,12 @@ _DEFAULTS = {
     "deck_font_scale": 100,  # percent; scales the Deck UI's fonts only, never the desktop UI
     "deck_start_screen": "play",  # Deck screen shown on launch (key into Steamdeck.screens.SCREENS)
     "deck_runner_confirmed": False,  # user picked a runner once in Deck Mode
+    "deck_finish_sound": True,  # play the PDA chime when a long Deck task ends
+    "deck_finish_rumble": True,  # buzz the controller when a long Deck task ends
+    "welcome_hidden": False,  # "Don't show again" on the Welcome screen (desktop and Deck Mode)
+    "welcome_seen_version": "",  # COMMANDER version the Welcome screen last showed for (always shown after an update)
+    "update_channel": "stable",  # "stable" | "unstable" - COMMANDER self-update channel (unstable includes pre-releases)
+    "pending_settings_restore": {},  # profile -> pre-reset backup to restore after the GAMMA reinstall (game_backup)
 }
 
 _cache: dict | None = None
@@ -76,14 +87,16 @@ def load_gui_settings() -> dict:
     data = copy.deepcopy(_DEFAULTS)
     if path.exists():
         try:
-            stored = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            # utf-8-sig tolerates a BOM; ValueError covers UnicodeDecodeError
+            # too - garbage bytes here used to crash startup outright.
+            stored = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError):
             # Try the last-known-good backup if the main file is corrupt.
             backup = path.with_suffix(".json.last-good")
             if backup.exists():
                 try:
-                    stored = json.loads(backup.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
+                    stored = json.loads(backup.read_text(encoding="utf-8-sig"))
+                except (ValueError, OSError):
                     return data
             else:
                 return data
@@ -102,6 +115,8 @@ def load_gui_settings() -> dict:
     # and an unhashable one (a list, an object) makes `x not in {...}` raise
     # TypeError rather than simply fail the check - which would crash the
     # app during startup, before any window exists to report it.
+    if data.get("update_channel") not in ("stable", "unstable"):
+        data["update_channel"] = "stable"
     if not isinstance(data.get("start_page"), str) or data.get("start_page") not in {
         "dashboard",
         "systemcheck",
@@ -131,7 +146,6 @@ def load_gui_settings() -> dict:
         "install",
         "update",
         "mods",
-        "profile",
         "system",
         "utilities",
         "settings",
@@ -171,13 +185,23 @@ def load_gui_settings() -> dict:
     font_family = data.get("font_family")
     if not isinstance(font_family, str) or font_family not in _allowed_fonts:
         data["font_family"] = "Exo 2"
+    if not isinstance(data.get("welcome_seen_version"), str):
+        data["welcome_seen_version"] = ""
     if not isinstance(data.get("discord_client_id"), str):
         data["discord_client_id"] = ""
+    if not isinstance(data.get("update_notifications"), bool):
+        data["update_notifications"] = True
+    for key in ("notified_gamma_version", "notified_commander_tag"):
+        if not isinstance(data.get(key), str):
+            data[key] = ""
     for key in (
         "always_gamemoderun",
         "autostart",
         "discord_rpc_enabled",
+        "discord_show_mods",
+        "discord_show_playtime",
         "deck_runner_confirmed",
+        "welcome_hidden",
     ):
         v = data.get(key)
         if isinstance(v, bool):
@@ -220,12 +244,8 @@ def load_gui_settings() -> dict:
         if isinstance(last_played, dict)
         else {}
     )
-    flip_pending = data.get("flip_priority_pending")
-    data["flip_priority_pending"] = (
-        {str(k): bool(v) for k, v in flip_pending.items() if isinstance(v, bool)}
-        if isinstance(flip_pending, dict)
-        else {}
-    )
+    # Left by the removed Flip Priority button; dropped on load.
+    data.pop("flip_priority_pending", None)
     user_categories = data.get("user_created_categories")
     data["user_created_categories"] = (
         {
@@ -267,9 +287,15 @@ def save_gui_settings(**changes) -> None:
     # when corruption strikes, leaving no way to recover the next time.
     if path.exists():
         try:
-            json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+            json.loads(path.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError):
+            # About to be overwritten: keep the corrupt original for
+            # inspection/recovery instead of losing it silently (the same
+            # courtesy settings.py extends to the CLI's settings.json).
+            try:
+                shutil.copy2(path, path.with_suffix(".json.corrupt"))
+            except OSError:
+                pass
         else:
             try:
                 backup = path.with_suffix(".json.last-good")
@@ -290,12 +316,53 @@ def configured_wine_prefix() -> str:
     lives one level down in ``pfx``. Tools driven against the prefix directly
     (winetricks) must use the resolved path, not the stored one.
     """
-    from .launcher import wine_prefix_for  # deferred: keeps this module leaf-ish
+    from .launcher import LaunchError, wine_prefix_for  # deferred: leaf-ish
 
+    # Derived from the runner a launch or a dependency install would really
+    # use, not from the saved runner *name*: "auto" can resolve to Steam
+    # Proton when umu-run is missing, whose prefix is <compat>/pfx rather
+    # than umu's default - checking the name made dependency status (and
+    # log dumps) read one prefix while installs wrote to another.
+    try:
+        env = configured_runner().env
+    except (LaunchError, OSError, ValueError):
+        env = {}
+    compat = env.get("STEAM_COMPAT_DATA_PATH")
+    if compat:
+        return str(Path(compat) / "pfx")
+    if env.get("WINEPREFIX"):
+        return env["WINEPREFIX"]
     state = load_gui_settings()
-    return wine_prefix_for(
-        state.get("runner") or "auto", state.get("wine_prefix") or ""
-    )
+    kind = state.get("runner") or "auto"
+    return wine_prefix_for(kind, saved_prefix_for(kind, state))
+
+
+def saved_prefix_for(kind: str, state: dict | None = None) -> str:
+    """The prefix saved for runner ``kind``, or "" for the runner's default.
+
+    The one rule every part of COMMANDER uses to pick a runner's prefix -
+    the Play page's launch, Winecfg and the display scale on the Settings
+    page, dependency installs and the prefix repair. Each used to do its
+    own lookup, and they disagreed: after the runner was changed in
+    Settings or on the Dashboard (which save only the runner), Winecfg
+    fell back to the previous runner's prefix while MO2 launched in the new
+    runner's default one - Winecfg changes never reached MO2.
+
+    The single legacy ``wine_prefix`` is honoured only for settings from
+    before prefixes were kept per runner (no ``prefixes`` map at all), and
+    only for the runner it was saved with.
+    """
+    from pathlib import Path
+
+    state = load_gui_settings() if state is None else state
+    prefixes = state.get("prefixes") or {}
+    saved = prefixes.get(kind) or ""
+    if not saved and not prefixes and kind == (state.get("runner") or "auto"):
+        saved = state.get("wine_prefix") or ""
+    if kind.startswith("proton:") and Path(saved).name == "umu-default":
+        # Older builds could carry the UMU default into a Steam Proton runner.
+        saved = ""
+    return saved
 
 
 def configured_runner():
@@ -308,15 +375,8 @@ def configured_runner():
     goes through this so it can never pick a different Wine than a launch
     would.
     """
-    from pathlib import Path
-
     from .launcher import resolve_runner  # deferred: keeps this module leaf-ish
 
     state = load_gui_settings()
     kind = state.get("runner") or "auto"
-    prefixes = state.get("prefixes") or {}
-    prefix = prefixes.get(kind) or state.get("wine_prefix") or ""
-    if kind.startswith("proton:") and Path(prefix).name == "umu-default":
-        # Older builds could carry the UMU default into a Steam Proton runner.
-        prefix = ""
-    return resolve_runner(kind, prefix)
+    return resolve_runner(kind, saved_prefix_for(kind, state))

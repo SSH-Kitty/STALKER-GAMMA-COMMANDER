@@ -18,15 +18,10 @@ first change.
 from __future__ import annotations
 
 import shutil
-from datetime import datetime
 from pathlib import Path
 
-from commander_gui.modlist import save_lines
+from commander_gui.modlist import BACKUP_SUFFIX, save_lines, timestamped_backup_path
 from commander_gui.ui.common import mo2_running
-
-#: Same suffix the desktop Mod Manager uses, so the two interfaces share one
-#: backup rather than each keeping its own idea of "the original".
-BACKUP_SUFFIX = ".gammagui.bak"
 
 
 class ModlistWriteBlocked(RuntimeError):
@@ -35,16 +30,6 @@ class ModlistWriteBlocked(RuntimeError):
 
 def backup_path(modlist: Path) -> Path:
     return modlist.with_name(modlist.name + BACKUP_SUFFIX)
-
-
-def timestamped_backup_path(modlist: Path) -> Path:
-    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    candidate = modlist.with_name(f"{modlist.stem}-{stamp}.bak")
-    suffix = 2
-    while candidate.exists():
-        candidate = modlist.with_name(f"{modlist.stem}-{stamp}-{suffix}.bak")
-        suffix += 1
-    return candidate
 
 
 def guard_reason(window) -> str | None:
@@ -57,7 +42,7 @@ def guard_reason(window) -> str | None:
 
     if getattr(window, "install_busy", False):
         return tr("An install is already running.")
-    if mo2_running():
+    if mo2_running(force=True):
         return tr(
             "Close Mod Organizer first - it would overwrite your changes "
             "when it exits."

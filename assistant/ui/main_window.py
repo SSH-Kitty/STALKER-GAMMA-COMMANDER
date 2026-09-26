@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -130,6 +130,13 @@ class MainWindow(QMainWindow):
         self.theme_combo.setCurrentIndex(self.theme_combo.findData(theme.active_theme()))
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
         top_bar.addWidget(self.theme_combo)
+        # Follow a theme picked in COMMANDER while ASSISTANT is open: both
+        # share gui-settings.json, which is cheap to stat.
+        self._theme_mtime = self._settings_mtime()
+        self._theme_watch = QTimer(self)
+        self._theme_watch.setInterval(1500)
+        self._theme_watch.timeout.connect(self._follow_saved_theme)
+        self._theme_watch.start()
         open_button = QPushButton("Open ZIP...")
         open_button.clicked.connect(self._browse)
         top_bar.addWidget(open_button)
@@ -280,14 +287,42 @@ class MainWindow(QMainWindow):
         name = self.theme_combo.itemData(index)
         if not isinstance(name, str):
             return
+        if self._apply_theme_ui(name):
+            theme.save_theme(name)
+            # Our own write: not a change to follow.
+            self._theme_mtime = self._settings_mtime()
+
+    def _apply_theme_ui(self, name: str) -> bool:
         app = QApplication.instance()
         if app is None:
-            return
+            return False
         theme.apply_theme(app, name)
-        theme.save_theme(name)
         self._refresh_theme_labels()
         for widget in self.findChildren(QWidget):
             widget.update()
+        return True
+
+    @staticmethod
+    def _settings_mtime() -> float:
+        try:
+            return theme.config_path().stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _follow_saved_theme(self) -> None:
+        mtime = self._settings_mtime()
+        if mtime == self._theme_mtime:
+            return
+        self._theme_mtime = mtime
+        name = theme.load_saved_theme()
+        if name == theme.active_theme():
+            return
+        index = self.theme_combo.findData(name)
+        if index >= 0:
+            self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentIndex(index)
+            self.theme_combo.blockSignals(False)
+        self._apply_theme_ui(name)
 
     def _build_analysis(self) -> QWidget:
         page = QWidget()
@@ -484,8 +519,18 @@ class MainWindow(QMainWindow):
         normally fast, so blocking briefly here is an acceptable trade
         against a crash-on-quit.
         """
-        if self._bg_thread is not None and self._bg_thread.isRunning():
-            self._bg_thread.wait(10_000)
+        thread = self._bg_thread
+        if thread is not None and thread.isRunning() and not thread.wait(10_000):
+            # Still running after the wait: closing now would destroy a live
+            # QThread, which Qt answers by aborting the process.
+            event.ignore()
+            QMessageBox.information(
+                self,
+                "Still Analyzing",
+                "The archive is still being analyzed. Close the window "
+                "again once it finishes.",
+            )
+            return
         super().closeEvent(event)
 
     def _set_busy(self, busy: bool) -> None:
@@ -541,6 +586,11 @@ class MainWindow(QMainWindow):
         # bug this whole background-worker change exists to avoid.
         self._pending_dump = dump
         self._pending_partial = partial
+        if self._bg_thread is None:
+            # The "Analyze anyway?" question above ran a nested event loop in
+            # which stage 1's cleanup already restored the cursor and
+            # re-enabled the drop zones; stage 2 must claim them again.
+            self._set_busy(True)
         self._run_in_background(
             run_analysis,
             dump,

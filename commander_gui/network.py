@@ -33,7 +33,7 @@ def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
     scheme = urllib.parse.urlsplit(full_url).scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise ValueError(f"Refusing to open a non-http(s) URL: {full_url!r}")
-    return urllib.request.urlopen(url_or_request, timeout=timeout)
+    return urllib.request.urlopen(url_or_request, timeout=timeout)  # nosec B310 - scheme checked above
 
 
 def urlopen_with_retry(

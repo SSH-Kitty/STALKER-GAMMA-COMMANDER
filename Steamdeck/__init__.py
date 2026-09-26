@@ -36,4 +36,9 @@ Two notes on this module itself:
 
 from __future__ import annotations
 
-__version__ = "1.3.0"
+# Deck Mode is part of COMMANDER, not a separately versioned product: one
+# version number, defined in commander_gui (itself Qt-free, so this import
+# keeps the headless check in build-appimage.sh working).
+from commander_gui import __version__, __version_label__
+
+__all__ = ["__version__", "__version_label__"]

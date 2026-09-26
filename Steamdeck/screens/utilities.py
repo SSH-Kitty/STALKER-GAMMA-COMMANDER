@@ -12,17 +12,38 @@ declutter every other Deck screen in this overhaul already went through).
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from commander_gui.cli_runner import cli_command
+from commander_gui.game_backup import (
+    NAME_MAX,
+    BackupError,
+    clean_name,
+    create_backup,
+    delete_backup,
+    list_backups,
+    mark_settings_restore,
+    restore_backup,
+)
 from commander_gui.gui_settings import configured_runner
 from commander_gui.i18n import tr
+from commander_gui.integrity import format_size
 from commander_gui.launcher import LaunchError
 from commander_gui.log_dump import create_log_dump
 from commander_gui.parsers import parse_prune_archive, strip_ansi
 from commander_gui.repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
+from commander_gui.ui.backup_dialog import backup_summary, backup_title
 from commander_gui.ui.common import (
     BackgroundTask,
     CommandRunner,
@@ -30,42 +51,70 @@ from commander_gui.ui.common import (
     mo2_running,
 )
 from commander_gui.ui.utilities_page import (
+    _backup_then_wipe,
     _move_folders,
     _resolved_wipe_target,
     _rewrite_mo2_ini_paths,
     _save_moved_profile,
     _validate_move_destination,
     _validate_wipe_paths,
-    _wipe_folders,
 )
 
 from ..folder_picker import show_folder_picker
+from ..scale import px
 from ..widgets import (
+    MIN_TOUCH,
     DeckCard,
     DeckOverlay,
+    DeckPicker,
     DeckProgress,
     DeckRow,
     deck_button,
     deck_label,
+    picker_overlay,
 )
 from .base import DeckScreen
 
 
+class _StatusLabel(QLabel):
+    """The result line at the top: hidden while empty, so it doesn't leave
+    a blank band above the first card."""
+
+    def __init__(self) -> None:
+        super().__init__("")
+        self.setObjectName("deckCaption")
+        self.setWordWrap(True)
+        self.hide()
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setVisible(bool(text))
+
+
 def _tool_row(title, description, on_run, *, role="normal"):
-    """A title + wrapped description + a real, focusable Run button.
+    """A tool tile: title and wrapped description, with a small Run button.
 
     Not a DeckRow: descriptions here run long enough to need wrapping past
     DeckRow's fixed ROW_H, and each of these needs its own click target
     rather than the whole row being one "tap to pick" control.
     """
-    box = QWidget()
-    layout = QVBoxLayout(box)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(4)
-    layout.addWidget(deck_label(title, role="rowTitle"))
-    layout.addWidget(deck_label(description, role="caption", wrap=True))
+    box = QFrame()
+    box.setObjectName("deckTile")
+    layout = QHBoxLayout(box)
+    layout.setContentsMargins(px(16), px(10), px(12), px(10))
+    layout.setSpacing(px(12))
+    text = QVBoxLayout()
+    text.setSpacing(px(2))
+    text.addWidget(deck_label(title, role="rowTitle"))
+    text.addWidget(deck_label(description, role="caption", wrap=True))
+    layout.addLayout(text, 1)
     button = deck_button(tr("Run"), role=role, on_click=on_run)
-    layout.addWidget(button)
+    # Small and the same whatever the role: a touch-sized pill beside the
+    # text, not a slab under it - and a danger tile's button is no bigger
+    # than anyone else's.
+    button.setObjectName("deckRunButton" if role == "normal" else "deckRunDanger")
+    button.setFixedSize(px(104), px(MIN_TOUCH))
+    layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
     return box, button
 
 
@@ -76,6 +125,7 @@ class UtilitiesScreen(DeckScreen):
         self._move_task: StreamTask | None = None
         self._log_dump_task: StreamTask | None = None
         self._repair_task: BackgroundTask | None = None
+        self._backup_task: StreamTask | None = None
         self._action_buttons: list = []
         self._prune_mb = 0
         self._move_dest: Path | None = None
@@ -85,99 +135,200 @@ class UtilitiesScreen(DeckScreen):
         self._wipe_targets: tuple[str, str] = ("", "")
         self._full_uninstall_targets: tuple[str, str, str] = ("", "", "")
 
-        self.status = deck_label("", role="caption", wrap=True)
+        self.status = _StatusLabel()
         self.body.addWidget(self.status)
 
         self.progress = DeckProgress()
         self.progress.hide()
         self.body.addWidget(self.progress)
 
-        self.body.addWidget(self._tools_card())
+        # Two columns balanced by height: the two one- and two-tool groups
+        # stacked on the left, the three-tool group on the right. Paired
+        # strictly two-by-two, the lone Wine / Proton tool sat in a card
+        # half as tall as the one beside it.
+        cache, files, wine, installation, backups = self._tool_cards()
+        left = QVBoxLayout()
+        left.setSpacing(px(12))
+        # Equal stretch above and below: the left column's two cards sit
+        # centred beside the taller right column, with the same empty space
+        # over and under them. (With no stretch at all they grew to the
+        # right column's height and their headings floated mid-card.)
+        left.addStretch(1)
+        left.addWidget(cache)
+        left.addWidget(wine)
+        left.addStretch(1)
+        right = QVBoxLayout()
+        right.setSpacing(px(12))
+        right.addWidget(files)
+        right.addWidget(backups)
+        right.addStretch(1)
+        columns = QHBoxLayout()
+        columns.setSpacing(px(12))
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
+        self.body.addLayout(columns)
+        self.body.addWidget(installation)
         self.body.addWidget(self._destructive_section())
         self.body.addStretch(1)
 
     # -- layout -------------------------------------------------------------
-    def _tools_card(self) -> DeckCard:
-        card = DeckCard()
-        card.body.addWidget(deck_label(tr("Tools"), role="rowTitle"))
+    def _tool_cards(self) -> list[DeckCard]:
+        """The maintenance tools, grouped so the D-pad walk stays short.
 
-        def add(title, description, on_run, *, role="normal"):
-            box, button = _tool_row(title, description, on_run, role=role)
-            card.body.addWidget(box)
-            self._action_buttons.append(button)
-
-        add(
-            tr("Preview cache cleanup"),
-            tr(
-                "List out-of-date addon archives in the cache with the total "
-                "size that can be reclaimed."
+        One card per kind of problem - the download cache, the game files,
+        Wine, the install as a whole - rather than one long list, so what
+        someone is looking for is under a heading they recognise.
+        """
+        groups = [
+            (
+                tr("Download cache"),
+                [
+                    (
+                        tr("Preview cache cleanup"),
+                        tr(
+                            "List out-of-date addon archives in the cache with "
+                            "the total size that can be reclaimed."
+                        ),
+                        self._prune_check,
+                        "normal",
+                    ),
+                    (
+                        tr("Clean the download cache"),
+                        tr("Permanently delete out-of-date addon archives from the cache."),
+                        self._prune_apply,
+                        "normal",
+                    ),
+                ],
             ),
-            self._prune_check,
-        )
-        add(
-            tr("Clean the download cache"),
-            tr("Permanently delete out-of-date addon archives from the cache."),
-            self._prune_apply,
-        )
-        add(
-            tr("Clear shader cache"),
-            tr("Delete the shader cache for the active Anomaly profile."),
-            self._purge_shader_cache,
-        )
-        add(
-            tr("Remove ReShade"),
-            tr("Remove all ReShade-related files from the Anomaly bin directory."),
-            self._delete_reshade,
-        )
-        add(
-            tr("Fix GOG installation"),
-            tr("Fix the ModOrganizer.ini paths for a GOG-provided install."),
-            self._gog_fix,
-        )
-        add(
-            tr("Repair Wine prefix"),
-            tr(
-                "Restore the runner's own system DLLs if another Wine has "
-                "written into the game's prefix. Use this when every launch "
-                "crashes immediately, then reinstall the dependencies."
+            (
+                tr("Game files"),
+                [
+                    (
+                        tr("Clear shader cache"),
+                        tr("Delete the shader cache for the active Anomaly profile."),
+                        self._purge_shader_cache,
+                        "normal",
+                    ),
+                    (
+                        tr("Remove ReShade"),
+                        tr("Remove all ReShade-related files from the Anomaly bin directory."),
+                        self._delete_reshade,
+                        "normal",
+                    ),
+                    (
+                        tr("Fix GOG installation"),
+                        tr("Fix the ModOrganizer.ini paths for a GOG-provided install."),
+                        self._gog_fix,
+                        "normal",
+                    ),
+                ],
             ),
-            self._repair_prefix,
-            role="danger",
-        )
-        add(
-            tr("Move Installation"),
-            tr(
-                "Move the Anomaly, GAMMA, and cache folders to another drive. "
-                "Files are copied and checked before the originals are removed."
+            (
+                tr("Wine / Proton"),
+                [
+                    (
+                        tr("Repair Wine prefix"),
+                        tr(
+                            "Restore the runner's own system DLLs if another Wine has "
+                            "written into the game's prefix. Use this when every launch "
+                            "crashes immediately, then reinstall the dependencies."
+                        ),
+                        self._repair_prefix,
+                        "normal",
+                    ),
+                ],
             ),
-            self._open_move_overlay,
-        )
-        add(
-            tr("Create Log Dump"),
-            tr(
-                "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
-                "plus crash dumps into one zip archive."
+            (
+                tr("Installation"),
+                [
+                    (
+                        tr("Move Installation"),
+                        tr(
+                            "Move the Anomaly, GAMMA, and cache folders to another drive. "
+                            "Files are copied and checked before the originals are removed."
+                        ),
+                        self._open_move_overlay,
+                        "normal",
+                    ),
+                    (
+                        tr("Create Log Dump"),
+                        tr(
+                            "Collect COMMANDER, Anomaly, GAMMA/MO2 and Wine-prefix logs "
+                            "plus crash dumps into one zip archive."
+                        ),
+                        self._start_log_dump,
+                        "normal",
+                    ),
+                ],
             ),
-            self._start_log_dump,
-        )
-        return card
+            (
+                tr("Saves & settings"),
+                [
+                    (
+                        tr("Back up now"),
+                        tr(
+                            "Copy your saves, user.ltx (keybinds) and MCM settings to a "
+                            "folder outside the game. Also done automatically before "
+                            "every reset or uninstall."
+                        ),
+                        self._backup_now,
+                        "normal",
+                    ),
+                    (
+                        tr("Restore a backup"),
+                        tr("Put saves and settings from an earlier backup back in place."),
+                        self._choose_backup,
+                        "normal",
+                    ),
+                ],
+            ),
+        ]
+        cards: list[DeckCard] = []
+        for heading, tools in groups:
+            card = DeckCard()
+            section = deck_label(heading, role="rowTitle")
+            section.setObjectName("deckSection")
+            card.body.addWidget(section)
+            # Installation's two tools share the full width, side by side.
+            row = QHBoxLayout() if heading == tr("Installation") else None
+            if row is not None:
+                row.setSpacing(px(12))
+                card.body.addLayout(row)
+            for title, description, on_run, role in tools:
+                box, button = _tool_row(title, description, on_run, role=role)
+                if row is not None:
+                    row.addWidget(box, 1)
+                else:
+                    card.body.addWidget(box)
+                self._action_buttons.append(button)
+            cards.append(card)
+        return cards
 
     def _destructive_section(self) -> DeckCard:
         card = DeckCard()
-        card.body.addWidget(deck_label(tr("Reset or uninstall"), role="rowTitle"))
+        card.setObjectName("deckDangerCard")
+        heading = deck_label(tr("Uninstall / Reinstall"), role="rowTitle")
+        heading.setObjectName("deckSection")
+        card.body.addWidget(heading)
         card.body.addWidget(
             deck_label(
                 tr(
-                    "All reset and uninstall actions refuse to operate on "
-                    "system paths, home directories or symlinks, and "
-                    "re-check that the profile still points where it did "
-                    "before deleting anything."
+                    "Use these to start over when an install is broken. They "
+                    "only ever delete the active profile's Anomaly, GAMMA and "
+                    "download cache folders, never anything else on your "
+                    "system, and your saves, keybinds and MCM settings are "
+                    "backed up first."
                 ),
                 role="caption",
                 wrap=True,
             )
         )
 
+        # One per line, full width: side by side at a third of the screen
+        # each, the descriptions wrapped to five lines and the buttons were
+        # squeezed off the bottom of their tiles.
+        tiles = QVBoxLayout()
+        tiles.setSpacing(px(10))
         box, self.fresh_reset_button = _tool_row(
             tr("Fresh Reset"),
             tr(
@@ -187,20 +338,17 @@ class UtilitiesScreen(DeckScreen):
             self._start_fresh_reset,
             role="danger",
         )
-        card.body.addWidget(box)
-
+        tiles.addWidget(box)
         box, self.gamma_reset_button = _tool_row(
             tr("GAMMA Reset"),
             tr(
-                "Deletes the GAMMA folder and reinstalls GAMMA while "
-                "preserving the existing Anomaly installation. Uses the "
-                "Preserve toggles on the Install screen."
+                "Deletes the GAMMA folder and reinstalls GAMMA, keeping "
+                "Anomaly. Uses the Preserve toggles on the Install screen."
             ),
             self._start_gamma_reset,
             role="danger",
         )
-        card.body.addWidget(box)
-
+        tiles.addWidget(box)
         box, self.full_uninstall_button = _tool_row(
             tr("Full Uninstall"),
             tr(
@@ -210,7 +358,8 @@ class UtilitiesScreen(DeckScreen):
             self._start_full_uninstall,
             role="danger",
         )
-        card.body.addWidget(box)
+        tiles.addWidget(box)
+        card.body.addLayout(tiles)
         return card
 
     # -- state ----------------------------------------------------------
@@ -235,6 +384,7 @@ class UtilitiesScreen(DeckScreen):
             and self._move_task is None
             and self._log_dump_task is None
             and self._repair_task is None
+            and self._backup_task is None
         )
 
     def _reject_if_mo2_running(self) -> bool:
@@ -275,7 +425,7 @@ class UtilitiesScreen(DeckScreen):
         handler=None,
     ) -> None:
         if self.profile() is None:
-            self.window.notify(tr("Create or activate a profile first (Profiles page)."))
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
             return
         if not self._tasks_idle() or self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
@@ -309,6 +459,7 @@ class UtilitiesScreen(DeckScreen):
         self.progress.set_runner(runner)
         self.progress.on_started()
         runner.start()
+        self.progress.focus_controls()
 
     def _on_cli_finished(self, rc: int, _output: str) -> None:
         self.progress.on_finished(rc, "")
@@ -316,6 +467,9 @@ class UtilitiesScreen(DeckScreen):
         self.window.set_install_busy(False)
         self._set_actions_enabled(True)
         self.status.setText(tr("Done") if rc == 0 else tr("Failed (exit {rc})", rc=rc))
+        # The status line sits at the top of a long screen; the toast is
+        # seen wherever the user has scrolled to.
+        self.window.notify(self.status.text(), 5000)
 
     def _prune_handler(self, line: str) -> None:
         self.progress.on_line(line)
@@ -370,7 +524,7 @@ class UtilitiesScreen(DeckScreen):
     # -- repair wine prefix (bespoke, off the GUI thread) --------------------
     def _repair_prefix(self) -> None:
         if self.profile() is None:
-            self.window.notify(tr("Create or activate a profile first (Profiles page)."))
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
             return
         if not self._tasks_idle() or self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
@@ -446,6 +600,204 @@ class UtilitiesScreen(DeckScreen):
         self._set_actions_enabled(True)
         self.window.notify(tr("Repair failed: {message}", message=message), 8000)
 
+    # -- saves & settings backup ---------------------------------------------
+    def _run_backup_task(self, fn, status: str, on_done) -> None:
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        self.window.set_install_busy(True)
+        self.status.setText(status)
+        self.progress.reset()
+        self.progress.show()
+        self.progress.set_cancellable(None)
+        self._set_actions_enabled(False)
+        task = StreamTask(fn, parent=self)
+        self._backup_task = task
+        task.line.connect(self.progress.on_line)
+        task.result.connect(lambda result: self._on_backup_task_done(on_done, result, None))
+        task.error.connect(lambda message: self._on_backup_task_done(on_done, None, message))
+        task.start()
+        self.progress.focus_controls()
+
+    def _on_backup_task_done(self, on_done, result, error) -> None:
+        self._backup_task = None
+        self.progress.hide()
+        self.window.set_install_busy(False)
+        self._set_actions_enabled(True)
+        on_done(result, error)
+
+    def _backup_now(self) -> None:
+        """Ask for an optional name, then back up."""
+        if self.profile() is None:
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
+            return
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(px(10))
+        layout.addWidget(deck_label(tr("Name this backup (optional):"), role="caption"))
+        name_edit = QLineEdit()
+        name_edit.setMaxLength(NAME_MAX)
+        name_edit.setPlaceholderText(tr("e.g. Before the Zaton trip"))
+        layout.addWidget(name_edit)
+
+        def _go() -> None:
+            label = clean_name(name_edit.text())
+            self.window.dismiss_overlay()
+            self._start_backup(label)
+
+        overlay = DeckOverlay(
+            tr("Back up now"),
+            body,
+            [
+                (tr("Back up"), _go, "primary"),
+                (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+            ],
+            panel_width=1000,
+        )
+        # A on the name field opens the on-screen keyboard; skipping the
+        # name is one D-pad press down to "Back up".
+        overlay.default_button = name_edit
+        self.window.show_overlay(overlay)
+
+    def _start_backup(self, label: str) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        name, anomaly, gamma = profile.profile_name, profile.anomaly, profile.gamma
+
+        def done(info, error) -> None:
+            if error:
+                self.status.setText("")
+                self.window.notify(tr("Backup failed: {message}", message=error), 8000)
+            elif info is None:
+                self.status.setText(
+                    tr("No saves, user.ltx or MCM settings found - nothing to back up.")
+                )
+            else:
+                self.status.setText(
+                    tr(
+                        "Backup saved ({what}):\n{path}",
+                        what=backup_summary(info),
+                        path=str(info.path),
+                    )
+                )
+                self.window.notify(tr("Backup saved"), 4000)
+
+        self._run_backup_task(
+            lambda report: create_backup(
+                name, anomaly, gamma, reason="manual", name=label, report=report
+            ),
+            tr("Backing up..."),
+            done,
+        )
+
+    def _choose_backup(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
+            return
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        backups = list_backups(profile.profile_name)
+        if not backups:
+            self.window.notify(tr("No backups yet for profile '{name}'.", name=profile.profile_name))
+            return
+        picker = DeckPicker(
+            "",
+            [
+                (f"{backup_title(info)}   ·   {backup_summary(info)}", index)
+                for index, info in enumerate(backups)
+            ],
+            0,
+        )
+        picker.chosen.connect(lambda index: self._on_backup_chosen(backups[int(index)]))
+        self.window.show_overlay(
+            picker_overlay(self.window, tr("Restore a backup"), picker, panel_width=1200)
+        )
+
+    def _on_backup_chosen(self, info) -> None:
+        self.window.dismiss_overlay()
+        body = deck_label(
+            tr(
+                "{when}\n{what}, {size}\n\nFiles with the same name are replaced. "
+                "Nothing else is deleted, and the files being replaced are kept "
+                "in a new \"Before restore\" backup.",
+                when=backup_title(info),
+                what=backup_summary(info),
+                size=format_size(info.size),
+            ),
+            wrap=True,
+        )
+        actions = []
+        if info.saves and info.has_settings:
+            actions.append((tr("Restore all"), lambda: self._restore(info, True, True), "primary"))
+        if info.saves:
+            actions.append((tr("Saves only"), lambda: self._restore(info, True, False), "normal"))
+        if info.has_settings:
+            actions.append(
+                (tr("Settings only"), lambda: self._restore(info, False, True), "normal")
+            )
+        actions.append((tr("Delete"), lambda: self._delete_backup(info), "danger"))
+        actions.append((tr("Cancel"), self.window.dismiss_overlay, "normal"))
+        self.window.show_overlay(
+            DeckOverlay(
+                tr("Restore a backup"),
+                body,
+                actions,
+                panel_width=1200,
+                default_index=len(actions) - 1,
+            )
+        )
+
+    def _restore(self, info, saves: bool, settings: bool) -> None:
+        self.window.dismiss_overlay()
+        if self._reject_if_mo2_running():
+            return
+        profile = self.profile()
+        if profile is None:
+            return
+        anomaly, gamma = profile.anomaly, profile.gamma
+
+        def done(count, error) -> None:
+            if error:
+                self.status.setText("")
+                self.window.notify(tr("Restore failed: {message}", message=error), 8000)
+            else:
+                self.status.setText(tr("Restored {count} files.", count=count))
+                self.window.notify(tr("Restored {count} files.", count=count), 4000)
+
+        self._run_backup_task(
+            lambda report: restore_backup(
+                info, anomaly, gamma, saves=saves, settings=settings, report=report
+            ),
+            tr("Restoring..."),
+            done,
+        )
+
+    def _delete_backup(self, info) -> None:
+        self.window.dismiss_overlay()
+
+        def _do() -> None:
+            try:
+                delete_backup(info)
+            except (BackupError, OSError) as exc:
+                self.window.notify(str(exc), 8000)
+                return
+            self.window.notify(tr("Backup deleted"))
+
+        self.window.confirm(
+            tr("Delete"),
+            tr("Permanently delete the backup of {when}?", when=backup_title(info)),
+            _do,
+            confirm_role="danger",
+            confirm_text=tr("Delete"),
+        )
+
     # -- create log dump -----------------------------------------------------
     def _start_log_dump(self) -> None:
         if not self._tasks_idle() or self.window.install_busy:
@@ -463,6 +815,7 @@ class UtilitiesScreen(DeckScreen):
         task.result.connect(self._on_log_dump_done)
         task.error.connect(self._on_log_dump_error)
         task.start()
+        self.progress.focus_controls()
 
     def _on_log_dump_done(self, result: object) -> None:
         self._log_dump_task = None
@@ -498,7 +851,7 @@ class UtilitiesScreen(DeckScreen):
     # -- move installation ----------------------------------------------------
     def _open_move_overlay(self) -> None:
         if self.profile() is None:
-            self.window.notify(tr("Create or activate a profile first (Profiles page)."))
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
             return
         if not self._tasks_idle() or self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
@@ -530,21 +883,25 @@ class UtilitiesScreen(DeckScreen):
         )
         move_button.setEnabled(self._move_dest is not None)
         layout.addWidget(move_button)
-        self.window.show_overlay(
-            DeckOverlay(
-                tr("Move Installation"),
-                body,
-                [(tr("Close"), self.window.dismiss_overlay, "normal")],
-                panel_width=1000,
-            )
+        overlay = DeckOverlay(
+            tr("Move Installation"),
+            body,
+            [(tr("Close"), self.window.dismiss_overlay, "normal")],
+            panel_width=1000,
         )
+        # On the step still to do: pick a destination, then move.
+        overlay.default_button = move_button if self._move_dest is not None else dest_row
+        self.window.show_overlay(overlay)
 
     def _pick_move_destination(self) -> None:
+        # Stacked, so backing out of the browser returns to this panel
+        # instead of dropping the whole Move flow.
         show_folder_picker(
             self.window,
             title=tr("Select destination folder"),
             start=self._move_dest,
             on_choose=self._set_move_dest,
+            stacked=True,
         )
 
     def _set_move_dest(self, path: Path) -> None:
@@ -605,6 +962,7 @@ class UtilitiesScreen(DeckScreen):
         task.result.connect(self._on_move_done)
         task.error.connect(self._on_move_error)
         task.start()
+        self.progress.focus_controls()
 
     def _on_move_done(self, moved: object) -> None:
         self._move_task = None
@@ -666,7 +1024,7 @@ class UtilitiesScreen(DeckScreen):
             return
         profile = self.profile()
         if profile is None:
-            self.window.notify(tr("Create or activate a profile first (Profiles page)."))
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
             return
         wipe_paths = [("GAMMA", profile.gamma)]
         if include_anomaly:
@@ -682,7 +1040,8 @@ class UtilitiesScreen(DeckScreen):
         message = tr(
             "This permanently deletes the {folders} folder(s):\n\n{paths}\n\n"
             "This deletes ALL SAVES, MO2 settings, MCM settings and any mods "
-            "you added. Back up anything you want to keep first.",
+            "you added. Saves, user.ltx and MCM settings are backed up "
+            "automatically first; mods you added yourself are not.",
             folders=folders,
             paths="\n".join(path for _label, path in wipe_paths),
         )
@@ -706,14 +1065,20 @@ class UtilitiesScreen(DeckScreen):
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)
-        task = StreamTask(lambda report: _wipe_folders(wipe_paths, report), parent=self)
+        reason = "fresh-reset" if include_anomaly else "gamma-reset"
+        snapshot = dataclasses.replace(profile)
+        task = StreamTask(
+            lambda report: _backup_then_wipe(snapshot, wipe_paths, reason, report),
+            parent=self,
+        )
         self._wipe_task = task
         task.line.connect(self.progress.on_line)
-        task.result.connect(lambda _wiped: self._on_reset_wiped(title))
+        task.result.connect(lambda result: self._on_reset_wiped(title, result))
         task.error.connect(self._on_reset_wipe_error)
         task.start()
+        self.progress.focus_controls()
 
-    def _on_reset_wiped(self, title: str) -> None:
+    def _on_reset_wiped(self, title: str, result: object = None) -> None:
         self._wipe_task = None
         self.progress.hide()
         profile = self.profile()
@@ -737,6 +1102,13 @@ class UtilitiesScreen(DeckScreen):
         else:
             preserve_user = install_page.preserve_user_row.is_checked()
             preserve_mcm = install_page.preserve_mcm_row.is_checked()
+            backup = result[1] if isinstance(result, tuple) and len(result) == 2 else None
+            if backup is not None:
+                # The wipe already deleted what the CLI's "preserve" would
+                # keep; the pre-reset backup is put back after the reinstall.
+                mark_settings_restore(
+                    profile.profile_name, backup, user_ltx=preserve_user, mcm=preserve_mcm
+                )
         if not install_page.start_auto_install(
             include_anomaly=self._reset_includes_anomaly,
             preserve_user=preserve_user,
@@ -759,7 +1131,7 @@ class UtilitiesScreen(DeckScreen):
             return
         profile = self.profile()
         if profile is None:
-            self.window.notify(tr("Create or activate a profile first (Profiles page)."))
+            self.window.notify(tr("Create or activate a profile first (Dashboard → Profiles)."))
             return
         nothing_to_remove = (
             _resolved_wipe_target(profile.anomaly) is None
@@ -784,7 +1156,8 @@ class UtilitiesScreen(DeckScreen):
             "This permanently deletes:\n\n{paths}\n\n"
             "This deletes ALL SAVES, MO2 settings, MCM settings, mods and "
             "the download cache. The Wine/Proton prefix is kept.\n\n"
-            "Back up anything you want to keep first.",
+            "Saves, user.ltx and MCM settings are backed up automatically "
+            "first; mods you added yourself are not.",
             paths="\n".join(path for _label, path in uninstall_paths),
         )
 
@@ -812,12 +1185,17 @@ class UtilitiesScreen(DeckScreen):
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)
-        task = StreamTask(lambda report: _wipe_folders(uninstall_paths, report), parent=self)
+        snapshot = dataclasses.replace(profile)
+        task = StreamTask(
+            lambda report: _backup_then_wipe(snapshot, uninstall_paths, "uninstall", report),
+            parent=self,
+        )
         self._wipe_task = task
         task.line.connect(self.progress.on_line)
         task.result.connect(self._on_full_uninstall_done)
         task.error.connect(self._on_full_uninstall_error)
         task.start()
+        self.progress.focus_controls()
 
     def _on_full_uninstall_done(self, _wiped: object) -> None:
         self._wipe_task = None

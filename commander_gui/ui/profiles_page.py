@@ -26,7 +26,9 @@ from ..modlist import seed_new_mo2_profile
 from ..profile_bundle import (
     ProfileBundleError,
     export_profile_bundle,
+    non_default_sources,
     read_profile_bundle,
+    reset_sources,
 )
 from ..settings import CliProfile, cli_ok, run_config_command
 from .common import (
@@ -39,6 +41,112 @@ from .common import (
     section_label,
     tr,
 )
+
+
+def check_cli_values(profile: CliProfile) -> None:
+    """Refuse text fields that start with "-".
+
+    Each value is passed as its own argument after its flag, and the CLI's
+    parser reads an argument starting with "-" as another option - so a
+    name, URL or branch like "--gamma" (typed, or from an imported bundle)
+    would silently change what the command does.
+    """
+    for name in (
+        "profile_name", "anomaly", "gamma", "cache", "mo2_profile",
+        "mod_pack_maker_url", "mod_list_url",
+        "gamma_setup_repo_url", "gamma_setup_repo_branch",
+        "stalker_gamma_repo_url", "stalker_gamma_repo_branch",
+        "gamma_large_files_repo_url", "gamma_large_files_repo_branch",
+        "teivaz_anomaly_gunslinger_repo_url", "teivaz_anomaly_gunslinger_repo_branch",
+    ):
+        value = str(getattr(profile, name, "") or "")
+        if value.lstrip().startswith("-"):
+            raise ValueError(
+                tr("{field} can't start with \"-\": {value}", field=name, value=value)
+            )
+
+
+def create_profile_args(profile: CliProfile) -> list[str]:
+    """The CLI ``config create`` arguments for ``profile``.
+
+    Module-level so Deck Mode's setup wizard builds exactly the same
+    command as this page's "Create" button. Raises ``ValueError`` for a
+    value the CLI would read as an option of its own.
+    """
+    check_cli_values(profile)
+    return [
+        "create",
+        "--anomaly",
+        profile.anomaly,
+        "--gamma",
+        profile.gamma,
+        "--cache",
+        profile.cache,
+        "--name",
+        profile.profile_name,
+        "--mo2-profile",
+        profile.mo2_profile,
+        "--mod-pack-maker-url",
+        profile.mod_pack_maker_url,
+        "--mod-list-url",
+        profile.mod_list_url,
+        "--download-threads",
+        str(profile.download_threads),
+        "--gamma-setup-repo-url",
+        profile.gamma_setup_repo_url,
+        "--gamma-setup-repo-branch",
+        profile.gamma_setup_repo_branch,
+        "--stalker-gamma-repo-url",
+        profile.stalker_gamma_repo_url,
+        "--stalker-gamma-repo-branch",
+        profile.stalker_gamma_repo_branch,
+        "--gamma-large-files-repo-url",
+        profile.gamma_large_files_repo_url,
+        "--gamma-large-files-repo-branch",
+        profile.gamma_large_files_repo_branch,
+        "--teivaz-anomaly-gunslinger-repo-url",
+        profile.teivaz_anomaly_gunslinger_repo_url,
+        "--teivaz-anomaly-gunslinger-repo-branch",
+        profile.teivaz_anomaly_gunslinger_repo_branch,
+    ]
+
+
+def save_profile(settings, original_name: str | None, profile: CliProfile) -> None:
+    """Replace the profile named ``original_name`` with ``profile`` and save.
+
+    Matches on the name the edit started from, not the (possibly just
+    renamed) new name, so a rename replaces the original entry instead of
+    leaving it behind as an orphaned duplicate. The edited profile keeps the
+    original's unknown JSON keys and its active flag (or becomes active if
+    no profile is). On a write failure ``settings.profiles`` is restored and
+    the ``OSError`` re-raised. Shared by this page and Deck Mode's editor.
+    """
+    active = settings.active_profile
+    existing = next(
+        (p for p in settings.profiles if p.profile_name == original_name),
+        None,
+    )
+    # Build the new list without mutating settings.profiles yet.
+    profiles = [p for p in settings.profiles if p is not existing]
+    if existing is not None:
+        profile.extra = dict(existing.extra)
+    profile.active = bool(
+        active is None
+        or (existing is not None and existing.profile_name == active.profile_name)
+    )
+    profiles.append(profile)
+    original_profiles = settings.profiles[:]
+    settings.profiles = profiles
+    try:
+        settings.save()
+    except OSError:
+        settings.profiles = original_profiles
+        raise
+    if original_name and original_name != profile.profile_name:
+        # Backups live in a folder named after the profile.
+        from ..game_backup import rename_profile_backups
+
+        rename_profile_backups(original_name, profile.profile_name)
 
 
 class ProfilesPage(QWidget):
@@ -514,41 +622,11 @@ class ProfilesPage(QWidget):
             return
         if self._busy_guard():
             return
-        args = [
-            "create",
-            "--anomaly",
-            profile.anomaly,
-            "--gamma",
-            profile.gamma,
-            "--cache",
-            profile.cache,
-            "--name",
-            profile.profile_name,
-            "--mo2-profile",
-            profile.mo2_profile,
-            "--mod-pack-maker-url",
-            profile.mod_pack_maker_url,
-            "--mod-list-url",
-            profile.mod_list_url,
-            "--download-threads",
-            str(profile.download_threads),
-            "--gamma-setup-repo-url",
-            profile.gamma_setup_repo_url,
-            "--gamma-setup-repo-branch",
-            profile.gamma_setup_repo_branch,
-            "--stalker-gamma-repo-url",
-            profile.stalker_gamma_repo_url,
-            "--stalker-gamma-repo-branch",
-            profile.stalker_gamma_repo_branch,
-            "--gamma-large-files-repo-url",
-            profile.gamma_large_files_repo_url,
-            "--gamma-large-files-repo-branch",
-            profile.gamma_large_files_repo_branch,
-            "--teivaz-anomaly-gunslinger-repo-url",
-            profile.teivaz_anomaly_gunslinger_repo_url,
-            "--teivaz-anomaly-gunslinger-repo-branch",
-            profile.teivaz_anomaly_gunslinger_repo_branch,
-        ]
+        try:
+            args = create_profile_args(profile)
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Invalid profile"), str(exc))
+            return
         self._set_buttons_enabled(False)
         self._task = BackgroundTask(run_config_command, args, timeout=300, parent=self)
         self._task.result.connect(lambda res: self._on_create_done(profile, *res))
@@ -600,35 +678,16 @@ class ProfilesPage(QWidget):
                 tr("Anomaly, GAMMA, and cache folders are required."),
             )
             return
-        active = self.settings.active_profile
-        # Match on the name the form was loaded from, not the (possibly
-        # just-renamed) new name, so a rename replaces the original entry
-        # instead of leaving it behind as an orphaned duplicate.
-        existing = next(
-            (
-                p
-                for p in self.settings.profiles
-                if p.profile_name == self._form_state
-            ),
-            None,
-        )
-        # Build the new list without mutating self.settings.profiles yet.
-        profiles = [p for p in self.settings.profiles if p is not existing]
-        if existing is not None:
-            profile.extra = dict(existing.extra)
-        profile.active = bool(
-            active is None
-            or (existing is not None and existing.profile_name == active.profile_name)
-        )
-        profiles.append(profile)
         if self._busy_guard():
             return
-        original_profiles = self.settings.profiles[:]
-        self.settings.profiles = profiles
         try:
-            self.settings.save()
+            check_cli_values(profile)
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("Invalid profile"), str(exc))
+            return
+        try:
+            save_profile(self.settings, self._form_state, profile)
         except OSError as exc:
-            self.settings.profiles = original_profiles
             QMessageBox.warning(
                 self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
             )
@@ -720,6 +779,26 @@ class ProfilesPage(QWidget):
             return
         imported = CliProfile()
         bundle.apply_to(imported)
+        changed = non_default_sources(imported)
+        if changed:
+            # A bundle is a file someone sends you. Its download sources
+            # decide what gets downloaded and run through MO2/Wine, so a
+            # change from the official ones is shown, not applied silently.
+            listing = "\n".join(f"• {name}: {value}" for name, value in changed)
+            answer = QMessageBox.question(
+                self,
+                tr("Different download sources"),
+                tr(
+                    "This bundle changes where GAMMA is downloaded from:\n\n{listing}\n\n"
+                    "Only keep these if you trust whoever made the bundle. "
+                    "Keep them? (No uses the official sources.)",
+                    listing=listing,
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                reset_sources(imported)
         self._new_profile()
         self.mo2_edit.setText(imported.mo2_profile)
         self.threads_spin.setValue(imported.download_threads)
@@ -738,6 +817,13 @@ class ProfilesPage(QWidget):
         )
         if bundle.modlist_text is not None:
             modlist_out = Path(path_str).with_suffix("").with_suffix(".modlist.txt")
+            # Never overwrite (or write through a symlink at) an existing file.
+            counter = 2
+            while modlist_out.exists() or modlist_out.is_symlink():
+                modlist_out = modlist_out.with_name(
+                    f"{Path(path_str).with_suffix('').stem}.modlist-{counter}.txt"
+                )
+                counter += 1
             try:
                 modlist_out.write_text(bundle.modlist_text, encoding="utf-8")
                 message += "\n\n" + tr(

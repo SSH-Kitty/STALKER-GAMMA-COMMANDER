@@ -15,6 +15,7 @@ THEME_INFO = [
     ("dusk", "Dusk"),
     ("midnight", "Midnight"),
     ("terminal", "Terminal"),
+    ("reactor", "Reactor"),
 ]
 
 # These are the COMMANDER core colors. The smaller assistant UI derives all
@@ -25,6 +26,7 @@ THEMES = {
     "dusk": {"bg": "#140d06", "panel": "#1d140a", "card": "#2a1c10", "border": "#3a2a18", "text": "#f0e2cc", "dim": "#9c8261", "accent": "#ff9f45", "strong": "#ff8f2e", "selection": "#c8721e", "danger": "#b04f3d", "warn": "#e0a24a"},
     "midnight": {"bg": "#0b1016", "panel": "#111824", "card": "#1a2432", "border": "#1d2a3a", "text": "#dbe6f0", "dim": "#6e8496", "accent": "#6fd3a8", "strong": "#5ec99b", "selection": "#3f9d7a", "danger": "#b0554f", "warn": "#d9a04c"},
     "terminal": {"bg": "#000000", "panel": "#060b06", "card": "#0a120a", "border": "#123912", "text": "#33cc55", "dim": "#1f7a33", "accent": "#33ff66", "strong": "#2ee75c", "selection": "#1f8a3a", "danger": "#a0443f", "warn": "#cc9933"},
+    "reactor": {"bg": "#010a0a", "panel": "#061616", "card": "#0a2020", "border": "#0f3232", "text": "#cdeaea", "dim": "#4a7a7a", "accent": "#00a3a3", "strong": "#00c2c2", "selection": "#0a9494", "danger": "#b0554f", "warn": "#d9a04c"},
 }
 
 _ACTIVE = "gamma"

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gui_settings
+from .config import child_environment
 from .dependencies import configured_tool
 
 DEFAULT_UMU_PREFIX = Path.home() / "Games" / "umu" / "umu-default"
@@ -70,16 +71,71 @@ _RUNNER_ENV_NAMES = {
 }
 
 
+def steam_shortcut_appid(environ: dict[str, str] | None = None) -> int | None:
+    """The Steam app ID COMMANDER itself was launched under, or None.
+
+    Set when COMMANDER runs as a Steam shortcut - always the case in Game
+    Mode. Steam passes a non-Steam shortcut's 64-bit game ID in
+    ``SteamGameId`` (the 32-bit app ID is its upper half); the media and
+    shader-cache paths carry the app ID too, and are read the same way
+    umu-run reads them, as a fallback.
+    """
+    environ = dict(os.environ if environ is None else environ)
+    raw = environ.get("SteamGameId", "").strip()
+    if raw.isdigit():
+        value = int(raw)
+        appid = value >> 32 if value > 0xFFFFFFFF else value
+        if appid:
+            return appid
+    for key, part in (
+        ("STEAM_COMPAT_TRANSCODED_MEDIA_PATH", -1),
+        ("STEAM_COMPAT_MEDIA_PATH", -2),
+        ("STEAM_FOSSILIZE_DUMP_PATH", -3),
+        ("DXVK_STATE_CACHE_PATH", -2),
+    ):
+        path = environ.get(key, "")
+        if not path:
+            continue
+        try:
+            appid = int(Path(path).parts[part])
+        except (ValueError, IndexError):
+            continue
+        if appid:
+            return appid
+    return None
+
+
 def runner_environment(values: dict[str, str] | None = None) -> dict[str, str]:
-    """Return an environment isolated from inherited Wine/Proton state."""
+    """Return an environment isolated from inherited Wine/Proton state.
+
+    One piece of Steam's state is deliberately carried over: which app the
+    game belongs to. In Game Mode, gamescope decides which window has focus,
+    and Steam decides which controller layout applies, by the app ID on
+    each window (the STEAM_GAME property Proton sets from ``SteamGameId``).
+    Stripped, the game ran under umu-run's own placeholder ID - a window
+    belonging to no app Steam had launched - so the controller kept driving
+    COMMANDER's layout and the game received nothing. Now the game carries
+    COMMANDER's shortcut ID, the app Steam actually started, exactly as a
+    game launched straight from a Steam shortcut would.
+    """
+    base = child_environment()
     environment = {
         key: value
-        for key, value in os.environ.items()
+        for key, value in base.items()
         if not (
             key in _RUNNER_ENV_NAMES
             or any(key.upper().startswith(prefix) for prefix in _RUNNER_ENV_PREFIXES)
         )
     }
+    appid = steam_shortcut_appid(base)
+    if appid is not None:
+        environment["SteamAppId"] = str(appid)
+        environment["SteamGameId"] = str(appid)
+        # umu-run replaces SteamAppId/SteamGameId with an ID derived from
+        # GAMEID, so the shortcut's ID has to go in through GAMEID as well.
+        # A shortcut ID never collides with a real Steam app, so umu's
+        # per-game fixes (keyed on the same number) find nothing to apply.
+        environment["GAMEID"] = f"umu-{appid}"
     environment.update(values or {})
     return environment
 
@@ -232,36 +288,52 @@ def _terminate_process_group(
             os.killpg(pid, signal.SIGTERM)
     except OSError:
         pass
-    if process is not None:
-        if process.poll() is None:
+    if os.name == "nt":
+        if process is not None and process.poll() is None:
             try:
                 process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
                 try:
-                    if os.name == "nt":
-                        process.kill()
-                    else:
-                        os.killpg(pid, signal.SIGKILL)
+                    process.kill()
                 except OSError:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-    elif os.name != "nt":
-        # No handle to wait on: give the group a short grace period and
-        # escalate to SIGKILL if the leader is still alive (wineserver and
-        # friends routinely ignore SIGTERM).
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
+                    pass
+        return
+    # Wait for the whole *group* to go, not just its leader: the leader
+    # (a wrapper script, umu-run) often exits promptly on SIGTERM while
+    # wineserver and friends ignore it - waiting on the leader alone let
+    # them outlive the escalation below.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if process is not None:
+            process.poll()  # reap the leader so it doesn't linger as a zombie
+        if not _group_alive(pid):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        if process is not None:
             try:
-                os.kill(pid, 0)
+                process.kill()
             except OSError:
-                return
-            time.sleep(0.05)
+                pass
+    if process is not None:
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except OSError:
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+def _group_alive(pgid: int) -> bool:
+    """True while any process is still in process group ``pgid``."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM: members exist but aren't ours to signal - treat as alive.
+        return True
+    return True
 
 
 def runner_build_dir(runner: Runner) -> Path | None:
@@ -498,6 +570,29 @@ def mo2_path_to_host(value: str) -> str:
     return value
 
 
+def _qsettings_value(value: str) -> str:
+    """Undo QSettings' INI quoting (MO2 writes ModOrganizer.ini with it).
+
+    A value containing a comma or leading/trailing space is stored quoted,
+    with backslashes and quotes escaped: ``"Z:\\\\Games\\\\A, B\\\\x.exe"``.
+    Read raw, the quotes stayed in the path and it never matched a file.
+    """
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        inner = value[1:-1]
+        out: list[str] = []
+        index = 0
+        while index < len(inner):
+            char = inner[index]
+            if char == "\\" and index + 1 < len(inner):
+                out.append(inner[index + 1])
+                index += 2
+                continue
+            out.append(char)
+            index += 1
+        return "".join(out)
+    return value
+
+
 def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
     """Parse the ``[customExecutables]`` section of ModOrganizer.ini."""
     ini = Path(gamma_dir) / "ModOrganizer.ini"
@@ -508,8 +603,17 @@ def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
         lines = ini.read_text(encoding="utf-8", errors="replace").splitlines()
     except (OSError, UnicodeError):
         return []
+    section = ""
     for raw in lines:
         line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        # Only [customExecutables]: other sections (e.g. [Plugins]) also
+        # have "N\\key=value" lines, whose indices used to merge into
+        # executables with the same number.
+        if section != "customexecutables":
+            continue
         if "\\" not in line or "=" not in line:
             continue
         key, _, value = line.partition("=")
@@ -520,7 +624,7 @@ def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
             continue
         exe = entries.setdefault(index, Mo2Executable())
         field_name = field_name.lower()
-        value = value.strip()
+        value = _qsettings_value(value.strip())
         if field_name == "title":
             exe.title = value
         elif field_name == "binary":
@@ -540,6 +644,17 @@ def available_commands() -> dict[str, str]:
         or shutil.which("gamemoderun")
         or "",
     }
+
+
+def _steam_client_root() -> Path | None:
+    """The Steam client's own install directory, if one is found."""
+    for candidate in STEAM_ROOT_CANDIDATES:
+        try:
+            if (candidate / "steam.sh").is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
 
 
 def _steam_library_paths() -> list[Path]:
@@ -677,7 +792,16 @@ def _proton_runner(proton_script: str, prefix: str = "") -> Runner:
             f"{proton_script} is not inside a Steam library "
             "(expected steamapps/common/<Proton>/proton)."
         )
+    # parents[3] is the *library* the Proton build sits in. For a build in a
+    # secondary library (an SD card, a second drive) that isn't the Steam
+    # client's own install, which is what this variable must name - so
+    # prefer a real client install (one with steam.sh) when the library
+    # isn't one.
     steam_root = parents[3]
+    if not (steam_root / "steam.sh").is_file():
+        client = _steam_client_root()
+        if client is not None:
+            steam_root = client
     env = {"STEAM_COMPAT_CLIENT_INSTALL_PATH": str(steam_root)}
     # Keep Wine client/server versions paired when MO2 starts child processes.
     # Without this, a stale system or older Proton wineserver can be selected.
@@ -903,9 +1027,16 @@ def shortcut_slug(title: str) -> str:
 
 
 def _desktop_quote(value: str) -> str:
-    """Quote one argument per the freedesktop Exec key rules."""
+    """Quote one argument per the freedesktop Exec key rules.
+
+    Two escaping layers apply, in this order when *reading*: the general
+    string-value rule (``\\\\`` -> ``\\``), then the Exec quoting rule. So a
+    literal backslash inside a quoted argument is written as four; writing
+    two (quote-level only) made readers see a single escaping backslash.
+    """
+    _reject_control_chars(value)
     # '%' starts a field code even inside quotes, so it must be doubled too.
-    return (
+    quoted = (
         '"'
         + value.replace("\\", "\\\\")
         .replace('"', '\\"')
@@ -914,6 +1045,18 @@ def _desktop_quote(value: str) -> str:
         .replace("%", "%%")
         + '"'
     )
+    return quoted.replace("\\", "\\\\")
+
+
+def _reject_control_chars(value: str) -> None:
+    """A newline (or other control character) in a .desktop value would end
+    the line early and let the rest be read as extra keys - including a new
+    Exec= - so such values are refused rather than written."""
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise LaunchError(
+            "A name or path contains a control character and can't be used "
+            "in a desktop shortcut."
+        )
 
 
 def write_desktop_shortcut(
@@ -931,6 +1074,8 @@ def write_desktop_shortcut(
     """
     if not command:
         raise LaunchError("No command specified for desktop shortcut")
+    for value in (name, cwd, icon or ""):
+        _reject_control_chars(value)
     directory = directory or desktop_dir()
     argv = [_desktop_quote(arg) for arg in command]
     if env:
@@ -1044,3 +1189,49 @@ def launch_detached(
             return process
         except OSError as exc:
             raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc
+
+
+def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
+    """Kill ``winedbg`` processes that belong to *this* game's Wine prefix.
+
+    A Wine crash loop answers every fault with winedbg, whose own process
+    faults too; the ones that escaped the launch's process group are
+    stopped here. Only processes whose environment points at the same
+    prefix (WINEPREFIX or Proton's STEAM_COMPAT_DATA_PATH) and that run as
+    this user are touched - ``pkill -f winedbg`` also killed debuggers of
+    unrelated Wine games. Returns how many were signalled.
+    """
+    env = runner_env or {}
+    wanted = {
+        os.path.realpath(value)
+        for value in (env.get("WINEPREFIX"), env.get("STEAM_COMPAT_DATA_PATH"))
+        if value
+    }
+    if not wanted:
+        return 0
+    uid = os.getuid()
+    killed = 0
+    for entry in Path("/proc").iterdir() if Path("/proc").is_dir() else ():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            cmdline = (entry / "cmdline").read_bytes()
+            if b"winedbg" not in cmdline:
+                continue
+            environ = (entry / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        prefixes = set()
+        for item in environ:
+            key, _, value = item.partition(b"=")
+            if key in (b"WINEPREFIX", b"STEAM_COMPAT_DATA_PATH") and value:
+                prefixes.add(os.path.realpath(value.decode("utf-8", "replace")))
+        if prefixes & wanted:
+            try:
+                os.kill(int(entry.name), signal.SIGKILL)
+                killed += 1
+            except OSError:
+                pass
+    return killed

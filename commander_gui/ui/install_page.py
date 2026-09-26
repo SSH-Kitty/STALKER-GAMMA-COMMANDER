@@ -31,6 +31,7 @@ from .. import gui_settings
 from ..cli_runner import cli_command
 from ..config import logs_dir
 from ..dependencies import check_all_dependencies
+from ..game_backup import apply_pending_settings_restore, backup_settings_before
 from ..gui_settings import configured_runner, configured_wine_prefix
 from ..integrity import (
     CacheArchiveVerifyResult,
@@ -38,18 +39,25 @@ from ..integrity import (
     fetch_official_mod_names,
     invalidate_baseline,
     is_expected_gamma_overlay_corrupt,
+    restore_gamma_overlay,
+    reverted_gamma_overlay,
     scan_mods_md5,
     verify_cache_archives,
     verify_gamma,
 )
 from ..launcher import LaunchError
+from ..modlist import modlist_path_for
 from ..parsers import ProgressEvent, parse_progress_line, strip_ansi
 from ..repair import (
     classify_problems,
     fetch_modpack_records,
     purge_quarantine,
     quarantine_mod_and_archive,
+    repair_preview,
     restore_from_quarantine,
+    restore_modlist_after_repair,
+    settle_quarantine,
+    snapshot_modlist,
 )
 from ..settings import cli_ok
 from ..winetricks import (
@@ -474,6 +482,7 @@ class InstallPage(QWidget):
         self._verify_runner = None
         self._verify_task = None
         self._verify_counts = {"OK": 0, "CORRUPT": 0, "NOT FOUND": 0}
+        self._anomaly_problem_lines: list[str] = []
         self._verify_anomaly_ok = False
         self._scan_cancel = None
         self._presence = None
@@ -935,9 +944,23 @@ class InstallPage(QWidget):
         self.gamma_edit.setText(str(folders["GAMMA folder"]))
         self.cache_edit.setText(str(folders["Cache folder"]))
         self._update_cache_info(str(folders["Cache folder"]))
-        self._persist_dirs()
+        if not self._persist_dirs():
+            return
         self.window.statusBar().showMessage(
             "Created and set install folders: Anomaly, GAMMA, cache", 6000
+        )
+        # Creating the folders used to be silent apart from the status bar,
+        # and people could not tell whether it had worked.
+        QMessageBox.information(
+            self,
+            tr("Installation Directory"),
+            tr(
+                "Installation directory created and selected automatically for "
+                "Step 3 and Step 4.\n\nAnomaly: {anomaly}\nGAMMA: {gamma}\nCache: {cache}",
+                anomaly=str(folders["Anomaly folder"]),
+                gamma=str(folders["GAMMA folder"]),
+                cache=str(folders["Cache folder"]),
+            ),
         )
 
     def _make_folder_row(self, label_text, on_browse, placeholder="Enter or browse to a folder..."):
@@ -980,24 +1003,30 @@ class InstallPage(QWidget):
             self._persist_dirs()
             return
 
-    def _persist_dirs(self):
+    def _persist_dirs(self) -> bool:
+        """Save the three folder fields to the active profile.
+
+        True when the profile now holds exactly these folders (saved, or
+        already the same); False when nothing was saved - the reason has
+        already been shown.
+        """
         # editingFinished fires on focus-out, and the message boxes below steal
         # focus - without this guard the handler re-enters itself.
         if self.window.install_busy:
             self._update_button_states()
-            return
+            return False
         if self._persisting:
-            return
+            return False
         self._persisting = True
         try:
-            self._persist_dirs_locked()
+            return self._persist_dirs_locked()
         finally:
             self._persisting = False
 
-    def _persist_dirs_locked(self):
+    def _persist_dirs_locked(self) -> bool:
         if self.window.install_busy:
             self._update_button_states()
-            return
+            return False
         self.window.refresh_settings()
         profile = self.window.settings.active_profile
         if profile is None:
@@ -1007,7 +1036,7 @@ class InstallPage(QWidget):
                 tr("Create or activate a profile first (Profiles page)."),
             )
             self.refresh()
-            return
+            return False
         anomaly = normalize_path(self.anomaly_edit.text())
         gamma = normalize_path(self.gamma_edit.text())
         cache = normalize_path(self.cache_edit.text())
@@ -1021,7 +1050,7 @@ class InstallPage(QWidget):
                 tr("Both install folders must be set. Reverting to the saved paths."),
             )
             self.refresh()
-            return
+            return False
         if not cache:
             QMessageBox.warning(
                 self,
@@ -1029,13 +1058,13 @@ class InstallPage(QWidget):
                 tr("Cache folder must be set. Reverting to the saved path."),
             )
             self.refresh()
-            return
+            return False
         if (
             anomaly == profile.anomaly
             and gamma == profile.gamma
             and cache == profile.cache
         ):
-            return
+            return True
         old_anomaly, old_gamma, old_cache = profile.anomaly, profile.gamma, profile.cache
         profile.anomaly = anomaly
         profile.gamma = gamma
@@ -1052,12 +1081,13 @@ class InstallPage(QWidget):
                 self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
             )
             self.refresh()
-            return
+            return False
         self.window.refresh_settings()
         self._update_install_status()
         self.window.statusBar().showMessage(
             f"Install folders updated: {anomaly} | {gamma} | {cache}", 6000
         )
+        return True
 
     def _build_full_command(
         self,
@@ -1160,8 +1190,15 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._update_button_states()
                 return
+        backup_error = None
+        if not _is_auto_retry and gamma_installed(profile.gamma, profile.mo2_profile):
+            # Reinstalling over a working GAMMA can reset user.ltx and MCM
+            # settings; keep a copy first (a few KB, so done in place).
+            backup_error = backup_settings_before(profile, "reinstall")
         self.window.set_install_busy(True, "gamma")
         self.full_progress.reset()
+        if backup_error:
+            self.full_progress.log.append_line(f"Settings backup failed: {backup_error}")
         self.full_progress.set_concurrency(profile.download_threads)
         self.install_button.setEnabled(False)
         self.anomaly_button.setEnabled(False)
@@ -1269,7 +1306,8 @@ class InstallPage(QWidget):
             gave_up = self._auto_retry_count >= _AUTO_RETRY_MAX
             self._auto_retry_count = 0
             hint = tr(
-                'Click "{button}" to continue - cached archives are reused automatically, so nothing that already finished has to download again.',
+                "Click \"{button}\" to continue - most of what already downloaded is reused. "
+                "Some large files from GAMMA's GitHub repos aren't kept in the cache, so those download again.",
                 button=tr(_RESUME_BUTTON_LABEL),
             )
             if gave_up:
@@ -1292,6 +1330,10 @@ class InstallPage(QWidget):
             profile = self.window.settings.active_profile
             if profile is not None:
                 invalidate_baseline(profile.gamma)
+                note = apply_pending_settings_restore(profile)
+                if note:
+                    self.full_progress.log.append_line(note)
+                    self.window.statusBar().showMessage(note, 8000)
         # Only for a run that's actually done (not cancelled - the user
         # already knows - and not a failure that's about to silently
         # auto-retry, handled by the early return above), and only while
@@ -1331,11 +1373,22 @@ class InstallPage(QWidget):
             "gamma": profile.gamma,
             "cache": profile.cache,
         }
-        gui_settings.save_gui_settings(gamma_install_resume=self._resume_state)
+        self._write_resume_state(self._resume_state)
 
     def _clear_resume_state(self) -> None:
         self._resume_state = None
-        gui_settings.save_gui_settings(gamma_install_resume={})
+        self._write_resume_state({})
+
+    def _write_resume_state(self, state: dict) -> None:
+        # Called from the install's finished handler before the install lock
+        # is released: a failed write (a full disk is the usual reason an
+        # install stops) must not raise out of it and leave the lock held.
+        try:
+            gui_settings.save_gui_settings(gamma_install_resume=state)
+        except OSError as exc:
+            self.window.statusBar().showMessage(
+                tr("Could not save install progress: {exc}", exc=exc), 8000
+            )
 
     def _active_install_runner(self) -> CommandRunner | None:
         """Whichever install is currently running on the shared console.
@@ -1640,6 +1693,7 @@ class InstallPage(QWidget):
             )
             return
         self._verify_counts = {"OK": 0, "CORRUPT": 0, "NOT FOUND": 0}
+        self._anomaly_problem_lines: list[str] = []
         self._verify_anomaly_ok = False
         self._presence = None
         self._repair_plan = None
@@ -1689,6 +1743,8 @@ class InstallPage(QWidget):
         if status is not None:
             if status in self._verify_counts:
                 self._verify_counts[status] += 1
+            if status in ("CORRUPT", "NOT FOUND"):
+                self._anomaly_problem_lines.append(strip_ansi(line).strip())
             seen = sum(self._verify_counts.values())
             if seen and seen % 20 == 0:
                 # Keep the busy bar label moving during the anomaly check.
@@ -1977,15 +2033,31 @@ class InstallPage(QWidget):
                 f"GAMMA: {len(plan.unrepairable)} mod(s) cannot be repaired "
                 f"(no download source found) and will be left broken: {shown}"
             )
-        answer = QMessageBox.question(
-            self,
-            tr("Verify & Repair"),
-            "Issues found:\n\n" + "\n\n".join(sections) + "\n\nRepair now?",
-            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle(tr("Verify & Repair"))
+        dialog.setText(
+            "Issues found:\n\n" + "\n\n".join(sections)
+            + "\n\nClick \"Show Details...\" for every file and mod the repair "
+            "will touch.\n\nRepair now?"
         )
+        dialog.setDetailedText(
+            repair_preview(
+                self._repair_plan,
+                getattr(self, "_anomaly_problem_lines", []) if anomaly_needs_repair else [],
+            )
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        answer = dialog.exec()
         if answer != QMessageBox.StandardButton.Yes:
             self._finish_with_issues()
             return
+        error = backup_settings_before(self.window.settings.active_profile, "repair")
+        if error:
+            self.verify_progress.log.append_line(f"Settings backup failed: {error}")
         self._repair_anomaly_pending = anomaly_needs_repair
         self._gamma_repair_pending = gamma_repairable
         # An Anomaly repair (`anomaly install`) unconditionally re-extracts
@@ -2062,6 +2134,7 @@ class InstallPage(QWidget):
         )
         # One bounded re-check so the verdict reflects reality.
         self._verify_counts = {"OK": 0, "CORRUPT": 0, "NOT FOUND": 0}
+        self._anomaly_problem_lines: list[str] = []
         self._anomaly_recheck_done = True
         self._verify_phase_busy("Re-checking Anomaly files")
         self.verify_progress.log.append_line("")
@@ -2140,9 +2213,43 @@ class InstallPage(QWidget):
                 f"{len(self._cache_archive_result.verified)} reusable, "
                 f"{self._cache_archive_result.problems} needing attention"
             )
+        # After an Anomaly repair, GAMMA's own engine files must be back.
+        # "Anomaly: OK" can't show it - vanilla files are exactly what the
+        # Anomaly check expects - and the game crashes with them.
+        reverted: list[str] = []
+        if self._anomaly_recheck_done and not self._gamma_skipped:
+            profile = self.window.settings.active_profile
+            if profile is not None:
+                reverted = reverted_gamma_overlay(profile.anomaly)
+                if reverted:
+                    # Put GAMMA's copies back from the cached GAMMA repo
+                    # rather than leaving the game on vanilla engine files.
+                    fixed = restore_gamma_overlay(profile.anomaly, profile.cache, reverted)
+                    if fixed.restored:
+                        lines.append(
+                            f"Restored {len(fixed.restored)} GAMMA engine file(s) that the "
+                            "Anomaly repair had reset to vanilla."
+                        )
+                    if fixed.reason:
+                        self.verify_progress.log.append_line(
+                            f"Could not restore GAMMA engine files: {fixed.reason}"
+                        )
+                    reverted = reverted_gamma_overlay(profile.anomaly)
+        if reverted:
+            lines.append(
+                "GAMMA engine files are still the vanilla Anomaly versions "
+                f"({', '.join(reverted[:4])}{'...' if len(reverted) > 4 else ''}). "
+                "The game will not run correctly until GAMMA is reinstalled "
+                "over them: use Install GAMMA (it keeps your mods and settings)."
+            )
         # Cache staleness vs. the current live list is never itself a
         # failure condition - see the matching comment in _on_gamma_verify_done.
-        ok_final = anomaly_ok and (remaining in (None, 0)) and unrepairable_count == 0
+        ok_final = (
+            anomaly_ok
+            and (remaining in (None, 0))
+            and unrepairable_count == 0
+            and not reverted
+        )
         message = "\n".join(lines)
         summary = "Verify & Repair complete" if ok_final else "Issues remain"
         dialog_lines = "\n".join(f"• {line}" for line in lines)
@@ -2287,6 +2394,13 @@ class InstallPage(QWidget):
         )
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Running installer (repair) ==")
+        # The installer writes the official modlist.txt over the profile's;
+        # keep the user's to put back afterwards.
+        profile = self.window.settings.active_profile
+        self._repair_modlist_path = (
+            modlist_path_for(profile.gamma, profile.mo2_profile) if profile is not None else None
+        )
+        self._repair_modlist_snapshot = snapshot_modlist(self._repair_modlist_path)
         # Preservation flags are mandatory: a repair must never touch
         # user.ltx or MCM settings.
         runner = CommandRunner(
@@ -2300,12 +2414,23 @@ class InstallPage(QWidget):
         self._repair_runner = runner
         runner.start()
 
+    def _restore_user_modlist(self) -> None:
+        path = getattr(self, "_repair_modlist_path", None)
+        snapshot = getattr(self, "_repair_modlist_snapshot", None)
+        self._repair_modlist_snapshot = None
+        if path is None:
+            return
+        note = restore_modlist_after_repair(path, snapshot)
+        if note:
+            self.verify_progress.log.append_line(note)
+
     def _on_repair_install_finished(self, rc, output):
         # A cancelled repair must not fall through to the post-scan: that scan
         # re-baselines the MD5 manifest and would record the broken state as
         # the new reference.
         if self._repair_runner is not None and self._repair_runner.was_cancelled:
             return
+        self._restore_user_modlist()
         self.verify_progress.log.append_line("")
         if not cli_ok(rc, output, ""):
             self.verify_progress.log.append_line("Repair install failed.")
@@ -2323,14 +2448,31 @@ class InstallPage(QWidget):
                 summary="Repair failed",
             )
             return
-        # Reinstall itself succeeded: the quarantined originals are no
-        # longer needed - keep the newly-installed files, not the old
-        # broken ones.
-        purge_quarantine(self.window.settings.active_profile.gamma)
+        # The installer succeeded, but that alone doesn't prove each mod
+        # was reinstalled: keep the new copy where one exists and put the
+        # old one back where it doesn't (see settle_quarantine).
+        settled = settle_quarantine(self._quarantine_records)
         self._quarantine_records = []
+        if settled.restored:
+            self.verify_progress.log.append_line(
+                "WARNING: the installer did not reinstall "
+                f"{len(settled.restored)} mod(s); their previous copies were "
+                "put back instead:"
+            )
+            for folder in settled.restored:
+                self.verify_progress.log.append_line(f"  {folder}")
+        for line in settled.failures:
+            self.verify_progress.log.append_line(f"WARNING: {line}")
+        self._repair_quarantined_count = len(settled.reinstalled)
+        # Leftovers from an older, interrupted run can go now - but never
+        # while something just failed to move back: that copy may be the
+        # only one left.
+        if not any("->" in line for line in settled.failures):
+            purge_quarantine(self.window.settings.active_profile.gamma)
         self._start_post_scan()
 
     def _on_repair_install_cancelled(self):
+        self._restore_user_modlist()
         self.verify_progress.log.append_line("Repair install cancelled")
         self.verify_progress.log.append_line("Restoring mods that were set aside...")
         restore_note = self._restore_all_quarantined()

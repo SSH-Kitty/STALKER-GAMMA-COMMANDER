@@ -17,6 +17,7 @@ htmlcov/
 *.tar.gz
 *.zip
 *.AppImage
+*.sha512sum
 .appimage-build/
 
 # Python build outputs

@@ -16,6 +16,8 @@ own folders, the same as creating any new profile. What does travel well:
 from __future__ import annotations
 
 import json
+import re
+import urllib.parse
 import zipfile
 from dataclasses import fields
 from pathlib import Path
@@ -45,8 +47,72 @@ _PORTABLE_FIELDS = (
 )
 
 
+#: The fields that decide *where GAMMA is downloaded from*. A bundle that
+#: changes them points the whole install at another source, so the import
+#: shows them and asks instead of applying them silently.
+SOURCE_FIELDS = tuple(name for name in _PORTABLE_FIELDS if name.endswith(("_url", "_branch")))
+
+#: Upper bounds for the two members read out of a bundle (zip-bomb guard).
+_MAX_MANIFEST_BYTES = 1024 * 1024
+_MAX_MODLIST_BYTES = 16 * 1024 * 1024
+
+
+#: A git branch name as GAMMA's repos use them. Never starting with "-",
+#: which a tool receiving it as an argument could read as an option.
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+
+
+def _valid_source_url(value: str) -> bool:
+    """An http(s) URL with a host - no file://, no bare paths."""
+    parts = urllib.parse.urlsplit(value.strip())
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+def _valid_branch(value: str) -> bool:
+    return bool(_BRANCH_RE.fullmatch(value.strip())) and ".." not in value
+
+
+def _valid_source_value(name: str, value: object) -> bool:
+    """A string, and for a download source, one shaped like a source."""
+    if not isinstance(value, str):
+        return False
+    if name.endswith("_url"):
+        return _valid_source_url(value)
+    if name.endswith("_branch"):
+        return _valid_branch(value)
+    return True
+
+
 class ProfileBundleError(ValueError):
     """Raised when a bundle cannot be built or read."""
+
+
+def non_default_sources(profile: CliProfile) -> list[tuple[str, str]]:
+    """``(field, value)`` for every download source differing from the default."""
+    default = CliProfile()
+    return [
+        (name, getattr(profile, name))
+        for name in SOURCE_FIELDS
+        if getattr(profile, name) != getattr(default, name)
+    ]
+
+
+def reset_sources(profile: CliProfile) -> None:
+    """Put every download source back to the official default."""
+    default = CliProfile()
+    for name in SOURCE_FIELDS:
+        setattr(profile, name, getattr(default, name))
+
+
+def _read_member(zf: zipfile.ZipFile, name: str, limit: int) -> bytes:
+    info = zf.getinfo(name)
+    if info.file_size > limit:
+        raise ProfileBundleError(f"{name} in this bundle is too large.")
+    with zf.open(info) as member:
+        data = member.read(limit + 1)
+    if len(data) > limit:
+        raise ProfileBundleError(f"{name} in this bundle is too large.")
+    return data
 
 
 def export_profile_bundle(profile: CliProfile, dest_path: Path) -> None:
@@ -90,9 +156,10 @@ class ImportedProfileBundle:
             if name == "download_threads":
                 try:
                     value = int(value)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
+                    # OverflowError: JSON's Infinity parses to float("inf").
                     continue
-            elif not isinstance(value, str):
+            elif not _valid_source_value(name, value):
                 continue
             setattr(profile, name, value)
 
@@ -102,20 +169,24 @@ def read_profile_bundle(bundle_path: Path) -> ImportedProfileBundle:
     try:
         with zipfile.ZipFile(bundle_path) as zf:
             try:
-                manifest_raw = zf.read(_MANIFEST_NAME)
+                manifest_raw = _read_member(zf, _MANIFEST_NAME, _MAX_MANIFEST_BYTES)
             except KeyError as exc:
                 raise ProfileBundleError(
                     f"{bundle_path.name} is not a COMMANDER profile bundle."
                 ) from exc
             modlist_text = None
             if _MODLIST_NAME in zf.namelist():
-                modlist_text = zf.read(_MODLIST_NAME).decode("utf-8", errors="replace")
+                modlist_text = _read_member(zf, _MODLIST_NAME, _MAX_MODLIST_BYTES).decode(
+                    "utf-8", errors="replace"
+                )
     except (OSError, zipfile.BadZipFile) as exc:
         raise ProfileBundleError(f"Could not read {bundle_path.name}: {exc}") from exc
     try:
         manifest = json.loads(manifest_raw.decode("utf-8", errors="replace"))
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise ProfileBundleError(f"{bundle_path.name} is corrupted: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ProfileBundleError(f"{bundle_path.name} is corrupted: no settings found.")
     settings = manifest.get("settings")
     if not isinstance(settings, dict):
         raise ProfileBundleError(f"{bundle_path.name} is corrupted: no settings found.")

@@ -1,4 +1,5 @@
-"""COMMANDER Assistant: read and understand GAMMA COMMANDER log dumps."""
+"""COMMANDER Assistant: read and understand GAMMA COMMANDER log dumps.
 
-__version__ = "1.2.9-dev"
-__version_label__ = f"v{__version__}"
+Part of COMMANDER, not a separate program: it has no version of its own and
+reports COMMANDER's (``commander_gui.__version_label__``).
+"""

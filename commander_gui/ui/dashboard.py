@@ -4,20 +4,26 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from ..achievements import ACHIEVEMENTS, unlocked_count
 from ..cli_runner import run_sync
+from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
 from ..launcher import find_extra_protons
 from ..settings import CliSettings
@@ -26,6 +32,7 @@ from ..updates import UpdateStatus, check_updates, format_version, status_summar
 from ..winetricks import WINETRICKS_VERBS, check_winetricks_full_status
 from .common import (
     OK_GREEN,
+    WARN,
     BackgroundTask,
     InstallStatusRow,
     NoWheelComboBox,
@@ -33,9 +40,11 @@ from .common import (
     anomaly_installed,
     clear_layout,
     dir_size,
+    disk_usage_bytes,
     display_state,
     format_last_played,
     format_playtime,
+    game_running,
     gamma_installed,
     human_size,
     info_label,
@@ -52,60 +61,108 @@ from .deck_icon import deck_icon
 from .deck_switch import switch_mode
 from .mod_manager_page import _QUERY_TIMEOUT, _query_mo2_profiles
 
-#: Shared fixed width for every flat value combo on the Profile overview
-#: card (Profile, MO2 profile, Current runner, Download threads) - each
-#: sits at the end of its own row, so a shared width is what makes their
-#: text actually line up into one column instead of each combo just
-#: hugging its own (differently sized) content.
-_VALUE_COMBO_WIDTH = 260
+#: Below this much free space the drive meter turns to the warning colour:
+#: a GAMMA update alone can download tens of GB.
+_LOW_DISK_BYTES = 50 * 1024**3
 
 
-class _FlatValueCombo(NoWheelComboBox):
-    """A read-only combo whose current value sits right-aligned, flush
+#: Theme tokens colouring the Storage usage segments, in folder order:
+#: bright accent, dark shade, light neutral - picked per theme so the three
+#: always stay apart (a theme's own accent shades can be near-identical).
+#: Looked up at paint time, so a theme switch recolours them straight away.
+_SEGMENT_TOKENS = ("storage_a", "storage_b", "storage_c")
 
-    against the dropdown arrow, instead of the default left-aligned combo
-    label - matches how the plain read-only value rows around it
-    (Total playtime, Last played, ...) are right-aligned too, and keeps
-    the text close to the arrow that opens it rather than floating off to
-    the left of a wide, mostly-empty box.
 
-    Achieved by making the combo editable with a read-only QLineEdit
-    (the only way to get right-aligned text out of a QComboBox) - which,
-    as a side effect, stops a click on the text itself from opening the
-    popup (only the arrow would). The event filter below restores that.
-    """
+def _token_color(token: str) -> QColor:
+    return QColor(active_theme_tokens().get(token, "#7f8f78"))
 
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setEditable(True)
-        line_edit = self.lineEdit()
-        line_edit.setReadOnly(True)
-        line_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
-        line_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-        line_edit.installEventFilter(self)
 
-    _CLICK_EVENTS = (
-        QEvent.Type.MouseButtonPress,
-        QEvent.Type.MouseButtonRelease,
-        QEvent.Type.MouseButtonDblClick,
+#: Height of a card's title row - the pill buttons' height (Deck Mode,
+#: Achievements, Check for updates). Plain titles get the same row so cards
+#: side by side have their titles on one line.
+_TITLE_ROW_H = 34
+
+
+def _card_title(text: str) -> QLabel:
+    """A card title the height of a title row with a pill button in it."""
+    label = section_label(text)
+    label.setFixedHeight(_TITLE_ROW_H)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    return label
+
+
+def _field_combo() -> NoWheelComboBox:
+    """A Profile overview dropdown: fills its grid cell, never widens the
+    card for a long runner name, and shows the full text on hover."""
+    combo = NoWheelComboBox()
+    combo.setMinimumHeight(34)
+    combo.setCursor(Qt.CursorShape.PointingHandCursor)
+    combo.setSizeAdjustPolicy(
+        QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
     )
+    combo.setMinimumContentsLength(8)
+    combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    combo.currentTextChanged.connect(combo.setToolTip)
+    return combo
 
-    def eventFilter(self, obj, event):
-        if obj is self.lineEdit() and event.type() in self._CLICK_EVENTS:
-            # Open on release, not press: calling showPopup() from within
-            # the press handler starts the popup's own mouse grab while
-            # this same click is still in progress, so Qt reads the click's
-            # own release (landing back on the line edit, outside the
-            # popup's list) as the native combo box's press-drag-release
-            # "select on release" gesture cancelling with nothing picked -
-            # closing the popup the instant it opened. Waiting for release
-            # to open it means there is no in-flight grab for that release
-            # to cancel; press is still swallowed so the line edit itself
-            # never reacts to it (cursor placement, focus selection, ...).
-            if event.type() == QEvent.Type.MouseButtonRelease:
-                self.showPopup()
-            return True
-        return super().eventFilter(obj, event)
+
+def _field(label: str, control: QWidget) -> QVBoxLayout:
+    """A dim caption right above its control."""
+    column = QVBoxLayout()
+    column.setSpacing(4)
+    caption = QLabel(label)
+    caption.setObjectName("dim")
+    column.addWidget(caption)
+    column.addWidget(control)
+    return column
+
+
+class _Swatch(QWidget):
+    """A small rounded square in a theme colour: a legend entry's key."""
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+        self.setFixedSize(10, 10)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_token_color(self._token))
+        painter.drawRoundedRect(self.rect(), 2, 2)
+        painter.end()
+
+
+class _SegmentedBar(QWidget):
+    """One rounded bar split into ``(value, theme token)`` segments."""
+
+    def __init__(self, segments: list[tuple[int, str]]) -> None:
+        super().__init__()
+        self._segments = segments
+        self.setFixedHeight(14)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, 5, 5)
+        painter.setClipPath(clip)
+        painter.fillRect(rect, _token_color("input"))
+        total = sum(value for value, _color in self._segments)
+        if total > 0:
+            x = 0.0
+            for index, (value, token) in enumerate(self._segments):
+                width = rect.width() * value / total
+                # A 2px gap between segments, not after the last.
+                gap = 2 if index < len(self._segments) - 1 else 0
+                painter.fillRect(
+                    QRectF(x, 0, max(width - gap, 0), rect.height()), _token_color(token)
+                )
+                x += width
+        painter.end()
 
 
 def _query_winetricks_status(prefix: str) -> dict[str, bool] | None:
@@ -154,14 +211,25 @@ class DashboardPage(QWidget):
         self.actions_card, _ = make_card(expand=True)
         root.addWidget(self.actions_card)
 
+        # Two rows of two: Installation status | Updates, then
+        # Game stats | Storage usage.
+        status_row = QHBoxLayout()
+        status_row.setSpacing(16)
+        root.addLayout(status_row)
         self.install_status_card, _ = make_card(expand=True)
-        root.addWidget(self.install_status_card)
+        status_row.addWidget(self.install_status_card, 1)
+        self.updates_card, _ = make_card(expand=True)
+        status_row.addWidget(self.updates_card, 1)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(16)
         root.addLayout(bottom)
-        self.updates_card, _ = make_card(expand=True)
-        bottom.addWidget(self.updates_card, 1)
+        self._save: SaveStats | None = None
+        self._stats_task: BackgroundTask | None = None
+        self._stats_for: tuple | None = None
+        self._stats_connection = None
+        self._build_stats_card()
+        bottom.addWidget(self.stats_card, 1)
         self.sizes_card, _ = make_card(expand=True)
         bottom.addWidget(self.sizes_card, 1)
 
@@ -186,12 +254,13 @@ class DashboardPage(QWidget):
         self._start_mo2_profiles_task()
         self._start_size_task()
         self._start_update_check()
+        self._start_stats_task()
 
     # ----- install status card -----
     def _render_install_status(self) -> None:
         layout = self.install_status_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label(tr("Installation status")))
+        layout.addWidget(_card_title(tr("Installation status")))
         profile = self.settings.active_profile
         if profile is None:
             layout.addWidget(InstallStatusRow("STALKER Anomaly", tr("No active profile")))
@@ -333,22 +402,33 @@ class DashboardPage(QWidget):
             go.clicked.connect(lambda: self.window.set_page("profiles"))
             layout.addWidget(go)
             return
-        layout.addWidget(section_label(tr("Profile overview")))
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(_card_title(tr("Profile overview")))
+        header.addStretch(1)
+        manage = QPushButton(tr("Manage profiles"))
+        manage.setObjectName("pillButton")
+        manage.setFixedHeight(_TITLE_ROW_H)
+        manage.setCursor(Qt.CursorShape.PointingHandCursor)
+        manage.clicked.connect(lambda: self.window.set_page("profiles"))
+        header.addWidget(manage)
+        layout.addLayout(header)
 
-        # Profile row is a live switcher (not a static label) when more
-        # than one profile exists - Anomaly/GAMMA/Cache folder paths were
-        # removed from this card entirely, since they're already shown as
-        # the detail text under "STALKER Anomaly"/"GAMMA Modpack" in the
-        # Installation status card above.
-        profile_row = QHBoxLayout()
-        profile_key = QLabel(tr("Profile"))
-        profile_key.setObjectName("dim")
-        profile_row.addWidget(profile_key)
-        profile_row.addStretch(1)
-        profile_combo = _FlatValueCombo()
-        profile_combo.setObjectName("flatValueCombo")
-        profile_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        profile_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        # Settings on the left as a 2x2 grid of labelled fields - each
+        # label right above its control, rather than at the far end of a
+        # full-width row - and the session numbers as tiles on the right.
+        # Anomaly/GAMMA/Cache folder paths are deliberately not repeated
+        # here: the Installation status card already shows them.
+        body = QHBoxLayout()
+        body.setSpacing(24)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        # Profile: a live switcher between COMMANDER profiles.
+        profile_combo = _field_combo()
         for candidate in self.settings.profiles:
             profile_combo.addItem(candidate.profile_name, candidate.profile_name)
         profile_combo.blockSignals(True)
@@ -359,64 +439,33 @@ class DashboardPage(QWidget):
         profile_combo.currentIndexChanged.connect(
             lambda _index, combo=profile_combo: self._on_dashboard_profile_switch(combo)
         )
-        profile_row.addWidget(profile_combo)
-        layout.addLayout(profile_row)
+        grid.addLayout(_field(tr("Profile"), profile_combo), 0, 0)
 
-        # MO2 profile is a live switcher too, same as Profile above -
-        # populated for real by _start_mo2_profiles_task() once its
-        # background query returns; starts out showing just the
+        # MO2 profile - populated for real by _start_mo2_profiles_task()
+        # once its background query returns; starts out showing just the
         # configured profile so there is never a blank/empty combo.
-        mo2_row = QHBoxLayout()
-        mo2_key = QLabel(tr("MO2 profile"))
-        mo2_key.setObjectName("dim")
-        mo2_row.addWidget(mo2_key)
-        mo2_row.addStretch(1)
-        self.mo2_profile_combo = _FlatValueCombo()
-        self.mo2_profile_combo.setObjectName("flatValueCombo")
-        self.mo2_profile_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mo2_profile_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        self.mo2_profile_combo = _field_combo()
         self.mo2_profile_combo.addItem(profile.mo2_profile, profile.mo2_profile)
         self.mo2_profile_combo.currentIndexChanged.connect(
             lambda _index, combo=self.mo2_profile_combo: self._on_mo2_profile_switch(
                 combo
             )
         )
-        mo2_row.addWidget(self.mo2_profile_combo)
-        layout.addLayout(mo2_row)
+        grid.addLayout(_field(tr("MO2 profile"), self.mo2_profile_combo), 0, 1)
 
-        # Current runner is a live switcher too - same combo (Auto-detect +
-        # every installed GE-Proton version) and the same gui_settings
-        # "runner" key as the Play page's own runner selector, which is
-        # where this value actually comes from/is normally changed.
-        runner_row = QHBoxLayout()
-        runner_key = QLabel(tr("Current runner"))
-        runner_key.setObjectName("dim")
-        runner_row.addWidget(runner_key)
-        runner_row.addStretch(1)
-        self.runner_combo = _FlatValueCombo()
-        self.runner_combo.setObjectName("flatValueCombo")
-        self.runner_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.runner_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        # Current runner - same combo (Auto-detect + every installed
+        # GE-Proton version) and the same gui_settings "runner" key as the
+        # Play page's own runner selector.
+        self.runner_combo = _field_combo()
         self._populate_runner_combo(self.runner_combo)
         self.runner_combo.currentIndexChanged.connect(
             lambda _index, combo=self.runner_combo: self._on_runner_switch(combo)
         )
-        runner_row.addWidget(self.runner_combo)
-        layout.addLayout(runner_row)
+        grid.addLayout(_field(tr("Current runner"), self.runner_combo), 1, 0)
 
-        # Download threads is a live switcher too - a fixed 3-option
-        # choice (rather than the Profiles page's free-form 1-20 spin box)
-        # since this is meant as a quick, low-friction "just pick a speed"
-        # control, not the full range editing already available there.
-        threads_row = QHBoxLayout()
-        threads_key = QLabel(tr("Download threads"))
-        threads_key.setObjectName("dim")
-        threads_row.addWidget(threads_key)
-        threads_row.addStretch(1)
-        self.download_threads_combo = _FlatValueCombo()
-        self.download_threads_combo.setObjectName("flatValueCombo")
-        self.download_threads_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.download_threads_combo.setFixedWidth(_VALUE_COMBO_WIDTH)
+        # Download threads - a fixed 3-option "just pick a speed" choice
+        # rather than the Profiles page's free-form 1-20 spin box.
+        self.download_threads_combo = _field_combo()
         for value, threads_label in (
             (4, tr("4 (Safe)")),
             (6, tr("6 (Balanced)")),
@@ -432,28 +481,41 @@ class DashboardPage(QWidget):
                 self._on_download_threads_switch(combo)
             )
         )
-        threads_row.addWidget(self.download_threads_combo)
-        layout.addLayout(threads_row)
+        grid.addLayout(
+            _field(tr("Download threads"), self.download_threads_combo), 1, 1
+        )
+        body.addLayout(grid, 3)
 
-        playtime_seconds = load_gui_settings().get("playtime_seconds", {}).get(
-            profile.profile_name, 0.0
-        )
-        last_played_ts = load_gui_settings().get("last_played_ts", {}).get(
-            profile.profile_name
-        )
-        for label, value in [
+        divider = QFrame()
+        divider.setObjectName("vDivider")
+        divider.setFixedWidth(1)
+        body.addWidget(divider)
+
+        state = load_gui_settings()
+        playtime_seconds = state.get("playtime_seconds", {}).get(profile.profile_name, 0.0)
+        last_played_ts = state.get("last_played_ts", {}).get(profile.profile_name)
+        tiles = QVBoxLayout()
+        tiles.setSpacing(10)
+        tiles.addStretch(1)
+        for caption, value in (
             ("Total playtime", format_playtime(playtime_seconds)),
             ("Last played", format_last_played(last_played_ts)),
-        ]:
-            row = QHBoxLayout()
-            key = QLabel(tr(label))
-            key.setObjectName("dim")
-            val = QLabel(value)
-            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            row.addWidget(key)
-            row.addStretch(1)
-            row.addWidget(val)
-            layout.addLayout(row)
+        ):
+            value_label = QLabel(value)
+            value_label.setObjectName("statValue")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            value_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            caption_label = QLabel(tr(caption))
+            caption_label.setObjectName("statCaption")
+            caption_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            tiles.addWidget(value_label)
+            tiles.addWidget(caption_label)
+            tiles.addSpacing(4)
+        tiles.addStretch(1)
+        body.addLayout(tiles, 1)
+        layout.addLayout(body)
 
     def _sync_profile_combo(self, combo: NoWheelComboBox) -> None:
         """Reset the profile combo's displayed selection to the real active profile."""
@@ -476,7 +538,7 @@ class DashboardPage(QWidget):
         if self.window.install_busy:
             self._sync_profile_combo(combo)
             return
-        if active is not None and mo2_running():
+        if active is not None and game_running(force=True):
             answer = QMessageBox.question(
                 self,
                 tr("Game Running"),
@@ -693,6 +755,18 @@ class DashboardPage(QWidget):
         ):
             self._render_sizes(self._sizes, generation)
             return
+        if self._size_cache_key != cache_key:
+            # Walking ~100k files takes a second or more - several on a
+            # cold disk cache right after launch. Meanwhile show the last
+            # numbers measured for these same folders (kept across
+            # launches), or a placeholder, never an empty card.
+            stored = load_gui_settings().get("storage_sizes") or {}
+            if stored.get("key") == list(cache_key) and isinstance(
+                stored.get("sizes"), dict
+            ):
+                self._draw_sizes(stored["sizes"])
+            else:
+                self._draw_sizes(None)
 
         def compute() -> dict[str, int]:
             return {k: dir_size(p) for k, p in paths.items()}
@@ -726,20 +800,91 @@ class DashboardPage(QWidget):
         if cache_key is not None:
             self._size_cache_key = cache_key
             self._size_cache_time = time.monotonic()
+            stored = load_gui_settings().get("storage_sizes") or {}
+            if stored.get("key") != list(cache_key) or stored.get("sizes") != sizes:
+                save_gui_settings(storage_sizes={"key": list(cache_key), "sizes": sizes})
+        self._draw_sizes(sizes, unavailable)
+
+    def _draw_sizes(
+        self, sizes: dict[str, int] | None, unavailable: str | None = None
+    ) -> None:
+        """Draw the Storage usage card; ``sizes`` None is the placeholder
+        shown while the first measurement runs."""
         layout = self.sizes_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label(tr("Storage usage")))
+        layout.addWidget(_card_title(tr("Storage usage")))
+        if sizes is None:
+            layout.addWidget(_SegmentedBar([]))
+            measuring = QLabel(tr("Measuring folder sizes..."))
+            measuring.setObjectName("dim")
+            layout.addWidget(measuring)
+            self._draw_free_space(layout)
+            return
         total = sum(sizes.values())
-        for key, value in sizes.items():
-            bar_label = QLabel(tr("{key}: {arg}", key=key, arg=human_size(value)))
-            layout.addWidget(bar_label)
+        segments = [
+            (value, _SEGMENT_TOKENS[index % len(_SEGMENT_TOKENS)])
+            for index, value in enumerate(sizes.values())
+        ]
+        layout.addWidget(_SegmentedBar(segments))
+
+        # Legend: a swatch per folder, then the total on the right.
+        legend = QHBoxLayout()
+        legend.setSpacing(18)
+        for (key, value), (_value, token) in zip(sizes.items(), segments, strict=True):
+            item = QHBoxLayout()
+            item.setSpacing(6)
+            item.addWidget(_Swatch(token), 0, Qt.AlignmentFlag.AlignVCenter)
+            item.addWidget(QLabel(tr("{key}: {arg}", key=key, arg=human_size(value))))
+            legend.addLayout(item)
+        legend.addStretch(1)
         total_label = QLabel(tr("Total: {arg}", arg=human_size(total)))
         total_label.setStyleSheet(f"color: {OK_GREEN.name()};")
-        layout.addWidget(total_label)
+        legend.addWidget(total_label)
+        layout.addLayout(legend)
+        self._draw_free_space(layout)
         if unavailable is not None:
             status_label = info_label(tr("Storage usage unavailable: {unavailable}", unavailable=unavailable))
             status_label.setObjectName("warn")
             layout.addWidget(status_label)
+
+    def _draw_free_space(self, layout: QVBoxLayout) -> None:
+        """Free space on the drive - one statvfs call, so never waited on."""
+        profile = self.settings.active_profile
+        usage = (
+            disk_usage_bytes(profile.gamma or profile.anomaly)
+            if profile is not None and (profile.gamma or profile.anomaly)
+            else None
+        )
+        if usage is not None and usage[0] > 0:
+            disk_total, free = usage
+            used_percent = round(100 * (disk_total - free) / disk_total)
+            layout.addSpacing(6)
+            free_row = QHBoxLayout()
+            free_label = QLabel(
+                tr(
+                    "Free on drive: {free} of {total}",
+                    free=human_size(free),
+                    total=human_size(disk_total),
+                )
+            )
+            free_row.addWidget(free_label)
+            free_row.addStretch(1)
+            percent_label = QLabel(tr("{percent}% used", percent=used_percent))
+            percent_label.setObjectName("dim")
+            free_row.addWidget(percent_label)
+            layout.addLayout(free_row)
+            meter = QProgressBar()
+            meter.setTextVisible(False)
+            meter.setRange(0, 100)
+            meter.setValue(used_percent)
+            low = free < _LOW_DISK_BYTES
+            meter.setObjectName("storageMeterLow" if low else "storageMeter")
+            if low:
+                free_label.setObjectName("warn")
+                hint = tr("Low on space - GAMMA updates and new mods need room.")
+                free_label.setToolTip(hint)
+                meter.setToolTip(hint)
+            layout.addWidget(meter)
 
     def _on_size_error(self, message: str, generation: int) -> None:
         self._size_task = None
@@ -747,6 +892,112 @@ class DashboardPage(QWidget):
             self._start_size_task()
             return
         self._render_sizes(self._sizes, generation, unavailable=message)
+
+    # ----- game stats card -----
+    def _build_stats_card(self) -> None:
+        """Counters from the newest save, and the Achievements window.
+
+        Built once: only the values and the footer change on a refresh.
+        """
+        self.stats_card, layout = make_card(expand=True)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        # Which save the numbers come from is a hover on the title, not a
+        # line of its own under the grid.
+        self.stats_title = section_label(tr("Game stats"))
+        header.addWidget(self.stats_title)
+        header.addStretch(1)
+        self.achievements_button = QPushButton()
+        self.achievements_button.setObjectName("achievementsButton")
+        self.achievements_button.setFixedHeight(34)
+        self.achievements_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.achievements_button.setToolTip(
+            tr("Every achievement, what unlocks it and what it gives.")
+        )
+        self.achievements_button.clicked.connect(self._show_achievements)
+        header.addWidget(self.achievements_button)
+        layout.addLayout(header)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(12)
+        self._stat_values: dict[str, QLabel] = {}
+        for index, (key, caption) in enumerate(STAT_FIELDS):
+            cell = QVBoxLayout()
+            cell.setSpacing(0)
+            value = QLabel("–")
+            value.setObjectName("statValue")
+            value.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            label = QLabel(tr(caption))
+            label.setObjectName("statCaption")
+            label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            cell.addWidget(value)
+            cell.addWidget(label)
+            grid.addLayout(cell, index // 3, index % 3)
+            self._stat_values[key] = value
+        layout.addLayout(grid)
+
+        # Shown only while there is no save, to explain the dashes.
+        self.stats_source = info_label("")
+        self.stats_source.setObjectName("dim")
+        self.stats_source.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.stats_source)
+        self._render_stats(None)
+
+    def _start_stats_task(self, *, force: bool = False) -> None:
+        profile = self.settings.active_profile
+        self.stats_card.setVisible(profile is not None)
+        if profile is None:
+            return
+        folders = (profile.anomaly, profile.gamma, profile.mo2_profile)
+        if self._stats_task is not None and self._stats_for == folders and not force:
+            return
+        # A read still running for another profile's folders (the profile
+        # was just switched) is superseded: its result is dropped below.
+        self._stats_for = folders
+        task = BackgroundTask(latest_save_stats, *folders, parent=self)
+        self._stats_task = task
+        task.result.connect(
+            lambda result, t=task: self._on_stats_loaded(t, result)
+        )
+        task.error.connect(lambda _message, t=task: self._on_stats_loaded(t, None))
+        task.start()
+
+    def _on_stats_loaded(self, task: BackgroundTask, result: object) -> None:
+        if task is not self._stats_task:
+            return
+        self._stats_task = None
+        self._render_stats(result if isinstance(result, SaveStats) else None)
+
+    def _render_stats(self, save: SaveStats | None) -> None:
+        self._save = save
+        self.achievements_button.setText(
+            "\u2605  "
+            + tr("Achievements")
+            + f"   {unlocked_count(save)} / {len(ACHIEVEMENTS)}"
+        )
+        self.achievements_button.setEnabled(save is not None)
+        if save is None:
+            for value in self._stat_values.values():
+                value.setText("–")
+            hint = tr("No saves yet - stats appear after your first save.")
+            self.stats_source.setText(hint)
+            self.stats_source.setVisible(True)
+            self.stats_title.setToolTip(hint)
+            return
+        for key, _caption in STAT_FIELDS:
+            self._stat_values[key].setText(f"{stat_value(save, key):,}")
+        self.stats_source.setVisible(False)
+        self.stats_title.setToolTip(
+            tr("From save: {name}", name=save.save_name)
+            + "   ·   "
+            + format_last_played(save.mtime or time.time())
+        )
+
+    def _show_achievements(self) -> None:
+        from .achievements_dialog import AchievementsDialog
+
+        AchievementsDialog(self, self._save).exec()
 
     # ----- updates card -----
     def _start_update_check(self) -> None:
@@ -837,53 +1088,84 @@ class DashboardPage(QWidget):
     ) -> None:
         layout = self.updates_card.layout()
         clear_layout(layout)
-        layout.addWidget(section_label(tr("Updates")))
-
-        if status is not None and status.installed is not None:
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(6)
-            grid.addWidget(info_label(tr("Installed GAMMA version:")), 0, 0)
-            installed_value = QLabel(
-                format_version(status.installed, status.installed_human)
-            )
-            grid.addWidget(installed_value, 0, 1)
-            grid.addWidget(info_label(tr("Latest GAMMA version:")), 1, 0)
-            latest_value = QLabel(
-                format_version(status.latest, status.latest_human, missing="-")
-            )
-            grid.addWidget(latest_value, 1, 1)
-            grid.setColumnStretch(2, 1)
-            layout.addLayout(grid)
-
-        status_label = info_label(status_text)
-        if status_kind == "accent":
-            # "Up to date" is a positive/ready result, same as the Installed
-            # status dot elsewhere on this page - use the same fixed green
-            # rather than the theme's accent color so the two always match.
-            status_label.setStyleSheet(f"color: {OK_GREEN.name()};")
-        else:
-            status_label.setObjectName(status_kind)
-            status_label.style().unpolish(status_label)
-            status_label.style().polish(status_label)
-        layout.addWidget(status_label)
-
-        row = QHBoxLayout()
+        # Title with the check as a pill beside it, like Deck Mode and
+        # Achievements on the neighbouring cards.
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(section_label(tr("Updates")))
+        header.addStretch(1)
         check_button = QPushButton(tr("Check for updates"))
-        check_button.setObjectName("primary")
+        check_button.setObjectName("pillButton")
+        check_button.setFixedHeight(34)
+        check_button.setCursor(Qt.CursorShape.PointingHandCursor)
         check_button.setEnabled(
             not self._update_checking
             and not self.window.install_busy
             and self.settings.active_profile is not None
         )
         check_button.clicked.connect(self._start_update_check)
-        row.addWidget(check_button)
+        header.addWidget(check_button)
+        layout.addLayout(header)
+
+        if status is not None and status.installed is not None:
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(16)
+            grid.setVerticalSpacing(6)
+            rows = (
+                (
+                    tr("Installed GAMMA version:"),
+                    format_version(
+                        status.installed, status.installed_human, show_build=False
+                    ),
+                ),
+                (
+                    tr("Latest GAMMA version:"),
+                    format_version(
+                        status.latest, status.latest_human, missing="-", show_build=False
+                    ),
+                ),
+            )
+            for index, (key, value) in enumerate(rows):
+                # No wrapping: the key column sizes to its longest label
+                # instead of breaking "Installed GAMMA version:" in two.
+                key_label = QLabel(key)
+                key_label.setObjectName("dim")
+                grid.addWidget(key_label, index, 0)
+                grid.addWidget(QLabel(value), index, 1)
+            grid.setColumnStretch(2, 1)
+            layout.addLayout(grid)
+
+        # The result as a dot + text, like the Installation status rows.
+        if status_kind == "accent":
+            # "Up to date" is a positive/ready result, same as the Installed
+            # status dot elsewhere on this page - use the same fixed green
+            # rather than the theme's accent color so the two always match.
+            color = OK_GREEN.name()
+        elif status_kind == "warn":
+            color = WARN.name()
+        else:
+            color = None
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        if color is not None:
+            dot = QLabel("●")
+            dot.setStyleSheet(f"color: {color}; font-size: 18px;")
+            dot.setFixedWidth(24)
+            status_row.addWidget(dot)
+        status_label = info_label(status_text)
+        if color is not None:
+            status_label.setStyleSheet(f"color: {color};")
+        else:
+            status_label.setObjectName(status_kind)
+            status_label.style().unpolish(status_label)
+            status_label.style().polish(status_label)
+        status_row.addWidget(status_label, 1)
         if status is not None and status.update_available:
             goto_button = QPushButton(tr("Open updates"))
+            goto_button.setObjectName("primary")
             goto_button.clicked.connect(lambda: self.window.set_page("update"))
-            row.addWidget(goto_button)
-        row.addStretch(1)
-        layout.addLayout(row)
+            status_row.addWidget(goto_button)
+        layout.addLayout(status_row)
 
     # ----- actions card -----
     def _build_actions(self) -> None:
@@ -898,15 +1180,17 @@ class DashboardPage(QWidget):
         # retained reference would go stale - the same trap _play_button
         # below has to null out explicitly. This button holds no state and
         # nothing outside this method touches it, so rebuilding is enough.
-        deck_button = QPushButton()
+        # Icon plus a short label: the bare glyph alone, tucked in the card's
+        # corner, was easy to miss and did not say what it opened.
+        deck_button = QPushButton(" " + tr("Deck Mode"))
         deck_button.setObjectName("deckModeButton")
         deck_button.setIcon(
-            deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")))
+            deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")), 28)
         )
-        deck_button.setIconSize(QSize(22, 22))
-        deck_button.setFixedSize(34, 28)
-        deck_button.setToolTip(tr("Steam Deck mode available soon."))
-        deck_button.setEnabled(False)
+        deck_button.setIconSize(QSize(28, 28))
+        deck_button.setFixedHeight(34)
+        deck_button.setToolTip(tr("Switch to Steam Deck Mode"))
+        deck_button.setCursor(Qt.CursorShape.PointingHandCursor)
         deck_button.clicked.connect(lambda: switch_mode(self.window, deck=True))
         header.addWidget(deck_button)
         layout.addLayout(header)
@@ -958,6 +1242,11 @@ class DashboardPage(QWidget):
             self._play_button_connection = play_page.launch_state_changed.connect(
                 self._set_play_button_disabled
             )
+        if self._stats_connection is None:
+            # A session that just ended most likely wrote a new save.
+            self._stats_connection = play_page.launch_state_changed.connect(
+                lambda launching: None if launching else self._start_stats_task(force=True)
+            )
 
     def _set_play_button_disabled(self, disabled: bool) -> None:
         button = getattr(self, "_play_button", None)
@@ -1007,7 +1296,13 @@ class DashboardPage(QWidget):
         # Reject duplicate dashboard clicks before delegating to the Play page.
         if self.window.install_busy or play_page is None or play_page.is_launching:
             return
+        # A Play page built just now, by this click, has no listener yet -
+        # _bind_play_state() only ran at the last refresh(), when it did not
+        # exist - so the button stayed green through the launch until the
+        # next tab switch. Connect before launching, then reflect the state.
+        self._bind_play_state()
         play_page.launch_game()
+        self._set_play_button_disabled(play_page.is_launching)
 
     def _open_folder(self, target: str) -> None:
         if not open_in_file_manager(target):

@@ -63,7 +63,7 @@ Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's execut
 - The game launches **detached** — closing COMMANDER doesn't kill your session — with output captured to a rotating `launcher.log`. Failed launches are diagnosed automatically: a DXVK/Vulkan problem, a runner/prefix mismatch, or the classic `concrt140.dll` error are called out by name instead of surfacing a raw Wine crash, with a one-click option to bundle a bug report on the spot.
 - One-click **desktop shortcuts** that launch a specific target with the currently selected runner.
 - **Total playtime** is tracked per profile and shown on the Dashboard.
-- Optional **Discord Rich Presence** ("Playing S.T.A.L.K.E.R. GAMMA") — off by default; enable it in Settings with your own free Discord Application Client ID.
+- Optional **Discord Rich Presence** ("Playing S.T.A.L.K.E.R. GAMMA" with your mod count and total playtime) — off by default; one checkbox in Settings turns it on, no Discord developer setup needed.
 
 ### Updates
 Compares your installed GAMMA version and addon list against the latest official data — without hitting the rate-limited GitHub REST API — and shows exactly what changed: Added, Modified, Removed, and archive-name changes.
@@ -77,7 +77,8 @@ Direct, careful editing of the active MO2 profile's `modlist.txt` — search, en
 
 <img width="1340" height="1008" alt="4 Mod Manager" src="https://github.com/user-attachments/assets/d00fa817-fd02-4b20-ada5-ec4405b9bf19" />
 
-- **Drag-and-drop reordering** with multi-selection support, plus Move Up/Down and **Flip Priority** to reverse the entire load order in one click.
+- **Drag-and-drop reordering** with multi-selection support, plus Move Up/Down.
+- **Reversed load order detection**: a GAMMA load order that has been flipped end to end (which crashes the game on startup) is flagged in the Mod Manager and before launching, with a one-click fix.
 - Create new categories, install a local ZIP/7Z/RAR/FOMOD mod archive straight into the modlist, and use the active profile as MO2's selected profile without opening MO2.
 - **A backup is taken automatically before your first edit** (`modlist.txt.gammagui.bak`) and can be restored from the UI, alongside a **Restore Original Order** option.
 - **Writes are atomic** — a crash or full disk cannot truncate your load order — and **edits are blocked while Mod Organizer is running**, since MO2 rewrites the file on exit and would silently discard them.

@@ -56,6 +56,5 @@ class FindingFactory:
         )
 
 
-XRAY_ERROR_RE = re.compile(r"^\[error\]\s*(\w+)\s*:\s?(.*)$")
 SERILOG_TS_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}")
 MO2_LINE_RE = re.compile(r"^\[[\d:. -]+?\s([EWDI])\]\s?(.*)$")

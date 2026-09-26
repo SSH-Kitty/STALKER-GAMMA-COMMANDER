@@ -196,17 +196,24 @@ QWidget#panelTransparent {
 #cogButton[active="true"] {
     color: $accent_strong;
 }
-/* Opens Steam Deck Mode. Sized to match #cogButton so the two read as the
-   same class of control; the glyph itself is painted in ui/deck_icon.py. */
-#deckModeButton {
+/* Opens Steam Deck Mode: a small pill with the Deck glyph (painted in
+   ui/deck_icon.py) and a label, so it reads as a control at a glance.
+   The Dashboard's Achievements button is the same pill. */
+#deckModeButton, #achievementsButton, #pillButton {
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    padding: 0;
+    border: 1px solid $border;
+    border-radius: 17px;
+    padding: 0 14px 0 10px;
+    color: $text;
+    font-weight: 600;
 }
-#deckModeButton:hover {
+#deckModeButton:hover, #achievementsButton:hover, #pillButton:hover {
     background-color: $btn_hover;
-    border-color: $border_strong;
+    border-color: $accent_strong;
+    color: $accent_strong;
+}
+#deckModeButton:pressed, #achievementsButton:pressed, #pillButton:pressed {
+    background-color: $border_strong;
 }
 #card {
     background-color: $card;
@@ -302,6 +309,65 @@ QLabel#section3 {
     font-size: 20px;
     font-weight: bold;
     color: $accent_strong;
+}
+/* A button showing only a glyph (⋯, ⟳): larger glyph, no menu arrow. */
+QPushButton#iconButton {
+    font-size: 18px;
+    padding: 0;
+}
+QPushButton#iconButton::menu-indicator {
+    image: none;
+    width: 0;
+}
+#vDivider {
+    background-color: $border;
+}
+#statValue {
+    font-size: 22px;
+    font-weight: bold;
+    color: $accent_strong;
+}
+#statCaption {
+    color: $text_dim;
+}
+#achievementsButton:disabled, #pillButton:disabled {
+    color: $text_disabled;
+}
+#achievementName {
+    font-weight: bold;
+    color: $text_bright;
+}
+#achievementNameLocked {
+    color: $text_dim;
+}
+QListWidget#achievementList::item {
+    border-left: 3px solid transparent;
+}
+QListWidget#achievementList::item:selected {
+    background-color: $btn_hover;
+    border-left: 3px solid $accent_strong;
+}
+QProgressBar#storageMeter, QProgressBar#storageMeterLow {
+    border: none;
+    border-radius: 4px;
+    max-height: 8px;
+    min-height: 8px;
+}
+QProgressBar#storageMeter::chunk {
+    border-radius: 4px;
+}
+QProgressBar#storageMeterLow::chunk {
+    background: $warn;
+    border-radius: 4px;
+}
+QProgressBar#achievementMeter {
+    border: none;
+    border-radius: 2px;
+    max-height: 4px;
+    min-height: 4px;
+}
+QProgressBar#achievementMeter::chunk {
+    border-radius: 2px;
 }
 #section2 {
     font-size: 15px;
@@ -536,37 +602,6 @@ QComboBox::separator {
     background: $border_input;
     margin: 4px 8px;
 }
-/* A value that happens to be pickable from a few choices (Dashboard's
-   Profile overview row values) - reads as plain clickable text, not a
-   boxed form control, since it sits among a column of plain read-only
-   labels and would otherwise look out of place. */
-QComboBox#flatValueCombo {
-    background: transparent;
-    border: none;
-    padding: 2px 4px;
-    color: $text;
-}
-QComboBox#flatValueCombo:hover,
-QComboBox#flatValueCombo:hover QLineEdit {
-    color: $link_hover;
-}
-/* Right-aligning the current value (see _FlatValueCombo) requires an
-   editable combo's internal QLineEdit - style it to disappear into the
-   combo itself rather than showing the general QLineEdit's own boxed
-   look (background/border/focus outline). */
-QComboBox#flatValueCombo QLineEdit {
-    background: transparent;
-    border: none;
-    padding: 0;
-    color: $text;
-    selection-background-color: transparent;
-    selection-color: $text;
-}
-QComboBox#flatValueCombo QAbstractItemView {
-    background-color: $card;
-    border: 1px solid $border_input;
-    selection-background-color: $selection;
-}
 QProgressBar {
     background-color: $input;
     border: 1px solid $border_input;
@@ -663,13 +698,23 @@ QStatusBar {
     color: $text_dim;
     border-top: 1px solid $border;
 }
-QPushButton#githubLink {
+QPushButton#discordButton {
+    background-color: #4E59CF;
+    border: 1px solid #4E59CF;
+    color: #f2f3ff;
+    font-weight: bold;
+}
+QPushButton#discordButton:hover {
+    background-color: #5865F2;
+    border: 1px solid #5865F2;
+}
+QPushButton#githubLink, QPushButton#discordLink {
     color: $link;
     padding: 0 2px 0 8px;
     border: none;
     background: transparent;
 }
-QPushButton#githubLink:hover {
+QPushButton#githubLink:hover, QPushButton#discordLink:hover {
     color: $link_hover;
     background: transparent;
 }
@@ -742,6 +787,9 @@ THEMES: dict[str, dict[str, str]] = {
         "text_tertiary_hover": "#c8e2a0",
         "accent": "#9fe96f",
         "accent_strong": "#8fe45c",
+        "storage_a": "#8fe45c",
+        "storage_b": "#3f7f2c",
+        "storage_c": "#9aa596",
         "accent_text": "#0c130a",
         "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
@@ -823,6 +871,9 @@ THEMES: dict[str, dict[str, str]] = {
         "text_tertiary_hover": "#bcd2e0",
         "accent": "#6fd3a8",
         "accent_strong": "#5ec99b",
+        "storage_a": "#5ec99b",
+        "storage_b": "#2d6e57",
+        "storage_c": "#8aa0b2",
         "accent_text": "#0b1511",
         "warn_text": "#0b1511",
         "accent_section": "#7fceab",
@@ -904,6 +955,9 @@ THEMES: dict[str, dict[str, str]] = {
         "text_tertiary_hover": "#3ddc5a",
         "accent": "#33ff66",
         "accent_strong": "#2ee75c",
+        "storage_a": "#2ee75c",
+        "storage_b": "#12692a",
+        "storage_c": "#9aa59c",
         "accent_text": "#001a05",
         "warn_text": "#001a05",
         "accent_section": "#33dd55",
@@ -985,6 +1039,9 @@ THEMES: dict[str, dict[str, str]] = {
         "text_tertiary_hover": "#b0b0b0",
         "accent": "#9fe96f",
         "accent_strong": "#8fe45c",
+        "storage_a": "#8fe45c",
+        "storage_b": "#3f7f2c",
+        "storage_c": "#8a8a8a",
         "accent_text": "#0c130a",
         "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
@@ -1066,6 +1123,9 @@ THEMES: dict[str, dict[str, str]] = {
         "text_tertiary_hover": "#e8c9a0",
         "accent": "#ff9f45",
         "accent_strong": "#ff8f2e",
+        "storage_a": "#ff8f2e",
+        "storage_b": "#8a4a14",
+        "storage_c": "#d9c7a6",
         "accent_text": "#2a1600",
         "warn_text": "#2a1600",
         "accent_section": "#f0a75f",
@@ -1147,6 +1207,9 @@ THEMES: dict[str, dict[str, str]] = {
         "text_tertiary_hover": "#9fe2e2",
         "accent": "#006868",
         "accent_strong": "#00a3a3",
+        "storage_a": "#00a3a3",
+        "storage_b": "#035e5e",
+        "storage_c": "#8fb3b3",
         "accent_text": "#eafcfc",
         "warn_text": "#001515",
         "accent_section": "#3aabab",

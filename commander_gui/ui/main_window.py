@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import ClassVar
 
 from PySide6.QtCore import (
@@ -13,13 +12,11 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     Qt,
     QTimer,
-    QUrl,
     QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import (
     QColor,
-    QDesktopServices,
     QFont,
     QKeySequence,
     QLinearGradient,
@@ -49,6 +46,7 @@ from ..self_update import (
     commander_appimage_path,
     download_and_install_commander_update,
     relaunch_commander,
+    switch_commander_build,
 )
 from ..settings import load_settings
 from ..themes import (
@@ -59,8 +57,8 @@ from ..themes import (
     build_stylesheet,
     set_active_theme,
 )
-from ..updates import check_commander_update, check_updates
-from .about_page import AboutPage
+from ..updates import check_commander_update, check_updates, effective_update_channel
+from .about_page import _DISCORD, AboutPage
 from .common import (
     OK_GREEN,
     STATUS_GREY,
@@ -72,6 +70,7 @@ from .common import (
     instance_window_title,
     mo2_running,
     notify_desktop,
+    open_url,
     resume_after_shutdown,
     shutdown_active_runners,
     tr,
@@ -310,9 +309,18 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._build_ui()
         self._build_shortcuts()
+        # Mouse-wheel scrolling glides instead of jumping, in every page,
+        # list and text box of this window.
+        from .smooth_scroll import install as install_smooth_scroll
+
+        self._smooth_scroll = install_smooth_scroll(self)
         self.tabs.setCurrentIndex(0)
         QTimer.singleShot(0, self._maybe_check_for_updates_in_background)
         QTimer.singleShot(0, self._check_commander_update_status)
+        self._start_update_timer()
+        # The Welcome screen (latest patch notes, links), unless "Don't show
+        # again" was ticked - here or in Deck Mode, which shares the setting.
+        QTimer.singleShot(0, self._maybe_show_welcome)
 
         start_page = gui_settings.load_gui_settings().get("start_page")
         if start_page and start_page in _TAB_INDEX:
@@ -322,6 +330,11 @@ class MainWindow(QMainWindow):
         # default current index (0, Dashboard) - called explicitly here so
         # the initial page is always built, lazy pages notwithstanding.
         self._on_nav(self.tabs.currentIndex())
+
+    def _maybe_show_welcome(self) -> None:
+        from .welcome_overlay import maybe_show_welcome
+
+        self._welcome = maybe_show_welcome(self)
 
     def setWindowTitle(self, title: str) -> None:
         """Mark this window when it is not the first COMMANDER running.
@@ -389,78 +402,63 @@ class MainWindow(QMainWindow):
 
     def _on_scheduled_update_checked(self, status: object) -> None:
         gui_settings.save_gui_settings(last_update_check_ts=time.time())
-        if getattr(status, "update_available", False):
-            notify_desktop(
-                tr("GAMMA update available"),
-                tr(
-                    "A new GAMMA update is available - open COMMANDER's Updates page to review it."
-                ),
-            )
-
-    def _build_shortcuts(self) -> None:
-        """Set up app-wide keyboard shortcuts - called once from __init__.
-
-        Deliberately NOT called from _build_ui(): that method reruns on
-        every switch_language() and would otherwise stack a duplicate
-        QShortcut (each one firing its action again) on every language
-        change, the same trap _build_status_bar()'s own docstring
-        documents for status bar widgets.
-        """
-        focus_search = QShortcut(QKeySequence("Ctrl+F"), self)
-        focus_search.activated.connect(self._focus_mod_search)
-        open_settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
-        open_settings_shortcut.activated.connect(self.open_settings)
-
-    def _focus_mod_search(self) -> None:
-        """Jump to Mod Manager and focus its search box.
-
-        Looks up the current page fresh rather than capturing it at
-        shortcut-creation time - _build_ui() replaces every page instance
-        on each switch_language(), so a captured reference would go stale.
-        """
-        self.set_page("modmanager")
-        page = self._pages.get("modmanager")
-        if page is not None and hasattr(page, "search"):
-            page.search.setFocus()
-            page.search.selectAll()
-
-    #: How often the background update check re-runs on its own, without
-    #: the user ever visiting the Dashboard/Updates page.
-    _UPDATE_CHECK_INTERVAL_S = 86400
-
-    def _maybe_check_for_updates_in_background(self) -> None:
-        """Once a day at most, check for a GAMMA update without being asked.
-
-        The Dashboard/Updates pages already check on demand when visited -
-        this covers the user who never opens either, surfacing a desktop
-        notification (see notify_desktop()) instead of a badge that would
-        need its own always-on UI plumbing.
-        """
-        gui_state = gui_settings.load_gui_settings()
-        last_check = gui_state.get("last_update_check_ts", 0.0)
-        try:
-            last_check = float(last_check)
-        except (TypeError, ValueError):
-            last_check = 0.0
-        if time.time() - last_check < self._UPDATE_CHECK_INTERVAL_S:
+        if not getattr(status, "update_available", False):
             return
-        profile = self.settings.active_profile
-        if profile is None:
+        # Once per GAMMA version: the daily check used to repeat the same
+        # notification every day until the update was installed.
+        latest = str(getattr(status, "latest", "") or "")
+        state = gui_settings.load_gui_settings()
+        if not state.get("update_notifications", True):
             return
-        task = BackgroundTask(check_updates, profile, parent=self)
-        self._scheduled_update_task = task
-        task.result.connect(self._on_scheduled_update_checked)
-        task.start()
+        if latest and state.get("notified_gamma_version") == latest:
+            return
+        gui_settings.save_gui_settings(notified_gamma_version=latest)
+        notify_desktop(
+            tr("GAMMA update available"),
+            tr(
+                "A new GAMMA update is available - open COMMANDER's Updates page to review it."
+            ),
+        )
 
-    def _on_scheduled_update_checked(self, status: object) -> None:
-        gui_settings.save_gui_settings(last_update_check_ts=time.time())
-        if getattr(status, "update_available", False):
-            notify_desktop(
-                tr("GAMMA update available"),
-                tr(
-                    "A new GAMMA update is available - open COMMANDER's Updates page to review it."
-                ),
-            )
+    #: How often an open COMMANDER looks for updates again. Each check keeps
+    #: its own interval (GAMMA daily, COMMANDER below); this just wakes up.
+    _UPDATE_TIMER_MS = 60 * 60 * 1000
+    _COMMANDER_CHECK_INTERVAL_S = 12 * 60 * 60
+
+    def _start_update_timer(self) -> None:
+        """Keep checking while COMMANDER stays open - both checks used to
+        run only at startup, so an app left open for days never heard of
+        an update."""
+        if getattr(self, "_update_timer", None) is not None:
+            return
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(self._UPDATE_TIMER_MS)
+        self._update_timer.timeout.connect(self._periodic_update_check)
+        self._update_timer.start()
+
+    def _periodic_update_check(self) -> None:
+        if self.install_busy:
+            return
+        self._maybe_check_for_updates_in_background()
+        last = getattr(self, "_commander_checked_at", 0.0)
+        if time.monotonic() - last >= self._COMMANDER_CHECK_INTERVAL_S:
+            self._check_commander_update_status()
+
+    def _notify_commander_update(self, tag: str) -> None:
+        """Desktop notification for a new COMMANDER release, once per tag."""
+        state = gui_settings.load_gui_settings()
+        if not state.get("update_notifications", True):
+            return
+        if state.get("notified_commander_tag") == tag:
+            return
+        gui_settings.save_gui_settings(notified_commander_tag=tag)
+        notify_desktop(
+            tr("COMMANDER update available"),
+            tr(
+                "COMMANDER {tag} is out - click the update button in COMMANDER's status bar to get it.",
+                tag=tag,
+            ),
+        )
 
     def _build_ui(self) -> None:
         """(Re)build the header, nav tabs, and every page from scratch.
@@ -736,15 +734,26 @@ class MainWindow(QMainWindow):
         update_separator.setStyleSheet(_STATUS_LABEL_STYLE)
         update_layout.addWidget(update_separator)
 
+        # COMMANDER is up to date | Discord | GitHub - Discord styled
+        # exactly like the GitHub link beside it.
+        discord_link = QPushButton(tr("Discord"))
+        discord_link.setObjectName("discordLink")
+        discord_link.setToolTip(tr("Join the COMMANDER Discord"))
+        discord_link.setFlat(True)
+        discord_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        discord_link.clicked.connect(lambda: open_url(_DISCORD))
+        update_layout.addWidget(discord_link)
+        discord_separator = QLabel("   |   ")
+        discord_separator.setStyleSheet(_STATUS_LABEL_STYLE)
+        update_layout.addWidget(discord_separator)
+
         github_link = QPushButton(tr("GitHub"))
         github_link.setObjectName("githubLink")
         github_link.setToolTip(tr("Open SSH-Kitty on GitHub"))
         github_link.setFlat(True)
         github_link.setCursor(Qt.CursorShape.PointingHandCursor)
         github_link.clicked.connect(
-            lambda: QDesktopServices.openUrl(
-                QUrl("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER")
-            )
+            lambda: open_url("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER")
         )
         update_layout.addWidget(github_link)
 
@@ -758,13 +767,31 @@ class MainWindow(QMainWindow):
         updates..." → "Up to date"/"Update available" label built in
         _build_status_bar(). Just a status/link, not an auto-updater.
         """
-        task = BackgroundTask(check_commander_update, __version__, parent=self)
+        # The channel is read here, on the GUI thread; the worker only fetches.
+        channel = effective_update_channel(
+            gui_settings.load_gui_settings().get("update_channel"), __version__
+        )
+        self._commander_checked_at = time.monotonic()
+        task = BackgroundTask(
+            check_commander_update, __version__, channel=channel, parent=self
+        )
         task.result.connect(self._on_commander_update_status_checked)
         task.start()
 
     def _on_commander_update_status_checked(self, tag: object) -> None:
         button = self._update_status_button
+        # The check can run again (switching the update channel in
+        # Settings); drop the previous result's click handler first, or one
+        # click would open the dialog once per check.
+        previous = getattr(self, "_update_status_handler", None)
+        if previous is not None:
+            try:
+                button.clicked.disconnect(previous)
+            except (RuntimeError, TypeError):
+                pass
+            self._update_status_handler = None
         if tag and isinstance(tag, str):
+            self._notify_commander_update(tag)
             button.setText(tr("COMMANDER update available"))
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -776,18 +803,14 @@ class MainWindow(QMainWindow):
                 # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
                 # through to the plain "open the releases page" behavior.
                 button.setToolTip(tr("Download and install {tag} now", tag=tag))
-                button.clicked.connect(
-                    lambda: self._offer_commander_self_update(tag)
-                )
+                self._update_status_handler = lambda: self._offer_commander_self_update(tag)
+                button.clicked.connect(self._update_status_handler)
             else:
                 button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
-                button.clicked.connect(
-                    lambda: QDesktopServices.openUrl(
-                        QUrl(
-                            "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
-                        )
-                    )
+                self._update_status_handler = lambda: open_url(
+                    "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
                 )
+                button.clicked.connect(self._update_status_handler)
         else:
             button.setText(tr("COMMANDER is up to date"))
             button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
@@ -807,10 +830,71 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-
-        progress = QProgressDialog(
-            tr("Downloading COMMANDER {tag}...", tag=tag), tr("Cancel"), 0, 100, self
+        self._run_commander_download(
+            tr("Downloading COMMANDER {tag}...", tag=tag),
+            lambda cancel, progress: download_and_install_commander_update(
+                tag, cancel_event=cancel, progress_cb=progress
+            ),
         )
+
+    def switch_commander_build(self, target: str) -> None:
+        """Settings' "Switch to Unstable" / "Revert to Stable".
+
+        Installs the newest build of ``target`` ("unstable" or "stable") over
+        this AppImage and restarts - going back a version when reverting.
+        """
+        if target == "unstable":
+            title = tr("Try the unstable build")
+            question = tr(
+                "Download and install the latest unstable COMMANDER build? "
+                "Unstable builds get new features sooner but are less tested.\n\n"
+                "COMMANDER restarts when it's done, and you can revert to the "
+                "stable build from Settings at any time."
+            )
+        else:
+            title = tr("Go back to the stable build")
+            question = tr(
+                "Download and install the latest stable COMMANDER build?\n\n"
+                "It may be older than the unstable build you're running now. "
+                "Settings changed by the newer build may not all carry back.\n\n"
+                "COMMANDER restarts when it's done."
+            )
+        answer = QMessageBox.question(
+            self,
+            title,
+            question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def work(cancel, progress):
+            path, _tag = switch_commander_build(
+                target, cancel_event=cancel, progress_cb=progress
+            )
+            return path
+
+        def switched() -> None:
+            # The update channel follows the build that is now installed.
+            gui_settings.save_gui_settings(update_channel=target)
+
+        self._run_commander_download(
+            tr("Downloading the unstable build...")
+            if target == "unstable"
+            else tr("Downloading the stable build..."),
+            work,
+            on_installed=switched,
+        )
+
+    def _run_commander_download(self, label: str, work, on_installed=None) -> None:
+        """Run ``work(cancel_event, progress_cb) -> AppImage path`` with a
+        progress dialog, then restart into the installed AppImage.
+
+        Shared by the status bar's update and Settings' build switch; the
+        download itself (size, ELF/AppImage and checksum checks, atomic
+        swap) is ``self_update``'s.
+        """
+        progress = QProgressDialog(label, tr("Cancel"), 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
@@ -825,24 +909,18 @@ class MainWindow(QMainWindow):
 
         def _progress(downloaded: int, total: int) -> None:
             pct = int(downloaded * 100 / total) if total > 0 else 0
-            text = tr(
-                "Downloading COMMANDER {tag}... {done}/{total}",
-                tag=tag,
-                done=human_size(downloaded),
-                total=human_size(total),
+            text = label + " " + tr(
+                "{done}/{total}", done=human_size(downloaded), total=human_size(total)
             )
             bridge.updated.emit(pct, text)
 
-        def _work() -> Path:
-            return download_and_install_commander_update(
-                tag, cancel_event=task.cancel_event, progress_cb=_progress
-            )
-
-        task = BackgroundTask(_work, parent=self)
+        task = BackgroundTask(lambda: work(task.cancel_event, _progress), parent=self)
         progress.canceled.connect(task.cancel_event.set)
 
         def on_result(path: object) -> None:
             progress.close()
+            if on_installed is not None:
+                on_installed()
             from ..main import release_instance_lock
 
             # release_instance_lock must run in this (still-running)
@@ -872,9 +950,7 @@ class MainWindow(QMainWindow):
         )
         box.exec()
         if box.clickedButton() == open_releases:
-            QDesktopServices.openUrl(
-                QUrl("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases")
-            )
+            open_url("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases")
 
     def _refresh_status_bar(self) -> None:
         """Re-render status bar text and re-select the combos' current items.

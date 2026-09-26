@@ -64,10 +64,6 @@ QTPDF_HARMLESS = (
     "the cause of any crash; no action is required for this warning."
 )
 
-PROTONFIXES_NOTE = (
-    "ProtonFixes is adjusting the runtime. These messages are "
-    "informational; only act on them if the game fails to start."
-)
 
 
 def launch_exit_code(code: str) -> tuple[str, str]:
