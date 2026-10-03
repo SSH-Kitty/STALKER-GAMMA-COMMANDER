@@ -84,7 +84,7 @@ class DashboardStatsCardTest(_QtTest):
 
     def test_shows_counters_from_the_newest_save(self):
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
             # No real worker: its result could otherwise land mid-test and
@@ -106,7 +106,7 @@ class DashboardStatsCardTest(_QtTest):
 
     def test_stale_result_is_dropped(self):
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
         ):
@@ -116,7 +116,7 @@ class DashboardStatsCardTest(_QtTest):
 
     def test_hidden_without_a_profile(self):
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
         ):
             page = self._page([])
@@ -128,7 +128,7 @@ class StorageCardTest(DashboardStatsCardTest):
         from PySide6.QtWidgets import QLabel, QProgressBar
 
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
             patch(
@@ -154,7 +154,7 @@ class StorageCardTest(DashboardStatsCardTest):
         from commander_gui.gui_settings import load_gui_settings, save_gui_settings
 
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
             # The scan never returns during the test: only saved numbers
@@ -224,7 +224,7 @@ class DashboardPlayButtonTest(_QtTest):
                 return self._pages.setdefault(key, FakePlayPage())
 
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
         ):
@@ -261,7 +261,7 @@ class ModManagerMo2WatchTest(_QtTest):
                 return QStatusBar()
 
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch.object(mod_manager_page, "mo2_running", return_value=True),
         ):
@@ -271,7 +271,7 @@ class ModManagerMo2WatchTest(_QtTest):
             self.assertTrue(page.guard_label.isVisible())
             self.assertTrue(page._mo2_watch.isActive())
         with (
-            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
             patch.object(mod_manager_page, "mo2_running", return_value=False),
             patch.object(ModManagerPage, "_load_mods"),

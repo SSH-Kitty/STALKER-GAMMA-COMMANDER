@@ -19,6 +19,7 @@ simply becomes the "real" function those inner ``patch()`` calls save
 and restore around, so it changes nothing for them.
 """
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -40,6 +41,21 @@ def _block_real_network_calls():
         patch("commander_gui.network.time"),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _stop_background_work_after_each_test():
+    """Join every BackgroundTask/CommandRunner a test left running, with
+    result delivery suppressed, then re-arm it - the same teardown a live
+    language switch uses. Otherwise a task finishes during a *later* test's
+    processEvents() and its handler touches a page that is already gone,
+    segfaulting the suite (seen intermittently in CI)."""
+    yield
+    common = sys.modules.get("commander_gui.ui.common")
+    if common is None:  # test never touched the Qt UI
+        return
+    common.shutdown_active_runners(timeout_ms=10000)
+    common.resume_after_shutdown()
 
 
 @pytest.fixture(autouse=True)
