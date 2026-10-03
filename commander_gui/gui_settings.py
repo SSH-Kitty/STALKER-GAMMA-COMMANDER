@@ -37,6 +37,8 @@ _DEFAULTS = {
     "tool_overrides": {},  # manually selected Linux tools and runner locations
     "move_dest": "",  # in-progress Move Game destination (cleared on completion)
     "move_expected": [],  # destination folder names owned by an in-progress move
+    "move_sources": [],  # absolute source folders of an in-progress move
+    "custom_title_bar": True,  # draw COMMANDER's own title bar instead of the desktop's
     "window_width": 1080,
     "window_height": 950,
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
@@ -45,6 +47,8 @@ _DEFAULTS = {
     "notified_commander_tag": "",  # COMMANDER release tag already notified about
     "playtime_seconds": {},  # accumulated play time per profile name, in seconds
     "last_played_ts": {},  # time.time() a session last ended, per profile name
+    "profile_notes": {},  # profile name -> the note shown on the Profiles page
+    "profile_colors": {},  # profile name -> color tag key (see profiles_page.PROFILE_COLORS)
     "user_created_categories": {},  # profile name -> list of category names the user created (deletable); official GAMMA categories are never in this list
     "discord_rpc_enabled": False,  # show "Playing S.T.A.L.K.E.R. GAMMA" on Discord
     "discord_show_mods": True,  # add the enabled mod count under the presence line
@@ -202,6 +206,7 @@ def load_gui_settings() -> dict:
         "discord_show_playtime",
         "deck_runner_confirmed",
         "welcome_hidden",
+        "custom_title_bar",
     ):
         v = data.get(key)
         if isinstance(v, bool):
@@ -244,6 +249,18 @@ def load_gui_settings() -> dict:
         if isinstance(last_played, dict)
         else {}
     )
+    notes = data.get("profile_notes")
+    data["profile_notes"] = (
+        {str(k): v[:500] for k, v in notes.items() if isinstance(v, str) and v.strip()}
+        if isinstance(notes, dict)
+        else {}
+    )
+    colors = data.get("profile_colors")
+    data["profile_colors"] = (
+        {str(k): v for k, v in colors.items() if isinstance(v, str) and v}
+        if isinstance(colors, dict)
+        else {}
+    )
     # Left by the removed Flip Priority button; dropped on load.
     data.pop("flip_priority_pending", None)
     user_categories = data.get("user_created_categories")
@@ -261,6 +278,9 @@ def load_gui_settings() -> dict:
     if not isinstance(data.get("move_expected"), list):
         data["move_expected"] = []
     data["move_expected"] = [x for x in data["move_expected"] if isinstance(x, str)]
+    if not isinstance(data.get("move_sources"), list):
+        data["move_sources"] = []
+    data["move_sources"] = [x for x in data["move_sources"] if isinstance(x, str)]
     try:
         dpi = int(data.get("mo2_display_dpi", 120))
     except (TypeError, ValueError, OverflowError):

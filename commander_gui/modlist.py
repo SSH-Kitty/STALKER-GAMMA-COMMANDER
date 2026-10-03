@@ -396,7 +396,10 @@ def reorder_to_original(lines: list[str], original: list[str]) -> list[str]:
     comments, and blank lines.  Each mod keeps its own enabled/disabled prefix,
     and mods missing from *lines* are not re-added.
     """
-    gamma_order = [name for _, name in entries(original)]
+    # First occurrence's rank, as list.index() gave - but O(1) per lookup.
+    gamma_rank: dict[str, int] = {}
+    for rank, (_, name) in enumerate(entries(original)):
+        gamma_rank.setdefault(name, rank)
     # positions/current_names: the existing gamma-mod lines in *lines*, in
     # their current file order - reordering only ever permutes this exact
     # multiset among itself (by a stable sort on each name's rank in
@@ -409,21 +412,21 @@ def reorder_to_original(lines: list[str], original: list[str]) -> list[str]:
     # zip() silently misaligned every pairing after it - dropping a real
     # mod and duplicating another instead of just reordering them.
     positions: list[int] = []
-    current_names: list[str] = []
-    by_name: dict[str, str] = {}
+    moving: list[str] = []
     for index, line in enumerate(lines):
         info = _line_info(line)
-        if info is None or info[1] not in gamma_order:
+        if info is None or info[1] not in gamma_rank:
             continue
         positions.append(index)
-        current_names.append(info[1])
-        by_name[info[1]] = line
-    if len(current_names) <= 1:
+        moving.append(line)
+    if len(moving) <= 1:
         return list(lines)
-    new_names = sorted(current_names, key=gamma_order.index)
+    # Sort the lines themselves (stable), not names mapped back to one line
+    # per name: a name listed twice keeps each copy's own +/- status.
+    new_lines = sorted(moving, key=lambda line: gamma_rank[_line_info(line)[1]])
     out = list(lines)
-    for position, name in zip(positions, new_names, strict=True):
-        out[position] = by_name[name]
+    for position, line in zip(positions, new_lines, strict=True):
+        out[position] = line
     return out
 
 
@@ -544,7 +547,11 @@ def modlist_path_for(gamma: str, mo2_profile: str) -> Path | None:
 
 
 def seed_new_mo2_profile(
-    gamma_dir: str | Path, mo2_profile: str, source_profile: str = "G.A.M.M.A"
+    gamma_dir: str | Path,
+    mo2_profile: str,
+    source_profile: str = "G.A.M.M.A",
+    *,
+    replace: bool = False,
 ) -> bool:
     """Copy an existing MO2 profile's modlist.txt into a brand-new one.
 
@@ -570,13 +577,23 @@ def seed_new_mo2_profile(
     seeded), or if *source_profile* has none to copy (nothing installed at
     *gamma_dir* yet - a subsequent Full Install creates its own profile from
     scratch). Returns whether a file was actually copied.
+
+    ``replace=True`` overwrites *mo2_profile*'s files instead. The CLI's
+    ``config create`` downloads the official GAMMA modlist.txt into a new
+    MO2 profile, so a profile meant as a copy of another would otherwise
+    keep that stock list. Only pass it for an MO2 profile that did not
+    exist before the create.
     """
     base = Path(gamma_dir)
-    source_dir = base / "profiles" / source_profile
-    dest_dir = base / "profiles" / mo2_profile
-    source = source_dir / "modlist.txt"
-    destination = dest_dir / "modlist.txt"
-    if destination.exists() or not source.is_file():
+    # Both names can come from outside (an imported profile bundle): never
+    # let one point outside <gamma>/profiles.
+    source = modlist_path_for(str(base), source_profile)
+    destination = modlist_path_for(str(base), mo2_profile)
+    if source is None or destination is None:
+        return False
+    source_dir = source.parent
+    dest_dir = destination.parent
+    if (destination.exists() and not replace) or not source.is_file():
         return False
     try:
         lines = read_lines(source)
@@ -586,7 +603,7 @@ def seed_new_mo2_profile(
     for name in ("modpack_maker_list.txt", "modpack_maker_list.json"):
         src_file = source_dir / name
         dest_file = dest_dir / name
-        if src_file.is_file() and not dest_file.exists():
+        if src_file.is_file() and (replace or not dest_file.exists()):
             try:
                 shutil.copy2(src_file, dest_file)
             except OSError:
@@ -893,12 +910,43 @@ def timestamped_backup_path(modlist: Path) -> Path:
     return candidate
 
 
+#: Timestamped modlist backups kept per modlist; older ones are pruned.
+MAX_TIMESTAMPED_BACKUPS = 20
+
+
+def prune_timestamped_backups(modlist: Path, keep: int = MAX_TIMESTAMPED_BACKUPS) -> None:
+    """Keep only ``modlist``'s newest ``keep`` timestamped backups."""
+
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    baks = sorted(
+        (p for p in modlist.parent.glob(f"{modlist.stem}-*.bak") if p.is_file()),
+        key=_mtime,
+        reverse=True,
+    )
+    for old in baks[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def snapshot_modlist_backup(modlist: Path) -> None:
+    """Take one timestamped backup of ``modlist``, pruning the oldest."""
+    shutil.copy2(modlist, timestamped_backup_path(modlist))
+    prune_timestamped_backups(modlist)
+
+
 def backup_before_change(modlist: Path) -> None:
     """Keep the pristine copy (once) and a timestamped one before a rewrite."""
     backup = modlist.with_name(modlist.name + BACKUP_SUFFIX)
     if not backup.exists():
         shutil.copy2(modlist, backup)
-    shutil.copy2(modlist, timestamped_backup_path(modlist))
+    snapshot_modlist_backup(modlist)
 
 
 #: A numbered GAMMA category separator ("224- Newly added addons").

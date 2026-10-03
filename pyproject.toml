@@ -1,0 +1,9 @@
+[tool.ruff.lint.per-file-ignores]
+# "Steamdeck" (capitalized) is this package's actual, intentional name
+# throughout the codebase, not a naming mistake to flag.
+"Steamdeck/**" = ["N999"]
+
+[tool.pytest.ini_options]
+# Some test modules import shared fixtures as "tests.<module>"; bare
+# `pytest` (what CI runs) only puts tests/ itself on sys.path.
+pythonpath = ["."]

@@ -15,7 +15,9 @@ optdepends=(
   'mangohud: optional performance overlay'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+# Update this alongside every pkgver bump (e.g. `updpkgsums`) - 'SKIP' let a
+# tampered or corrupted download through unnoticed.
+sha256sums=('e780e22fd22eec3fada4a12129bdbee9856e36bac1e02a2160be23f6fc74349f')
 
 package() {
   cd "STALKER-GAMMA-COMMANDER-$pkgver"

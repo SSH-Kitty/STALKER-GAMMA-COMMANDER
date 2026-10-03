@@ -1,0 +1,32 @@
+# Posts the full release notes to the Discord #releases channel whenever a
+# stable release is published. Discord's own GitHub integration only posts a
+# one-line "New release published" card, so this adds the patch notes as
+# STALKER COMMANDER, in the same style as earlier release posts.
+#
+# Secrets (set one pair):
+#   DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID  post as the STALKER COMMANDER bot
+#   DISCORD_WEBHOOK_URL                     post through a #releases webhook
+name: Discord release post
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/post_release_discord.py
+          sparse-checkout-cone-mode: false
+      - name: Post release notes to Discord
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python3 scripts/post_release_discord.py --event "$GITHUB_EVENT_PATH"

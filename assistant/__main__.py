@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import QTimer, qInstallMessageHandler
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .ui.main_window import MainWindow
@@ -65,6 +66,7 @@ def main() -> None:
     install_message_filter()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("COMMANDER Assistant")
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("assistant-icon.png"))))
     apply_theme(app)
     window = MainWindow()
     window.show()

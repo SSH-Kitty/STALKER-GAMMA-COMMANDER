@@ -5,6 +5,8 @@ The wording is aligned with GAMMA COMMANDER's own troubleshooting guidance
 advice the main app would.
 """
 
+import re
+
 # --- Launcher and Wine -------------------------------------------------------
 
 CONCRT140 = (
@@ -33,10 +35,10 @@ LAUNCH_EXITED = (
 
 GAMEMODE_OPTIONAL = (
     "GameMode is an optional performance booster. Install your distro's gamemode "
-    "package to silence this, or leave it installed as-is; it does not affect the game."
+    "package to silence this, or simply ignore it; it does not affect the game."
 )
 
-GAMEMODE_TITLE = "GameMode is not installed (optional performance booster)."
+GAMEMODE_TITLE = "GameMode is not installed (optional, safe to ignore)."
 
 PRESSURE_VESSEL = (
     "The Steam Linux Runtime container prints these loader warnings on many "
@@ -44,7 +46,7 @@ PRESSURE_VESSEL = (
 )
 
 PRESSURE_VESSEL_TITLE = (
-    "Steam Linux Runtime printed non-critical loader warnings (pressure-vessel)."
+    "Steam Linux Runtime printed harmless loader warnings."
 )
 
 PROTONFIXES_SUMMARY = (
@@ -54,9 +56,9 @@ PROTONFIXES_SUMMARY = (
 )
 
 TOOLMANIFEST_MISSING = (
-    "Part of the Proton/UMU runtime files are missing. Reinstalling umu-run "
-    "(COMMANDER can do this from Install → Install Dependencies), or let Steam "
-    "recreate the compatibility data."
+    "If the game starts normally you can ignore this. If it does not, reinstall "
+    "umu-run from COMMANDER's Install → Install Dependencies, or let Steam "
+    "recreate its compatibility data."
 )
 
 QTPDF_HARMLESS = (
@@ -69,7 +71,7 @@ QTPDF_HARMLESS = (
 def launch_exit_code(code: str) -> tuple[str, str]:
     """Title/detail pair for a non-zero exit code line."""
     return (
-        f"The game or Mod Organizer exited with an error (code {code}).",
+        f"The game or Mod Organizer closed with an error (exit code {code}).",
         (
             "A non-zero exit code means the program closed abnormally. The lines "
             "around this entry in launcher.log may show the underlying cause."
@@ -80,7 +82,7 @@ def launch_exit_code(code: str) -> tuple[str, str]:
 # --- XRay engine -------------------------------------------------------------
 
 XRAY_FATAL_GENERIC = (
-    "The game engine encountered an unrecoverable problem and shut down.",
+    "Game crash: the engine hit an error it could not recover from.",
     (
         "XRay can stop when something in the game data prevents startup or play. The "
         "[error] block names the subsystem that failed."
@@ -91,7 +93,7 @@ XRAY_FATAL_GENERIC = (
 def xray_missing_section(section: str) -> tuple[str, str, str]:
     """(title, detail, suggestion) for a missing config section crash."""
     return (
-        f"The game crashed reading a config section that does not exist ('{section}').",
+        f"Game crash: a mod setting is missing ('{section}').",
         (
             "This is a common symptom of a mod conflict: two mods edit the same "
             "settings file and one removed or renamed a section another mod expects."
@@ -107,11 +109,25 @@ def xray_missing_section(section: str) -> tuple[str, str, str]:
 # --- CLI installer -----------------------------------------------------------
 
 
+_SUBJECT_RE = re.compile(
+    r"^error (?:downloading|expanding files|extracting|cloning|fetching updates)"
+    r" (?:from|for) (.+?)\.?$",
+    re.IGNORECASE,
+)
+
+
+def _subject(reason: str) -> str:
+    """'Error downloading from Stalker Gamma Repo' -> 'Stalker Gamma Repo'."""
+    match = _SUBJECT_RE.match(reason.strip())
+    return match.group(1) if match else ""
+
+
 def cli_failed(reason_kind: str, reason: str) -> tuple[str, str, str]:
     """(title, detail, suggestion) per failure kind."""
+    subject = _subject(reason)
     if reason_kind == "canceled":
         return (
-            "An install was cancelled before it finished.",
+            "An install was stopped before it finished.",
             (
                 "The operation received a cancel request (or lost its connection) "
                 "and stopped cleanly."
@@ -123,10 +139,11 @@ def cli_failed(reason_kind: str, reason: str) -> tuple[str, str, str]:
         )
     if reason_kind == "download":
         return (
-            f"A download failed: {reason}",
+            f"Download failed: {subject}" if subject else f"A download failed: {reason}",
             (
-                "The installer could not fetch a file from ModDB or GitHub. This is "
-                "often a temporary network issue or a busy mirror."
+                "The installer could not download a file from ModDB or GitHub. This "
+                "is usually a temporary network problem or a busy server, not a "
+                "problem with your PC."
             ),
             (
                 "Run the install again — completed downloads are cached and reused. "
@@ -135,7 +152,7 @@ def cli_failed(reason_kind: str, reason: str) -> tuple[str, str, str]:
         )
     if reason_kind == "integrity":
         return (
-            f"A file failed verification: {reason}",
+            f"A file failed its integrity check: {reason}",
             (
                 "The MD5 check found a mod archive or installed file that does not "
                 "match the official checksums."
@@ -147,7 +164,7 @@ def cli_failed(reason_kind: str, reason: str) -> tuple[str, str, str]:
         )
     if reason_kind == "storage":
         return (
-            f"Installation failed while writing files: {reason}",
+            f"Couldn't write files to disk: {subject or reason}",
             (
                 "Extraction or file operations failed, often due to low disk space "
                 "or permission problems."

@@ -5,12 +5,11 @@ winetricks and verify (bottom).
 
 from __future__ import annotations
 
-import os
 import re
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -50,6 +49,7 @@ from ..modlist import modlist_path_for
 from ..parsers import ProgressEvent, parse_progress_line, strip_ansi
 from ..repair import (
     classify_problems,
+    expected_archive_md5s,
     fetch_modpack_records,
     purge_quarantine,
     quarantine_mod_and_archive,
@@ -67,7 +67,9 @@ from ..winetricks import (
     protontricks_install_command,
     umu_binary,
     umu_install_command,
+    winetricks_binary,
     winetricks_install_command,
+    winetricks_tool_install_command,
 )
 from .common import (
     ACCENT,
@@ -88,9 +90,10 @@ from .common import (
     mo2_running,
     normalize_path,
     notify_desktop,
+    paused_dependency_status,
+    save_profile_dirs,
     section_label,
     tr,
-    update_cache_label,
     winetricks_tooltip,
 )
 
@@ -168,12 +171,14 @@ def _winetricks_progress(line: str, stage: str, completed: set[str]) -> int | No
 
 
 # Overall-bar ranges for each dependency-install stage, mirroring the
-# determinate staged style used for Anomaly: umu first, then protontricks,
-# then the winetricks verbs fill the remainder.
+# determinate staged style used for Anomaly: the winetricks tool itself
+# first (if missing), then umu, then protontricks, then the winetricks
+# verbs fill the remainder.
 _WT_STAGE_RANGES = {
-    "umu": (0, 15),
-    "tools": (15, 35),
-    "verbs": (35, 100),
+    "winetricks": (0, 10),
+    "umu": (10, 25),
+    "tools": (25, 40),
+    "verbs": (40, 100),
 }
 
 
@@ -462,10 +467,6 @@ class InstallPage(QWidget):
     def __init__(self, window):
         super().__init__()
         self.setObjectName("installPage")
-        # Ensure ~/.local/bin is on PATH so umu-run installed there is discoverable.
-        local_bin = os.path.expanduser("~/.local/bin")
-        if local_bin not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = local_bin + ":" + os.environ.get("PATH", "")
         self.window = window
         self._runner = None
         self._anomaly_runner = None
@@ -504,17 +505,14 @@ class InstallPage(QWidget):
         self._wt_runner = None
         self._wt_task = None
         self._wt_checking = False
+        self._deps_check_task = None
+        self._deps_checking = False
         self._wt_installed: bool | None = None
         self._wt_stage = "verbs"
         self._wt_completed_verbs: set[str] = set()
         self._wt_last_pct = -1
         self._winetricks_status_enabled = False
         self._persisting = False
-        # Refreshes the download-cache archive count live while a GAMMA install
-        # is running (see _refresh_cache_count).
-        self._cache_timer = QTimer(self)
-        self._cache_timer.setInterval(1200)
-        self._cache_timer.timeout.connect(self._refresh_cache_count)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -707,12 +705,6 @@ class InstallPage(QWidget):
         )
         grid.addLayout(self.cache_folder_row, 5, 2)
 
-        # cache_info_label ("N archives cached") is kept but not shown on
-        # this page - _update_cache_info's call sites stay unchanged, they
-        # just update an off-screen label now.
-        self.cache_info_label = info_label("")
-        self.cache_info_label.setObjectName("dim")
-
         # -- Install buttons, aligned on the same row --
         self.anomaly_button = QPushButton(tr("Install Anomaly"))
         self.anomaly_button.setObjectName("primary")
@@ -776,7 +768,6 @@ class InstallPage(QWidget):
             self.anomaly_edit.setText(profile.anomaly)
             self.gamma_edit.setText(profile.gamma)
             self.cache_edit.setText(profile.cache)
-            self._update_cache_info(profile.cache)
             if not self.window.install_busy:
                 # Anomaly's installed/not-installed state is already shown
                 # by anomaly_status above - the shared progress console
@@ -792,8 +783,6 @@ class InstallPage(QWidget):
                     self.full_progress.bar.setRange(0, 1)
                     self.full_progress.bar.setValue(0)
                     self.full_progress.bar.setFormat("Not installed")
-        else:
-            self._update_cache_info("")
         self._update_install_status()
         self.wt_prefix_label.setText(tr("Prefix: {arg}", arg=self._wt_prefix()))
         self._refresh_winetricks_status()
@@ -885,20 +874,6 @@ class InstallPage(QWidget):
         else:
             self.gamma_status.set_state(bool(gamma_state))
 
-    def _update_cache_info(self, cache_path: str) -> None:
-        update_cache_label(self.cache_info_label, cache_path)
-
-    def _refresh_cache_count(self) -> None:
-        """Live-update the cache archive count while a GAMMA install runs."""
-        if self._runner is None or not self._runner.is_running():
-            self._cache_timer.stop()
-            return
-        profile = self.window.settings.active_profile
-        if profile is None:
-            self._cache_timer.stop()
-            return
-        self._update_cache_info(profile.cache)
-
     def _browse_install_root(self):
         start = str(Path.home())
         folder = QFileDialog.getExistingDirectory(
@@ -943,7 +918,6 @@ class InstallPage(QWidget):
         self.anomaly_edit.setText(str(folders["Anomaly folder"]))
         self.gamma_edit.setText(str(folders["GAMMA folder"]))
         self.cache_edit.setText(str(folders["Cache folder"]))
-        self._update_cache_info(str(folders["Cache folder"]))
         if not self._persist_dirs():
             return
         self.window.statusBar().showMessage(
@@ -999,7 +973,6 @@ class InstallPage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select cache folder", start)
         if folder:
             self.cache_edit.setText(folder)
-            self._update_cache_info(folder)
             self._persist_dirs()
             return
 
@@ -1065,18 +1038,9 @@ class InstallPage(QWidget):
             and cache == profile.cache
         ):
             return True
-        old_anomaly, old_gamma, old_cache = profile.anomaly, profile.gamma, profile.cache
-        profile.anomaly = anomaly
-        profile.gamma = gamma
-        profile.cache = cache
         try:
-            self.window.settings.save()
+            save_profile_dirs(self.window.settings, profile, anomaly, gamma, cache)
         except OSError as exc:
-            # Roll back the in-memory profile so it cannot diverge from the
-            # settings.json that is still on disk.
-            profile.anomaly = old_anomaly
-            profile.gamma = old_gamma
-            profile.cache = old_cache
             QMessageBox.warning(
                 self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
             )
@@ -1198,7 +1162,10 @@ class InstallPage(QWidget):
         self.window.set_install_busy(True, "gamma")
         self.full_progress.reset()
         if backup_error:
-            self.full_progress.log.append_line(f"Settings backup failed: {backup_error}")
+            # full_progress has no log pane (show_log=False).
+            self.window.statusBar().showMessage(
+                f"Settings backup failed: {backup_error}", 8000
+            )
         self.full_progress.set_concurrency(profile.download_threads)
         self.install_button.setEnabled(False)
         self.anomaly_button.setEnabled(False)
@@ -1250,7 +1217,6 @@ class InstallPage(QWidget):
         )
         self.full_progress.set_runner(self._runner)
         self.full_progress.on_started()
-        self._cache_timer.start()
         self._runner.start()
 
     def _on_full_install_line(self, line):
@@ -1268,7 +1234,6 @@ class InstallPage(QWidget):
             self.window.statusBar().showMessage(note, 6000)
 
     def _on_full_finished(self, rc, output):
-        self._cache_timer.stop()
         cancelled = self._runner is not None and self._runner.was_cancelled
         # Clear the reference so later cancel paths cannot act on a dead runner.
         self._runner = None
@@ -1332,7 +1297,6 @@ class InstallPage(QWidget):
                 invalidate_baseline(profile.gamma)
                 note = apply_pending_settings_restore(profile)
                 if note:
-                    self.full_progress.log.append_line(note)
                     self.window.statusBar().showMessage(note, 8000)
         # Only for a run that's actually done (not cancelled - the user
         # already knows - and not a failure that's about to silently
@@ -1846,13 +1810,7 @@ class InstallPage(QWidget):
         plan = None
         report("Checking GAMMA download cache...")
         records = fetch_modpack_records(profile.mod_pack_maker_url)
-        expected: dict[str, str] = {}
-        for record in records.values():
-            digest = record.md5_mod_db.lower()
-            if len(digest) != 32 or any(char not in "0123456789abcdef" for char in digest):
-                continue
-            for archive_name in record.archive_names():
-                expected.setdefault(archive_name, digest)
+        expected = expected_archive_md5s(records)
         cache_result = (
             verify_cache_archives(
                 profile.cache,
@@ -2000,46 +1958,61 @@ class InstallPage(QWidget):
         if anomaly_needs_repair:
             counts = self._verify_counts
             sections.append(
-                f"Anomaly: {counts['CORRUPT']} corrupt / "
-                f"{counts['NOT FOUND']} missing file(s).\n"
-                "Repairing re-runs the Anomaly installer, then restores "
-                "GAMMA's own file overlay (including its replacement "
-                "engine files) on top - Anomaly's installer alone would "
-                "otherwise silently revert them. Your appdata (saves, "
-                "user.ltx) lives outside the game folder and is never "
-                "touched."
+                tr(
+                    "Anomaly: {corrupt} corrupt / {missing} missing file(s).\n"
+                    "Repairing re-runs the Anomaly installer, then restores "
+                    "GAMMA's own file overlay (including its replacement "
+                    "engine files) on top - Anomaly's installer alone would "
+                    "otherwise silently revert them. Your appdata (saves, "
+                    "user.ltx) lives outside the game folder and is never "
+                    "touched.",
+                    corrupt=counts["CORRUPT"],
+                    missing=counts["NOT FOUND"],
+                )
             )
         if gamma_repairable:
             names = self._repair_plan.repairable
             shown = "\n".join(f"  - {name}" for name in names[:8])
             if len(names) > 8:
-                shown += f"\n  ... and {(len(names) - 8)} more"
+                shown += "\n  " + tr("... and {count} more", count=len(names) - 8)
             sections.append(
-                "GAMMA: broken mod(s):\n"
+                tr("GAMMA: broken mod(s):")
+                + "\n"
                 + shown
-                + "\nRepairing sets each broken mod folder and cached "
-                "archive aside (not deleted), then re-downloads and "
-                "re-installs it (MD5-verified). If the reinstall fails or "
-                "is cancelled, the set-aside copies are restored "
-                "automatically - nothing is lost. Extra mods and your own "
-                "added files are never touched."
+                + "\n"
+                + tr(
+                    "Repairing sets each broken mod folder and cached "
+                    "archive aside (not deleted), then re-downloads and "
+                    "re-installs it (MD5-verified). If the reinstall fails or "
+                    "is cancelled, the set-aside copies are restored "
+                    "automatically - nothing is lost. Extra mods and your own "
+                    "added files are never touched."
+                )
             )
         plan = self._repair_plan
         if plan is not None and plan.unrepairable:
             shown = ", ".join(plan.unrepairable[:5])
             if len(plan.unrepairable) > 5:
-                shown += f"... (+{(len(plan.unrepairable) - 5)} more)"
+                shown += "... " + tr("(+{count} more)", count=len(plan.unrepairable) - 5)
             sections.append(
-                f"GAMMA: {len(plan.unrepairable)} mod(s) cannot be repaired "
-                f"(no download source found) and will be left broken: {shown}"
+                tr(
+                    "GAMMA: {count} mod(s) missing from the community mod list "
+                    "and won't be repaired: {mods}",
+                    count=len(plan.unrepairable),
+                    mods=shown,
+                )
             )
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Question)
         dialog.setWindowTitle(tr("Verify & Repair"))
         dialog.setText(
-            "Issues found:\n\n" + "\n\n".join(sections)
-            + "\n\nClick \"Show Details...\" for every file and mod the repair "
-            "will touch.\n\nRepair now?"
+            tr("Issues found:")
+            + "\n\n"
+            + "\n\n".join(sections)
+            + "\n\n"
+            + tr('Click "Show Details..." for every file and mod the repair will touch.')
+            + "\n\n"
+            + tr("Repair now?")
         )
         dialog.setDetailedText(
             repair_preview(
@@ -2053,7 +2026,7 @@ class InstallPage(QWidget):
         dialog.setDefaultButton(QMessageBox.StandardButton.No)
         answer = dialog.exec()
         if answer != QMessageBox.StandardButton.Yes:
-            self._finish_with_issues()
+            self._finish_with_issues(declined=True)
             return
         error = backup_settings_before(self.window.settings.active_profile, "repair")
         if error:
@@ -2200,8 +2173,9 @@ class InstallPage(QWidget):
             if unrepairable_count > 5:
                 shown += f"... (+{(unrepairable_count - 5)} more)"
             lines.append(
-                f"GAMMA: {unrepairable_count} mod(s) left broken - "
-                f"no download source found: {shown}"
+                f"GAMMA: {unrepairable_count} mod(s) missing from the "
+                f"community mod list, could not be verified: {shown}. "
+                "This is not file corruption."
             )
         else:
             lines.append("GAMMA: verified - no issues found")
@@ -2244,10 +2218,12 @@ class InstallPage(QWidget):
             )
         # Cache staleness vs. the current live list is never itself a
         # failure condition - see the matching comment in _on_gamma_verify_done.
+        # A mod missing from the community mod list (unrepairable_count) is
+        # not a failure either - nothing broke and nothing here can fix it;
+        # see _finish_with_issues for the same reasoning.
         ok_final = (
             anomaly_ok
             and (remaining in (None, 0))
-            and unrepairable_count == 0
             and not reverted
         )
         message = "\n".join(lines)
@@ -2261,14 +2237,23 @@ class InstallPage(QWidget):
             return f"Confirmed: GAMMA repaired ({repaired} mod(s)) and verified successfully."
         return "Confirmed: Anomaly and GAMMA verified successfully."
 
-    def _finish_with_issues(self):
+    def _finish_with_issues(self, *, declined: bool = False) -> None:
+        """Report the verify result.
+
+        ``declined`` is True only when the user was offered a real repair
+        (something actually fixable was found) and chose not to run it -
+        that is a genuine unresolved issue. Otherwise this is reached with
+        nothing left that a repair could fix (only unrepairable/added-only/
+        cache notes), which is not a failure of the install.
+        """
         plan = self._repair_plan
         if plan is not None and plan.unrepairable:
             shown = ", ".join(plan.unrepairable[:5])
             if len(plan.unrepairable) > 5:
                 shown += f"... (+{(len(plan.unrepairable) - 5)} more)"
             self.verify_progress.log.append_line(
-                f"Not repairable ({len(plan.unrepairable)}): no download source found - {shown}"
+                f"Missing from the community mod list ({len(plan.unrepairable)}), "
+                f"could not be verified: {shown}. This is not file corruption."
             )
         if plan is not None and plan.added_only:
             self.verify_progress.log.append_line(
@@ -2279,8 +2264,12 @@ class InstallPage(QWidget):
                 "Cache is not fully reusable; affected archives will be downloaded "
                 "again during reinstall."
             )
-        message = "Verify finished with issues - Anomaly and/or GAMMA are not fully verified (see details above)."
-        self._finish_verify(ok=False, message=message, summary="GAMMA has issues")
+        if declined:
+            message = "Verify finished with issues - Anomaly and/or GAMMA are not fully verified (see details above)."
+            self._finish_verify(ok=False, message=message, summary="GAMMA has issues")
+            return
+        message = "Verify complete - see details above."
+        self._finish_verify(ok=True, message=message, summary="Verify complete")
 
     def _start_gamma_repair_deletion(self) -> None:
         self.verify_progress.cancel_button.show()
@@ -2429,6 +2418,10 @@ class InstallPage(QWidget):
         # re-baselines the MD5 manifest and would record the broken state as
         # the new reference.
         if self._repair_runner is not None and self._repair_runner.was_cancelled:
+            # Only now has full-install actually exited: putting the
+            # set-aside mods back (or unlocking the app) any earlier raced
+            # an installer still extracting into the same folders.
+            self._restore_after_repair_cancel()
             return
         self._restore_user_modlist()
         self.verify_progress.log.append_line("")
@@ -2472,8 +2465,12 @@ class InstallPage(QWidget):
         self._start_post_scan()
 
     def _on_repair_install_cancelled(self):
-        self._restore_user_modlist()
+        # The process is still exiting; _on_repair_install_finished restores.
         self.verify_progress.log.append_line("Repair install cancelled")
+        self.verify_progress.status_message("Cancelling...")
+
+    def _restore_after_repair_cancel(self):
+        self._restore_user_modlist()
         self.verify_progress.log.append_line("Restoring mods that were set aside...")
         restore_note = self._restore_all_quarantined()
         self._finish_verify(
@@ -2612,16 +2609,10 @@ class InstallPage(QWidget):
         can even report everything missing), so it is paused until the game
         closes and this page next refreshes.
         """
-        paused = {verb: True for verb in WINETRICKS_VERBS}
-        paused["wine"] = True
-        paused["protontricks"] = True
-        paused["umu"] = True
-        total = len(paused)
+        paused, text = paused_dependency_status()
         self._wt_installed = True
         self.wt_status.set_state(True)
-        self.wt_progress.status_label.setText(
-            f"{total}/{total} dependencies installed (paused - game running)"
-        )
+        self.wt_progress.status_label.setText(text)
         self.wt_status.set_status_tooltip(winetricks_tooltip(paused))
         self._update_button_states()
 
@@ -2690,7 +2681,34 @@ class InstallPage(QWidget):
         if mo2_running(force=True):
             # The game holds the Wine prefix; winetricks must not touch it.
             return
-        errors = check_all_dependencies()
+        if self._deps_checking:
+            return
+        self._deps_checking = True
+        # check_all_dependencies() chains several subprocess lookups (umu,
+        # protontricks, pip) with their own timeouts - worst case a several
+        # -second stall, so it runs off the GUI thread like every other
+        # dependency probe on this page.
+        task = BackgroundTask(check_all_dependencies, parent=self)
+        task.result.connect(self._on_dependencies_checked)
+        task.error.connect(self._on_dependencies_check_error)
+        self._deps_check_task = task
+        task.start()
+
+    def _on_dependencies_check_error(self, message: str) -> None:
+        self._deps_checking = False
+        QMessageBox.warning(
+            self, tr("Error"), tr("Could not query dependencies: {message}", message=message)
+        )
+
+    def _on_dependencies_checked(self, errors) -> None:
+        self._deps_checking = False
+        # install_busy/mo2 state may have changed while the check ran in
+        # the background.
+        if self.window.install_busy:
+            QMessageBox.information(self, tr("Busy"), tr("An install is already running."))
+            return
+        if mo2_running(force=True):
+            return
         if errors:
             QMessageBox.warning(
                 self,
@@ -2701,9 +2719,12 @@ class InstallPage(QWidget):
             )
             return
         prefix = self._wt_prefix()
+        need_winetricks = not winetricks_binary()
         need_umu = not umu_binary()
         need_protontricks = not protontricks_binary()
         message = f"This installs the runtime libraries needed by Mod Organizer and the game into:\n\n{prefix}\n\nVerbs: {', '.join(WINETRICKS_VERBS)}\n(~150 MB download on first run)."
+        if need_winetricks:
+            message += "\n\nwinetricks is missing and will be installed first."
         if need_umu:
             message += (
                 "\n\numu-run (Proton launcher) is missing and will be installed first."
@@ -2730,7 +2751,9 @@ class InstallPage(QWidget):
                 tr("Mod Organizer / the game started while this dialog was open.\n\nClose it before installing dependencies."),
             )
             return
-        if need_umu:
+        if need_winetricks:
+            self._wt_stage = "winetricks"
+        elif need_umu:
             self._wt_stage = "umu"
         elif need_protontricks:
             self._wt_stage = "tools"
@@ -2757,7 +2780,19 @@ class InstallPage(QWidget):
         self.wt_progress.bar.setValue(start)
         self._wt_last_pct = start
         self.wt_progress.bar.setFormat("%p%")
-        if self._wt_stage == "umu":
+        if self._wt_stage == "winetricks":
+            command = winetricks_tool_install_command()
+            if not command:
+                msg = "winetricks could not be installed (curl is not available)."
+                self.wt_progress.on_finished(1, msg)
+                self._wt_runner = None
+                self._wt_status_failed(msg)
+                self.window.set_install_busy(False)
+                self._refresh_winetricks_status()
+                return
+            self.wt_progress.status_message("Installing winetricks...")
+            self.wt_progress.log.append_line("== Installing winetricks ==")
+        elif self._wt_stage == "umu":
             command = umu_install_command()
             if not command:
                 msg = "umu-run could not be installed (curl is not available)."
@@ -2858,6 +2893,17 @@ class InstallPage(QWidget):
             self._wt_runner = None
             self.window.set_install_busy(False)
             self._refresh_winetricks_status()
+            return
+        if rc == 0 and self._wt_stage == "winetricks":
+            # winetricks tool installed — chain to umu, protontricks or verbs.
+            if not umu_binary():
+                self._wt_stage = "umu"
+            elif not protontricks_binary():
+                self._wt_stage = "tools"
+            else:
+                self._wt_stage = "verbs"
+            self._wt_runner = None
+            self._start_winetricks_stage()
             return
         if rc == 0 and self._wt_stage == "umu":
             # UMU installed — chain to protontricks or verbs.

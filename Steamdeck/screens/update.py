@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from commander_gui.cli_runner import cli_command
 from commander_gui.game_backup import backup_settings_before
 from commander_gui.i18n import tr
+from commander_gui.integrity import invalidate_baseline
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
 from commander_gui.themes import active_theme_tokens
@@ -378,9 +379,19 @@ class UpdateScreen(DeckScreen):
                 "and MCM settings are preserved."
             )
             + battery_warning(),
-            self._apply,
+            self._apply_if_still_idle,
             confirm_text=tr("Apply"),
         )
+
+    def _apply_if_still_idle(self) -> None:
+        # install_busy/MO2 may have changed while the confirm was open.
+        if self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        if mo2_running():
+            self.window.notify(tr("Mod Organizer is running"))
+            return
+        self._apply()
 
     def _apply(self) -> None:
         args = [
@@ -436,6 +447,10 @@ class UpdateScreen(DeckScreen):
         if cancelled:
             self.window.notify(tr("Cancelled"))
         elif cli_ok(rc, output, ""):
+            profile = self.profile()
+            # The update rewrote mod files: drop the stale MD5 baseline.
+            if profile is not None:
+                invalidate_baseline(profile.gamma)
             self.window.announce_finished(
                 tr("GAMMA update finished"), tr("GAMMA update completed successfully.")
             )

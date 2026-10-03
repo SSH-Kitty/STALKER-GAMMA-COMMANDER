@@ -114,6 +114,29 @@ QWidget#deckHeader {
     background-color: $topbar;
     border-bottom: 1px solid $border;
 }
+/* Minimize/maximize/close of the windowed Deck Mode's own title bar -
+   the same look as the desktop window's (icons are painted, see
+   commander_gui.ui.title_bar.WindowButton). */
+QWidget#titleStrip {
+    background: transparent;
+}
+QPushButton#winMin, QPushButton#winMax, QPushButton#winClose {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    min-height: 0;
+    min-width: 0;
+}
+QPushButton#winMin:hover, QPushButton#winMax:hover {
+    background-color: $btn_hover;
+}
+QPushButton#winClose:hover {
+    background-color: #c42b1c;
+}
+QPushButton#winClose:pressed {
+    background-color: #a1261a;
+}
 QWidget#deckNav {
     background-color: $topbar;
     border-top: 1px solid $border;

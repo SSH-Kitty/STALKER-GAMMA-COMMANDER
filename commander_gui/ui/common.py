@@ -280,29 +280,7 @@ def mo2_pids() -> set[int]:
     wrongly leaves the Play page's buttons disabled forever once the launch's
     own instance closes while a pre-existing one lingers.
     """
-    exe = shutil.which("pgrep")
-    if not exe:
-        return set()
-    try:
-        proc = subprocess.run(
-            # See mo2_running()'s matching pattern comment: case-insensitive
-            # for the same reason.
-            [exe, "-if", r"ModOrganizer\.exe"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return set()
-    if proc.returncode != 0:
-        return set()
-    pids: set[int] = set()
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.isdigit():
-            pids.add(int(line))
-    return pids
+    return exe_pids("ModOrganizer.exe")
 
 
 def exe_pids(exe_name: str) -> set[int]:
@@ -312,8 +290,7 @@ def exe_pids(exe_name: str) -> set[int]:
     Organizer, which stays running after the game it launched exits) so
     playtime can be recorded when the game itself closes.
 
-    Matches case-insensitively (``-i``), same as ``mo2_pids()``'s own
-    ``[Mm]odOrganizer\\.exe`` pattern - the exe name comes from
+    Matches case-insensitively (``-i``) - the exe name comes from
     ModOrganizer.ini's ``[customExecutables]`` path, whose case is not
     guaranteed to match how Wine reports the running process's own
     command line.
@@ -708,6 +685,33 @@ def _detach_unfinished_task(task: QObject) -> None:
     task.setParent(None)
 
 
+def _watch_owner(task: QObject, on: bool) -> None:
+    """While ``task`` runs, catch its owner being deleted (a closed overlay
+    or dialog): that would destroy the running QThread with it, which Qt
+    answers with an abort. See ``_detach_on_owner_delete``."""
+    owner = task.parent()
+    if owner is None:
+        return
+    if on:
+        owner.installEventFilter(task)
+    else:
+        owner.removeEventFilter(task)
+
+
+def _detach_on_owner_delete(task, obj: QObject, event: QEvent) -> bool:
+    """``eventFilter`` of the tasks: detach before a ``deleteLater()`` of the
+    owner lands while the worker thread still runs."""
+    if (
+        event.type() == QEvent.Type.DeferredDelete
+        and obj is task.parent()
+        and task._thread is not None
+        and task._thread.isRunning()
+    ):
+        obj.removeEventFilter(task)
+        _detach_unfinished_task(task)
+    return False
+
+
 class CommandRunner(QObject):
     """Runs a CLI command on a background thread, streaming output lines."""
 
@@ -851,6 +855,8 @@ class _Worker(QObject):
 class BackgroundTask(QObject):
     """Run a plain Python callable on a worker thread, emit its result."""
 
+    eventFilter = _detach_on_owner_delete
+
     result = Signal(object)
     error = Signal(str)
 
@@ -889,6 +895,7 @@ class BackgroundTask(QObject):
             lambda thread=self._thread: self._on_thread_finished(thread)
         )
         _ACTIVE_TASKS.add(self)
+        _watch_owner(self, True)
         self._thread.start()
 
     @property
@@ -912,6 +919,7 @@ class BackgroundTask(QObject):
         if self._thread is not thread:
             return
         _ACTIVE_TASKS.discard(self)
+        _watch_owner(self, False)
         self._worker = None
         self._thread = None
 
@@ -1022,6 +1030,8 @@ class StreamTask(QObject):
     result = Signal(object)
     error = Signal(str)
 
+    eventFilter = _detach_on_owner_delete
+
     def __init__(self, fn, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._fn = fn
@@ -1057,6 +1067,7 @@ class StreamTask(QObject):
             lambda thread=self._thread: self._on_thread_finished(thread)
         )
         _ACTIVE_TASKS.add(self)
+        _watch_owner(self, True)
         self._thread.start()
 
     @property
@@ -1082,6 +1093,7 @@ class StreamTask(QObject):
         if self._thread is not thread:
             return
         _ACTIVE_TASKS.discard(self)
+        _watch_owner(self, False)
         self._worker = None
         self._thread = None
 
@@ -1327,6 +1339,64 @@ def _kv_row(label: str, value: str) -> QHBoxLayout:
 
 #: Re-exported so UI code keeps a single, obvious import site for sizes.
 human_size = format_size
+
+
+def save_profile_dirs(settings, profile, anomaly: str, gamma: str, cache: str) -> None:
+    """Set *profile*'s install folders and save settings.json.
+
+    Raises OSError with the in-memory profile rolled back, so it never
+    diverges from the settings.json still on disk.
+    """
+    old = (profile.anomaly, profile.gamma, profile.cache)
+    profile.anomaly, profile.gamma, profile.cache = anomaly, gamma, cache
+    try:
+        settings.save()
+    except OSError:
+        profile.anomaly, profile.gamma, profile.cache = old
+        raise
+
+
+def populate_runner_combo(
+    combo: QComboBox,
+    protons: list[tuple[str, str]],
+    saved: str | None,
+    fallback: str | None = None,
+) -> None:
+    """Fill a runner picker (Play, Dashboard, Settings share the same list).
+
+    Selects *saved*, else *fallback*, else "auto". A falsy choice must not
+    reach findData(): findData(None) matches the separator (its data is
+    None too) instead of returning -1.
+    """
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
+    if protons:
+        combo.insertSeparator(combo.count())
+        for label, path in protons:
+            combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
+    chosen = saved
+    if not chosen or combo.findData(chosen) < 0:
+        chosen = fallback
+    if not chosen or combo.findData(chosen) < 0:
+        chosen = "auto"
+    combo.setCurrentIndex(combo.findData(chosen))
+    combo.blockSignals(False)
+
+
+def paused_dependency_status() -> tuple[dict[str, bool], str]:
+    """Dependency status to show while the game runs, and its summary text.
+
+    The game cannot run without the runtimes, and a winetricks query against
+    a running prefix is unreliable (it can report everything missing), so
+    the live check pauses and everything reads as installed until it closes.
+    """
+    paused = {verb: True for verb in WINETRICKS_VERBS}
+    paused.update(wine=True, protontricks=True, umu=True)
+    total = len(paused)
+    return paused, tr(
+        "{total}/{total} dependencies installed (paused - game running)", total=total
+    )
 
 
 def winetricks_tooltip(status: dict[str, bool]) -> str:
@@ -1629,8 +1699,12 @@ class ProgressTable(QTableWidget):
             # stale operation/percent) cluttering the list indefinitely.
             self.setRowHidden(row, True)
         elif event.operation == "Check MD5":
+            self.setRowHidden(row, False)
             self.item(row, 1).setForeground(QColor(TEAL.name()))
         else:
+            # A finished Download hides the row; the archive's next phase
+            # (Extract) must bring it back.
+            self.setRowHidden(row, False)
             self.item(row, 1).setForeground(QColor(LIGHT_GREY.name()))
             self.item(row, 2).setForeground(QColor(LIGHT_GREY.name()))
 
@@ -1846,7 +1920,7 @@ class ProgressArea(QWidget):
         #: glance without opening the console at all.
         self._bar_follows_log = bar_follows_log
         self.stage_progress = stage_progress
-        self._bar_idle_format = "Idle"
+        self._bar_idle_format = tr("Idle")
         self._bar_percent_format = "%p%"
         self._status_idle = ""
         self._max_bar_value: int = 0
@@ -2068,7 +2142,7 @@ class ProgressArea(QWidget):
             self._runner.pause()
             self._paused = True
             self.pause_button.setText(tr("Resume"))
-            self.bar.setFormat("Paused")
+            self.bar.setFormat(tr("Paused"))
 
     def on_line(self, line: str) -> None:
         clean = strip_ansi(line)
@@ -2089,7 +2163,7 @@ class ProgressArea(QWidget):
                 elif event.operation == "Skipped":
                     self.bar.setRange(0, 1)
                     self.bar.setValue(1)
-                    self.bar.setFormat("Skipped")
+                    self.bar.setFormat(tr("Skipped"))
                     self.status_label.setText(tr("{name} - Skipped", name=event.name))
                 else:
                     # Extract/Expand/Check MD5 report a numeric percentage
@@ -2186,7 +2260,7 @@ class ProgressArea(QWidget):
         self.bar.setStyleSheet("")
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
-        self.bar.setFormat("Starting...")
+        self.bar.setFormat(tr("Starting..."))
         if self._auto_expand_log:
             self._show_log()
 
@@ -2199,12 +2273,12 @@ class ProgressArea(QWidget):
         if cli_ok(rc, output, ""):
             self.bar.setRange(0, 1)
             self.bar.setValue(1)
-            self.bar.setFormat("Finished")
+            self.bar.setFormat(tr("Finished"))
             self.status_label.setText(tr("Complete"))
             if self.table is not None:
                 self.table.finish_all()
         else:
-            self.bar.setFormat("Failed")
+            self.bar.setFormat(tr("Failed"))
             self.bar.setValue(0)
             self.status_label.setText(tr("Failed"))
             if self.table is not None:
@@ -2225,7 +2299,7 @@ class ProgressArea(QWidget):
             self.table.mark_interrupted()
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
-        self.bar.setFormat("Cancelled")
+        self.bar.setFormat(tr("Cancelled"))
         if self.heavy_notice_label is not None:
             self.heavy_notice_label.hide()
 

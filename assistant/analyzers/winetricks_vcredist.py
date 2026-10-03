@@ -40,7 +40,7 @@ _CODE_MEANINGS: dict[int, tuple[str, str]] = {
     ),
     1638: (
         "Another version of this runtime is already installed (code 1638).",
-        "info",
+        "ok",
     ),
     3010: ("Runtime installed; a prefix restart is recommended (3010).", "info"),
 }
@@ -78,12 +78,12 @@ def analyze_winetricks(arcname: str, where: str, lines: list[str]) -> list[Findi
         ]
     return [
         factory.make(
-            Severity.INFO,
+            Severity.OK,
             CATEGORY_SYSTEM,
             "All expected game runtimes are recorded as installed.",
             None,
             detail=knowledge.WINETRICKS_ALL_GOOD,
-            suggestion="Informational — no action is required.",
+            suggestion="Nothing to do. This is normal.",
         )
     ]
 
@@ -105,7 +105,7 @@ def analyze_vcredist(arcname: str, where: str, lines: list[str]) -> list[Finding
             code,
             (f"A runtime installer exited with Windows error code {code}.", "error"),
         )
-        severity = Severity.ERROR if level == "error" else Severity.INFO
+        severity = {"error": Severity.ERROR, "ok": Severity.OK}.get(level, Severity.INFO)
         if level == "error":
             suggestion = knowledge.VCREDIST_FAILED
         elif code == 1638:

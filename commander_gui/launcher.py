@@ -29,8 +29,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gui_settings
+from .atomic import write_bytes
 from .config import child_environment
 from .dependencies import configured_tool
+from .proton_installer import version_key
 
 DEFAULT_UMU_PREFIX = Path.home() / "Games" / "umu" / "umu-default"
 DEFAULT_PROTON_PREFIX = Path.home() / "Games" / "proton"
@@ -724,11 +726,7 @@ def find_steam_protons() -> list[tuple[str, str]]:
                 label = label[len("Proton") :].strip()
             found.setdefault(f"Steam Proton {label}".strip(), str(proton.resolve()))
 
-    def _version_key(item: tuple[str, str]) -> tuple[int, ...]:
-        nums = re.findall(r"\d+", item[0])
-        return tuple(int(x) for x in nums) or (0,)
-
-    return sorted(found.items(), key=_version_key, reverse=True)
+    return sorted(found.items(), key=lambda item: version_key(item[0]), reverse=True)
 
 
 def find_extra_protons() -> list[tuple[str, str]]:
@@ -838,9 +836,7 @@ def _pick_umu_proton() -> str:
         build_dir = Path(script).parent
         if not (build_dir / "toolmanifest.vdf").is_file():
             continue
-        nums = re.findall(r"\d+", label)
-        key = tuple(int(x) for x in nums) or (0,)
-        candidates.append((key, str(build_dir)))
+        candidates.append((version_key(label), str(build_dir)))
     if not candidates:
         return ""
     candidates.sort(reverse=True)
@@ -1093,7 +1089,8 @@ def write_desktop_shortcut(
     if icon:
         lines.append(f"Icon={icon}")
     path = directory / f"{shortcut_slug(name)}.desktop"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Atomic, and no .lock dotfile left on the user's Desktop.
+    write_bytes(path, ("\n".join(lines) + "\n").encode("utf-8"), lock=False)
     path.chmod(path.stat().st_mode | 0o111)
     return path
 

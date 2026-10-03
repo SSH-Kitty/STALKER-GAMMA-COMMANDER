@@ -232,14 +232,23 @@ def add_or_update_shortcut(
             value_map.get("Exe") == quoted_exe
             and value_map.get("LaunchOptions", "") == launch_options
         ):
+            # Keep what the user set in Steam itself: collections, play
+            # history and hidden state used to reset on every "Add to Steam".
+            kept = {k: (k, t, v) for k, t, v in value if k in _USER_OWNED_FIELDS}
+            merged = [kept.pop(k, (k, t, v)) for k, t, v in fields]
+            merged.extend(kept.values())
             new_shortcuts = list(shortcuts)
-            new_shortcuts[index] = (key, _TYPE_MAP, fields)
+            new_shortcuts[index] = (key, _TYPE_MAP, merged)
             return new_shortcuts
     existing_indices = [
         int(key) for key, t, _v in shortcuts if t == _TYPE_MAP and key.isdigit()
     ]
     next_index = str(max(existing_indices, default=-1) + 1)
     return [*shortcuts, (next_index, _TYPE_MAP, fields)]
+
+
+#: shortcuts.vdf fields Steam lets the user change; preserved on update.
+_USER_OWNED_FIELDS = frozenset({"tags", "LastPlayTime", "IsHidden"})
 
 
 def add_commander_shortcuts(
@@ -267,7 +276,7 @@ def add_commander_shortcuts(
     root = read_shortcuts(vdf_path)
     if vdf_path.is_file():
         backup = vdf_path.with_name(vdf_path.name + ".gammagui.bak")
-        backup.write_bytes(vdf_path.read_bytes())
+        atomic.write_bytes(backup, vdf_path.read_bytes())
     else:
         vdf_path.parent.mkdir(parents=True, exist_ok=True)
     deck_options = f"{base_launch_options} --deck".strip()

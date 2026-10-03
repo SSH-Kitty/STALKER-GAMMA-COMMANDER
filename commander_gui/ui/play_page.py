@@ -94,6 +94,8 @@ from .common import (
     normalize_path,
     notify_desktop,
     play_click_sound,
+    populate_runner_combo,
+    save_profile_dirs,
     section_label,
     set_hover_grow_text,
     tr,
@@ -201,11 +203,13 @@ class PlayPage(QWidget):
         self._launch_status_clear_timer.setSingleShot(True)
         self._launch_status_clear_timer.timeout.connect(self._clear_launch_status)
         self._crash_report_task: BackgroundTask | None = None
+        self._repair_task: BackgroundTask | None = None
         self._launch_started_at: float | None = None
         self._discord_rpc = None
         self._discord_wanted = False
         self._discord_started_at: float | None = None
         self._discord_last_attempt = 0.0
+        self._discord_task: BackgroundTask | None = None
         self._persisting = False
         self._installed_protons: list[tuple[str, str]] = []
         #: Set only once a GE-Proton install actually starts (_install_proton());
@@ -501,32 +505,18 @@ class PlayPage(QWidget):
 
     def _reload_runners(self) -> None:
         current = self.runner_combo.currentData()
-        self.runner_combo.blockSignals(True)
-        self.runner_combo.clear()
-        self.runner_combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
         extra_protons = find_extra_protons()
         self._installed_protons = extra_protons
-        if extra_protons:
-            self.runner_combo.insertSeparator(self.runner_combo.count())
-            for label, path in extra_protons:
-                self.runner_combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
-        saved = gui_settings.load_gui_settings().get("runner", "auto")
         # The saved runner wins: the Dashboard and Settings change it
         # without this page, and keeping the combo's old choice made the
         # next launch use a different runner (and prefix) than the one
         # shown everywhere else - and Winecfg acts on.
-        chosen = saved
-        if not chosen or self.runner_combo.findData(chosen) < 0:
-            chosen = current
-        # QComboBox.findData(None) matches the separator item above (its
-        # itemData is also None), returning its index instead of -1 - so a
-        # falsy `chosen` must be caught explicitly, or a saved runner of
-        # None/"" would stick the selection on the separator instead of
-        # falling back to "auto".
-        if not chosen or self.runner_combo.findData(chosen) < 0:
-            chosen = "auto"
-        self.runner_combo.setCurrentIndex(self.runner_combo.findData(chosen))
-        self.runner_combo.blockSignals(False)
+        populate_runner_combo(
+            self.runner_combo,
+            extra_protons,
+            gui_settings.load_gui_settings().get("runner", "auto"),
+            fallback=current,
+        )
         self.prefix_edit.setText(self._prefix_for(kind=self.runner_combo.currentData()))
         self._update_runner_hint(self.runner_combo.currentData())
 
@@ -553,7 +543,9 @@ class PlayPage(QWidget):
         selected = self.proton_version_combo.currentData() or ""
         if not selected and self._releases:
             selected = self._releases[0]["tag"]
-        if selected and any(selected in label for label in installed):
+        # Labels are the build folder names: equality, or "GE-Proton9-1"
+        # would read as installed whenever "GE-Proton9-10" is.
+        if selected and selected in installed:
             self.install_proton_button.setText(tr("GE-Proton installed ✓"))
             self.install_proton_button.setEnabled(False)
         elif selected:
@@ -575,7 +567,7 @@ class PlayPage(QWidget):
         if not version:
             return
         installed = {label for label, _ in self._installed_protons}
-        if any(version in label for label in installed):
+        if version in installed:
             return
         overrides = gui_settings.load_gui_settings().get("tool_overrides") or {}
         steam_root = overrides.get("steam_root", "")
@@ -801,15 +793,13 @@ class PlayPage(QWidget):
                 and cache == profile.cache
             ):
                 return
-            profile.anomaly = anomaly
-            profile.gamma = gamma
-            profile.cache = cache
             try:
-                self.window.settings.save()
+                save_profile_dirs(self.window.settings, profile, anomaly, gamma, cache)
             except OSError as exc:
                 QMessageBox.warning(
                     self, tr("Save Failed"), tr("Could not write settings.json:\n{exc}", exc=exc)
                 )
+                self._load_folders()
                 return
             self.window.statusBar().showMessage(
                 f"Folders updated: {anomaly} | {gamma} | {cache}", 6000
@@ -1404,15 +1394,43 @@ class PlayPage(QWidget):
 
     def _repair_prefix(self) -> None:
         """Put the runner's own DLLs back and tell the user what comes next."""
-        from ..repair import repair_prefix_foreign_dlls
-
+        if self._repair_task is not None:
+            return
         try:
             runner = self._runner()
-            prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
-            repaired = repair_prefix_foreign_dlls(prefix, runner) if prefix else []
-        except (LaunchError, OSError) as exc:
+        except LaunchError as exc:
             QMessageBox.warning(self, tr("Repair Failed"), str(exc))
             return
+        prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
+        if not prefix:
+            QMessageBox.information(
+                self,
+                tr("Prefix Repaired"),
+                tr(
+                    "{count} files were restored to the runner's own versions.\n\n"
+                    "Now open the Install page and run Install Dependencies - the "
+                    "runtimes it had installed were among the files overwritten.",
+                    count=0,
+                ),
+            )
+            return
+        from ..repair import repair_prefix_foreign_dlls
+
+        # Byte-compares every DLL in the prefix against every host Wine
+        # build found - real disk I/O, run off the GUI thread. The launch
+        # this repairs has already stopped/aborted by the time this runs.
+        task = BackgroundTask(repair_prefix_foreign_dlls, prefix, runner, parent=self)
+        task.result.connect(self._on_repair_done)
+        task.error.connect(self._on_repair_error)
+        self._repair_task = task
+        task.start()
+
+    def _on_repair_error(self, message: str) -> None:
+        self._repair_task = None
+        QMessageBox.warning(self, tr("Repair Failed"), message)
+
+    def _on_repair_done(self, repaired) -> None:
+        self._repair_task = None
         QMessageBox.information(
             self,
             tr("Prefix Repaired"),
@@ -1536,6 +1554,10 @@ class PlayPage(QWidget):
                 self._start_crash_report(open_assistant=True)
             return
         self._crash_poll_attempts_left -= 1
+        # The timer that just fired is done; parented to the page, each of
+        # up to ~45 attempts per session used to stay alive.
+        if self._crash_poll_timer is not None:
+            self._crash_poll_timer.deleteLater()
         if self._crash_poll_attempts_left <= 0:
             self._crash_poll_timer = None
             return
@@ -1559,20 +1581,45 @@ class PlayPage(QWidget):
     def _try_start_discord_presence(self) -> None:
         """Connect and publish the presence. Called at launch, then retried
         from the launch tick every so often while Discord isn't reachable,
-        so starting Discord after the game still picks it up."""
+        so starting Discord after the game still picks it up.
+
+        The IPC connect (and the handshake/SET_ACTIVITY round-trip) is a
+        blocking socket call with up to a ~2s timeout per candidate path -
+        if Discord's socket file exists but the process is wedged, that
+        stall would otherwise repeat on every retry for the whole play
+        session. Runs off the GUI thread for exactly that reason.
+        """
+        if self._discord_task is not None:
+            return
         self._discord_last_attempt = time.monotonic()
         gui_state = gui_settings.load_gui_settings()
-        self._discord_rpc = start_presence(
-            effective_client_id(gui_state.get("discord_client_id"))
-        )
-        if self._discord_rpc is None:
+        client_id = effective_client_id(gui_state.get("discord_client_id"))
+        state = discord_presence_state(self.window.settings.active_profile, gui_state)
+        started_at = self._discord_started_at
+
+        def _connect_and_update():
+            rpc = start_presence(client_id)
+            if rpc is not None:
+                update_presence(rpc, DETAILS_TEXT, started_at, state=state)
+            return rpc
+
+        task = BackgroundTask(_connect_and_update, parent=self)
+        self._discord_task = task
+        task.result.connect(self._on_discord_presence_started)
+        task.error.connect(self._on_discord_presence_error)
+        task.start()
+
+    def _on_discord_presence_started(self, rpc) -> None:
+        self._discord_task = None
+        if not self._discord_wanted:
+            # Presence was turned off (or the launch already finished)
+            # while this was connecting - don't leave it dangling.
+            stop_presence(rpc)
             return
-        update_presence(
-            self._discord_rpc,
-            DETAILS_TEXT,
-            self._discord_started_at,
-            state=discord_presence_state(self.window.settings.active_profile, gui_state),
-        )
+        self._discord_rpc = rpc
+
+    def _on_discord_presence_error(self, _message: str) -> None:
+        self._discord_task = None
 
     def _retry_discord_presence(self) -> None:
         if not self._discord_wanted or self._discord_rpc is not None:
@@ -1922,7 +1969,10 @@ class PlayPage(QWidget):
         """Prevent launch actions from racing an install or reset operation."""
         self._install_busy = busy
         if busy:
-            self.launch_button.setEnabled(False)
+            # While a game runs this button is "Quit Game" - it must stay
+            # usable (a hung game, a log dump or backup started meanwhile).
+            if not self._launching:
+                self.launch_button.setEnabled(False)
             self.open_mo2_button.setEnabled(False)
             self.direct_button.setEnabled(False)
             self.shortcut_button.setEnabled(False)

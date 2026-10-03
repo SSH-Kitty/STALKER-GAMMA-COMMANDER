@@ -2681,7 +2681,7 @@ class DeckVersionTests(unittest.TestCase):
 
         self.assertEqual(Steamdeck.__version__, commander_gui.__version__)
         self.assertEqual(Steamdeck.__version_label__, commander_gui.__version_label__)
-        self.assertEqual(commander_gui.__version_label__, "1.3.0")
+        self.assertEqual(commander_gui.__version_label__, "1.3.1")
 
 
 class DeckAuditTests(DeckWindowFixture):

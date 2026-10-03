@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version_label__
+from .atomic import write_bytes
 from .config import cli_binary_path, gui_settings_path, logs_dir, settings_path
 
 _MAX_DIAGNOSTIC_FILE_BYTES = 1_000_000
@@ -44,7 +45,12 @@ _AUTH_HEADER_RE = re.compile(
 _URL_CREDENTIALS_RE = re.compile(r"(?i)(://)[^/@\s]+:[^/@\s]+@")
 
 
-def _redact(text: str) -> str:
+def redact(text: str) -> str:
+    """Mask tokens, passwords, auth headers, and URL credentials in *text*.
+
+    Public: also used by log_dump.py to scrub log dumps, not just this
+    module's own diagnostics export.
+    """
     redacted = _SENSITIVE_VALUE_RE.sub(r'\1"[REDACTED]"', text)
     redacted = _SENSITIVE_ASSIGNMENT_RE.sub(r'\1"[REDACTED]"', redacted)
     redacted = _SENSITIVE_ASSIGNMENT_UNQUOTED_RE.sub(r"\1[REDACTED]", redacted)
@@ -133,28 +139,19 @@ def collect_diagnostics() -> str:
     sections = [
         _section("System Info", _system_info()),
         _section("CLI Version", _cli_version()),
-        _section("CLI Settings (settings.json)", _redact(_read_file(settings_path()))),
+        _section("CLI Settings (settings.json)", redact(_read_file(settings_path()))),
         _section(
             "GUI Settings (gui-settings.json)",
-            _redact(_read_file(gui_settings_path())),
+            redact(_read_file(gui_settings_path())),
         ),
-        _section("Launcher Log", _redact(_read_file(logs_dir() / "launcher.log"))),
+        _section("Launcher Log", redact(_read_file(logs_dir() / "launcher.log"))),
         _section(
-            "COMMANDER App Log", _redact(_read_file(logs_dir() / "commander.log"))
+            "COMMANDER App Log", redact(_read_file(logs_dir() / "commander.log"))
         ),
     ]
     return "\n".join(sections)
 
 
 def export_diagnostics(path: Path) -> None:
-    import tempfile
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(collect_diagnostics())
-        Path(tmp).replace(path)
-    except OSError:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    # Atomic; no .lock dotfile beside a file saved wherever the user chose.
+    write_bytes(path, collect_diagnostics().encode("utf-8"), lock=False)

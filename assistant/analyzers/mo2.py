@@ -57,13 +57,13 @@ def analyze_mo2_interface(arcname: str, where: str, lines: list[str]) -> list[Fi
     if not findings:
         findings.append(
             factory.make(
-                Severity.INFO,
+                Severity.OK,
                 CATEGORY_INFO,
                 "Mod Organizer recorded no errors or warnings.",
                 None,
                 detail="The interface log contains no [E]/[W] entries for this "
                 "session.",
-                suggestion="Informational — no action is required.",
+                suggestion="Nothing to do. This is normal.",
             )
         )
     return findings
@@ -74,35 +74,41 @@ def analyze_usvfs(arcname: str, where: str, lines: list[str]) -> list[Finding]:
     factory = FindingFactory(arcname, where)
     findings: list[Finding] = []
     version: str | None = None
+    # Every hook problem collapses into one finding anyway (same title);
+    # counting repeats here instead of building a finding with an excerpt
+    # per line keeps a huge, noisy usvfs log cheap.
+    problem: Finding | None = None
     for index, line in enumerate(lines):
         version_match = _USVFS_VERSION_RE.search(line)
         if version_match:
             version = version_match.group(1)
         if _VFS_PROBLEM_RE.search(line) and not _BENIGN_HOOK_MISS_RE.search(line):
-            findings.append(
-                factory.make(
-                    Severity.WARNING,
-                    CATEGORY_MO2,
-                    "The virtual file system reported a problem hooking files.",
-                    index + 1,
-                    detail=line.strip()[:180],
-                    suggestion=(
-                        "If mods appear missing in-game, restart the game via "
-                        "MO2 (not directly). Persistent hook failures can mean "
-                        "an antivirus or overlay tool is interfering."
-                    ),
-                    excerpt_text=excerpt(lines, index),
-                )
+            if problem is not None:
+                problem.count += 1
+                continue
+            problem = factory.make(
+                Severity.WARNING,
+                CATEGORY_MO2,
+                "The virtual file system reported a problem hooking files.",
+                index + 1,
+                detail=line.strip()[:180],
+                suggestion=(
+                    "If mods appear missing in-game, restart the game via "
+                    "MO2 (not directly). Persistent hook failures can mean "
+                    "an antivirus or overlay tool is interfering."
+                ),
+                excerpt_text=excerpt(lines, index),
             )
+            findings.append(problem)
     if version:
         findings.append(
             factory.make(
-                Severity.INFO,
+                Severity.OK,
                 CATEGORY_INFO,
                 f"Virtual file system initialised correctly (usvfs {version}).",
                 None,
                 detail=knowledge.USVFS_OK,
-                suggestion="Informational — no action is required.",
+                suggestion="Nothing to do. This is normal.",
             )
         )
     return findings

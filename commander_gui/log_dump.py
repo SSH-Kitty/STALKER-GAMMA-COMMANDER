@@ -167,10 +167,10 @@ def _prefix_candidates(root: Path) -> list[Path]:
 
 def _scrub(text: str) -> str:
     """Credential redaction plus the home path, which names the user."""
-    from .diagnostics import _redact
+    from .diagnostics import redact
 
     home = str(Path.home())
-    redacted = _redact(text)
+    redacted = redact(text)
     return redacted.replace(home, "~") if len(home) > 1 else redacted
 
 
@@ -211,7 +211,9 @@ def build_log_dump(
     temp_fd, temp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
     os.close(temp_fd)
     try:
-        with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(
+            temp_path, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False
+        ) as zf:
             for label in sorted(sources):
                 safe_label = _safe_archive_part(label)
                 root = Path(sources[label]).expanduser()

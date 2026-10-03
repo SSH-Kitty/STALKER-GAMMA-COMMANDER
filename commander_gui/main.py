@@ -26,7 +26,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
 
 from . import gui_settings
-from .applog import install_excepthook
+from .applog import install_crash_handler, install_excepthook
 from .config import (
     cli_binary_path,
     mark_secondary_instance,
@@ -223,6 +223,16 @@ def _ask_deck_mode() -> bool:
     return chose_deck
 
 
+def _has_original(source: Path | None) -> bool:
+    """Whether *source* is still a real, non-empty folder."""
+    if source is None:
+        return False
+    try:
+        return source.is_dir() and not source.is_symlink() and any(source.iterdir())
+    except OSError:
+        return False
+
+
 def _cleanup_interrupted_move(saved: dict) -> None:
     """Offer to delete folders left behind by an interrupted Move Game.
 
@@ -259,7 +269,7 @@ def _cleanup_interrupted_move(saved: dict) -> None:
         if name and Path(name).name == name and Path(name).is_absolute() is False
     }
     if not safe_destination:
-        gui_settings.save_gui_settings(move_dest="", move_expected=[])
+        gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
         return
     orphans = [
         name
@@ -269,7 +279,29 @@ def _cleanup_interrupted_move(saved: dict) -> None:
         and (dest / name).resolve().parent == dest
     ]
     if not orphans:
-        gui_settings.save_gui_settings(move_dest="", move_expected=[])
+        gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
+        return
+    # A destination folder is only an orphan while its original still exists:
+    # once _move_folders has deleted the originals (a crash after that point,
+    # or a failed ModOrganizer.ini rewrite, which keeps this marker on
+    # purpose), the destination copy is the only one left. A marker written
+    # before move_sources existed can't prove that, so it never deletes.
+    sources_by_name = {
+        Path(src).name: Path(src)
+        for src in saved.get("move_sources", [])
+        if isinstance(src, str) and src
+    }
+    orphans = [name for name in orphans if _has_original(sources_by_name.get(name))]
+    if not orphans:
+        gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
+        QMessageBox.information(
+            None,
+            "Move Game Interrupted",
+            "A previous Move Game operation did not finish cleanly.\n\n"
+            f"The game folders at:\n{move_dest}\n"
+            "are now the only copy and were left untouched. Check that your "
+            "profile and ModOrganizer.ini point there before deleting anything.",
+        )
         return
     answer = QMessageBox.question(
         None,
@@ -283,12 +315,27 @@ def _cleanup_interrupted_move(saved: dict) -> None:
     if answer == QMessageBox.StandardButton.Yes:
         for name in orphans:
             shutil.rmtree(dest / name, ignore_errors=True)
-        gui_settings.save_gui_settings(move_dest="", move_expected=[])
+        gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
+
+
+def _ensure_local_bin_on_path() -> None:
+    """Put ``~/.local/bin`` on PATH, where umu-run and winetricks self-install.
+
+    Done once at startup for both interfaces: Deck Mode never builds the
+    desktop Install page, and a Steam (Game Mode) launch has no
+    ``~/.local/bin`` on PATH, so tools installed there were never found.
+    """
+    local_bin = os.path.expanduser("~/.local/bin")
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    if local_bin not in entries:
+        os.environ["PATH"] = os.pathsep.join([local_bin, *filter(None, entries)])
 
 
 def main(argv: list[str] | None = None) -> int:
     global _INSTANCE_LOCK, _PREVIOUS_QT_HANDLER
     install_excepthook()
+    install_crash_handler()
+    _ensure_local_bin_on_path()
     argv = list(sys.argv if argv is None else argv)
     deck = deck_requested(argv)
     _PREVIOUS_QT_HANDLER = qInstallMessageHandler(_quiet_qt_message_handler)

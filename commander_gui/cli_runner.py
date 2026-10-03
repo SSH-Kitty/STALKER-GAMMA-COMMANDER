@@ -8,7 +8,6 @@ GUI. Quick commands use a simple synchronous helper.
 from __future__ import annotations
 
 import os
-import re
 import signal
 import subprocess
 import threading
@@ -18,7 +17,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .config import child_environment, cli_binary_path
+from .config import (
+    _LD_PRELOAD_NOISE_RE,  # noqa: F401 - re-exported for existing importers
+    _query_environment,
+    _strip_loader_noise,
+    child_environment,
+    cli_binary_path,
+)
 from .launcher import _terminate_process_group as _terminate_group
 
 if os.name == "nt":
@@ -42,45 +47,6 @@ def _bounded_output(text: str) -> str:
     return "[output truncated]\n" + text[-_MAX_OUTPUT_CHARS:]
 
 
-#: The dynamic loader's complaint about an LD_PRELOAD entry it cannot load.
-#: Started from Steam, COMMANDER inherits both the 32- and 64-bit
-#: gameoverlayrenderer.so, so every child prints one of these for the
-#: wrong-bitness copy - noise, but it lands in output callers parse.
-_LD_PRELOAD_NOISE_RE = re.compile(
-    r"ld\.so: object '[^']*' from LD_PRELOAD cannot be pre?loaded"
-)
-
-
-def _strip_loader_noise(text: str) -> str:
-    """Drop the loader's LD_PRELOAD failure lines from captured output."""
-    if "LD_PRELOAD" not in text:
-        return text
-    return "\n".join(
-        line for line in text.split("\n") if not _LD_PRELOAD_NOISE_RE.search(line)
-    )
-
-
-def _query_environment() -> dict[str, str]:
-    """Child environment for quick CLI commands, minus Steam's overlay.
-
-    The overlay only matters to the game; for the CLI it just makes the
-    loader print errors (see _LD_PRELOAD_NOISE_RE).
-    """
-    env = child_environment()
-    preload = env.get("LD_PRELOAD")
-    if preload:
-        kept = [
-            entry
-            for entry in re.split(r"[:\s]+", preload)
-            if entry and "gameoverlayrenderer" not in entry
-        ]
-        if kept:
-            env["LD_PRELOAD"] = ":".join(kept)
-        else:
-            env.pop("LD_PRELOAD")
-    return env
-
-
 class CliWorker(QObject):
     """Runs one CLI invocation, streaming output lines.
 
@@ -98,6 +64,7 @@ class CliWorker(QObject):
         self._cwd = ""
         self._env: dict[str, str] | None = None
         self._cancel_event = threading.Event()
+        self._kill_timer_for: subprocess.Popen[str] | None = None
 
     def setup(
         self, command: list[str], cwd: str = "", env: dict[str, str] | None = None
@@ -203,6 +170,11 @@ class CliWorker(QObject):
                 proc.kill()
             except OSError:
                 pass
+        if self._kill_timer_for is proc:
+            # A cancel() already started a 3s kill-timer for this same
+            # process - mashing Cancel must not spawn another one.
+            return
+        self._kill_timer_for = proc
         threading.Thread(
             target=self._force_kill_after_cancel,
             args=(proc,),

@@ -220,6 +220,10 @@ class DeckLaunchController(QObject):
             self._set_active(False)
             self.failed.emit(tr("Launch Failed"), str(exc))
             return
+        except Exception as exc:  # noqa: BLE001 - never leave the session stuck "active"
+            self._set_active(False)
+            self.failed.emit(tr("Launch Failed"), str(exc))
+            return
 
         self._profile_name = profile.profile_name or ""
         self._started_at = time.time()

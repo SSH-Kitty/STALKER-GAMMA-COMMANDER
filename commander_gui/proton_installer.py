@@ -123,7 +123,12 @@ def _find_assets(release_tag: str) -> tuple[str, str]:
     return tar_url, sum_url
 
 
-def _sha512(path: Path) -> str:
+#: A SHA512 hex digest inside a ``.sha512sum`` file.
+SHA512_RE = re.compile(r"\b([0-9a-fA-F]{128})\b")
+
+
+def sha512_file(path: Path) -> str:
+    """Hex SHA512 of *path*, read in chunks."""
     h = hashlib.sha512()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -196,14 +201,6 @@ def _safe_extract(tf: tarfile.TarFile, destination: Path) -> None:
                 resolved = Path(os.path.realpath(path))
                 if resolved != root and root not in resolved.parents:
                     raise ValueError(f"Refusing unsafe link in Proton archive: {path.name}") from None
-
-
-def _top_level_dir(tar_path: Path) -> str | None:
-    """The archive's single top-level folder, or None if it has several."""
-    with tarfile.open(tar_path, "r:gz") as tf:
-        tops = {posixpath.normpath(m.name).split("/", 1)[0] for m in tf}
-    tops.discard(".")
-    return tops.pop() if len(tops) == 1 else None
 
 
 def install_proton(
@@ -284,12 +281,12 @@ def install_proton(
                 errors="replace"
             )
         check_cancelled()
-        match = re.search(r"\b([0-9a-fA-F]{128})\b", checksum_text)
+        match = SHA512_RE.search(checksum_text)
         if match is None:
             raise ValueError("Checksum asset did not contain a valid SHA512 digest")
         expected = match.group(1).lower()
         check_cancelled()
-        actual = _sha512(tar_path)
+        actual = sha512_file(tar_path)
         check_cancelled()
         if actual != expected:
             raise ValueError(
@@ -299,15 +296,23 @@ def install_proton(
         # --- extract transactionally ---
         # Named after what is actually inside, not guessed from the file name:
         # the two only agree by convention.
-        dir_name = _top_level_dir(tar_path) or tar_name.removesuffix(".tar.gz")
-        destination = install_dir / dir_name
-        if destination.exists():
-            raise ValueError(f"Proton build already exists: {destination.name}")
+        # Read off the extracted tree rather than a separate pass over the
+        # archive: decompressing ~500 MB twice doubled install time on a Deck.
+        dir_name = tar_name.removesuffix(".tar.gz")
+        if (install_dir / dir_name).exists():
+            # The usual case, caught before spending time extracting.
+            raise ValueError(f"Proton build already exists: {dir_name}")
         staging = Path(tempfile.mkdtemp(prefix=".proton-staging-", dir=install_dir))
         try:
             check_cancelled()
             with tarfile.open(tar_path, "r:gz") as tf:
                 _safe_extract(tf, staging)
+            tops = [entry.name for entry in staging.iterdir()]
+            if len(tops) == 1:
+                dir_name = tops[0]
+            destination = install_dir / dir_name
+            if destination.exists():
+                raise ValueError(f"Proton build already exists: {destination.name}")
             installed_staged = staging / dir_name
             if not installed_staged.is_dir():
                 raise ValueError(f"Expected directory {dir_name} not found in archive")
@@ -356,7 +361,8 @@ class ProtonBuild:
         return not self.in_use
 
 
-def _version_key(name: str) -> tuple[int, ...]:
+def version_key(name: str) -> tuple[int, ...]:
+    """Sort key for Proton build names: their numbers, in order."""
     return tuple(int(x) for x in re.findall(r"\d+", name)) or (0,)
 
 
@@ -434,7 +440,7 @@ def installed_builds(runner_kind: str | None = None) -> list[ProtonBuild]:
                 steam_uses=name in steam_names,
             )
         )
-    builds.sort(key=lambda build: _version_key(build.name), reverse=True)
+    builds.sort(key=lambda build: version_key(build.name), reverse=True)
     ge = [build for build in builds if build.name.startswith("GE-Proton")]
     if ge:
         ge[0].newest = True

@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
 )
 
 from ..game_backup import (
-    BackupError,
     BackupInfo,
     clean_name,
     create_backup,
@@ -287,11 +286,12 @@ class BackupDialog(QDialog):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            delete_backup(info)
-        except (BackupError, OSError) as exc:
-            QMessageBox.warning(self, tr("Delete"), str(exc))
-        self.reload()
+
+        def done(_result, error) -> None:
+            if error:
+                QMessageBox.warning(self, tr("Delete"), error)
+
+        self._start(lambda report: delete_backup(info), done, tr("Removing..."))
 
     def _open_folder(self) -> None:
         profile = self._profile()

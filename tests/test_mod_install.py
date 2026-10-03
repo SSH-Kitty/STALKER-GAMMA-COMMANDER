@@ -18,6 +18,7 @@ from commander_gui.mod_install import (
     _validate_archive_entries,
     default_mod_name,
     install_archive,
+    make_staging_dir,
     sanitize_name,
 )
 from commander_gui.modlist import (
@@ -551,3 +552,46 @@ class ModInstallTests(unittest.TestCase):
     def test_default_mod_name_handles_compound_extension(self):
         self.assertEqual(default_mod_name(Path("My Mod.7z")), "My Mod")
         self.assertEqual(default_mod_name(Path("My Mod.fomod")), "My Mod")
+
+    def test_staging_dir_is_made_in_the_gamma_folder_not_the_mods_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            (gamma / "mods").mkdir()
+            staging = make_staging_dir(gamma)
+            self.assertEqual(staging.parent, gamma)
+            self.assertTrue(staging.name.startswith("."))
+            self.assertEqual(list((gamma / "mods").iterdir()), [])
+
+    def test_staging_dir_falls_back_to_the_system_temp_folder(self):
+        staging = make_staging_dir(Path("/nonexistent/gamma"))
+        try:
+            self.assertTrue(staging.is_dir())
+        finally:
+            staging.rmdir()
+
+    def test_install_archive_leaves_no_staging_folder_behind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma"
+            mods = gamma / "mods"
+            archive = Path(tmp) / "Mod.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("gamedata/a.txt", "x")
+            install_archive(archive, mods)
+            self.assertEqual(sorted(p.name for p in gamma.iterdir()), ["mods"])
+
+
+class LocalBinPathTests(unittest.TestCase):
+    def test_local_bin_is_added_once_as_a_whole_entry(self):
+        import os
+
+        from commander_gui.main import _ensure_local_bin_on_path
+
+        local_bin = os.path.expanduser("~/.local/bin")
+        # A look-alike entry must not count as already present.
+        with patch.dict(os.environ, {"PATH": local_bin + "2:/usr/bin"}):
+            _ensure_local_bin_on_path()
+            _ensure_local_bin_on_path()
+            self.assertEqual(
+                os.environ["PATH"].split(os.pathsep),
+                [local_bin, local_bin + "2", "/usr/bin"],
+            )

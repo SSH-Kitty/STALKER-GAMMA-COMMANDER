@@ -16,7 +16,7 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
     exit 1
 fi
 
-requested_version="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+requested_version="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
 venv_version=""
 if [ -x "$VENV_DIR/bin/python" ]; then
     venv_version="$("$VENV_DIR/bin/python" -c \

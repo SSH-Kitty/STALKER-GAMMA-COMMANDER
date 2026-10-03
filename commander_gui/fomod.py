@@ -526,6 +526,7 @@ def _place_item(item: FomodFile, root: Path, destination: Path) -> None:
         raise ModInstallError("FOMOD destination contains unsafe components")
     # Windows-authored configs often end a folder destination with a
     # separator ("gamedata\\"); that trailing empty component is not unsafe.
+    names_folder_only = dest_str.endswith(("/", "\\"))
     dest_str = dest_str.rstrip("/\\")
     components = dest_str.replace("\\", "/").split("/") if dest_str else []
     if any(
@@ -550,7 +551,22 @@ def _place_item(item: FomodFile, root: Path, destination: Path) -> None:
     # (destination="gamedata\\scripts\\foo.script", the common authoring
     # style) or just its folder (destination="gamedata"); only the latter
     # gets the source's own name appended.
-    names_file = bool(components) and components[-1].lower() == source.name.lower()
+    # A destination that renames the file (source="foo_v2.ltx",
+    # destination="gamedata\\configs\\foo.ltx", the usual way variant
+    # options are authored) names it too: same extension as the source and
+    # not an existing folder.
+    names_file = (
+        bool(components)
+        and (
+            components[-1].lower() == source.name.lower()
+            or (
+                not names_folder_only
+                and bool(source.suffix)
+                and PurePosixPath(components[-1]).suffix.lower() == source.suffix.lower()
+                and not destination.joinpath(*components).is_dir()
+            )
+        )
+    )
     if item.is_folder:
         target = destination.joinpath(*components)
     elif names_file:

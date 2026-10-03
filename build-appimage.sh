@@ -41,8 +41,15 @@ APPDIR="$BUILD_DIR/AppDir"
 
 BASE_APPIMAGE="python${PY_FULL}-${PY_ABI}-${PY_ABI}-${PY_PLATFORM}.AppImage"
 BASE_URL="https://github.com/niess/python-appimage/releases/download/python${PY_SERIES}/${BASE_APPIMAGE}"
-TOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
-RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH}"
+# Fixed releases, each checked against a known SHA256 before use: the
+# runtime is embedded in every shipped AppImage, so a moving "continuous"
+# build (or a tampered download) must never slip in unnoticed. Bump a
+# version and its hash together.
+TOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH}.AppImage"
+TOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH}"
+RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+BASE_SHA256="cefdd1b6e08dfb6c977d4233a4177ed3ee55a526991a122c8d92263f5901544f"
 
 # xcb/xkb helper libraries. Qt hard-requires these but stock Ubuntu/Debian
 # often ship without them, which is the classic "could not load the Qt
@@ -79,25 +86,29 @@ mkdir -p "$CACHE_DIR" "$OUT_DIR"
 rm -rf "$APPDIR"
 
 # --------------------------------------------------------------- fetch tools
-fetch() { # url dest
-  local digest="$2.sha256"
-  if [ -s "$2" ] && [ -s "$digest" ]; then
-    sha256sum -c "$digest" >/dev/null 2>&1 && {
-      log "cached and verified: $(basename "$2")"
-      return
-    }
-    rm -f "$2" "$digest"
+sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+fetch() { # url dest expected-sha256
+  if [ -s "$2" ] && [ "$(sha256_of "$2")" = "$3" ]; then
+    log "cached and verified: $(basename "$2")"
+    return
   fi
+  rm -f "$2" "$2.sha256"
   log "downloading $(basename "$2")"
   curl -fL --retry 3 --connect-timeout 30 -o "$2.part" "$1"
+  local actual
+  actual="$(sha256_of "$2.part")"
+  if [ "$actual" != "$3" ]; then
+    rm -f "$2.part"
+    die "$(basename "$2"): SHA256 mismatch (expected $3, got $actual) - not using it"
+  fi
   mv "$2.part" "$2"
-  sha256sum "$2" > "$digest"
   chmod +x "$2"
 }
-fetch "$TOOL_URL" "$CACHE_DIR/appimagetool"
-fetch "$BASE_URL" "$CACHE_DIR/$BASE_APPIMAGE"
+fetch "$TOOL_URL" "$CACHE_DIR/appimagetool" "$TOOL_SHA256"
+fetch "$BASE_URL" "$CACHE_DIR/$BASE_APPIMAGE" "$BASE_SHA256"
 # appimagetool would otherwise download this on every single run.
-fetch "$RUNTIME_URL" "$CACHE_DIR/runtime-$ARCH"
+fetch "$RUNTIME_URL" "$CACHE_DIR/runtime-$ARCH" "$RUNTIME_SHA256"
 
 PY="$APPDIR/opt/python$PY_SERIES/bin/python$PY_SERIES"
 PYLIB="$APPDIR/opt/python$PY_SERIES/lib/python$PY_SERIES"
@@ -285,6 +296,15 @@ for lib in "${BUNDLED_SYS_LIBS[@]}"; do
   cp -L "$src" "$QTLIB/$lib"
   echo "    + $lib (glibc ${need:-none})"
 done
+# libxkbcommon-x11 builds keymaps through libxkbcommon's private structs, so
+# the two must come from the same release. A new -x11 next to the host's
+# older libxkbcommon (it failed the glibc gate above) corrupts the keymap and
+# segfaults on the first key press - seen on Linux Mint 22 / Ubuntu 24.04.
+if [ ! -e "$QTLIB/libxkbcommon.so.0" ] && [ -e "$QTLIB/libxkbcommon-x11.so.0" ]; then
+  rm -f "$QTLIB/libxkbcommon-x11.so.0"
+  echo "    - libxkbcommon-x11.so.0 dropped: must match the host's libxkbcommon" >&2
+  SKIPPED_LIBS+=("libxkbcommon-x11.so.0 (pairs with libxkbcommon.so.0)")
+fi
 if [ ${#SKIPPED_LIBS[@]} -gt 0 ]; then
   log "NOT bundled - users must have these from their distro:"
   printf '      %s\n' "${SKIPPED_LIBS[@]}"

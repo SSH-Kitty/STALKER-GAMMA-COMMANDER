@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import ClassVar
 
 from .atomic import write_text
-from .config import cli_binary_path, settings_path
+from .config import (
+    _query_environment,
+    _strip_loader_noise,
+    cli_binary_path,
+    settings_path,
+)
 
 DEFAULT_MOD_PACK_MAKER_URL = "https://stalker-gamma.com/api/client/v1/mods/list"
 DEFAULT_MOD_LIST_URL = (
@@ -126,6 +131,9 @@ class CliSettings:
     #: Top-level keys owned by the CLI that the GUI does not model. Preserved
     #: verbatim so saving from the GUI never drops CLI-only settings.
     extra: dict = field(default_factory=dict)
+    #: Set when settings.json exists but could not be read (permissions, I/O
+    #: error): the in-memory defaults must never be saved over it.
+    load_error: str = ""
 
     @property
     def active_profile(self) -> CliProfile | None:
@@ -137,6 +145,8 @@ class CliSettings:
     def save(self, path: Path | None = None) -> None:
         """Write settings.json atomically, preserving unknown keys."""
         path = path or settings_path()
+        if self.load_error:
+            raise OSError(f"settings.json could not be read, not overwriting it: {self.load_error}")
         path.parent.mkdir(parents=True, exist_ok=True)
         data = dict(self.extra)
         data["Profiles"] = [p.to_dict() for p in self.profiles]
@@ -176,9 +186,16 @@ def load_settings(path: Path | None = None) -> CliSettings:
         # ValueError also covers UnicodeDecodeError on non-UTF-8 bytes,
         # which used to escape this handler.
         data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (ValueError, OSError):
+    except ValueError:
         # Back up corrupt file and start fresh.
         return _reset_settings(path, _corrupt_backup_path(path))
+    except OSError as exc:
+        # Unreadable is not corrupt (e.g. EACCES after running something
+        # with sudo): renaming it away and saving one default profile made
+        # every profile look lost. Work with defaults, never overwrite it.
+        settings = CliSettings(load_error=str(exc))
+        settings.profiles = [CliProfile(active=True)]
+        return settings
     if not isinstance(data, dict):
         return _reset_settings(path, _corrupt_backup_path(path))
     profiles_raw = data.get("Profiles", [])
@@ -216,6 +233,7 @@ def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, s
             errors="replace",
             timeout=timeout,
             check=False,
+            env=_query_environment(),
         )
     except subprocess.TimeoutExpired:
         label = args[0] if args else "<no args>"
@@ -245,5 +263,7 @@ def cli_ok(
     """
     if rc != 0:
         return False
-    text = f"{out}\n{err}".lower()
+    # Started from Steam, every child prints the loader's "ERROR: ld.so: ...
+    # LD_PRELOAD cannot be preloaded" for the overlay - not a CLI failure.
+    text = _strip_loader_noise(f"{out}\n{err}").lower()
     return not any(marker in text for marker in markers)

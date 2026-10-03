@@ -79,6 +79,19 @@ def is_expected_gamma_overlay_corrupt(line: str, anomaly_path: str) -> bool:
     return rel.lower() in GAMMA_OVERLAY_FILES
 
 
+def is_gamma_overlay_corrupt_line(line: str) -> bool:
+    """Like is_expected_gamma_overlay_corrupt, but without an anomaly root.
+
+    Log dumps don't reliably carry the profile's Anomaly path, so this
+    matches the overlay file by path suffix instead.
+    """
+    match = _ANOMALY_LINE_RE.match(line.strip())
+    if match is None or match.group("status") != "CORRUPT":
+        return False
+    path = match.group("path").strip().replace("\\", "/").lower()
+    return any(path.endswith("/" + rel) for rel in GAMMA_OVERLAY_FILES)
+
+
 def format_size(num_bytes: int) -> str:
     """Render a byte count as a human-readable size (canonical implementation)."""
     if num_bytes <= 0:
@@ -691,23 +704,31 @@ def reverted_gamma_overlay(anomaly_dir: str) -> list[str]:
     vanilla checksum has been reverted.
     """
     root = Path(anomaly_dir).expanduser()
-    checksums = root / "tools" / "checksums.md5"
-    try:
-        lines = checksums.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
     reverted: list[str] = []
-    for line in lines:
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
-            continue
-        digest, name = parts[0].lower(), parts[1].lstrip("*").replace("\\", "/")
-        if name.lower() not in GAMMA_OVERLAY_FILES:
+    for key, (name, digest) in _vanilla_md5s(root).items():
+        if key not in GAMMA_OVERLAY_FILES:
             continue
         result = _md5_file(root / name)
         if result is not None and result[0].lower() == digest:
             reverted.append(name)
     return reverted
+
+
+def _vanilla_md5s(anomaly_root: Path) -> dict[str, tuple[str, str]]:
+    """Anomaly's ``tools/checksums.md5``: lowercase path -> (path, md5)."""
+    try:
+        lines = (anomaly_root / "tools" / "checksums.md5").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        return {}
+    vanilla: dict[str, tuple[str, str]] = {}
+    for line in lines:
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            name = parts[1].lstrip("*").replace("\\", "/")
+            vanilla[name.lower()] = (name, parts[0].lower())
+    return vanilla
 
 
 #: Where GAMMA keeps the files it lays over Anomaly, inside the cached
@@ -743,8 +764,8 @@ def restore_gamma_overlay(
     """
     import shutil
     import subprocess
-    import tempfile
 
+    from .atomic import write_bytes
     from .config import child_environment
 
     result = OverlayRestore()
@@ -776,16 +797,7 @@ def restore_gamma_overlay(
         if item.startswith(_GAMMA_PATCH_ROOT)
     }
     root = Path(anomaly_dir).expanduser()
-    vanilla = {}
-    try:
-        for line in (root / "tools" / "checksums.md5").read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2:
-                vanilla[parts[1].lstrip("*").replace("\\", "/").lower()] = parts[0].lower()
-    except OSError:
-        pass
+    vanilla = {key: digest for key, (_name, digest) in _vanilla_md5s(root).items()}
     for name in names:
         key = name.replace("\\", "/").lower()
         source = by_name.get(key)
@@ -806,16 +818,10 @@ def restore_gamma_overlay(
         ):
             result.failed.append(name)
             continue
-        target = root / name
-        tmp = None
         try:
-            fd, tmp = tempfile.mkstemp(prefix=".gamma-", dir=target.parent)
-            with os.fdopen(fd, "wb") as out:
-                out.write(data)
-            os.replace(tmp, target)
+            # Keeps the replaced file's permissions (an executable stays one).
+            write_bytes(root / name, data, lock=False)
         except OSError:
-            if tmp is not None:
-                Path(tmp).unlink(missing_ok=True)
             result.failed.append(name)
             continue
         result.restored.append(name)

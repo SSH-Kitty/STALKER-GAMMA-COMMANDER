@@ -29,7 +29,7 @@ from ..launcher import find_extra_protons
 from ..settings import CliSettings
 from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
-from ..winetricks import WINETRICKS_VERBS, check_winetricks_full_status
+from ..winetricks import check_winetricks_full_status
 from .common import (
     OK_GREEN,
     WARN,
@@ -52,7 +52,9 @@ from .common import (
     make_card,
     mo2_running,
     open_in_file_manager,
+    paused_dependency_status,
     play_click_sound,
+    populate_runner_combo,
     section_label,
     tr,
     winetricks_tooltip,
@@ -307,18 +309,8 @@ class DashboardPage(QWidget):
         a running prefix are unreliable, so the live check is paused until the
         game closes.
         """
-        paused = {verb: True for verb in WINETRICKS_VERBS}
-        paused["wine"] = True
-        paused["protontricks"] = True
-        paused["umu"] = True
-        total = len(paused)
-        self.winetricks_status.set_state(
-            True,
-            tr(
-                "{total}/{total} dependencies installed (paused - game running)",
-                total=total,
-            ),
-        )
+        paused, text = paused_dependency_status()
+        self.winetricks_status.set_state(True, text)
         self.winetricks_status.set_status_tooltip(winetricks_tooltip(paused))
 
     def _start_winetricks_status(self, generation: int, status_widget) -> None:
@@ -590,6 +582,9 @@ class DashboardPage(QWidget):
     ) -> None:
         self._mo2_profiles_task = None
         if generation != self._refresh_generation:
+            # A refresh() arrived while this ran and couldn't start its own
+            # task (one at a time) - run it now, as _render_sizes does.
+            self._start_mo2_profiles_task()
             return
         combo = getattr(self, "mo2_profile_combo", None)
         names, selected = result
@@ -613,6 +608,8 @@ class DashboardPage(QWidget):
 
     def _on_mo2_profiles_error(self, generation: int) -> None:
         self._mo2_profiles_task = None
+        if generation != self._refresh_generation:
+            self._start_mo2_profiles_task()
 
     def _sync_mo2_profile_combo(self, combo: NoWheelComboBox) -> None:
         """Reset the MO2 profile combo to the real configured profile."""
@@ -701,20 +698,9 @@ class DashboardPage(QWidget):
 
     def _populate_runner_combo(self, combo: NoWheelComboBox) -> None:
         """Same item list/order as the Play page's own runner combo."""
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
-        extra_protons = find_extra_protons()
-        if extra_protons:
-            combo.insertSeparator(combo.count())
-            for label, path in extra_protons:
-                combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
-        saved = load_gui_settings().get("runner", "auto")
-        idx = combo.findData(saved)
-        if idx < 0:
-            idx = combo.findData("auto")
-        combo.setCurrentIndex(max(idx, 0))
-        combo.blockSignals(False)
+        populate_runner_combo(
+            combo, find_extra_protons(), load_gui_settings().get("runner", "auto")
+        )
 
     def _on_runner_switch(self, combo: NoWheelComboBox) -> None:
         kind = combo.currentData() or "auto"

@@ -11,7 +11,15 @@ import tempfile
 from pathlib import Path
 from threading import Event, Thread
 
+from . import atomic
 from .config import cli_binary_path
+
+#: Dropped into a mod folder for the duration of move_payload() and removed
+#: on success. A folder killed/crashed mid-move (the in-loop rollback below
+#: only runs for a raised Python exception, not a hard kill) still carries
+#: this afterwards, marking it as an incomplete install rather than a
+#: genuinely finished one.
+INSTALLING_MARKER = ".commander-installing"
 
 
 class ModInstallError(RuntimeError):
@@ -371,6 +379,7 @@ def move_payload(
     if not any(payload.iterdir()):
         raise ModInstallError("The archive contains no installable files")
     destination.mkdir()
+    (destination / INSTALLING_MARKER).touch()
     try:
         for child in list(payload.iterdir()):
             if cancel_event is not None and cancel_event.is_set():
@@ -379,6 +388,7 @@ def move_payload(
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
         raise
+    (destination / INSTALLING_MARKER).unlink()
 
 
 def write_basic_meta_ini(destination: Path, installation_file: str) -> None:
@@ -399,15 +409,32 @@ def write_basic_meta_ini(destination: Path, installation_file: str) -> None:
     installation_file = "".join(
         char for char in installation_file if ord(char) >= 32 and ord(char) != 127
     )
-    target.write_text(
+    atomic.write_text(
+        target,
         "[General]\n"
         "gameName=stalkeranomaly\n"
         "modid=0\n"
         "version=\n"
         f"installationFile={installation_file}\n"
         "[installedFiles]\n",
-        encoding="utf-8",
     )
+
+
+def make_staging_dir(gamma_dir: str | Path | None) -> Path:
+    """A fresh temporary folder to extract a mod archive into.
+
+    Made inside the GAMMA folder (next to ``mods``, never inside it, where
+    MO2 would list it as a mod) so the final move into ``mods`` is a rename
+    on one filesystem. The system temp folder is often a RAM-backed tmpfs
+    (Arch, SteamOS): a multi-GB mod extracted there could fill RAM, and
+    every file was then copied across filesystems a second time. Falls back
+    to the system temp folder when the GAMMA folder is unknown or can't be
+    written.
+    """
+    try:
+        return Path(tempfile.mkdtemp(prefix=".gamma-mod-install-", dir=gamma_dir))
+    except OSError:
+        return Path(tempfile.mkdtemp(prefix="gamma-mod-install-"))
 
 
 def install_archive(
@@ -421,8 +448,11 @@ def install_archive(
     mod_name = sanitize_name(name or default_mod_name(archive))
     mods_dir = mods_dir.resolve()
     mods_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gamma-mod-") as temp:
-        staging = Path(temp) / "payload"
+    temp = make_staging_dir(mods_dir.parent)
+    try:
+        staging = temp / "payload"
         extract_archive(archive, staging, cancel_event, progress)
         move_payload(staging, mods_dir / mod_name, cancel_event)
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
     return mod_name

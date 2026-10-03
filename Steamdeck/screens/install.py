@@ -29,6 +29,7 @@ from commander_gui.game_backup import (
 )
 from commander_gui.gui_settings import configured_wine_prefix
 from commander_gui.i18n import tr
+from commander_gui.integrity import invalidate_baseline
 from commander_gui.launcher import LaunchError, find_extra_protons
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.proton_installer import (
@@ -57,7 +58,9 @@ from commander_gui.winetricks import (
     protontricks_binary,
     protontricks_install_command,
     umu_install_command,
+    winetricks_binary,
     winetricks_install_command,
+    winetricks_tool_install_command,
 )
 
 from .. import gamepad as pad
@@ -113,7 +116,7 @@ _ANOMALY_INSTALL_BYTES = 20 * 1024**3
 #: rather than pretending to a precision it does not have - but it does
 #: advance, which an indeterminate spinner over a ten-minute Winetricks run
 #: does not.
-_STAGE_START = {"umu": 0, "tools": 20, "verbs": 40}
+_STAGE_START = {"winetricks": 0, "umu": 10, "tools": 25, "verbs": 45}
 
 
 def _save_resume(state: dict, window) -> None:
@@ -458,9 +461,19 @@ class InstallScreen(DeckScreen):
         self.window.confirm(
             tr("Install GAMMA"),
             message,
-            self._start_install,
+            lambda: self._confirmed(self._start_install),
             confirm_text=tr("Install"),
         )
+
+    def _confirmed(self, start) -> None:
+        """Run *start* unless a task or MO2 began while the confirm was open."""
+        if self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        if mo2_running():
+            self.window.notify(tr("Mod Organizer is running"))
+            return
+        start()
 
     def _start_install(self) -> bool:
         """Start the full install. False if it could not be started."""
@@ -544,12 +557,12 @@ class InstallScreen(DeckScreen):
                 "runtimes Mod Organizer and the game need:\n\n{verbs}",
                 verbs=" ".join(WINETRICKS_VERBS),
             ),
-            self._start_dependencies,
+            lambda: self._confirmed(self._start_dependencies),
             confirm_text=tr("Install"),
         )
 
     def _start_dependencies(self) -> None:
-        self._stage = "umu"
+        self._stage = "winetricks" if not winetricks_binary() else "umu"
         self._run_stage()
 
     def _run_stage(self) -> None:
@@ -559,7 +572,11 @@ class InstallScreen(DeckScreen):
         # curl / pipx stages touch no Wine and get no Wine env; the verbs
         # stage gets exactly the env winetricks_install_command() decides.
         env: dict[str, str] | None = None
-        if stage == "umu":
+        if stage == "winetricks":
+            command = winetricks_tool_install_command()
+            failure = tr("winetricks could not be installed (curl is not available).")
+            status = tr("Installing winetricks...")
+        elif stage == "umu":
             command = umu_install_command()
             failure = tr("umu-run could not be installed (curl is not available).")
             status = tr("Installing umu-run...")
@@ -647,6 +664,10 @@ class InstallScreen(DeckScreen):
         # the hand-off - dropping it between stages left a window in which
         # another screen could start a second job against the same prefix.
         if self._stage is not None and ok and not cancelled:
+            if self._stage == "winetricks":
+                self._stage = "umu"
+                self._run_stage()
+                return
             if self._stage == "umu":
                 self._stage = "verbs" if protontricks_binary() else "tools"
                 self._run_stage()
@@ -666,7 +687,12 @@ class InstallScreen(DeckScreen):
                 self._save_resume_state()
             else:
                 _save_resume({}, self.window)
-                restore_note = apply_pending_settings_restore(self.profile())
+                profile = self.profile()
+                # A fresh install rewrote gamma/mods: Verify Integrity must
+                # not compare it against the old MD5 baseline.
+                if profile is not None:
+                    invalidate_baseline(profile.gamma)
+                restore_note = apply_pending_settings_restore(profile)
         self._operation = None
 
         operation = self._finished_operation_title()

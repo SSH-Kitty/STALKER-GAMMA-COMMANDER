@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -64,6 +64,15 @@ from commander_gui.ui.common import (
 )
 from commander_gui.ui.deck_switch import switch_mode
 from commander_gui.ui.install_page import _resume_state_matches
+from commander_gui.ui.title_bar import (
+    BUTTON_HEIGHT,
+    EdgeResizeFilter,
+    WindowDragFilter,
+    attach_resize_filter,
+    build_window_buttons,
+    pin_top_right,
+    update_max_button,
+)
 
 from . import gamepad as pad
 from .deck_theme import build_deck_stylesheet
@@ -179,6 +188,11 @@ class DeckWindow(QMainWindow):
         self.settings = load_settings()
         self.install_busy = False
         self.install_operation: str | None = None
+        # COMMANDER's own title bar, as on the desktop - only ever for the
+        # windowed Deck Mode on a desktop (see show_for_environment()).
+        self.custom_title_bar = False
+        self._drag_filter = WindowDragFilter(self)
+        self._resize_filter = EdgeResizeFilter(self)
 
         self._fatal = fatal
         self._pages: dict[str, QWidget] = {}
@@ -340,7 +354,8 @@ class DeckWindow(QMainWindow):
 
         # Wordmark and byline on one line: the header is 48px now, and
         # two stacked lines of text were most of why it used to be 72.
-        layout.addWidget(deck_label(tr("COMMANDER"), role="wordmark"))
+        wordmark = deck_label(tr("COMMANDER"), role="wordmark")
+        layout.addWidget(wordmark)
         byline = deck_label(tr("by SSH-Kitty"), role="byline")
         # Nudged down to the wordmark's baseline rather than centred on it.
         byline.setContentsMargins(0, px(6), 0, 0)
@@ -359,7 +374,60 @@ class DeckWindow(QMainWindow):
         # battery is otherwise one QAM press away.
         self.battery_label = deck_label("", role="headerInfo")
         layout.addWidget(self.battery_label)
+        # Nudged down a few px like the desktop bar's counter: centered
+        # exactly, the counter text reads higher than the wordmark.
+        for label in (self.mod_counter_label, self.awake_label, self.battery_label):
+            label.setContentsMargins(0, px(6), 0, 0)
+
+        # Minimize/maximize/close floating in the top-right corner when
+        # COMMANDER draws its own title bar (see _sync_title_bar()).
+        self._header = header
+        self._title_strip = build_window_buttons(
+            self, self._drag_filter, on_close=self._ask_close
+        )
+        pin_top_right(self._title_strip, header)
+        for widget in (header, wordmark, byline, self.mod_counter_label):
+            widget.installEventFilter(self._drag_filter)
+        self._sync_title_bar()
         return header
+
+    # ----------------------------------------------------- own title bar
+    def apply_title_bar(self, custom: bool) -> None:
+        """Draw COMMANDER's own title bar (frameless) or use the desktop's."""
+        # Offscreen/minimal platforms (tests) have no window manager to
+        # hand moves and resizes to.
+        custom = custom and QGuiApplication.platformName() not in ("offscreen", "minimal")
+        visible = self.isVisible()
+        self.custom_title_bar = custom
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, custom)
+        self._sync_title_bar()
+        if visible:
+            self.show()
+        attach_resize_filter(self, self._resize_filter, custom)
+
+    def _sync_title_bar(self) -> None:
+        header = getattr(self, "_header", None)
+        if header is None or not isValid(header):
+            return
+        # Maximized or full screen, Deck Mode fills the screen like on the
+        # Deck itself, so the window buttons step aside (double-click the
+        # header, or the desktop's own shortcuts, to restore).
+        shown = self.custom_title_bar and not (self.isMaximized() or self.isFullScreen())
+        self._title_strip.setVisible(shown)
+        # The strip's height goes on top of the header, split above and
+        # below its content so the content stays centered.
+        extra = BUTTON_HEIGHT if shown else 0
+        header.setFixedHeight(px(HEADER_H) + extra)
+        margins = header.layout().contentsMargins()
+        header.layout().setContentsMargins(
+            margins.left(), extra // 2, margins.right(), extra - extra // 2
+        )
+
+    def toggle_maximized(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     def _build_nav(self) -> QWidget:
         nav = QWidget()
@@ -1073,15 +1141,24 @@ class DeckWindow(QMainWindow):
         what Deck Mode looks like would be hostile, and a windowed Deck UI is
         what makes it demonstrable and testable.
         """
+        custom = bool(gui_settings.load_gui_settings().get("custom_title_bar", True))
         if os.environ.get("COMMANDER_DECK_WINDOWED") == "1":
-            self.resize(DECK_W, DECK_H)
-            self.show()
+            self._show_windowed(custom)
             return
         if is_steam_deck() or in_game_mode():
             self.showFullScreen()
             return
-        self.resize(DECK_W, DECK_H)
         self.setMinimumSize(_MIN_W, _MIN_H)
+        self._show_windowed(custom)
+
+    def _show_windowed(self, custom: bool) -> None:
+        """A normal window, with COMMANDER's own title bar if chosen.
+
+        Taller by the title strip so the interface below keeps its size.
+        """
+        self.apply_title_bar(custom)
+        extra = BUTTON_HEIGHT if self.custom_title_bar else 0
+        self.resize(DECK_W, DECK_H + extra)
         self.show()
 
     def apply_pending_rescale(self) -> None:
@@ -1119,6 +1196,9 @@ class DeckWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.Type.ActivationChange:
             self._sync_gamepad()
+        elif event.type() == QEvent.Type.WindowStateChange:
+            update_max_button(self)
+            self._sync_title_bar()
 
     def _sync_gamepad(self) -> None:
         """Read the controller only while this window can use it.
