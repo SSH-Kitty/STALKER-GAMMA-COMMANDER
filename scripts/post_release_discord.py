@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 REPO = "SSH-Kitty/STALKER-GAMMA-COMMANDER"
@@ -141,6 +142,12 @@ def send(embeds: list[dict]) -> None:
         payload["username"] = USERNAME
         if os.environ.get("DISCORD_AVATAR_URL"):
             payload["avatar_url"] = os.environ["DISCORD_AVATAR_URL"]
+    # url/webhook come from CI-configured env vars, not a remote party, but
+    # keep the same http(s)-only rule commander_gui.network enforces on
+    # every other URL this project opens.
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        sys.exit(f"refusing to open a non-http(s) URL: {url!r}")
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers=headers, method="POST")
     for attempt in range(5):
@@ -150,7 +157,7 @@ def send(embeds: list[dict]) -> None:
         except urllib.error.HTTPError as e:
             if e.code != 429 or attempt == 4:
                 raise SystemExit(f"Discord rejected the post: HTTP {e.code} "
-                                 f"{e.read().decode(errors='replace')}")
+                                 f"{e.read().decode(errors='replace')}") from e
             time.sleep(float(json.loads(e.read()).get("retry_after", 1)) + 0.5)
 
 

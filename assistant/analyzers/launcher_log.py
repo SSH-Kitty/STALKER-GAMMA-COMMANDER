@@ -111,22 +111,21 @@ def analyze_launcher(arcname: str, where: str, lines: list[str]) -> list[Finding
                         index + 1,
                         detail="An ERROR-prefixed line appeared in the launch output; "
                         "its impact is not known from this line alone.",
-                        suggestion="Compare with the known issues below; if gameplay "
-                        "is fine this may be cosmetic.",
+                        suggestion="If the game starts and plays normally you can ignore "
+                        "this. If it does not, include this log when asking for help.",
                         excerpt_text=excerpt(lines, index),
                     )
                 )
     if protonfixes_count:
         findings.append(
             factory.make(
-                Severity.INFO,
+                Severity.OK,
                 CATEGORY_LAUNCHER,
-                f"ProtonFixes ran before {protonfixes_count} "
-                f"{'launch' if protonfixes_count == 1 else 'launches'} "
-                "(routine messages collapsed).",
+                f"ProtonFixes printed {protonfixes_count} routine "
+                f"{'message' if protonfixes_count == 1 else 'messages'} (normal).",
                 protonfixes_first_line,
                 detail=knowledge.PROTONFIXES_SUMMARY,
-                suggestion="Informational — no action is required.",
+                suggestion="Nothing to do. This is normal.",
             )
         )
     return findings
@@ -138,7 +137,7 @@ def _prefix_finding(
     return factory.make(
         Severity.ERROR,
         CATEGORY_LAUNCHER,
-        "The Wine prefix does not match the selected runner.",
+        "The Wine prefix was made by a different Proton/Wine version.",
         index + 1,
         detail="Wine refused to start with this prefix: " + stripped[:160],
         suggestion=knowledge.PREFIX_MISMATCH,
@@ -150,7 +149,7 @@ def _concrt_finding(factory: FindingFactory, lines: list[str], index: int) -> Fi
     return factory.make(
         Severity.ERROR,
         CATEGORY_LAUNCHER,
-        "MO2 is missing the Microsoft C++ runtime (concrt140.dll).",
+        "Mod Organizer is missing a Microsoft C++ runtime file (concrt140.dll).",
         index + 1,
         detail="Without this runtime Mod Organizer exits immediately "
         "on many Wine/Proton versions.",
@@ -174,12 +173,12 @@ def _graphics_finding(factory: FindingFactory, lines: list[str], index: int) -> 
 
 def _pressure_vessel_finding(factory: FindingFactory, line_no: int) -> Finding:
     return factory.make(
-        Severity.INFO,
+        Severity.OK,
         CATEGORY_LAUNCHER,
         knowledge.PRESSURE_VESSEL_TITLE,
         line_no,
         detail=knowledge.PRESSURE_VESSEL,
-        suggestion="Informational — no action is required.",
+        suggestion="Nothing to do. This is normal.",
     )
 
 
@@ -203,7 +202,7 @@ def _toolmanifest_finding(
     return factory.make(
         Severity.WARNING,
         CATEGORY_LAUNCHER,
-        "A Proton/UMU runtime file (toolmanifest.vdf) is missing.",
+        "A Proton runtime file is missing (toolmanifest.vdf).",
         index + 1,
         detail="Some Proton runtime metadata could not be read; the "
         "launch may still work.",
@@ -214,12 +213,12 @@ def _toolmanifest_finding(
 
 def _qtpdf_finding(factory: FindingFactory, lines: list[str], index: int) -> Finding:
     return factory.make(
-        Severity.INFO,
+        Severity.OK,
         CATEGORY_LAUNCHER,
         "MO2 printed a non-critical QtPdf plugin warning.",
         index + 1,
         detail=knowledge.QTPDF_HARMLESS,
-        suggestion="Informational — no action is required.",
+        suggestion="Nothing to do. This is normal.",
         excerpt_text=excerpt(lines, index),
     )
 

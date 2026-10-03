@@ -56,27 +56,31 @@ def analyze_xray(arcname: str, where: str, lines: list[str]) -> list[Finding]:
         if match and not any(f.title.startswith("Game engine started") for f in findings):
             findings.append(
                 factory.make(
-                    Severity.INFO,
+                    Severity.OK,
                     CATEGORY_INFO,
                     f"Game engine started ({match.group(1)} build {match.group(2)}).",
                     index + 1,
                     detail="The XRay engine initialized far enough to log its build.",
-                    suggestion="Informational — no action is required.",
+                    suggestion="Nothing to do. This is normal.",
                 )
             )
         index += 1
     if not findings and not consumed_fatal_block:
         findings.append(
             factory.make(
-                Severity.INFO,
+                Severity.OK,
                 CATEGORY_INFO,
                 "The game ran without recording any fatal errors.",
                 None,
                 detail="No FATAL ERROR blocks were found in this session's log.",
-                suggestion="Informational — no action is required.",
+                suggestion="Nothing to do. This is normal.",
             )
         )
     return findings
+
+
+#: Lines after a FATAL ERROR line searched for its first [error] entry.
+_MAX_LEAD_IN_LINES = 5
 
 
 def _collect_fatal_block(
@@ -108,10 +112,14 @@ def _collect_fatal_block(
             collected[-1] = (key_index, prev + " " + stripped)
             continuation_lines += 1
             block_text_size += len(stripped) + 1
-        elif collected:
+        elif collected or index - start > _MAX_LEAD_IN_LINES:
+            # Nothing block-shaped right after the FATAL line: give up
+            # instead of swallowing the rest of the log (and every later
+            # fatal block in it).
             break
         index += 1
-    return collected, index
+    # Empty block: resume right after the FATAL line so nothing is skipped.
+    return collected, (index if collected else start + 1)
 
 
 def _fatal_finding(

@@ -20,8 +20,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .atomic import write_bytes
 from .integrity import Md5ScanResult
 from .launcher import (
+    _PLACEHOLDER_DLL_BYTES,
     Runner,
     _same_file_contents,
     host_wine_lib_dirs,
@@ -155,8 +157,23 @@ def _name_only(folder_name: str) -> str:
     return match.group(1) if match else folder_name
 
 
+def expected_archive_md5s(records: dict[str, ModPackRecord]) -> dict[str, str]:
+    """Archive file name -> the MD5 the official list gives it (valid ones only)."""
+    expected: dict[str, str] = {}
+    for record in records.values():
+        digest = record.md5_mod_db.lower()
+        if len(digest) != 32 or any(char not in "0123456789abcdef" for char in digest):
+            continue
+        for archive_name in record.archive_names():
+            expected.setdefault(archive_name, digest)
+    return expected
+
+
 def find_record_for_folder(
-    folder: str, records: dict[str, ModPackRecord]
+    folder: str,
+    records: dict[str, ModPackRecord],
+    *,
+    by_name: dict[str, list[ModPackRecord]] | None = None,
 ) -> ModPackRecord | None:
     """Find the record for an on-disk mod folder, tolerating a counter shift.
 
@@ -174,9 +191,24 @@ def find_record_for_folder(
     record = records.get(folder)
     if record is not None:
         return record
-    name = _name_only(folder)
-    matches = [c for c in records.values() if _name_only(c.folder_name) == name]
+    if by_name is None:
+        by_name = records_by_name(records)
+    matches = by_name.get(_name_only(folder), [])
     return matches[0] if len(matches) == 1 else None
+
+
+def records_by_name(
+    records: dict[str, ModPackRecord],
+) -> dict[str, list[ModPackRecord]]:
+    """Index for find_record_for_folder's name-only fallback.
+
+    Built once per scan: after a list reorder every folder misses the exact
+    lookup, and a regex over every record per folder was O(folders x records).
+    """
+    index: dict[str, list[ModPackRecord]] = {}
+    for record in records.values():
+        index.setdefault(_name_only(record.folder_name), []).append(record)
+    return index
 
 
 @dataclass
@@ -242,8 +274,9 @@ def classify_problems(
         if folder_of(rel) is None
     ]
 
+    by_name = records_by_name(records)
     for folder in sorted(broken_folders):
-        record = find_record_for_folder(folder, records)
+        record = find_record_for_folder(folder, records, by_name=by_name)
         if record is not None:
             if folder not in plan.repairable:
                 plan.repairable.append(folder)
@@ -503,10 +536,6 @@ def _is_direct_child(parent: Path, child: Path) -> bool:
 
 
 # --------------------------------------------------------- Wine prefixes
-#: Proton's placeholders for DLLs it does not copy are a few hundred bytes;
-#: a real Windows DLL never is.
-_PLACEHOLDER_DLL_BYTES = 8 * 1024
-
 _ARCH_DIRS = (
     ("system32", "x86_64-windows"),
     ("syswow64", "i386-windows"),
@@ -626,7 +655,8 @@ def snapshot_modlist(modlist_path: Path | None) -> Path | None:
         return None
     snapshot = modlist_path.with_name(modlist_path.name + PRE_REPAIR_SUFFIX)
     try:
-        shutil.copy2(modlist_path, snapshot)
+        # Atomic: a torn snapshot would later be restored over modlist.txt.
+        write_bytes(snapshot, modlist_path.read_bytes(), lock=False)
     except OSError:
         return None
     return snapshot

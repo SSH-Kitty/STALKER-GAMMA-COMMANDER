@@ -20,7 +20,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from commander_gui.modlist import BACKUP_SUFFIX, save_lines, timestamped_backup_path
+from commander_gui.modlist import BACKUP_SUFFIX, save_lines, snapshot_modlist_backup
 from commander_gui.ui.common import mo2_running
 
 
@@ -72,7 +72,7 @@ def write_lines(
             if not original.exists():
                 shutil.copy2(path, original)
             if snapshot:
-                shutil.copy2(path, timestamped_backup_path(path))
+                snapshot_modlist_backup(path)
         save_lines(path, lines)
     except OSError as exc:
         raise ModlistWriteBlocked(str(exc)) from exc

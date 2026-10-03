@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from . import gui_settings
+from .config import child_environment
 
 # ---------------------------------------------------------------------------
 # Distro / package-manager detection
@@ -339,13 +340,27 @@ def configured_tool(tool: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def check_winetricks() -> str | None:
-    """Return an error message if winetricks is missing, or *None*."""
+def check_winetricks() -> tuple[bool, str | None]:
+    """Check for winetricks availability.
+
+    Returns ``(need_install, error_message)``:
+
+    * ``(False, None)`` — winetricks is already on PATH.
+    * ``(True, None)``  — missing but can be auto-installed via curl (see
+      ``winetricks_install_command()`` - this avoids recommending the
+      system package manager, which on Steam Deck writes to the read-only
+      OS partition and gets wiped by every SteamOS update).
+    * ``(True, msg)``   — missing and curl is not available; *msg* tells
+      the user what to install first.
+    """
     if configured_tool("winetricks") or shutil.which("winetricks"):
-        return None
+        return False, None
+    if shutil.which("curl"):
+        return True, None
     cmd = _install_command("winetricks")
-    return (
-        "winetricks is required but was not found.\n"
+    return True, (
+        "winetricks is required but was not found, and curl is not "
+        "available to download it automatically.\n\n"
         f"Install it with:  {cmd}\n"
         "Generic: https://github.com/Winetricks/winetricks#readme"
     )
@@ -374,6 +389,8 @@ def _umu_binary_valid() -> bool:
             capture_output=True,
             check=False,
             timeout=5,
+            # System tools, not COMMANDER: no AppImage PYTHONPATH etc.
+            env=child_environment(),
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -456,6 +473,8 @@ def _pip_module_available() -> bool:
             capture_output=True,
             check=False,
             timeout=5,
+            # System tools, not COMMANDER: no AppImage PYTHONPATH etc.
+            env=child_environment(),
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -488,6 +507,8 @@ def _externally_managed() -> bool:
             text=True,
             check=False,
             timeout=5,
+            # System tools, not COMMANDER: no AppImage PYTHONPATH etc.
+            env=child_environment(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -517,8 +538,8 @@ def check_all_dependencies() -> list[str]:
     if need_umu and umu_err:
         errors.append(umu_err)
 
-    wt_err = check_winetricks()
-    if wt_err:
+    need_winetricks, wt_err = check_winetricks()
+    if need_winetricks and wt_err:
         errors.append(wt_err)
 
     wine_err = check_wine()

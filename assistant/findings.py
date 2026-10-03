@@ -34,6 +34,7 @@ _CATEGORY_RANK = {name: i for i, name in enumerate(CATEGORIES)}
 class Severity(IntEnum):
     """Ordered severity; higher value means more serious."""
 
+    OK = -1  # confirmed fine, e.g. GAMMA's expected modified files
     INFO = 0
     WARNING = 1
     ERROR = 2
@@ -41,10 +42,11 @@ class Severity(IntEnum):
 
 
 SEVERITY_LABEL: dict[Severity, str] = {
-    Severity.FATAL: "CRITICAL",
-    Severity.ERROR: "ERROR",
+    Severity.FATAL: "CRASH",
+    Severity.ERROR: "PROBLEM",
     Severity.WARNING: "WARNING",
-    Severity.INFO: "INFO",
+    Severity.INFO: "NOTE",
+    Severity.OK: "NORMAL",
 }
 
 SEVERITY_COLOR: dict[Severity, str] = {
@@ -52,6 +54,7 @@ SEVERITY_COLOR: dict[Severity, str] = {
     Severity.ERROR: "#e0554f",
     Severity.WARNING: "#d9a04c",
     Severity.INFO: "#7f8f78",
+    Severity.OK: "#5fb548",
 }
 
 
@@ -163,52 +166,46 @@ class HealthSummary:
         return "good"
 
     @property
+    def problems(self) -> int:
+        return self.fatal + self.error
+
+    @property
     def headline(self) -> str:
         """Plain-language verdict phrase."""
-        if self.fatal:
-            return "Needs urgent attention"
-        if self.error:
-            return "Needs attention"
+        if self.problems:
+            noun = "problem" if self.problems == 1 else "problems"
+            lead = "Crash found: " if self.fatal else ""
+            return f"{lead}{self.problems} {noun} to fix"
         if self.warning:
-            return "Mostly healthy"
-        return "All clear"
+            noun = "warning" if self.warning == 1 else "warnings"
+            return f"No serious problems, {self.warning} {noun} to check"
+        return "All clear, no problems found"
 
     def sentence(self) -> str:
         """Full human-readable summary sentence."""
-        chunks: list[str] = []
-        if self.fatal:
-            noun = "crash" if self.fatal == 1 else "crashes"
-            chunks.append(f"{self.fatal} critical {noun}")
-        if self.error:
-            noun = "problem" if self.error == 1 else "problems"
-            chunks.append(f"{self.error} {noun}")
-        if chunks:
-            verb = (
-                "needs" if len(chunks) == 1 and chunks[0].startswith("1 ") else "need"
-            )
-            lead = " and ".join(chunks) + f" {verb} attention."
+        if self.problems:
+            parts = [
+                (
+                    "Start with the first item in the list. Each one explains "
+                    "what happened and how to fix it."
+                )
+            ]
+            if self.warning:
+                noun = "warning is" if self.warning == 1 else "warnings are"
+                parts.append(f"{self.warning} smaller {noun} also worth a look.")
         elif self.warning:
-            noun = "warning" if self.warning == 1 else "warnings"
-            lead = f"{self.warning} minor {noun} found — no serious problems detected."
+            parts = ["Nothing here should stop the game from working."]
         else:
-            lead = "No problems found — the scanned files look healthy."
-        extras: list[str] = []
-        if self.warning and chunks:
-            noun = "minor warning" if self.warning == 1 else "minor warnings"
-            extras.append(
-                f"{self.warning} {noun}"
-                + (" is" if self.warning == 1 else " are")
-                + " worth knowing about"
-            )
+            parts = ["The scanned logs show no crashes, errors or warnings."]
         if self.info:
-            noun = "note" if self.info == 1 else "notes"
-            extras.append(f"{self.info} informational {noun}")
-        tail = ""
-        if extras:
-            tail = " " + "; ".join(extras) + "."
+            noun = "entry is" if self.info == 1 else "entries are"
+            parts.append(f"{self.info} other {noun} normal and need no action.")
         if self.partial_scan:
-            tail += " (Partial scan: this archive did not appear to be a standard COMMANDER dump.)"
-        return lead + tail
+            parts.append(
+                "(Partial scan: this ZIP does not look like a standard COMMANDER "
+                "log dump.)"
+            )
+        return " ".join(parts)
 
 
 def summarize(

@@ -17,7 +17,6 @@ released, through the Mods screen's guarded writer.
 from __future__ import annotations
 
 import shutil
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from commander_gui.mod_install import (
     ModInstallError,
     default_mod_name,
     extract_archive,
+    make_staging_dir,
     move_payload,
     sanitize_name,
     write_basic_meta_ini,
@@ -352,6 +352,13 @@ class DeckModInstaller(QObject):
         if conflict == "leftover":
 
             def _replace() -> None:
+                # install-busy/MO2 state may have changed while the confirm
+                # dialog was open - never delete a folder out from under a
+                # concurrent install or a running game.
+                reason = self._blocked()
+                if reason:
+                    self.window.notify(reason, 6000)
+                    return
                 try:
                     shutil.rmtree(mods_dir / safe)
                 except OSError as exc:
@@ -426,7 +433,7 @@ class DeckModInstaller(QObject):
         self._name = name
         self._progress_hidden = False
         self.window.set_install_busy(True, "mod_install")
-        self._staging_root = Path(tempfile.mkdtemp(prefix="gamma-mod-install-"))
+        self._staging_root = make_staging_dir(self.screen.profile().gamma)
         staging = self._staging_root / "archive"
         self._show_progress(tr("Extracting {name}...", name=archive.name))
         task: StreamTask | None = None

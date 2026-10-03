@@ -11,8 +11,10 @@ silent terminal death.
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import sys
+import threading
 import traceback
 from logging.handlers import RotatingFileHandler
 
@@ -23,6 +25,8 @@ _MAX_LOG_BYTES = 1 << 20
 
 _logger = logging.getLogger("commander_gui")
 _configured = False
+#: Kept open for the process lifetime: faulthandler writes to its fd.
+_crash_file = None
 
 
 def _ensure_configured() -> None:
@@ -82,3 +86,38 @@ def install_excepthook() -> None:
         previous(exc_type, exc_value, exc_tb)
 
     sys.excepthook = _hook
+
+    # Plain threading.Thread workers bypass sys.excepthook entirely.
+    previous_thread_hook = threading.excepthook
+
+    def _thread_hook(args) -> None:
+        if args.exc_type is not SystemExit:
+            log_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        previous_thread_hook(args)
+
+    threading.excepthook = _thread_hook
+
+
+def install_crash_handler() -> None:
+    """Write a Python stack to ``crash.log`` when Qt/C++ code segfaults.
+
+    The excepthook never sees a native crash, so one used to leave
+    commander.log ending on whatever happened last. A separate file because
+    commander.log rotates and faulthandler holds on to one fd.
+    """
+    global _crash_file
+    try:
+        logs_dir().mkdir(parents=True, exist_ok=True)
+        crash_log = logs_dir() / "crash.log"
+        # Appended to across runs and never rotated by logging: start over
+        # once it grows past the same cap commander.log uses.
+        mode = "a"
+        try:
+            if crash_log.stat().st_size > _MAX_LOG_BYTES:
+                mode = "w"
+        except OSError:
+            pass
+        _crash_file = open(crash_log, mode, encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except OSError:
+        pass

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from commander_gui.integrity import is_gamma_overlay_corrupt_line
+
 from .. import knowledge
 from ..findings import (
     CATEGORY_INSTALL,
@@ -97,6 +99,24 @@ def analyze_cli(arcname: str, where: str, lines: list[str]) -> list[Finding]:
             )
             index += 1
             continue
+        if is_gamma_overlay_corrupt_line(line):
+            findings.append(
+                factory.make(
+                    Severity.OK,
+                    CATEGORY_INSTALL,
+                    "GAMMA's patched game files are flagged as CORRUPT (this is normal).",
+                    index + 1,
+                    detail="GAMMA ships its own patched engine executables and "
+                    "fsgame.ltx. Anomaly's file checker only knows the original "
+                    "versions, so these files always show as CORRUPT there. They "
+                    "are not damaged and not a virus.",
+                    suggestion="Nothing to fix. COMMANDER's Verify Integrity marks "
+                    'these files as "OK (GAMMA-modified, expected)".',
+                    excerpt_text=excerpt(lines, index),
+                )
+            )
+            index += 1
+            continue
         if _CORRUPT_RE.search(line) and "check md5" not in line.lower():
             findings.append(
                 factory.make(
@@ -104,7 +124,8 @@ def analyze_cli(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                     CATEGORY_INSTALL,
                     "A mod archive failed its checksum check.",
                     index + 1,
-                    detail=line.strip()[:200],
+                    detail="This file does not match its official checksum, so "
+                    "it may be damaged or incomplete:\n" + line.strip()[:200],
                     suggestion=knowledge.cli_failed("integrity", line.strip())[2],
                     excerpt_text=excerpt(lines, index),
                 )
@@ -123,6 +144,9 @@ def _failed_finding(
     technical, next_index = _collect_exception_block(lines, index)
     kind = _classify(reason.lower(), technical.lower())
     title, detail, suggestion = knowledge.cli_failed(kind, reason or "unknown reason")
+    cause = _root_cause(technical)
+    if cause and kind != "canceled" and cause.lower() not in reason.lower():
+        detail += f"\n\nReason given by the installer: {cause}"
     severity = Severity.INFO if kind == "canceled" else Severity.ERROR
     finding = factory.make(
         severity,
@@ -135,6 +159,28 @@ def _failed_finding(
         technical=technical,
     )
     return finding, next_index
+
+
+_EXCEPTION_MESSAGE_RE = re.compile(r"Exception Message:\s*(.+)$")
+#: Wrapper messages that only restate *what* failed, not *why*.
+_WRAPPER_PREFIXES = (
+    "error cloning",
+    "error fetching",
+    "error extracting",
+    "error downloading",
+    "error expanding",
+)
+
+
+def _root_cause(technical: str) -> str:
+    """The most specific exception message in a failure's stack dump."""
+    messages = [
+        match.group(1).strip()
+        for match in map(_EXCEPTION_MESSAGE_RE.search, technical.splitlines())
+        if match
+    ]
+    specific = [m for m in messages if not m.lower().startswith(_WRAPPER_PREFIXES)]
+    return (specific or [""])[0][:200]
 
 
 def _classify(reason: str, technical: str) -> str:

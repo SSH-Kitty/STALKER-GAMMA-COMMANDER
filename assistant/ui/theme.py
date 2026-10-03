@@ -67,6 +67,10 @@ def set_active_theme(name: str) -> None:
     global _ACTIVE
     if name in THEMES:
         _ACTIVE = name
+        # The shared title-bar buttons paint from COMMANDER's theme tokens.
+        from commander_gui import themes as commander_themes
+
+        commander_themes.set_active_theme(name)
 
 
 def active_theme() -> str:
@@ -87,11 +91,36 @@ QWidget#quickActions, QWidget#wordmarkBlock {{ background:transparent; }} QPushB
 QPushButton:hover {{ border-color:{t['accent']}; }} QPushButton#primary {{ background:{t['accent']}; color:{t['bg']}; font-weight:600; border:none; }}
 QPushButton#tabButton {{ background:transparent; color:{t['dim']}; border:none; border-bottom:2px solid transparent; border-radius:0; padding:12px 18px; }} QPushButton#tabButton:hover, QPushButton#tabButton:pressed {{ color:{t['accent']}; border-bottom-color:{t['accent']}; }}
  QLabel#wordmark {{ color:{t['accent']}; font-size:24px; font-weight:bold; letter-spacing:2px; }} QLabel#appTitle {{ color:{t['accent']}; }} QLabel#byline {{ color:{t['accent']}; font-size:11px; letter-spacing:1px; padding-right:3px; }} QLabel#heroSub, QLabel#dim, QLabel#caption, QLabel#emptyState {{ color:{t['dim']}; }} QLabel#heroTitle, QLabel#detailTitle {{ color:{t['text']}; }} QLabel#pageTitle {{ color:{t['text']}; font-size:20px; font-weight:bold; }} QLabel#section2 {{ color:{t['accent']}; font-weight:bold; }} QLabel#info {{ color:{t['dim']}; }}
-QFrame#card, QFrame#detailCard {{ background:{t['panel']}; border:1px solid {t['border']}; border-radius:10px; }} QFrame#suggestionCard {{ background:{t['card']}; border:1px solid {t['border']}; border-left:3px solid {t['accent']}; border-radius:8px; }} QLabel#suggestionHow {{ color:{t['accent']}; font-weight:600; }} QLabel#suggestionText {{ color:{t['text']}; }}
+QFrame#card, QFrame#detailCard {{ background:{t['panel']}; border:1px solid {t['border']}; border-radius:10px; }} QFrame#suggestionCard {{ background:{t['card']}; border:1px solid {t['border']}; border-left:3px solid {t['accent']}; border-radius:8px; }} QLabel#suggestionHow {{ color:{t['accent']}; font-size:11px; font-weight:bold; letter-spacing:1px; }} QLabel#suggestionText {{ color:{t['text']}; }}
 QLineEdit, QComboBox {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px; padding:4px 8px; }} QComboBox QAbstractItemView {{ background:{t['card']}; color:{t['text']}; selection-background-color:{t['selection']}; }}
 QTableWidget, QListWidget, QTreeWidget, QTextEdit, QPlainTextEdit {{ background:{t['bg']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:8px; selection-background-color:{t['selection']}; }} QHeaderView::section {{ background:{t['panel']}; color:{t['dim']}; border:none; padding:6px; }}
-QLabel#bannerGood {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:8px; padding:10px 14px; }} QLabel#bannerWarn {{ background:{t['card']}; color:{t['warn']}; border:1px solid {t['warn']}; padding:10px 14px; }} QLabel#bannerBad {{ background:{t['card']}; color:{t['danger']}; border:1px solid {t['danger']}; padding:10px 14px; }}
-QLabel[class=sevPill] {{ font-size:11px; font-weight:bold; padding:3px 8px; border-radius:4px; }} QLabel#sevFatal, QLabel#sevError {{ background:{t['danger']}; color:{t['bg']}; }} QLabel#sevWarning {{ background:{t['warn']}; color:{t['bg']}; }} QLabel#sevInfo {{ background:{t['dim']}; color:{t['bg']}; }} QSplitter::handle {{ background:{t['border']}; }} QToolButton {{ background:transparent; border:none; color:{t['dim']}; }}"""
+QSplitter::handle {{ background:transparent; }} QToolButton {{ background:transparent; border:none; color:{t['dim']}; }}
+QPushButton:checked {{ border-color:{t['accent']}; color:{t['accent']}; }} QPushButton:disabled {{ color:{t['dim']}; }}
+QPushButton#linkButton {{ background:transparent; border:none; color:{t['accent']}; padding:2px 4px; }} QPushButton#linkButton:hover {{ text-decoration:underline; }}
+QFrame#verdictCard {{ background:{t['panel']}; border:1px solid {t['border']}; border-left:4px solid {t['accent']}; border-radius:10px; }}
+QFrame#verdictCard[verdict="bad"] {{ border-left-color:{t['danger']}; }} QFrame#verdictCard[verdict="warn"] {{ border-left-color:{t['warn']}; }}
+QLabel#verdictIcon {{ background:{t['accent']}; color:{t['bg']}; border-radius:22px; font-size:24px; font-weight:bold; }}
+QFrame#verdictCard[verdict="bad"] QLabel#verdictIcon {{ background:{t['danger']}; }} QFrame#verdictCard[verdict="warn"] QLabel#verdictIcon {{ background:{t['warn']}; }}
+QLabel#verdictTitle {{ color:{t['text']}; font-size:20px; font-weight:bold; }} QLabel#verdictSub {{ color:{t['text']}; }}
+QScrollArea#findingScroll, QWidget#findingList, QScrollArea#detailScroll, QWidget#detailBody, QWidget#detailButtons {{ background:transparent; border:none; }}
+QLabel#groupHeader {{ color:{t['dim']}; font-size:11px; font-weight:bold; letter-spacing:1px; }}
+QLabel#groupHeader[sev="fatal"], QLabel#groupHeader[sev="error"] {{ color:{t['danger']}; }} QLabel#groupHeader[sev="warning"] {{ color:{t['warn']}; }}
+QFrame#findingCard {{ background:{t['panel']}; border:1px solid {t['border']}; border-radius:8px; }} QFrame#findingCard:hover {{ border-color:{t['dim']}; }}
+QFrame#findingCard[selected="true"] {{ background:{t['card']}; border-color:{t['accent']}; }}
+QLabel#findingTitle {{ color:{t['text']}; font-size:14px; }} QLabel#findingMeta {{ color:{t['dim']}; font-size:12px; }}
+QLabel#countBadge {{ color:{t['dim']}; background:{t['bg']}; border:1px solid {t['border']}; border-radius:9px; padding:1px 8px; font-size:11px; }}
+QFrame#sevBar {{ background:{t['dim']}; border:none; border-top-left-radius:8px; border-bottom-left-radius:8px; }}
+QFrame#sevBar[sev="fatal"], QFrame#sevBar[sev="error"] {{ background:{t['danger']}; }} QFrame#sevBar[sev="warning"] {{ background:{t['warn']}; }} QFrame#sevBar[sev="ok"] {{ background:#5fb548; }}
+QLabel#sevPill {{ font-size:11px; font-weight:bold; letter-spacing:1px; padding:3px 10px; border-radius:4px; background:{t['dim']}; color:{t['bg']}; }}
+QLabel#sevPill[sev="fatal"], QLabel#sevPill[sev="error"] {{ background:{t['danger']}; }} QLabel#sevPill[sev="warning"] {{ background:{t['warn']}; }} QLabel#sevPill[sev="ok"] {{ background:#5fb548; }}
+QLabel#detailTitle {{ font-size:18px; font-weight:bold; }} QLabel#caption {{ font-size:11px; font-weight:bold; letter-spacing:1px; }}
+QFrame#suggestionCard[tone="calm"] {{ border-left-color:{t['dim']}; }} QFrame#suggestionCard[tone="calm"] QLabel#suggestionHow {{ color:{t['dim']}; }}
+QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }} QScrollBar:horizontal {{ background:transparent; height:10px; margin:2px; }}
+QScrollBar::handle {{ background:{t['border']}; border-radius:3px; min-height:24px; min-width:24px; }} QScrollBar::handle:hover {{ background:{t['dim']}; }}
+QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ background:none; border:none; width:0; height:0; }}
+QWidget#titleStrip {{ background:transparent; }} QPushButton#winMin, QPushButton#winMax, QPushButton#winClose {{ background:transparent; border:none; border-radius:0; padding:0; }}
+QPushButton#winMin:hover, QPushButton#winMax:hover {{ background:{t['card']}; }} QPushButton#winClose:hover {{ background:#c42b1c; }} QPushButton#winClose:pressed {{ background:#a1261a; }}
+QPlainTextEdit#excerpt, QPlainTextEdit#technical {{ font-family:monospace; font-size:12px; background:{t['bg']}; }}"""
 
 
 def load_font() -> str:

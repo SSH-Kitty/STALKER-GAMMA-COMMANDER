@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import html
 import os
 import re
@@ -146,7 +147,7 @@ def _finding_lines(finding: Finding, severity: Severity) -> list[str]:
             "</details>",
             "",
         ]
-    elif finding.excerpt and severity is not Severity.INFO:
+    elif finding.excerpt and severity > Severity.INFO:
         out += [*_code_block(finding.excerpt)]
     del color, label  # markdown keeps it plain; kept for future HTML export
     return out
@@ -176,9 +177,35 @@ _KNOWN_TOKEN = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-)[A-Za-z0
 _URL_CREDENTIALS = re.compile(r"(?i)(://)[^/@\s]+:[^/@\s]+@")
 
 
+def _user_path_patterns() -> list[tuple[re.Pattern[str], str]]:
+    """The local home path and username as they show up in logs.
+
+    Anchored so "/home/al" never turns "/home/alice" into "~ice", and
+    covering Wine's own spellings of the same path ("Z:\\home\\deck",
+    "C:\\users\\deck") that a plain home-path replace misses.
+    """
+    patterns = [(re.compile(re.escape(str(Path.home())) + r"(?![\w.-])"), "~")]
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name: nothing more to hide
+        user = ""
+    if user:
+        patterns.append(
+            (
+                re.compile(
+                    r"(?i)([/\\](?:home|users)[/\\]+)" + re.escape(user) + r"(?![\w.-])"
+                ),
+                r"\1<user>",
+            )
+        )
+    return patterns
+
+
 def _redact(value: str) -> str:
     """Remove common secrets and the local user's home path from exports."""
-    text = str(value).replace(str(Path.home()), "~")
+    text = str(value)
+    for pattern, replacement in _user_path_patterns():
+        text = pattern.sub(replacement, text)
     text = _CREDENTIAL_JSON.sub(r'\1"[REDACTED]"', text)
     text = _CREDENTIAL.sub(r"\1[REDACTED]", text)
     text = _BEARER.sub(r"\1[REDACTED]", text)

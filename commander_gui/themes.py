@@ -183,6 +183,29 @@ QWidget#panelTransparent {
 #navtabs[settingsMode="true"]::tab:hover {
     color: $accent_strong;
 }
+#titleStrip, #topbarRow {
+    background: transparent;
+}
+QPushButton#winMin, QPushButton#winMax, QPushButton#winClose {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    color: $text_disabled;
+    font-size: 10px;
+}
+QPushButton#winMin:hover, QPushButton#winMax:hover {
+    background-color: $btn_hover;
+    color: $text_bright;
+}
+QPushButton#winClose:hover {
+    background-color: #c42b1c;
+    color: #ffffff;
+}
+QPushButton#winClose:pressed {
+    background-color: #a1261a;
+    color: #ffffff;
+}
 #cogButton {
     background: transparent;
     border: none;
@@ -622,6 +645,82 @@ QProgressBar::text {
     padding: 1px 6px;
     border-radius: 3px;
 }
+QListWidget#profileCards {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+QListWidget#profileCards::item,
+QListWidget#profileCards::item:hover,
+QListWidget#profileCards::item:selected {
+    background: transparent;
+    border: none;
+    color: $text;
+}
+QFrame#profileCard {
+    background-color: $card;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QFrame#profileCard:hover {
+    border-color: $border_strong;
+}
+QFrame#profileCard[selected="true"] {
+    border-color: $accent_strong;
+}
+QFrame#profileCard[active="true"] {
+    border: 2px solid $accent;
+}
+QFrame#statTile {
+    background-color: $input;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+#statValue[state="bad"] {
+    color: $text_dim;
+}
+QLabel#fieldLabel {
+    color: $text_info;
+    font-size: 12px;
+    font-weight: bold;
+}
+QLabel#cardTitle {
+    color: $text_bright;
+    font-weight: bold;
+}
+QPlainTextEdit#noteEdit {
+    background-color: $input;
+    color: $text_btn;
+    font-family: %FONT_FAMILY%;
+    font-size: %FONT_SIZE%;
+    padding: 4px;
+}
+QPlainTextEdit#noteEdit:focus {
+    border-color: $focus;
+}
+QSlider::groove:horizontal {
+    height: 6px;
+    background-color: $input;
+    border: 1px solid $border_input;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background-color: $accent_strong;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background-color: $text_bright;
+    border: 2px solid $accent_strong;
+    width: 12px;
+    margin: -6px 0;
+    border-radius: 8px;
+}
+QSlider::sub-page:horizontal:disabled {
+    background-color: $border_input;
+}
+QSlider::handle:horizontal:disabled {
+    border-color: $border_input;
+}
 QTableWidget, QListWidget {
     background-color: $input;
     border: 1px solid $border_input;
@@ -694,9 +793,16 @@ QGroupBox::title {
     color: $accent_section;
 }
 QStatusBar {
-    background-color: $topbar;
+    /* Flush with the app: the window's backdrop shows through. */
+    background: transparent;
     color: $text_dim;
-    border-top: 1px solid $border;
+    border: none;
+}
+QStatusBar::item {
+    border: none;
+}
+QStatusBar QLabel {
+    background: transparent;
 }
 QPushButton#discordButton {
     background-color: #4E59CF;

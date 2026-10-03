@@ -1,1 +1,4 @@
-PySide6>=6.6
+# The shipped AppImage pins an exact tested version (see build-appimage.sh's
+# QT_PACKAGE); this floor/ceiling just keeps a fresh source install off a
+# future Qt7-based major that's never been run against this codebase.
+PySide6>=6.6,<7

@@ -7,6 +7,7 @@ from typing import ClassVar
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QObject,
     QPointF,
     QPropertyAnimation,
@@ -18,6 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QGuiApplication,
     QKeySequence,
     QLinearGradient,
     QPainter,
@@ -83,6 +85,14 @@ from .play_page import PlayPage
 from .profiles_page import ProfilesPage
 from .settings_page import SettingsPage
 from .system_check_page import SystemCheckPage
+from .title_bar import (
+    EdgeResizeFilter,
+    WindowDragFilter,
+    attach_resize_filter,
+    build_window_buttons,
+    pin_top_right,
+    update_max_button,
+)
 from .update_page import UpdatePage
 from .utilities_page import UtilitiesPage
 
@@ -112,6 +122,8 @@ _SEPARATOR_AFTER = {1, 4, 7}
 #: Text grows to this fraction of its normal size while a tab is hovered.
 _HOVER_SCALE = 1.12
 _HOVER_ANIM_MS = 150
+#: How far (px) tab labels sit above their tab's middle.
+_TAB_TEXT_LIFT = 4
 
 
 class NavTabBar(QTabBar):
@@ -202,7 +214,13 @@ class NavTabBar(QTabBar):
 
             painter.setFont(self._scaled_font(self._hover_scale.get(i, 1.0)))
             painter.setPen(accent if active else text_nav)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.tabText(i))
+            # Text sits a little above the tab's middle: the underline takes
+            # the bottom, and exactly centered labels read low in the bar.
+            painter.drawText(
+                rect.translated(0, -_TAB_TEXT_LIFT),
+                Qt.AlignmentFlag.AlignCenter,
+                self.tabText(i),
+            )
 
             if is_selected and not settings_mode:
                 pen = QPen(accent)
@@ -233,49 +251,51 @@ class NavTabBar(QTabBar):
         painter.end()
 
 
-class Backdrop(QWidget):
+def paint_backdrop(painter: QPainter, rect) -> None:
     """Dark GAMMA-style backdrop with a soft, blurred radiation-green glow.
 
-    The background is painted (not styled) so the QSS ``QWidget`` background
-    rule does not cover it; page roots stay semi-transparent and let the glow
-    bleed through behind the cards.
+    Painted by the main window across its whole area - behind the central
+    widget and the status bar alike - so the bottom bar sits on the same
+    background as the pages instead of a separate dark strip.
     """
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    tokens = active_theme_tokens()
 
-    def paintEvent(self, _event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = self.rect()
-        tokens = active_theme_tokens()
+    def rgb(key: str) -> tuple[int, int, int]:
+        parts = tokens[key].split(",")
+        return int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
 
-        def rgb(key: str) -> tuple[int, int, int]:
-            parts = tokens[key].split(",")
-            return int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
+    base = QLinearGradient(0, 0, rect.width(), rect.height())
+    base.setColorAt(0.0, QColor(tokens["back_base_a"]))
+    base.setColorAt(1.0, QColor(tokens["back_base_b"]))
+    painter.fillRect(rect, base)
 
-        base = QLinearGradient(0, 0, rect.width(), rect.height())
-        base.setColorAt(0.0, QColor(tokens["back_base_a"]))
-        base.setColorAt(1.0, QColor(tokens["back_base_b"]))
-        painter.fillRect(rect, base)
+    radius = max(rect.width(), rect.height())
+    r1 = rgb("back_glow1_rgb")
+    glow = QRadialGradient(rect.width() * 0.18, rect.height() * 0.08, radius * 0.95)
+    glow.setColorAt(0.0, QColor(r1[0], r1[1], r1[2], int(tokens["back_glow1_a"])))
+    r1b = rgb("back_glow1b_rgb")
+    glow.setColorAt(
+        0.35, QColor(r1b[0], r1b[1], r1b[2], int(tokens["back_glow1b_a"]))
+    )
+    r1c = rgb("back_glow1c_rgb")
+    glow.setColorAt(
+        0.7, QColor(r1c[0], r1c[1], r1c[2], int(tokens["back_glow1c_a"]))
+    )
+    glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+    painter.fillRect(rect, glow)
 
-        radius = max(rect.width(), rect.height())
-        r1 = rgb("back_glow1_rgb")
-        glow = QRadialGradient(rect.width() * 0.18, rect.height() * 0.08, radius * 0.95)
-        glow.setColorAt(0.0, QColor(r1[0], r1[1], r1[2], int(tokens["back_glow1_a"])))
-        r1b = rgb("back_glow1b_rgb")
-        glow.setColorAt(
-            0.35, QColor(r1b[0], r1b[1], r1b[2], int(tokens["back_glow1b_a"]))
-        )
-        r1c = rgb("back_glow1c_rgb")
-        glow.setColorAt(
-            0.7, QColor(r1c[0], r1c[1], r1c[2], int(tokens["back_glow1c_a"]))
-        )
-        glow.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.fillRect(rect, glow)
+    r2 = rgb("back_glow2_rgb")
+    glow2 = QRadialGradient(rect.width() * 0.95, rect.height() * 0.96, radius * 0.7)
+    glow2.setColorAt(0.0, QColor(r2[0], r2[1], r2[2], int(tokens["back_glow2_a"])))
+    glow2.setColorAt(1.0, QColor(0, 0, 0, 0))
+    painter.fillRect(rect, glow2)
 
-        r2 = rgb("back_glow2_rgb")
-        glow2 = QRadialGradient(rect.width() * 0.95, rect.height() * 0.96, radius * 0.7)
-        glow2.setColorAt(0.0, QColor(r2[0], r2[1], r2[2], int(tokens["back_glow2_a"])))
-        glow2.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.fillRect(rect, glow2)
+
+class Backdrop(QWidget):
+    """The central widget. Transparent: the main window paints the backdrop
+    behind it (see paint_backdrop()); page roots stay semi-transparent and
+    let the glow bleed through behind the cards."""
 
 
 class _CommanderUpdateProgressBridge(QObject):
@@ -292,11 +312,17 @@ class _CommanderUpdateProgressBridge(QObject):
 
 
 class MainWindow(QMainWindow):
+    #: A newer COMMANDER release tag, from the one shared update check.
+    commander_update_found = Signal(str)
+
     def __init__(self) -> None:
         super().__init__()
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
         self.settings = load_settings()
+        self.custom_title_bar = False
+        self._drag_filter = WindowDragFilter(self)
+        self._resize_filter = EdgeResizeFilter(self)
         self.install_busy = False
         self.install_operation: str | None = None
         self._settings_open = False
@@ -309,6 +335,7 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._build_ui()
         self._build_shortcuts()
+        self.apply_title_bar(bool(gui_state.get("custom_title_bar", True)))
         # Mouse-wheel scrolling glides instead of jumping, in every page,
         # list and text box of this window.
         from .smooth_scroll import install as install_smooth_scroll
@@ -477,11 +504,20 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # top header: wordmark + tab navigation
+        # Top area: wordmark, tabs, mod counter and cog, all centered in its
+        # full height. With COMMANDER's own title bar the bar grows by the
+        # window-button strip's height and the strip floats in its top-right
+        # corner, above the counter and cog.
+        topbar = QWidget()
+        topbar.setObjectName("topbar")
+        topbar_layout = QHBoxLayout(topbar)
+        topbar_layout.setContentsMargins(16, 0, 0, 0)
+        topbar_layout.setSpacing(16)
+
         header = QWidget()
-        header.setObjectName("topbar")
+        header.setObjectName("topbarRow")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(16, 0, 8, 0)
+        header_layout.setContentsMargins(0, 0, 8, 0)
         header_layout.setSpacing(16)
 
         wordmark_block = QWidget()
@@ -499,7 +535,13 @@ class MainWindow(QMainWindow):
         byline.setAlignment(Qt.AlignmentFlag.AlignRight)
         wordmark_layout.addWidget(byline)
 
-        header_layout.addWidget(wordmark_block)
+        topbar_layout.addWidget(wordmark_block, 0, Qt.AlignmentFlag.AlignVCenter)
+        topbar_layout.addWidget(header, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._topbar = topbar
+        self._topbar_row = header
+        # Floats in the top-right corner (pinned there by pin_top_right()) instead
+        # of taking a row, so everything else stays centered in the bar.
+        pin_top_right(self._build_title_strip(), topbar)
 
         header_layout.addStretch(1)
 
@@ -511,9 +553,17 @@ class MainWindow(QMainWindow):
 
         header_layout.addStretch(1)
 
+        # Counter and cog share one box, so both move the window when dragged.
+        self._right_cluster = QWidget()
+        self._right_cluster.setObjectName("panelTransparent")
+        right_layout = QHBoxLayout(self._right_cluster)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(16)
+        header_layout.addWidget(self._right_cluster)
+
         self.mod_counter_label = QLabel()
         self.mod_counter_label.setObjectName("modCounter")
-        header_layout.addWidget(self.mod_counter_label)
+        right_layout.addWidget(self.mod_counter_label)
 
         self._cog = QPushButton(tr("⚙"))
         self._cog.setObjectName("cogButton")
@@ -521,7 +571,7 @@ class MainWindow(QMainWindow):
         self._cog.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cog.setFixedHeight(28)
         self._cog.clicked.connect(self.toggle_settings)
-        header_layout.addWidget(self._cog)
+        right_layout.addWidget(self._cog)
         self.update_mod_counter()
         # Keeps the topbar counter live on its own (e.g. while the user
         # watches an install/repair finish, or after Mod Manager/MO2
@@ -550,7 +600,7 @@ class MainWindow(QMainWindow):
         self._pages: dict[str, QWidget] = {}
         self.stack = QStackedWidget()
 
-        for key, title in NAV_ITEMS:
+        for _key, title in NAV_ITEMS:
             # Translated here, not by wrapping NAV_ITEMS itself: NAV_ITEMS is
             # a module-level constant evaluated at import time, before
             # main.py ever calls set_active_language() - tr() would always
@@ -592,9 +642,15 @@ class MainWindow(QMainWindow):
 
         self.tabs.currentChanged.connect(self._on_nav)
         self.tabs.tabBarClicked.connect(self._on_tab_clicked)
-        layout.addWidget(header)
+        layout.addWidget(topbar)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(central)
+        for widget in (
+            topbar, header, wordmark_block, wordmark, byline,
+            self._right_cluster, self.mod_counter_label,
+        ):
+            widget.installEventFilter(self._drag_filter)
+        self._sync_title_bar_layout()
 
         # Keep the full navigation strip visible at startup. The saved window
         # size may predate the current tab labels and otherwise enables the
@@ -713,6 +769,9 @@ class MainWindow(QMainWindow):
         # ordering again), whereas a layout's own child order is always
         # exactly what it's given, left to right.
         update_area = QWidget()
+        # Transparent like the rest of the bar - a plain QWidget would take
+        # the stylesheet's page background and show as a dark box.
+        update_area.setObjectName("panelTransparent")
         update_layout = QHBoxLayout(update_area)
         update_layout.setContentsMargins(0, 0, 0, 0)
         update_layout.setSpacing(0)
@@ -758,6 +817,9 @@ class MainWindow(QMainWindow):
         update_layout.addWidget(github_link)
 
         self.statusBar().setSizeGripEnabled(False)
+        # No bar of its own any more (transparent, see themes.py), so the
+        # text gets the same breathing room from the window edges as pages.
+        self.statusBar().setContentsMargins(12, 0, 12, 4)
         self.statusBar().addPermanentWidget(update_area)
 
     def _check_commander_update_status(self) -> None:
@@ -791,6 +853,8 @@ class MainWindow(QMainWindow):
                 pass
             self._update_status_handler = None
         if tag and isinstance(tag, str):
+            self._commander_update_tag = tag
+            self.commander_update_found.emit(tag)
             self._notify_commander_update(tag)
             button.setText(tr("COMMANDER update available"))
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
@@ -894,6 +958,18 @@ class MainWindow(QMainWindow):
         download itself (size, ELF/AppImage and checksum checks, atomic
         swap) is ``self_update``'s.
         """
+        # The restart at the end quits through closeEvent, which asks about a
+        # running install - answering "No" there left two instances running.
+        if self.install_busy:
+            QMessageBox.warning(
+                self,
+                tr("Busy"),
+                tr(
+                    "An install, update or dependency download is still running. "
+                    "Wait for it to finish before updating COMMANDER."
+                ),
+            )
+            return
         progress = QProgressDialog(label, tr("Cancel"), 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
@@ -962,7 +1038,9 @@ class MainWindow(QMainWindow):
         change instead of getting it "for free" via reconstruction.
         """
         self._status_info_label.setText(
-            f"COMMANDER {__version_label__}   |   Active profile: {self._active_name()}   |   {tr('Language:')}"
+            f"COMMANDER {__version_label__}   |   "
+            + tr("Active profile: {name}", name=self._active_name())
+            + f"   |   {tr('Language:')}"
         )
         self._status_theme_label.setText(f"   |   {tr('Theme:')}")
         lang_index = self._status_language_combo.findData(active_language())
@@ -1292,6 +1370,7 @@ class MainWindow(QMainWindow):
             )
         self.tabs.update()
         self.backdrop.update()
+        self.update()
         # The status bar is built exactly once and never rebuilt, so its
         # Theme/Font/size combos do not pick up a change made from the
         # Settings page's own pickers by themselves. Left showing the old
@@ -1317,6 +1396,60 @@ class MainWindow(QMainWindow):
             activity = getattr(page, "on_install_activity_changed", None)
             if callable(activity):
                 activity(self.install_operation)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        try:
+            paint_backdrop(painter, self.rect())
+        finally:
+            painter.end()
+
+    # ----- own title bar -----
+    def _build_title_strip(self) -> QWidget:
+        """Minimize/maximize/close, floating in the top bar's top-right corner.
+
+        Shown only when COMMANDER draws its own title bar (frameless window);
+        otherwise the desktop's title bar provides these.
+        """
+        self._title_strip = build_window_buttons(self, self._drag_filter)
+        return self._title_strip
+
+    def apply_title_bar(self, custom: bool) -> None:
+        """Draw COMMANDER's own title bar (frameless) or use the desktop's."""
+        # Offscreen/minimal platforms (tests, screenshots) have no window
+        # manager to hand moves and resizes to.
+        custom = custom and QGuiApplication.platformName() not in ("offscreen", "minimal")
+        visible = self.isVisible()
+        self.custom_title_bar = custom
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, custom)
+        self._sync_title_bar_layout()
+        if visible:
+            self.show()
+        attach_resize_filter(self, self._resize_filter, custom)
+
+    def _sync_title_bar_layout(self) -> None:
+        """Show the window-button strip only with COMMANDER's own title bar."""
+        custom = self.custom_title_bar
+        self._title_strip.setVisible(custom)
+        # Room for the strip, split equally above and below so the content
+        # stays centered and the bar still follows font-size changes.
+        pad = self._title_strip.height() // 2 if custom else 0
+        self._topbar.layout().setContentsMargins(16, pad, 0, pad)
+
+    def toggle_maximized(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _update_max_button(self) -> None:
+        update_max_button(self)
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._update_max_button()
+        super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
         if self.install_busy:

@@ -27,10 +27,12 @@ So: status is a file read, and installs go through the runner's own Wine.
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
 from .dependencies import _externally_managed, configured_tool
+from .launcher import runner_build_dir
 
 #: Verbs installed by the "Install Dependencies" action, in order.
 WINETRICKS_VERBS = (
@@ -44,8 +46,22 @@ WINETRICKS_VERBS = (
     "vcrun2022",
 )
 
-#: Hardcoded UMU release version for zipapp downloads.
+#: Hardcoded UMU release version for zipapp downloads. Pinned to an exact
+#: release (never "latest") so a run always fetches a known-good build.
+#:
+#: Unlike the Proton-GE downloads in proton_installer.py and COMMANDER's own
+#: self_update.py, upstream umu-launcher releases do not publish a checksum
+#: asset alongside the zipapp tarball, so there is nothing to verify the
+#: download against without querying api.github.com for it - and this
+#: project deliberately avoids that rate-limited API for routine operations
+#: (see updates.py's module docstring). The residual risk is the same one
+#: self_update.py documents for its own same-release checksum: a compromised
+#: GitHub release for this repo could still serve a tampered build. If
+#: upstream ever starts publishing a checksum file, verify against it here
+#: the same way self_update.py's ``_published_sha512`` does.
 UMU_VERSION = "1.4.4"
+if not re.fullmatch(r"[0-9][0-9A-Za-z.]*", UMU_VERSION):
+    raise ValueError(f"Unexpected UMU_VERSION format: {UMU_VERSION!r}")
 UMU_ZIPAPP_URL = (
     f"https://github.com/Open-Wine-Components/umu-launcher/releases/"
     f"download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar"
@@ -64,17 +80,6 @@ def protontricks_binary() -> str:
 def umu_binary() -> str:
     """Path to umu-run, or '' when it is not on PATH."""
     return configured_tool("umu-run") or shutil.which("umu-run") or ""
-
-
-def _proton_build_dir(runner) -> Path | None:
-    """The Proton build a runner uses, or None for plain Wine / unknown."""
-    proton_path = runner.env.get("PROTONPATH")
-    if proton_path:
-        return Path(proton_path)
-    if runner.kind == "proton" and runner.wrapper:
-        # wrapper is [<build>/proton, "run"]
-        return Path(runner.wrapper[0]).parent
-    return None
 
 
 def winetricks_install_command(
@@ -99,7 +104,7 @@ def winetricks_install_command(
     PATH.
     """
     env: dict[str, str] = {"WINEDEBUG": "-all"}
-    build = _proton_build_dir(runner)
+    build = runner_build_dir(runner)
 
     if runner.kind == "umu":
         umu = umu_binary()
@@ -181,6 +186,51 @@ def umu_install_command() -> list[str]:
             'chmod +x "$tmp_bin" && '
             'mv -f "$tmp_bin" ~/.local/bin/umu-run && '
             'rm -f "$tmp_tar" && trap - EXIT'
+        ),
+    ]
+
+
+#: Pinned upstream winetricks release tag. winetricks is a single POSIX
+#: shell script (not a compiled binary), so - unlike umu-run above - it can
+#: be verified against a checksum computed once for this exact pinned tag.
+WINETRICKS_VERSION = "20260125"
+if not re.fullmatch(r"[0-9]+", WINETRICKS_VERSION):
+    raise ValueError(f"Unexpected WINETRICKS_VERSION format: {WINETRICKS_VERSION!r}")
+WINETRICKS_SCRIPT_URL = (
+    f"https://raw.githubusercontent.com/Winetricks/winetricks/"
+    f"{WINETRICKS_VERSION}/src/winetricks"
+)
+WINETRICKS_SCRIPT_SHA256 = (
+    "431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b"
+)
+
+
+def winetricks_tool_install_command() -> list[str]:
+    """Download the winetricks script to ``~/.local/bin/`` via curl.
+
+    Self-installing it here (rather than relying on the system package
+    manager) matters most on Steam Deck: a system-installed winetricks
+    (``sudo pacman -S winetricks``) lives on SteamOS's read-only root and is
+    wiped by every OS update, while ``~/.local/bin`` is ordinary user data
+    that survives them. Same atomic-download shape as umu_install_command()
+    above. Returns an empty list when curl is not available.
+    """
+    if not shutil.which("curl"):
+        return []
+    return [
+        "bash",
+        "-c",
+        (
+            "set -o pipefail && "
+            "mkdir -p ~/.local/bin && "
+            'tmp_bin="$(mktemp -p ~/.local/bin .winetricks.XXXXXX)" && '
+            'trap \'rm -f "$tmp_bin"\' EXIT && '
+            f'curl -fL --retry 3 --connect-timeout 30 --max-time 120 '
+            f'"{WINETRICKS_SCRIPT_URL}" -o "$tmp_bin" && '
+            f'echo "{WINETRICKS_SCRIPT_SHA256}  $tmp_bin" | sha256sum -c - && '
+            'chmod +x "$tmp_bin" && '
+            'mv -f "$tmp_bin" ~/.local/bin/winetricks && '
+            'trap - EXIT'
         ),
     ]
 

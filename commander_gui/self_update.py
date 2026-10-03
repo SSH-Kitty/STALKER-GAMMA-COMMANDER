@@ -25,7 +25,6 @@ yet.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
@@ -37,7 +36,9 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from .config import child_environment
 from .network import urlopen_with_retry as urlopen
+from .proton_installer import SHA512_RE, sha512_file
 from .repair import USER_AGENT
 from .updates import _COMMANDER_REPO
 
@@ -76,18 +77,10 @@ def _published_sha512(url: str) -> str | None:
         raise CommanderSelfUpdateError(f"Could not fetch the update checksum: {exc}") from exc
     except urllib.error.URLError as exc:
         raise CommanderSelfUpdateError(f"Could not fetch the update checksum: {exc}") from exc
-    match = re.search(r"\b([0-9a-fA-F]{128})\b", text)
+    match = SHA512_RE.search(text)
     if match is None:
         raise CommanderSelfUpdateError("The update's checksum file is malformed")
     return match.group(1).lower()
-
-
-def _sha512_file(path: Path) -> str:
-    digest = hashlib.sha512()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 class CommanderSelfUpdateError(Exception):
@@ -216,7 +209,7 @@ def download_commander_update(
             )
         verify_appimage_file(tmp_path)
         expected = _published_sha512(url)
-        if expected is not None and _sha512_file(tmp_path) != expected:
+        if expected is not None and sha512_file(tmp_path) != expected:
             raise CommanderSelfUpdateError(
                 "The update does not match its published checksum - nothing was changed."
             )
@@ -230,8 +223,13 @@ def install_commander_update(downloaded: Path, running_path: Path) -> None:
     """Atomically replace *running_path* with *downloaded* (same filesystem)."""
     verify_appimage_file(downloaded)
     # An AppImage must be executable; the file was verified just above.
-    os.chmod(downloaded, 0o755)  # nosec B103
-    os.replace(downloaded, running_path)
+    try:
+        os.chmod(downloaded, 0o755)  # nosec B103
+        os.replace(downloaded, running_path)
+    except OSError:
+        # Don't leave a few hundred MB of hidden ".update" file behind.
+        downloaded.unlink(missing_ok=True)
+        raise
 
 
 def relaunch_commander(
@@ -251,6 +249,10 @@ def relaunch_commander(
         release_lock()
     subprocess.Popen(
         [str(path)],
+        # Not this process's environment as-is: the old AppRun pointed
+        # SSL_CERT_FILE into this AppImage's mount, which vanishes when we
+        # quit, and the new AppRun only sets it when unset.
+        env=child_environment(),
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,

@@ -1,4 +1,4 @@
-"""Reusable widgets: drop zone, severity chips and the finding detail pane."""
+"""Reusable widgets: drop zone, findings list and the finding detail pane."""
 
 from __future__ import annotations
 
@@ -13,14 +13,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
-    QSizePolicy,
-    QToolButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from ..findings import (
-    SEVERITY_COLOR,
     SEVERITY_LABEL,
     Finding,
     Severity,
@@ -227,53 +225,254 @@ def _zip_paths(mime: QMimeData) -> list[Path]:
     return paths
 
 
-def severity_chip(severity: Severity) -> QLabel:
-    """Small coloured pill showing the severity label."""
-    chip = QLabel(SEVERITY_LABEL[severity])
-    chip.setTextFormat(Qt.TextFormat.PlainText)
-    chip.setObjectName("chip")
-    color = SEVERITY_COLOR[severity]
-    chip.setStyleSheet(
-        f"color:{color}; border:1px solid {color}; background: transparent;"
-    )
-    return chip
-
-
-#: Object names for the solid table pills (theme: QLabel.sevPill + #sev*).
-_SEVERITY_PILL_NAMES = {
-    Severity.FATAL: "sevFatal",
-    Severity.ERROR: "sevError",
-    Severity.WARNING: "sevWarning",
-    Severity.INFO: "sevInfo",
+#: Value of the ``sev`` style property (theme: #sevPill / #sevBar).
+_SEVERITY_KEYS = {
+    Severity.FATAL: "fatal",
+    Severity.ERROR: "error",
+    Severity.WARNING: "warning",
+    Severity.INFO: "info",
+    Severity.OK: "ok",
 }
+
+#: How the findings list is split, most urgent first. The last group holds
+#: entries that need no action and starts collapsed when anything else exists.
+FINDING_GROUPS: tuple[tuple[str, tuple[Severity, ...]], ...] = (
+    ("Fix these first", (Severity.FATAL, Severity.ERROR)),
+    ("Worth checking", (Severity.WARNING,)),
+    ("Good to know, no action needed", (Severity.INFO, Severity.OK)),
+)
+
+
+def _repolish(widget: QWidget) -> None:
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 def severity_pill(severity: Severity) -> QLabel:
-    """Solid-background severity pill for table rows (COMMANDER status style)."""
+    """Solid-background severity pill (COMMANDER status style)."""
     pill = QLabel(SEVERITY_LABEL[severity])
-    pill.setProperty("class", "sevPill")
-    pill.setObjectName(_SEVERITY_PILL_NAMES[severity])
+    pill.setObjectName("sevPill")
+    pill.setProperty("sev", _SEVERITY_KEYS[severity])
     pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
     return pill
 
 
-class DetailPane(QWidget):
-    """Full view of one finding: what happened, where, why, how to fix."""
+def _display_title(finding: Finding) -> str:
+    return finding.title.removesuffix(".")
+
+
+def _location(finding: Finding) -> str:
+    where = finding.where_label or finding.arcname
+    if finding.line_no is not None:
+        where += f", line {finding.line_no}"
+    return where
+
+
+class FindingCard(QFrame):
+    """One clickable row in the findings list."""
+
+    clicked = Signal(object)  # Finding
+
+    def __init__(self, finding: Finding, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.finding = finding
+        self.setObjectName("findingCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 12, 0)
+        row.setSpacing(12)
+
+        bar = QFrame()
+        bar.setObjectName("sevBar")
+        bar.setProperty("sev", _SEVERITY_KEYS[finding.severity])
+        bar.setFixedWidth(4)
+        row.addWidget(bar)
+
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 9, 0, 9)
+        text.setSpacing(2)
+        title = QLabel(_display_title(finding))
+        title.setObjectName("findingTitle")
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setWordWrap(True)
+        text.addWidget(title)
+        meta = QLabel(f"{finding.category}  ·  {_location(finding)}")
+        meta.setObjectName("findingMeta")
+        meta.setTextFormat(Qt.TextFormat.PlainText)
+        meta.setWordWrap(True)
+        text.addWidget(meta)
+        row.addLayout(text, 1)
+
+        if finding.count > 1:
+            badge = QLabel(f"{finding.count}×")
+            badge.setObjectName("countBadge")
+            badge.setToolTip(f"Seen {finding.count} times")
+            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        _repolish(self)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.finding)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class FindingList(QScrollArea):
+    """Findings grouped by urgency; Up/Down keys move the selection."""
+
+    selected = Signal(object)  # Finding
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("findingScroll")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._findings: list[Finding] = []
+        self._needle = ""
+        self._minor_open = False
+        self._cards: list[FindingCard] = []
+        self._current: Finding | None = None
+
+    def set_findings(self, findings: list[Finding]) -> None:
+        """Show a new dump's findings; resets search and collapse state."""
+        self._findings = findings
+        self._needle = ""
+        has_action = any(f.severity >= Severity.WARNING for f in findings)
+        self._minor_open = not has_action
+        self._current = None
+        self._rebuild()
+
+    def set_filter(self, needle: str) -> None:
+        self._needle = needle.strip().lower()
+        self._rebuild()
+
+    def _matches(self, finding: Finding) -> bool:
+        if not self._needle:
+            return True
+        haystack = (
+            f"{finding.title} {finding.detail} {finding.category} "
+            f"{finding.arcname} {finding.where_label}"
+        ).lower()
+        return self._needle in haystack
+
+    def _toggle_minor(self) -> None:
+        self._minor_open = not self._minor_open
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        container = QWidget()
+        container.setObjectName("findingList")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(6)
+        self._cards = []
+        visible = [f for f in self._findings if self._matches(f)]
+        minor_name = FINDING_GROUPS[-1][0]
+
+        for name, severities in FINDING_GROUPS:
+            group = [f for f in visible if f.severity in severities]
+            # Confirmed-normal (green) entries lead their group.
+            group.sort(key=lambda f: f.severity != Severity.OK)
+            if not group:
+                continue
+            is_minor = name == minor_name
+            # A search always reveals matching minor entries.
+            collapsed = is_minor and not self._minor_open and not self._needle
+            header = QHBoxLayout()
+            header.setContentsMargins(2, 10 if self._cards else 0, 0, 2)
+            label = QLabel(f"{name.upper()}  ·  {len(group)}")
+            label.setObjectName("groupHeader")
+            label.setProperty("sev", _SEVERITY_KEYS[severities[0]])
+            header.addWidget(label)
+            header.addStretch(1)
+            if is_minor and not self._needle and len(visible) > len(group):
+                toggle = QPushButton("Show" if collapsed else "Hide")
+                toggle.setObjectName("linkButton")
+                toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+                toggle.clicked.connect(self._toggle_minor)
+                header.addWidget(toggle)
+            layout.addLayout(header)
+            if collapsed:
+                continue
+            for finding in group:
+                card = FindingCard(finding)
+                card.clicked.connect(self._select)
+                layout.addWidget(card)
+                self._cards.append(card)
+
+        if not visible:
+            empty = QLabel(
+                f"Nothing matches \u201c{self._needle}\u201d."
+                if self._needle
+                else "No findings. The scanned logs contain no crashes, "
+                "errors or warnings."
+            )
+            empty.setObjectName("emptyState")
+            empty.setWordWrap(True)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(empty)
+        layout.addStretch(1)
+        self.setWidget(container)
+
+        shown = [card.finding for card in self._cards]
+        if self._current in shown:
+            self._select(self._current)
+        elif shown:
+            self._select(shown[0])
+        else:
+            self._current = None
+            self.selected.emit(None)
+
+    def _select(self, finding: Finding) -> None:
+        self._current = finding
+        for card in self._cards:
+            is_current = card.finding is finding
+            card.set_selected(is_current)
+            if is_current:
+                self.ensureWidgetVisible(card, 0, 40)
+        self.selected.emit(finding)
+
+    def keyPressEvent(self, event) -> None:
+        step = {Qt.Key.Key_Up: -1, Qt.Key.Key_Down: 1}.get(event.key())
+        shown = [card.finding for card in self._cards]
+        if step is None or not shown:
+            super().keyPressEvent(event)
+            return
+        index = shown.index(self._current) if self._current in shown else -step
+        self._select(shown[max(0, min(len(shown) - 1, index + step))])
+
+
+class DetailPane(QFrame):
+    """Full view of one finding: what happened, how to fix it, where."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("detailCard")
+        self._finding: Finding | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        card = QFrame()
-        card.setObjectName("detailCard")
-        outer.addWidget(card)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setObjectName("detailScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+        body = QWidget()
+        body.setObjectName("detailBody")
+        scroll.setWidget(body)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(6)
 
         top = QHBoxLayout()
-        self.chip = severity_chip(Severity.INFO)
-        top.addWidget(self.chip)
+        self.pill = severity_pill(Severity.INFO)
+        top.addWidget(self.pill)
         self.category_label = QLabel()
         self.category_label.setTextFormat(Qt.TextFormat.PlainText)
         self.category_label.setObjectName("dim")
@@ -281,138 +480,183 @@ class DetailPane(QWidget):
         top.addStretch(1)
         layout.addLayout(top)
 
-        self.title_label = QLabel("Select a finding to see details")
-        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.title_label.setObjectName("detailTitle")
-        self.title_label.setWordWrap(True)
+        self.title_label = _wrapped("detailTitle")
         layout.addWidget(self.title_label)
+        layout.addSpacing(8)
 
-        self.where_label = QLabel("")
-        self.where_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.where_label.setObjectName("dim")
-        layout.addWidget(self.where_label)
-
-        self.detail_label = QLabel("")
-        self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.detail_label.setWordWrap(True)
-        self.detail_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        self.what_caption = _caption("What happened")
+        layout.addWidget(self.what_caption)
+        self.detail_label = _wrapped(selectable=True)
         layout.addWidget(self.detail_label)
+        layout.addSpacing(8)
 
-        suggestion_frame = QFrame()
-        suggestion_frame.setObjectName("suggestionCard")
-        suggestion_layout = QVBoxLayout(suggestion_frame)
-        suggestion_layout.setContentsMargins(10, 8, 10, 8)
-        how = QLabel("How to fix it")
-        how.setObjectName("suggestionHow")
-        self.suggestion_label = QLabel("")
-        self.suggestion_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.suggestion_label.setObjectName("suggestionText")
-        self.suggestion_label.setWordWrap(True)
-        self.suggestion_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        suggestion_layout.addWidget(how)
-        suggestion_layout.addWidget(self.suggestion_label)
-        layout.addWidget(suggestion_frame)
+        self.fix_card = QFrame()
+        self.fix_card.setObjectName("suggestionCard")
+        fix_layout = QVBoxLayout(self.fix_card)
+        fix_layout.setContentsMargins(14, 10, 14, 12)
+        fix_layout.setSpacing(4)
+        self.fix_caption = QLabel()
+        self.fix_caption.setObjectName("suggestionHow")
+        fix_layout.addWidget(self.fix_caption)
+        self.suggestion_label = _wrapped("suggestionText", selectable=True)
+        fix_layout.addWidget(self.suggestion_label)
+        layout.addWidget(self.fix_card)
+        layout.addSpacing(8)
 
-        excerpt_row = QHBoxLayout()
-        excerpt_caption = QLabel("LOG EXCERPT")
-        excerpt_caption.setObjectName("caption")
-        excerpt_row.addWidget(excerpt_caption)
-        excerpt_row.addStretch(1)
-        self.copy_button = QPushButton("Copy excerpt")
-        self.copy_button.setToolTip(
-            "Copy the location and log excerpt to the clipboard"
-        )
-        self.copy_button.clicked.connect(self._copy_excerpt)
-        excerpt_row.addWidget(self.copy_button)
-        layout.addLayout(excerpt_row)
+        self.where_caption = _caption("Where it was found")
+        layout.addWidget(self.where_caption)
+        self.where_label = _wrapped(selectable=True)
+        layout.addWidget(self.where_label)
+        self.file_label = _wrapped("dim", selectable=True)
+        layout.addWidget(self.file_label)
+        layout.addSpacing(10)
 
-        self.excerpt_view = QPlainTextEdit()
-        self.excerpt_view.setObjectName("excerpt")
-        self.excerpt_view.setReadOnly(True)
-        self.excerpt_view.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        layout.addWidget(self.excerpt_view, 2)
-
-        self.tech_toggle = QToolButton()
-        self.tech_toggle.setText("Technical details")
+        buttons = QHBoxLayout()
+        self.excerpt_toggle = QPushButton("Show log lines")
+        self.excerpt_toggle.setCheckable(True)
+        self.excerpt_toggle.toggled.connect(self._toggle_excerpt)
+        buttons.addWidget(self.excerpt_toggle)
+        self.tech_toggle = QPushButton("Show technical details")
         self.tech_toggle.setCheckable(True)
-        self.tech_toggle.setArrowType(Qt.ArrowType.RightArrow)
         self.tech_toggle.toggled.connect(self._toggle_technical)
-        self.tech_toggle.hide()
-        layout.addWidget(self.tech_toggle)
-        self.technical_view = QTextEditReadOnlyHolder()
-        self.technical_view.hide()
-        layout.addWidget(self.technical_view, 1)
+        buttons.addWidget(self.tech_toggle)
+        buttons.addStretch(1)
+        self.copy_button = QPushButton("Copy for bug report")
+        self.copy_button.setToolTip(
+            "Copy this finding and its log lines to the clipboard "
+            "(personal paths and tokens are removed)"
+        )
+        self.copy_button.clicked.connect(self._copy)
+        buttons.addWidget(self.copy_button)
+        self.buttons = QWidget()
+        self.buttons.setObjectName("detailButtons")
+        self.buttons.setLayout(buttons)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.buttons)
 
+        self.excerpt_view = _code_view("excerpt")
+        layout.addWidget(self.excerpt_view)
+        self.technical_view = _code_view("technical")
+        layout.addWidget(self.technical_view)
+        layout.addStretch(1)
+
+        self._content = (
+            self.pill,
+            self.what_caption,
+            self.fix_card,
+            self.where_caption,
+            self.where_label,
+            self.file_label,
+            self.buttons,
+        )
         self.clear()
 
-    def set_finding(self, finding: Finding) -> None:
-        self.title_label.setText(finding.title)
-        self.where_label.setText(finding.where_text())
+    def set_finding(self, finding: Finding | None) -> None:
+        if finding is None:
+            self.clear()
+            return
+        self._finding = finding
+        for widget in self._content:
+            widget.show()
+        self.pill.setText(SEVERITY_LABEL[finding.severity])
+        self.pill.setProperty("sev", _SEVERITY_KEYS[finding.severity])
+        _repolish(self.pill)
         self.category_label.setText(finding.category)
-        self.chip.setText(SEVERITY_LABEL[finding.severity])
-        color = SEVERITY_COLOR[finding.severity]
-        self.chip.setStyleSheet(
-            f"color:{color}; border:1px solid {color}; background: transparent;"
-        )
-        self.detail_label.setText(finding.detail or "—")
-        self.suggestion_label.setText(finding.suggestion or "No action needed.")
-        self.excerpt_view.setPlainText(finding.excerpt or "(no excerpt captured)")
-        has_tech = bool(finding.technical)
-        self.tech_toggle.setVisible(has_tech)
+        self.title_label.setText(_display_title(finding))
+        self.detail_label.setText(finding.detail or "No further explanation available.")
+        self.detail_label.setVisible(True)
+
+        actionable = finding.severity >= Severity.WARNING
+        self.fix_caption.setText("HOW TO FIX IT" if actionable else "DO I NEED TO DO ANYTHING?")
+        self.fix_card.setProperty("tone", "action" if actionable else "calm")
+        _repolish(self.fix_card)
+        self.suggestion_label.setText(finding.suggestion or "Nothing to do.")
+
+        where = _location(finding)
+        if finding.count > 1:
+            where += f", seen {finding.count} times"
+        self.where_label.setText(where)
+        self.file_label.setText(f"File in the dump: {finding.arcname}")
+
+        self.excerpt_view.setPlainText(finding.excerpt)
         self.technical_view.setPlainText(finding.technical)
-        if has_tech:
-            self.tech_toggle.setChecked(False)
-        else:
-            self.technical_view.hide()
+        self.excerpt_toggle.setVisible(bool(finding.excerpt))
+        self.tech_toggle.setVisible(bool(finding.technical))
+        self.excerpt_toggle.setChecked(False)
+        self.tech_toggle.setChecked(False)
+        self.excerpt_view.hide()
+        self.technical_view.hide()
 
     def clear(self) -> None:
-        self.title_label.setText("Select a finding on the left to see details")
-        self.where_label.setText("")
+        self._finding = None
+        for widget in (*self._content, self.excerpt_view, self.technical_view):
+            widget.hide()
+        self.detail_label.hide()
         self.category_label.setText("")
-        self.chip.setText("—")
-        self.chip.setStyleSheet("")
-        self.detail_label.setText("")
-        self.suggestion_label.setText("")
-        self.excerpt_view.clear()
-        self.technical_view.clear()
-        self.technical_view.hide()
-        self.tech_toggle.hide()
+        self.title_label.setText(
+            "Pick an item on the left to see what it means and how to fix it."
+        )
+
+    def _toggle_excerpt(self, checked: bool) -> None:
+        self.excerpt_toggle.setText("Hide log lines" if checked else "Show log lines")
+        self.excerpt_view.setVisible(checked)
 
     def _toggle_technical(self, checked: bool) -> None:
-        self.tech_toggle.setArrowType(
-            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        self.tech_toggle.setText(
+            "Hide technical details" if checked else "Show technical details"
         )
         self.technical_view.setVisible(checked)
 
-    def _copy_excerpt(self) -> None:
+    def _copy(self) -> None:
         # Route through the same redaction the export path uses - a
         # one-click "copy this and paste it into a bug report" action must
         # not be the one place secrets slip out unfiltered.
-        from ..report import _redact
-
-        text = "\n".join(
-            part
-            for part in (self.where_label.text(), self.excerpt_view.toPlainText())
-            if part
-        )
         from PySide6.QtGui import QGuiApplication
 
+        from ..report import _redact
+
+        finding = self._finding
+        if finding is None:
+            return
+        text = "\n".join(
+            part
+            for part in (
+                f"[{SEVERITY_LABEL[finding.severity]}] {finding.title}",
+                f"{finding.arcname}"
+                + (f" line {finding.line_no}" if finding.line_no is not None else ""),
+                finding.excerpt,
+            )
+            if part
+        )
         QGuiApplication.clipboard().setText(_redact(text))
+        self.copy_button.setText("Copied")
+        QTimer.singleShot(1500, lambda: self.copy_button.setText("Copy for bug report"))
 
 
-class QTextEditReadOnlyHolder(QPlainTextEdit):
-    """Monospace read-only viewer used for technical details."""
+def _wrapped(name: str = "", selectable: bool = False) -> QLabel:
+    label = QLabel()
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(True)
+    if name:
+        label.setObjectName(name)
+    if selectable:
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    return label
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("technical")
-        self.setReadOnly(True)
+
+def _caption(text: str) -> QLabel:
+    label = QLabel(text.upper())
+    label.setObjectName("caption")
+    return label
+
+
+def _code_view(name: str) -> QPlainTextEdit:
+    view = QPlainTextEdit()
+    view.setObjectName(name)
+    view.setReadOnly(True)
+    view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+    view.setFixedHeight(220)
+    return view
 
 
 def fill_recent_list(widget, dumps: Iterable[Path]) -> None:

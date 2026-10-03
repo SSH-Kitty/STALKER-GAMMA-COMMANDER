@@ -82,6 +82,10 @@ class _Page(unittest.TestCase):
             install_busy = False
             install_operation = None
 
+            def set_install_busy(self, busy, operation=None):
+                self.install_busy = busy
+                self.install_operation = operation if busy else None
+
             def refresh_settings(self):
                 pass
 
@@ -169,17 +173,40 @@ class UpdateFromArchiveTest(_Page):
         self.assertIn("updated", message)
 
     def test_reinstall_keeps_the_old_folder_until_the_new_one_lands(self):
+        import time
+
         page = self._page()
         mods = Path(self.tmp.name) / "mods"
         _write(mods, "Mine/gamedata/old.ltx")
-        with patch.object(page, "_start_mod_install") as start:
+        # The real _start_mod_install marks the install active as it starts.
+        with patch.object(
+            page,
+            "_start_mod_install",
+            side_effect=lambda *_a: setattr(page, "_install_active", True),
+        ) as start:
             page._reinstall_from(Path("/x/Mine.zip"), "Mine", "done")
+            # Moving the existing folder aside now runs on a
+            # BackgroundTask (real QThread) instead of blocking the
+            # caller.
+            app = QApplication.instance()
+            deadline = time.monotonic() + 5
+            while not start.called and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
+            for _ in range(20):
+                app.processEvents()
         start.assert_called_once()
         destination, backup = page._reinstall_backup
         self.assertFalse(destination.exists())
         self.assertTrue((backup / "gamedata" / "old.ltx").is_file())
         # The install failed: _finish_install() puts the old files back.
         page._finish_install()
+        deadline = time.monotonic() + 5
+        while not (mods / "Mine" / "gamedata" / "old.ltx").exists() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        for _ in range(20):
+            app.processEvents()
         self.assertTrue((mods / "Mine" / "gamedata" / "old.ltx").is_file())
         self.assertIsNone(page._reinstall_done_message)
 

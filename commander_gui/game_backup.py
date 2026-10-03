@@ -177,7 +177,9 @@ def _write_zip(
     fd, tmp = tempfile.mkstemp(prefix=".partial-", suffix=".zip", dir=dest.parent)
     os.close(fd)
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        with zipfile.ZipFile(
+            tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=1, strict_timestamps=False
+        ) as archive:
             archive.writestr(MANIFEST, json.dumps(manifest, indent=2))
             for index, (name, path) in enumerate(files, 1):
                 archive.write(path, name)
@@ -280,9 +282,8 @@ def read_info(path: Path) -> BackupInfo | None:
         return None
 
 
-def list_backups(profile_name: str) -> list[BackupInfo]:
-    """This profile's backups, newest first."""
-    folder = profile_backup_dir(profile_name)
+def _backups_in(folder: Path) -> list[BackupInfo]:
+    """The backups in *folder*, newest first (in-progress ``.partial`` skipped)."""
     if not folder.is_dir():
         return []
     infos = [
@@ -293,10 +294,16 @@ def list_backups(profile_name: str) -> list[BackupInfo]:
     return sorted(infos, key=lambda info: info.created, reverse=True)
 
 
-def prune_automatic(profile_name: str, keep: int = KEEP_AUTOMATIC) -> list[Path]:
+def list_backups(profile_name: str) -> list[BackupInfo]:
+    """This profile's backups, newest first."""
+    return _backups_in(profile_backup_dir(profile_name))
+
+
+def _prune_folder(folder: Path, keep: int = KEEP_AUTOMATIC) -> list[Path]:
+    """Keep the newest *keep* automatic backups of each reason in *folder*."""
     removed: list[Path] = []
     by_reason: dict[str, list[BackupInfo]] = {}
-    for info in list_backups(profile_name):  # newest first
+    for info in _backups_in(folder):  # newest first
         if info.reason != "manual":
             by_reason.setdefault(info.reason, []).append(info)
     for infos in by_reason.values():
@@ -309,23 +316,8 @@ def prune_automatic(profile_name: str, keep: int = KEEP_AUTOMATIC) -> list[Path]
     return removed
 
 
-def _prune_folder(folder: Path) -> None:
-    """prune_automatic() for a folder rather than a profile name."""
-    infos = sorted(
-        (i for p in folder.glob("*.zip") if (i := read_info(p)) is not None),
-        key=lambda i: i.created,
-        reverse=True,
-    )
-    by_reason: dict[str, list[BackupInfo]] = {}
-    for info in infos:
-        if info.reason != "manual":
-            by_reason.setdefault(info.reason, []).append(info)
-    for group in by_reason.values():
-        for info in group[KEEP_AUTOMATIC:]:
-            try:
-                info.path.unlink()
-            except OSError:
-                pass
+def prune_automatic(profile_name: str, keep: int = KEEP_AUTOMATIC) -> list[Path]:
+    return _prune_folder(profile_backup_dir(profile_name), keep)
 
 
 def rename_profile_backups(old_name: str, new_name: str) -> None:

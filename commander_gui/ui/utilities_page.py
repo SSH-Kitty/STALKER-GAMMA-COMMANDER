@@ -43,9 +43,10 @@ from ..parsers import (
     parse_prune_archive,
     strip_ansi,
 )
-from ..repair import fetch_modpack_records
+from ..repair import expected_archive_md5s, fetch_modpack_records
 from .common import (
     STATUS_RED,
+    BackgroundTask,
     CommandRunner,
     OutputPane,
     ProgressArea,
@@ -344,28 +345,28 @@ def _cache_preflight_summary_html(
     bare "392 reusable" count reads as contradicting.
     """
     if include_anomaly:
-        intro = (
+        intro = tr(
             "Fresh Reset deletes and reinstalls both Anomaly and the "
             "GAMMA modpack from scratch - everything still gets freshly "
             "extracted either way."
         )
     else:
-        intro = (
+        intro = tr(
             "GAMMA Reset deletes and reinstalls the GAMMA modpack - "
             "Anomaly itself is not touched. Every mod still gets freshly "
             "extracted from its archive either way."
         )
-    intro += (
-        " This check only looks at whether files already in your "
+    intro += " " + tr(
+        "This check only looks at whether files already in your "
         "download cache are still valid, so the reinstall can skip "
         "re-downloading those specifically."
     )
 
     rows = (
-        ("Already downloaded, valid", len(result.verified)),
-        ("Need downloading", len(result.missing)),
-        ("Outdated - official list changed", len(result.mismatched)),
-        ("Unreadable", len(result.unreadable)),
+        (tr("Already downloaded, valid"), len(result.verified)),
+        (tr("Need downloading"), len(result.missing)),
+        (tr("Outdated - official list changed"), len(result.mismatched)),
+        (tr("Unreadable"), len(result.unreadable)),
     )
     table_rows = "".join(
         f"<tr><td>{escape(label)}</td>"
@@ -377,18 +378,18 @@ def _cache_preflight_summary_html(
     sections = []
     for label, explanation, names in (
         (
-            "Need downloading",
-            "Not currently in your cache - they'll simply be downloaded, same as a normal install.",
+            tr("Need downloading"),
+            tr("Not currently in your cache - they'll simply be downloaded, same as a normal install."),
             result.missing,
         ),
         (
-            "Outdated",
-            "Differ from the current official list (e.g. after a GAMMA update) - not evidence anything is broken. They'll be redownloaded automatically.",
+            tr("Outdated"),
+            tr("Differ from the current official list (e.g. after a GAMMA update) - not evidence anything is broken. They'll be redownloaded automatically."),
             result.mismatched,
         ),
         (
-            "Unreadable",
-            "Couldn't be verified (e.g. corrupted) - they'll be redownloaded automatically.",
+            tr("Unreadable"),
+            tr("Couldn't be verified (e.g. corrupted) - they'll be redownloaded automatically."),
             result.unreadable,
         ),
     ):
@@ -397,16 +398,17 @@ def _cache_preflight_summary_html(
         shown_names = names[:_CACHE_PREFLIGHT_NAMES_SHOWN]
         items = "".join(f"<li>{escape(name)}</li>" for name in shown_names)
         if len(names) > len(shown_names):
-            items += f"<li>... and {len(names) - len(shown_names)} more</li>"
+            more = tr("... and {count} more", count=len(names) - len(shown_names))
+            items += f"<li>{escape(more)}</li>"
         sections.append(
-            f"<p><b>{escape(label)}:</b> {explanation}</p><ul>{items}</ul>"
+            f"<p><b>{escape(label)}:</b> {escape(explanation, quote=False)}</p><ul>{items}</ul>"
         )
 
     return (
-        f"<p>{intro}</p>"
+        f"<p>{escape(intro, quote=False)}</p>"
         f"{table}"
         f"{''.join(sections)}"
-        "<p><b>Continue with the reset?</b></p>"
+        f"<p><b>{escape(tr('Continue with the reset?'), quote=False)}</b></p>"
     )
 
 
@@ -685,13 +687,48 @@ def _rewrite_mo2_ini_paths(
         updated = updated.replace(old_variant, new_variant)
     if updated == text:
         raise ValueError(f"No configured paths were found in {ini}")
-    if any(old_variant in updated for old_variant, _new_variant in pairs):
+    # A new path may itself contain an old one (".../GAMMA" moved to
+    # ".../GAMMA-new/GAMMA"), so look for leftovers only outside the
+    # freshly written new paths.
+    remainder = updated
+    for _old_variant, new_variant in sorted(pairs, key=lambda pair: len(pair[1]), reverse=True):
+        remainder = remainder.replace(new_variant, "")
+    if any(old_variant in remainder for old_variant, _new_variant in pairs):
         raise ValueError(f"Old paths remain in {ini}")
     backup = ini.with_name(ini.name + ".gammagui.bak")
     if not backup.exists():
         shutil.copy2(ini, backup)
     write_text(ini, updated)
     return ini
+
+
+def _wipe_warning_html(headline: str, folders: list[str], extra_items: tuple[str, ...] = ()) -> str:
+    """The red "THIS DELETES" body shared by the reset and uninstall prompts."""
+    rows = "".join(f"&nbsp;&nbsp;&nbsp;&nbsp;{escape(folder)}<br>" for folder in folders)
+    items = [
+        tr("ALL SAVES"),
+        tr("MO2 SETTINGS"),
+        tr("MCM SETTINGS"),
+        tr("ANY ADDITIONAL MODS YOU ADDED"),
+        *extra_items,
+    ]
+    bullets = "".join(f"&nbsp;&nbsp;• {item}<br>" for item in items)
+    return (
+        "<html><body>"
+        f"<div style='font-weight: bold; font-size: 13px;'>{tr('WARNING')}</div><br>"
+        f"<div style='color: {STATUS_RED.name()}; text-align: center; font-weight: bold; font-size: 14px;'>"
+        f"{headline}"
+        "</div><br><br>"
+        + tr("This will permanently delete the following folders:")
+        + f"<br>{rows}<br>"
+        f"<strong>{tr('THIS DELETES:')}</strong><br>{bullets}<br>"
+    )
+
+
+_BACKUP_NOTE = (
+    "Your saves, user.ltx and MCM settings are backed up automatically first "
+    "(Utilities > Saves & Settings Backup). Mods you added yourself are not."
+)
 
 
 class _MoveDialog(QDialog):
@@ -719,6 +756,11 @@ class _MoveDialog(QDialog):
             return
         super().closeEvent(event)
 
+    def reject(self) -> None:
+        # Escape goes through reject(), not closeEvent().
+        if self._page._move_task is None:
+            super().reject()
+
 
 class UtilitiesPage(QWidget):
     def __init__(self, window) -> None:
@@ -742,6 +784,8 @@ class UtilitiesPage(QWidget):
         self._move_profile_name: str | None = None
         self._move_sources: list[tuple[str, str]] = []
         self._log_dump_task: StreamTask | None = None
+        self._repair_task: BackgroundTask | None = None
+        self._repair_running = False
         self._assistant_process = None
         self._assistant_timer = QTimer(self)
         self._assistant_timer.setInterval(100)
@@ -878,8 +922,10 @@ class UtilitiesPage(QWidget):
         """Undo another Wine's writes into the runner's prefix."""
         from ..gui_settings import configured_runner
         from ..launcher import LaunchError
-        from ..repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
+        from ..repair import foreign_prefix_dlls
 
+        if self._repair_running:
+            return
         if self.window.install_busy:
             QMessageBox.warning(self, tr("Busy"), tr("An install is already running."))
             return
@@ -903,8 +949,23 @@ class UtilitiesPage(QWidget):
                 tr("The selected runner does not use a Proton prefix."),
             )
             return
-        foreign = foreign_prefix_dlls(prefix, runner)
+        self._repair_running = True
+        # foreign_prefix_dlls() globs and byte-compares every DLL in the
+        # prefix against every host Wine build found - real disk I/O, so it
+        # runs off the GUI thread rather than freezing the window on click.
+        task = BackgroundTask(foreign_prefix_dlls, prefix, runner, parent=self)
+        task.result.connect(lambda foreign: self._on_repair_scanned(foreign, prefix, runner))
+        task.error.connect(self._on_repair_error)
+        self._repair_task = task
+        task.start()
+
+    def _on_repair_error(self, message: str) -> None:
+        self._repair_running = False
+        QMessageBox.warning(self, tr("Repair Failed"), message)
+
+    def _on_repair_scanned(self, foreign, prefix, runner) -> None:
         if not foreign:
+            self._repair_running = False
             QMessageBox.information(
                 self,
                 tr("Nothing to repair"),
@@ -930,12 +991,32 @@ class UtilitiesPage(QWidget):
             QMessageBox.StandardButton.Yes,
         )
         if reply != QMessageBox.StandardButton.Yes:
+            self._repair_running = False
             return
-        try:
-            repaired = repair_prefix_foreign_dlls(prefix, runner)
-        except OSError as exc:
-            QMessageBox.warning(self, tr("Repair Failed"), str(exc))
+        # install_busy/mo2 state may have changed while the scan ran and the
+        # dialog was open.
+        if self.window.install_busy:
+            self._repair_running = False
+            QMessageBox.warning(self, tr("Busy"), tr("An install is already running."))
             return
+        if mo2_running(force=True):
+            self._repair_running = False
+            QMessageBox.warning(
+                self,
+                tr("Mod Organizer is running"),
+                tr("Close Mod Organizer and the game before repairing the prefix."),
+            )
+            return
+        from ..repair import repair_prefix_foreign_dlls
+
+        task = BackgroundTask(repair_prefix_foreign_dlls, prefix, runner, parent=self)
+        task.result.connect(lambda repaired: self._on_repair_done(repaired, prefix))
+        task.error.connect(self._on_repair_error)
+        self._repair_task = task
+        task.start()
+
+    def _on_repair_done(self, repaired, prefix) -> None:
+        self._repair_running = False
         self.output.append_line(f"Repaired {len(repaired)} DLLs in {prefix}")
         for name in repaired:
             self.output.append_line(f"  restored {name}")
@@ -1260,15 +1341,19 @@ class UtilitiesPage(QWidget):
             self,
             tr("Move installation"),
             "<html><body>"
-            "<div style='font-weight: bold; font-size: 13px;'>Move installation</div><br>"
-            "This will copy the following folders to the destination and "
-            "then remove the originals:<br><br>"
+            f"<div style='font-weight: bold; font-size: 13px;'>{tr('Move installation')}</div><br>"
+            + tr(
+                "This will copy the following folders to the destination and "
+                "then remove the originals:"
+            )
+            + "<br><br>"
             f"&nbsp;&nbsp;&nbsp;&nbsp;Anomaly: {escape(profile.anomaly)}<br>"
             f"&nbsp;&nbsp;&nbsp;&nbsp;GAMMA: {escape(profile.gamma)}<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;Cache: {escape(profile.cache)}<br><br>"
-            f"<strong>Destination:</strong> {escape(dest)}<br><br>"
-            "Make sure the destination has enough free space.<br><br>"
-            "Continue?",
+            f"&nbsp;&nbsp;&nbsp;&nbsp;{tr('Cache')}: {escape(profile.cache)}<br><br>"
+            f"<strong>{tr('Destination')}:</strong> {escape(dest)}<br><br>"
+            + tr("Make sure the destination has enough free space.")
+            + "<br><br>"
+            + tr("Continue?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -1286,12 +1371,15 @@ class UtilitiesPage(QWidget):
         self._show_console()
         self._move_progress.reset()
         self._move_progress.on_started()
+        # A move can only be cancelled, not paused (no runner behind it).
+        self._move_progress.pause_button.hide()
         self._move_btn.setEnabled(False)
         self._move_cancel_btn.show()
         self._set_buttons_enabled(False)
         gui_settings.save_gui_settings(
             move_dest=str(dest_path),
             move_expected=[Path(path).name for _label, path in sources if path],
+            move_sources=[str(Path(path)) for _label, path in sources if path],
         )
 
         task = StreamTask(
@@ -1393,11 +1481,11 @@ class UtilitiesPage(QWidget):
             # Keep the interrupted-move marker until both configuration stores
             # have been successfully written and verified.
             if consistency_error is None:
-                gui_settings.save_gui_settings(move_dest="", move_expected=[])
+                gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
         else:
             # Nothing was moved (all sources missing): clear the marker so a
             # bogus "interrupted move" recovery is not offered on next launch.
-            gui_settings.save_gui_settings(move_dest="", move_expected=[])
+            gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
         # Now that paths, INI, and verification have settled, release the lock.
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
@@ -1632,31 +1720,18 @@ class UtilitiesPage(QWidget):
         self._reset_preserve_user = False
         self._reset_preserve_mcm = False
         folders = "Anomaly and GAMMA" if include_anomaly else "GAMMA"
-        warning = (
-            "FRESH RESET WILL COMPLETELY WIPE & RE-INSTALL STALKER ANOMALY & GAMMA FOLDERS"
+        warning = escape(
+            tr("FRESH RESET WILL COMPLETELY WIPE & RE-INSTALL STALKER ANOMALY & GAMMA FOLDERS")
             if include_anomaly
-            else "GAMMA RESET WILL WIPE & RE-INSTALL THE GAMMA FOLDER"
+            else tr("GAMMA RESET WILL WIPE & RE-INSTALL THE GAMMA FOLDER")
         )
-        anomaly_folder = (
-            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.anomaly}<br>" if include_anomaly else ""
-        )
+        folders_shown = [profile.anomaly, profile.gamma] if include_anomaly else [profile.gamma]
         message = (
-            "<html><body>"
-            "<div style='font-weight: bold; font-size: 13px;'>WARNING</div><br>"
-            f"<div style='color: {STATUS_RED.name()}; text-align: center; font-weight: bold; font-size: 14px;'>"
-            f"{warning}"
-            "</div><br><br>"
-            "This will permanently delete the following folders:<br>"
-            f"{anomaly_folder}"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.gamma}<br><br>"
-            "<strong>THIS DELETES:</strong><br>"
-            "&nbsp;&nbsp;• ALL SAVES<br>"
-            "&nbsp;&nbsp;• MO2 SETTINGS<br>"
-            "&nbsp;&nbsp;• MCM SETTINGS<br>"
-            "&nbsp;&nbsp;• ANY ADDITIONAL MODS YOU ADDED<br><br>"
-            "Your saves, user.ltx and MCM settings are backed up automatically first "
-            "(Utilities &gt; Saves &amp; Settings Backup). Mods you added yourself are not.<br><br>"
-            f"Are you sure you want to run a {title}?</body></html>"
+            _wipe_warning_html(warning, folders_shown)
+            + escape(tr(_BACKUP_NOTE), quote=False)
+            + "<br><br>"
+            + tr("Are you sure you want to run a {title}?", title=title)
+            + "</body></html>"
         )
         if include_anomaly:
             answer = QMessageBox.question(
@@ -1722,13 +1797,7 @@ class UtilitiesPage(QWidget):
             raise RuntimeError("No active profile")
         report("Downloading the current official GAMMA archive list...")
         records = fetch_modpack_records(profile.mod_pack_maker_url)
-        expected: dict[str, str] = {}
-        for record in records.values():
-            digest = record.md5_mod_db.lower()
-            if len(digest) != 32 or any(char not in "0123456789abcdef" for char in digest):
-                continue
-            for archive_name in record.archive_names():
-                expected.setdefault(archive_name, digest)
+        expected = expected_archive_md5s(records)
         if not expected:
             return None
         return verify_cache_archives(
@@ -1902,26 +1971,20 @@ class UtilitiesPage(QWidget):
         answer = QMessageBox.question(
             self,
             tr("Full Uninstall"),
-            "<html><body>"
-            "<div style='font-weight: bold; font-size: 13px;'>WARNING</div><br>"
-            f"<div style='color: {STATUS_RED.name()}; text-align: center; font-weight: bold; font-size: 14px;'>"
-            "FULL UNINSTALL WILL COMPLETELY REMOVE STALKER ANOMALY & GAMMA"
-            "</div><br><br>"
-            "This will permanently delete the following folders:<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.anomaly}<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.gamma}<br><br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;{profile.cache}<br><br>"
-            "<strong>THIS DELETES:</strong><br>"
-            "&nbsp;&nbsp;• ALL SAVES<br>"
-            "&nbsp;&nbsp;• MO2 SETTINGS<br>"
-            "&nbsp;&nbsp;• MCM SETTINGS<br>"
-            "&nbsp;&nbsp;• ANY ADDITIONAL MODS YOU ADDED<br><br>"
-            "&nbsp;&nbsp;• DOWNLOAD CACHE<br><br>"
-            "The configured Wine/Proton prefix and its Winetricks configuration "
-            "will not be deleted.<br><br>"
-            "Your saves, user.ltx and MCM settings are backed up automatically first "
-            "(Utilities &gt; Saves &amp; Settings Backup). Mods you added yourself are not.<br><br>"
-            "Are you sure you want to completely uninstall Anomaly and GAMMA?</body></html>",
+            _wipe_warning_html(
+                escape(tr("FULL UNINSTALL WILL COMPLETELY REMOVE STALKER ANOMALY & GAMMA")),
+                [profile.anomaly, profile.gamma, profile.cache],
+                (tr("DOWNLOAD CACHE"),),
+            )
+            + tr(
+                "The configured Wine/Proton prefix and its Winetricks configuration "
+                "will not be deleted."
+            )
+            + "<br><br>"
+            + escape(tr(_BACKUP_NOTE), quote=False)
+            + "<br><br>"
+            + tr("Are you sure you want to completely uninstall Anomaly and GAMMA?")
+            + "</body></html>",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:

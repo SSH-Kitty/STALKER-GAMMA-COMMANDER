@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -21,30 +21,26 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+)
+
+from commander_gui.gui_settings import load_gui_settings
+from commander_gui.ui.title_bar import (
+    EdgeResizeFilter,
+    WindowDragFilter,
+    attach_resize_filter,
+    build_window_buttons,
+    pin_top_right,
+    update_max_button,
 )
 
 from .. import report as report_mod
 from ..analyzers import run_analysis, scanned_files
 from ..dump import DumpArchive, DumpError, default_dumps_dir, human_size, recent_dumps
-from ..findings import (
-    CATEGORIES,
-    Finding,
-    Severity,
-    summarize,
-)
+from ..findings import Finding, summarize
 from . import theme
-from .widgets import DetailPane, DropZone, fill_recent_list, severity_pill
-
-_MIN_SEVERITY_FILTERS = (
-    ("Everything", Severity.INFO),
-    ("Warnings and worse", Severity.WARNING),
-    ("Errors and worse", Severity.ERROR),
-    ("Critical only", Severity.FATAL),
-)
+from .widgets import DetailPane, DropZone, FindingList, fill_recent_list
 
 
 class _Worker(QObject):
@@ -84,6 +80,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("COMMANDER Assistant")
         self.resize(1180, 740)
         self.setAcceptDrops(True)
+        self.custom_title_bar = False
+        self._drag_filter = WindowDragFilter(self)
+        self._resize_filter = EdgeResizeFilter(self)
 
         self._dump: DumpArchive | None = None
         self._findings: list[Finding] = []
@@ -122,22 +121,21 @@ class MainWindow(QMainWindow):
         wordmark_layout.addWidget(byline)
         top_bar.addWidget(wordmark_block)
         top_bar.addStretch(1)
-        self.theme_combo = QComboBox()
-        self.theme_combo.setObjectName("themeSelector")
-        for key, label in theme.THEME_INFO:
-            self.theme_combo.addItem(label, key)
-        self.theme_combo.setToolTip("COMMANDER theme")
-        self.theme_combo.setCurrentIndex(self.theme_combo.findData(theme.active_theme()))
-        self.theme_combo.currentIndexChanged.connect(self._theme_changed)
-        top_bar.addWidget(self.theme_combo)
-        # Follow a theme picked in COMMANDER while ASSISTANT is open: both
+        # Follow the theme picked in COMMANDER, also while ASSISTANT is open: both
         # share gui-settings.json, which is cheap to stat.
         self._theme_mtime = self._settings_mtime()
         self._theme_watch = QTimer(self)
         self._theme_watch.setInterval(1500)
         self._theme_watch.timeout.connect(self._follow_saved_theme)
         self._theme_watch.start()
+        open_logs_button = QPushButton("Log folder")
+        open_logs_button.setToolTip(
+            f"Open the folder where log dumps are stored:\n{default_dumps_dir()}"
+        )
+        open_logs_button.clicked.connect(self._open_dumps_folder)
+        top_bar.addWidget(open_logs_button)
         open_button = QPushButton("Open ZIP...")
+        open_button.setToolTip("Open a log dump ZIP (Ctrl+O). You can also drop one anywhere on this window.")
         open_button.clicked.connect(self._browse)
         top_bar.addWidget(open_button)
         self.recent_combo = QComboBox()
@@ -145,29 +143,18 @@ class MainWindow(QMainWindow):
         self.recent_combo.setToolTip("Recently created or opened log dumps")
         self.recent_combo.activated.connect(self._on_recent_selected)
         top_bar.addWidget(self.recent_combo)
-        self.save_button = QPushButton("Save analysis")
+        self.save_button = QPushButton("Save report")
+        self.save_button.setToolTip("Save this analysis as a Markdown report (Ctrl+S)")
         self.save_button.setObjectName("primary")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self._save_analysis)
         top_bar.addWidget(self.save_button)
         root.addWidget(header)
-
-        # --- quick actions row (below the logo, tab-styled) ---------------
-        quick_actions = QWidget()
-        quick_actions.setObjectName("quickActions")
-        actions_layout = QHBoxLayout(quick_actions)
-        actions_layout.setContentsMargins(8, 0, 8, 0)
-        actions_layout.setSpacing(0)
-        open_logs_button = QPushButton("Open log folder")
-        open_logs_button.setObjectName("tabButton")
-        open_logs_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        open_logs_button.setToolTip(
-            f"Open the folder where log dumps are stored:\n{default_dumps_dir()}"
-        )
-        open_logs_button.clicked.connect(self._open_dumps_folder)
-        actions_layout.addStretch(1)
-        actions_layout.addWidget(open_logs_button)
-        root.addWidget(quick_actions)
+        self._header = header
+        for widget in (header, wordmark_block, wordmark, byline):
+            widget.installEventFilter(self._drag_filter)
+        self._title_strip = build_window_buttons(self, self._drag_filter)
+        pin_top_right(self._title_strip, header)
 
         # --- stacked content ---------------------------------------------
         self.stack = QStackedWidget()
@@ -178,6 +165,37 @@ class MainWindow(QMainWindow):
         self._refresh_recents()
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self._browse)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_analysis)
+        self.apply_title_bar(bool(load_gui_settings().get("custom_title_bar", True)))
+
+    # ----------------------------------------------------------- title bar
+
+    def apply_title_bar(self, custom: bool) -> None:
+        """Draw COMMANDER's own title bar (frameless) or use the desktop's."""
+        # Offscreen/minimal platforms (tests, screenshots) have no window
+        # manager to hand moves and resizes to.
+        custom = custom and QGuiApplication.platformName() not in ("offscreen", "minimal")
+        visible = self.isVisible()
+        self.custom_title_bar = custom
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, custom)
+        self._title_strip.setVisible(custom)
+        # The top bar's buttons are taller than COMMANDER's, so the whole
+        # strip goes above them instead of being split above and below.
+        strip = self._title_strip.height() if custom else 0
+        self._header.layout().setContentsMargins(16, strip, 8, strip // 2)
+        if visible:
+            self.show()
+        attach_resize_filter(self, self._resize_filter, custom)
+
+    def toggle_maximized(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.WindowStateChange:
+            update_max_button(self)
+        super().changeEvent(event)
 
     # ------------------------------------------------------------------ UI
 
@@ -283,15 +301,6 @@ class MainWindow(QMainWindow):
                 f"{label.property('step_text')}"
             )
 
-    def _theme_changed(self, index: int) -> None:
-        name = self.theme_combo.itemData(index)
-        if not isinstance(name, str):
-            return
-        if self._apply_theme_ui(name):
-            theme.save_theme(name)
-            # Our own write: not a change to follow.
-            self._theme_mtime = self._settings_mtime()
-
     def _apply_theme_ui(self, name: str) -> bool:
         app = QApplication.instance()
         if app is None:
@@ -317,97 +326,60 @@ class MainWindow(QMainWindow):
         name = theme.load_saved_theme()
         if name == theme.active_theme():
             return
-        index = self.theme_combo.findData(name)
-        if index >= 0:
-            self.theme_combo.blockSignals(True)
-            self.theme_combo.setCurrentIndex(index)
-            self.theme_combo.blockSignals(False)
         self._apply_theme_ui(name)
 
     def _build_analysis(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 10, 16, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
 
-        self.analysis_drop = DropZone()
-        self.analysis_drop.set_compact(True)
-        self.analysis_drop.dropped.connect(self._open_paths)
-        self.analysis_drop.rejected_drop.connect(self._flash_reject)
-        self.analysis_drop.clicked_browse.connect(self._browse)
-        layout.addWidget(self.analysis_drop)
+        # Verdict: one glance tells the user whether anything needs fixing.
+        self.verdict = QFrame()
+        self.verdict.setObjectName("verdictCard")
+        verdict_row = QHBoxLayout(self.verdict)
+        verdict_row.setContentsMargins(16, 14, 16, 14)
+        verdict_row.setSpacing(16)
+        self.verdict_icon = QLabel()
+        self.verdict_icon.setObjectName("verdictIcon")
+        self.verdict_icon.setFixedSize(44, 44)
+        self.verdict_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        verdict_row.addWidget(self.verdict_icon, 0, Qt.AlignmentFlag.AlignTop)
+        verdict_text = QVBoxLayout()
+        verdict_text.setSpacing(3)
+        self.verdict_title = QLabel()
+        self.verdict_title.setObjectName("verdictTitle")
+        self.verdict_title.setTextFormat(Qt.TextFormat.PlainText)
+        verdict_text.addWidget(self.verdict_title)
+        self.verdict_sub = QLabel()
+        self.verdict_sub.setObjectName("verdictSub")
+        self.verdict_sub.setTextFormat(Qt.TextFormat.PlainText)
+        self.verdict_sub.setWordWrap(True)
+        verdict_text.addWidget(self.verdict_sub)
+        self.verdict_meta = QLabel()
+        self.verdict_meta.setObjectName("dim")
+        self.verdict_meta.setTextFormat(Qt.TextFormat.PlainText)
+        self.verdict_meta.setWordWrap(True)
+        verdict_text.addWidget(self.verdict_meta)
+        verdict_row.addLayout(verdict_text, 1)
+        layout.addWidget(self.verdict)
 
-        self.banner = QLabel("")
-        self.banner.setObjectName("bannerGood")
-        self.banner.setWordWrap(True)
-        layout.addWidget(self.banner)
-
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Show findings:"))
-        self.severity_filter = QComboBox()
-        for label, _minimum in _MIN_SEVERITY_FILTERS:
-            self.severity_filter.addItem(label)
-        self.severity_filter.currentIndexChanged.connect(self._apply_filters)
-        filter_row.addWidget(self.severity_filter)
-        self.category_filter = QComboBox()
-        self.category_filter.addItem("All finding categories")
-        self.category_filter.addItems(CATEGORIES)
-        self.category_filter.currentIndexChanged.connect(self._apply_filters)
-        filter_row.addWidget(self.category_filter)
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search findings... (file, summary, or log)")
+        self.search_box.setPlaceholderText("Search findings, e.g. download, prefix, MO2")
         self.search_box.setClearButtonEnabled(True)
         self.search_box.textChanged.connect(self._apply_filters)
-        filter_row.addWidget(self.search_box, 1)
-        self.stats_label = QLabel("")
-        self.stats_label.setObjectName("dim")
-        filter_row.addWidget(self.stats_label)
-        layout.addLayout(filter_row)
+        layout.addWidget(self.search_box)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(
-            ["Severity", "Category", "What happened", "Where", "Times"]
-        )
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
-        self.table.setShowGrid(False)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.setColumnWidth(0, 96)
-        self.table.setColumnWidth(1, 140)
-        self.table.setColumnWidth(4, 60)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        from PySide6.QtWidgets import QHeaderView
-
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.table.itemSelectionChanged.connect(self._on_row_selected)
-
-        # Table + friendly empty state share the left pane; the empty label
-        # appears whenever the active filters hide every finding.
-        self._row_findings: dict[int, Finding] = {}
-        table_page = QWidget()
-        table_layout = QVBoxLayout(table_page)
-        table_layout.setContentsMargins(0, 0, 0, 0)
-        table_layout.addWidget(self.table)
-        self.empty_state = QLabel(
-            "No findings match these filters.\n\n"
-            "Try changing the severity, category, or search text above."
-        )
-        self.empty_state.setObjectName("emptyState")
-        self.empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_state.hide()
-        table_layout.addWidget(self.empty_state, 1)
-        splitter.addWidget(table_page)
-
+        splitter.setHandleWidth(12)
+        self.finding_list = FindingList()
+        splitter.addWidget(self.finding_list)
         self.detail = DetailPane()
+        self.finding_list.selected.connect(self.detail.set_finding)
         splitter.addWidget(self.detail)
-        splitter.setSizes([620, 460])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([560, 560])
         layout.addWidget(splitter, 1)
         return page
 
@@ -503,7 +475,10 @@ class MainWindow(QMainWindow):
             worker.deleteLater()
             thread.deleteLater()
 
-        thread.finished.connect(_cleanup)
+        # QThread.finished is emitted from the worker thread, and a plain
+        # function has no thread affinity (see the note in the analyze step
+        # below): hop onto this window's thread before touching widgets.
+        thread.finished.connect(lambda: QTimer.singleShot(0, self, _cleanup))
         self._bg_thread = thread
         self._bg_worker = worker
         thread.start()
@@ -539,7 +514,6 @@ class MainWindow(QMainWindow):
         else:
             QApplication.restoreOverrideCursor()
         self.welcome_drop.setEnabled(not busy)
-        self.analysis_drop.setEnabled(not busy)
 
     def _open_paths(self, paths: object) -> None:
         if self._bg_thread is not None:
@@ -615,99 +589,28 @@ class MainWindow(QMainWindow):
         assert self._dump is not None
         dump_name = self._dump.path.name
         self.setWindowTitle(f"{dump_name} — COMMANDER Assistant")
-        text_files, binary_files = scanned_files(self._dump)
-        summary = summarize(
-            self._findings, len(self._dump.files), partial=self._partial
+        text_files, _binary_files = scanned_files(self._dump)
+        summary = summarize(self._findings, len(self._dump.files), partial=self._partial)
+        self.verdict.setProperty("verdict", summary.verdict)
+        self.verdict_icon.setText({"bad": "!", "warn": "!", "good": "✓"}[summary.verdict])
+        for widget in (self.verdict, self.verdict_icon):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+        self.verdict_title.setText(summary.headline)
+        self.verdict_sub.setText(summary.sentence())
+        self.verdict_meta.setText(
+            f"{dump_name}  ·  {len(text_files)} logs scanned  ·  "
+            f"{human_size(self._dump.size)}"
         )
-        self.banner.setText(f"<b>{summary.headline}.</b> {summary.sentence()}")
-        self.banner.setObjectName(f"banner{summary.verdict.capitalize()}")
-        self.banner.style().unpolish(self.banner)
-        self.banner.style().polish(self.banner)
-        self._scan_summary = (
-            f"Scanned {len(text_files)} text files and {len(binary_files)} binary "
-            f"files | {human_size(self._dump.size)}"
-        )
-        self.severity_filter.setCurrentIndex(0)
-        self.category_filter.setCurrentIndex(0)
+        self.search_box.blockSignals(True)
         self.search_box.clear()
-        self._apply_filters()
+        self.search_box.blockSignals(False)
+        self.finding_list.set_findings(self._findings)
+        self.finding_list.setFocus()
         self.save_button.setEnabled(True)
 
     def _apply_filters(self) -> None:
-        self.detail.clear()
-        minimum = _MIN_SEVERITY_FILTERS[max(0, self.severity_filter.currentIndex())][1]
-        category = (
-            self.category_filter.currentText()
-            if self.category_filter.currentIndex() > 0
-            else ""
-        )
-        needle = self.search_box.text().strip().lower()
-        self.table.setRowCount(0)
-        self._row_findings = {}
-        visible = 0
-        for finding in self._findings:
-            if finding.severity < minimum:
-                continue
-            if category and finding.category != category:
-                continue
-            if needle:
-                haystack = (
-                    f"{finding.title} {finding.detail} {finding.arcname} "
-                    f"{finding.where_label}"
-                ).lower()
-                if needle not in haystack:
-                    continue
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self.table.setCellWidget(row, 0, severity_pill(finding.severity))
-            self._set_cell(row, 1, finding.category)
-            self._set_cell(row, 2, finding.title)
-            where = finding.where_label or finding.arcname
-            if finding.line_no is not None:
-                where += f" : line {finding.line_no}"
-            self._set_cell(row, 3, where, dim=True)
-            count = str(finding.count) if finding.count > 1 else ""
-            count_item = self._set_cell(row, 4, count, dim=True)
-            count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._row_findings[row] = finding
-            visible += 1
-
-        total = len(self._findings)
-        if total == 0:
-            self.empty_state.setText(
-                "No findings were detected. This dump looks clean.\n\n"
-                "The scanned logs contain no crashes, errors, or warnings."
-            )
-        elif visible == 0:
-            self.empty_state.setText(
-                "No findings match these filters.\n\n"
-                "Try changing the severity, category, or search text above."
-            )
-        empty = total == 0 or visible == 0
-        self.empty_state.setVisible(empty)
-        self.table.setVisible(not empty)
-        stats = f"{visible} of {total} findings shown"
-        scan = getattr(self, "_scan_summary", "")
-        if scan:
-            stats += f" | {scan}"
-        self.stats_label.setText(stats)
-
-    def _set_cell(self, row: int, column: int, text: str, color=None, dim=False):
-        item = QTableWidgetItem(text)
-        if color:
-            item.setForeground(QColor(color))
-        elif dim:
-            item.setForeground(QColor(theme.token("DIM")))
-        self.table.setItem(row, column, item)
-        return item
-
-    def _on_row_selected(self) -> None:
-        row = self.table.currentRow()
-        if row < 0:
-            return
-        finding = self._row_findings.get(row)
-        if isinstance(finding, Finding):
-            self.detail.set_finding(finding)
+        self.finding_list.set_filter(self.search_box.text())
 
     def _save_analysis(self) -> None:
         if self._dump is None:
@@ -788,5 +691,4 @@ class MainWindow(QMainWindow):
 
     def _flash_reject(self, message: str) -> None:
         self.statusBar().showMessage(message, 4000)
-        for zone in (self.welcome_drop, self.analysis_drop):
-            zone.flash_reject()
+        self.welcome_drop.flash_reject()

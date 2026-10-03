@@ -139,7 +139,13 @@ class _IpcClient:
 
 def _owned_by_us(path: Path) -> bool:
     """True if ``path`` belongs to this user. /tmp is shared: a socket there
-    made by another account would otherwise receive this user's activity."""
+    made by another account would otherwise receive this user's activity.
+
+    Also doubles as the existence check (a stat on a missing path raises
+    the same OSError) - up to ~200 candidates are checked in the worst
+    case (Discord simply isn't running), so not stat-ing each one twice
+    over an ``exists()`` pre-check halves the syscalls for that path.
+    """
     try:
         return path.stat().st_uid == os.getuid()
     except OSError:
@@ -148,7 +154,7 @@ def _owned_by_us(path: Path) -> bool:
 
 def _connect(client_id: str) -> _IpcClient | None:
     for path in _candidate_sockets():
-        if not path.exists() or not _owned_by_us(path):
+        if not _owned_by_us(path):
             continue
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(_TIMEOUT_SECONDS)

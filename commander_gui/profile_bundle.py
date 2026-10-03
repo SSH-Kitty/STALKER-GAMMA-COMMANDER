@@ -80,6 +80,9 @@ def _valid_source_value(name: str, value: object) -> bool:
         return _valid_source_url(value)
     if name.endswith("_branch"):
         return _valid_branch(value)
+    if name == "mo2_profile":
+        # Becomes a folder under <gamma>/profiles and a CLI argument.
+        return modlist_path_for("/", value) is not None and not value.startswith("-")
     return True
 
 
@@ -124,7 +127,9 @@ def export_profile_bundle(profile: CliProfile, dest_path: Path) -> None:
     modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(
+            dest_path, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False
+        ) as zf:
             zf.writestr(_MANIFEST_NAME, json.dumps(manifest, indent=2))
             if modlist_path is not None and modlist_path.is_file():
                 zf.write(modlist_path, _MODLIST_NAME)

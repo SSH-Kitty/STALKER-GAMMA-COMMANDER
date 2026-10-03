@@ -198,6 +198,9 @@ class _Device:
         #: axis code -> (minimum, maximum)
         self.ranges: dict[int, tuple[int, int]] = {}
         self.notifier: QSocketNotifier | None = None
+        #: Bytes read but not yet forming a whole event, carried over to the
+        #: next read() so a short read never desyncs the event stream.
+        self.pending = b""
 
 
 class GamepadMonitor(QObject):
@@ -440,10 +443,17 @@ class GamepadMonitor(QObject):
             # a Bluetooth controller powering off). The rescan reopens it.
             self._close(device)
             return
+        if device.pending:
+            data = device.pending + data
         usable = len(data) - len(data) % _EVENT.size
         for offset in range(0, usable, _EVENT.size):
             _sec, _usec, etype, code, value = _EVENT.unpack_from(data, offset)
             self.feed(etype, code, value, device.ranges)
+        # A read is not guaranteed to land on an event boundary (a short
+        # read under load, a driver batching oddly); keep the trailing
+        # partial event for next time instead of misinterpreting every
+        # event after it until reconnect.
+        device.pending = data[usable:]
 
     # ------------------------------------------------------------ decoding
     def feed(

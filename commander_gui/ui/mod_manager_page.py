@@ -8,7 +8,6 @@ category) are done directly on the file with automatic backups.
 from __future__ import annotations
 
 import shutil
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,12 +59,12 @@ from ..launcher import (
     build_command,
     ensure_runner_prefix,
     launch_detached,
-    resolve_runner,
 )
 from ..mod_install import (
     ModInstallError,
     default_mod_name,
     extract_archive,
+    make_staging_dir,
     move_payload,
     sanitize_name,
     write_basic_meta_ini,
@@ -96,6 +95,7 @@ from ..modlist import (
     seed_new_mo2_profile,
     separator_name,
     set_status_at,
+    snapshot_modlist_backup,
     summarize_mod_conflicts,
     timestamped_backup_path,
     unflip,
@@ -462,7 +462,12 @@ class DragTree(QTreeWidget):
             super().wheelEvent(event)
             return
         sb = self.verticalScrollBar()
-        target_sb = sb if sb.maximum() > sb.minimum() else None
+        # At the list's own top/bottom the wheel scrolls the page instead,
+        # or hovering the list would trap the page scroll.
+        at_limit = (delta > 0 and sb.value() <= sb.minimum()) or (
+            delta < 0 and sb.value() >= sb.maximum()
+        )
+        target_sb = sb if sb.maximum() > sb.minimum() and not at_limit else None
         if target_sb is None:
             area = self._find_scroll_area()
             target_sb = area.verticalScrollBar() if area is not None else None
@@ -751,6 +756,48 @@ def _query_mo2_profiles() -> tuple[list[str], str]:
     return names, selected if rc == 0 else ""
 
 
+def _delete_mod_folders(mods_dir: Path, names: list[str]) -> list[str]:
+    """Permanently remove the mod folders for *names* from *mods_dir*.
+
+    Runs on a worker thread, so it never touches Qt widgets - it just
+    returns the list of failures (empty means every folder is gone) for
+    the caller to act on back on the GUI thread.
+    """
+    failures: list[str] = []
+    for name in names:
+        folder = mods_dir / name
+        try:
+            if folder.is_symlink():
+                failures.append(f"{name} (symlink, skipped)")
+                continue
+            if not folder.exists():
+                continue
+            shutil.rmtree(folder)
+        except OSError as exc:
+            failures.append(f"{name} ({exc})")
+    return failures
+
+
+def _cleanup_after_install(
+    old_backup: Path | None, staging_root: Path | None
+) -> list[str]:
+    """Delete a replaced mod's backup and the staging folder. Worker thread.
+
+    Returns any warning messages for the caller to show on the GUI thread -
+    it never touches Qt widgets itself.
+    """
+    warnings: list[str] = []
+    if old_backup is not None:
+        shutil.rmtree(old_backup, ignore_errors=True)
+    if staging_root is not None:
+        try:
+            shutil.rmtree(staging_root)
+        except OSError:
+            # Surface the leak once instead of accumulating silently.
+            warnings.append(f"Could not remove staging folder: {staging_root}")
+    return warnings
+
+
 class ModManagerPage(QWidget):
     def __init__(self, window) -> None:
         super().__init__()
@@ -772,6 +819,9 @@ class ModManagerPage(QWidget):
         self._mo2_selected_profile: str = ""
         self._install_task: StreamTask | None = None
         self._finalize_task: BackgroundTask | None = None
+        self._delete_task: BackgroundTask | None = None
+        self._reinstall_move_task: BackgroundTask | None = None
+        self._mod_conflicts_task: BackgroundTask | None = None
         self._install_staging: Path | None = None
         self._install_source: Path | None = None
         self._install_name = ""
@@ -1042,28 +1092,6 @@ class ModManagerPage(QWidget):
     def _backup_path(self, modlist: Path) -> Path:
         return modlist.with_name(modlist.name + BACKUP_SUFFIX)
 
-    def _timestamped_backup_path(self, modlist: Path) -> Path:
-        return timestamped_backup_path(modlist)
-
-    _MAX_BACKUPS = 20
-
-    def _prune_backups(self, modlist: Path) -> None:
-        """Keep only this modlist's newest timestamped backups."""
-        baks = sorted(
-            (
-                p
-                for p in modlist.parent.glob(f"{modlist.stem}-*.bak")
-                if p.is_file()
-            ),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        for old in baks[self._MAX_BACKUPS :]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
-
     # ----- MO2 running guard -----
     def _mo2_running(self) -> bool:
         # Every caller here gates a modlist.txt write or backup/restore
@@ -1199,6 +1227,19 @@ class ModManagerPage(QWidget):
         self._profiles_task = task
         task.start()
 
+    def _run_pending_refresh(self, generation: int) -> bool:
+        """Start the refresh() queued during a load; True if this result is stale.
+
+        A refresh() that arrives mid-load only bumps the generation and sets
+        _pending_refresh - dropping the stale result without running that
+        queued refresh left the page stuck on "Loading MO2 profiles...".
+        """
+        if getattr(self, "_pending_refresh", False):
+            self._pending_refresh = False
+            self.refresh()
+            return True
+        return generation != self._profiles_generation
+
     def _on_profiles_loaded(
         self, result: tuple[list[str], str], task: BackgroundTask, generation: int
     ) -> None:
@@ -1206,7 +1247,7 @@ class ModManagerPage(QWidget):
             return
         self._profiles_loading = False
         self._profiles_task = None
-        if generation != self._profiles_generation:
+        if self._run_pending_refresh(generation):
             return
         names, selected = result
         self.profile_combo.blockSignals(True)
@@ -1254,9 +1295,6 @@ class ModManagerPage(QWidget):
             self.tree.clear()
             return
         self._load_mods()
-        if self._pending_refresh:
-            self._pending_refresh = False
-            self.refresh()
 
     def _on_profiles_error(
         self, message: str, task: BackgroundTask, generation: int
@@ -1265,15 +1303,12 @@ class ModManagerPage(QWidget):
             return
         self._profiles_loading = False
         self._profiles_task = None
-        if generation != self._profiles_generation:
+        if self._run_pending_refresh(generation):
             return
         self._mo2_selected_profile = ""
         self._sync_selected_status()
         self.count_label.setText(tr("Could not list MO2 profiles: {message}", message=message))
         self.tree.clear()
-        if self._pending_refresh:
-            self._pending_refresh = False
-            self.refresh()
 
     def _load_mods(self) -> None:
         mo2_profile = self.profile_combo.currentText()
@@ -1286,6 +1321,7 @@ class ModManagerPage(QWidget):
             self._restore_missing_user_categories()
             self._populate_tree()
             self._update_count()
+            self._select_pending_mod()
         except Exception as exc:  # noqa: BLE001
             # Covers the whole pipeline, not just read_lines: a single
             # malformed +/- line raises ValueError out of grouped()/entries()
@@ -1333,7 +1369,7 @@ class ModManagerPage(QWidget):
             modlist = self._modlist_path(profile)
             if not modlist.is_file():
                 raise FileNotFoundError(f"Modlist not found: {modlist}")
-            default_path = self._timestamped_backup_path(modlist)
+            default_path = timestamped_backup_path(modlist)
             backup_name, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save modlist backup",
@@ -1451,6 +1487,33 @@ class ModManagerPage(QWidget):
         self._populating = False
         self._apply_filter()
 
+    def reveal_mod(self, name: str) -> None:
+        """Select and scroll to ``name`` once the list next loads.
+
+        Opening the page always reloads the list (refresh() on navigation),
+        so selecting now would just be wiped by that reload.
+        """
+        self._pending_reveal = name
+
+    def _select_pending_mod(self) -> None:
+        name = getattr(self, "_pending_reveal", None)
+        if not name:
+            return
+        for i in range(self.tree.topLevelItemCount()):
+            header = self.tree.topLevelItem(i)
+            for j in range(header.childCount()):
+                item = header.child(j)
+                if item.text(0) != name:
+                    continue
+                if item.isHidden():
+                    self.search.clear()
+                header.setExpanded(True)
+                self.tree.setCurrentItem(item)
+                self.tree.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                self.tree.setFocus()
+                self._pending_reveal = None
+                return
+
     def _toggle_collapse_all(self) -> None:
         if self._all_collapsed:
             self.tree.expandAll()
@@ -1537,11 +1600,10 @@ class ModManagerPage(QWidget):
                 if not bak.exists():
                     shutil.copy2(path, bak)
                 if snapshot:
-                    shutil.copy2(path, self._timestamped_backup_path(path))
+                    snapshot_modlist_backup(path)
             save_lines(path, new_lines)
             self._lines = new_lines
             self.backup_status.setText(self._backup_status_text(path))
-            self._prune_backups(path)
             self._update_guard()
             return True
         except Exception as exc:  # noqa: BLE001
@@ -1827,6 +1889,9 @@ class ModManagerPage(QWidget):
         exactly as it is. The current folder is moved aside first and put
         back by _finish_install() if the new install fails or is cancelled.
         """
+        if self.window.install_busy or self._install_active or self._mo2_running():
+            self._update_guard()
+            return
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
@@ -1842,17 +1907,69 @@ class ModManagerPage(QWidget):
             return
         destination = mods_dir / name
         self._reinstall_backup = None
-        if destination.exists() or destination.is_symlink():
-            backup = destination.with_name(f".{name}.reinstall-backup-{uuid.uuid4().hex}")
-            try:
-                shutil.move(str(destination), str(backup))
-            except OSError as exc:
-                QMessageBox.warning(self, tr("Cannot reinstall"), str(exc))
-                return
-            self._reinstall_backup = (destination, backup)
+        if not (destination.exists() or destination.is_symlink()):
+            self._install_is_reinstall = True
+            self._reinstall_done_message = done_message
+            self._start_mod_install(archive, name)
+            self._undo_reinstall_if_not_started()
+            return
+        backup = destination.with_name(f".{name}.reinstall-backup-{uuid.uuid4().hex}")
+        # Moving an existing mod folder aside can be slow for a large mod -
+        # lock installs while it runs so nothing else can start against the
+        # same mods dir mid-move, then hand off to _start_mod_install().
+        self.window.set_install_busy(True, "mod_install")
+        task = BackgroundTask(shutil.move, str(destination), str(backup))
+        task.result.connect(
+            lambda _r: self._on_reinstall_moved_aside(
+                destination, backup, archive, name, done_message
+            )
+        )
+        task.error.connect(self._on_reinstall_move_error)
+        self._reinstall_move_task = task
+        task.start()
+
+    def _on_reinstall_move_error(self, message: str) -> None:
+        self._reinstall_move_task = None
+        self.window.set_install_busy(False)
+        QMessageBox.warning(self, tr("Cannot reinstall"), message)
+
+    def _on_reinstall_moved_aside(
+        self, destination: Path, backup: Path, archive: Path, name: str, done_message: str
+    ) -> None:
+        self._reinstall_move_task = None
+        self._reinstall_backup = (destination, backup)
         self._install_is_reinstall = True
         self._reinstall_done_message = done_message
+        # _start_mod_install() takes the busy lock itself.
+        self.window.set_install_busy(False)
         self._start_mod_install(archive, name)
+        self._undo_reinstall_if_not_started()
+
+    def _undo_reinstall_if_not_started(self) -> None:
+        """Roll back reinstall state when _start_mod_install() refused to run.
+
+        It re-checks MO2 and the busy lock itself; when it bails out, the
+        moved-aside folder would otherwise stay hidden (the mod missing in
+        game) and the reinstall flag would leak into the next normal install,
+        which then never got added to modlist.txt.
+        """
+        if self._install_active:
+            return
+        pending = self._reinstall_backup
+        self._reinstall_backup = None
+        self._install_is_reinstall = False
+        if pending is None:
+            return
+        destination, backup = pending
+        try:
+            if not (destination.exists() or destination.is_symlink()):
+                backup.rename(destination)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                tr("Cannot reinstall"),
+                tr("Could not put the original mod folder back: {error}", error=str(exc)),
+            )
 
     def _update_mod_from_archive(self, name: str) -> None:
         """Right-click "Update from Archive..." on a mod the user installed.
@@ -1907,9 +2024,13 @@ class ModManagerPage(QWidget):
         self.install_progress.pause_button.hide()
 
         cancel_event = None
+        try:
+            gamma_dir = self._active_profile().gamma
+        except RuntimeError:
+            gamma_dir = None
 
         def worker(report):
-            staging_parent = Path(tempfile.mkdtemp(prefix="gamma-mod-install-"))
+            staging_parent = make_staging_dir(gamma_dir)
             staging = staging_parent / "archive"
             try:
                 extract_archive(
@@ -2115,37 +2236,46 @@ class ModManagerPage(QWidget):
             self._finish_install()
 
     def _finish_install(self) -> None:
-        if getattr(self, "_reinstall_backup", None) is not None:
-            # move_payload() only ever creates `destination` on a genuine
-            # success (and removes it again itself on any failure) - so
-            # its existence here is a reliable enough signal for every
-            # path that ends up at _finish_install() (success, error,
-            # cancel, FOMOD-dialog-cancelled) without each needing to say
-            # explicitly which case this is.
-            destination, backup = self._reinstall_backup
-            self._reinstall_backup = None
+        # move_payload() only ever creates `destination` on a genuine
+        # success (and removes it again itself on any failure) - so its
+        # existence here is a reliable enough signal for every path that
+        # ends up at _finish_install() (success, error, cancel, FOMOD-
+        # dialog-cancelled) without each needing to say explicitly which
+        # case this is.
+        reinstall_backup = getattr(self, "_reinstall_backup", None)
+        self._reinstall_backup = None
+        old_backup: Path | None = None
+        if reinstall_backup is not None:
+            destination, backup = reinstall_backup
             if destination.exists():
-                shutil.rmtree(backup, ignore_errors=True)
+                old_backup = backup
             else:
+                # Put the previous version back right now, before the busy
+                # lock drops and the list reloads: the backup sits next to
+                # it, so this is an instant rename. Done later in the
+                # background, a new install of the same name could land
+                # first - and the restore would then delete the old files.
                 try:
-                    shutil.move(str(backup), str(destination))
+                    backup.rename(destination)
                 except OSError:
                     self.window.statusBar().showMessage(
                         f"Could not restore the previous '{destination.name}' "
                         f"- it's saved at {backup}",
                         8000,
                     )
+        staging_root = (
+            self._install_staging.parent if self._install_staging is not None else None
+        )
+        if old_backup is not None or staging_root is not None:
+            # Deleting a large mod's files can be slow - it's pure cleanup
+            # of paths nothing else references, so it runs in the
+            # background instead of freezing the window on every install
+            # completion.
+            task = BackgroundTask(_cleanup_after_install, old_backup, staging_root)
+            task.result.connect(self._on_install_cleanup_done)
+            task.start()
         self._install_is_reinstall = False
         self._reinstall_done_message = None
-        if self._install_staging is not None:
-            staging_root = self._install_staging.parent
-            try:
-                shutil.rmtree(staging_root)
-            except OSError:
-                # Surface the leak once instead of accumulating silently.
-                self.window.statusBar().showMessage(
-                    f"Could not remove staging folder: {staging_root}", 8000
-                )
         self._install_staging = None
         self._install_task = None
         self._finalize_task = None
@@ -2170,6 +2300,10 @@ class ModManagerPage(QWidget):
             # Several archives were dropped at once: start the next one
             # after this install has fully wound down.
             QTimer.singleShot(0, self, self._install_next_dropped)
+
+    def _on_install_cleanup_done(self, warnings: list[str]) -> None:
+        for message in warnings:
+            self.window.statusBar().showMessage(message, 8000)
 
     def _focus_mod_in_tree(self, name: str) -> None:
         """Scroll to, select, and briefly highlight a mod by name.
@@ -2250,9 +2384,10 @@ class ModManagerPage(QWidget):
             tr("Also delete the mod folder(s) on disk - cannot be undone")
         )
         box.setCheckBox(delete_files)
-        confirm = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        confirm = box.addButton(tr("Delete"), QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
+        box.deleteLater()
         if box.clickedButton() != confirm:
             return
 
@@ -2260,33 +2395,14 @@ class ModManagerPage(QWidget):
         # fails partway, the modlist still references the remaining folders
         # and nothing is orphaned.
         deleting_files = delete_files.isChecked()
-        if deleting_files and not self._delete_mod_folders(names):
+        if not deleting_files:
+            self._commit_mod_deletion(indexes)
             return
-        if deleting_files:
-            # Actual files under gamma/mods just changed - Verify
-            # Integrity's MD5 baseline must not compare against them.
-            try:
-                invalidate_baseline(self._active_profile().gamma)
-            except RuntimeError:
-                pass
-        new_lines = list(self._lines)
-        for idx in sorted(indexes, reverse=True):
-            new_lines = delete_at(new_lines, idx)
-        if not self._write_lines(new_lines):
-            return
-        self._load_mods()
-
-    def _delete_mod_folders(self, names: list[str]) -> bool:
-        """Permanently remove the mod folders for *names* from the mods dir.
-
-        Returns ``True`` only when every requested folder is gone, so the
-        caller can avoid committing the modlist on a partial failure.
-        """
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
             QMessageBox.warning(self, tr("Error"), str(exc))
-            return False
+            return
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
             QMessageBox.warning(
@@ -2294,27 +2410,50 @@ class ModManagerPage(QWidget):
                 tr("Cannot delete folders"),
                 tr("The GAMMA mods directory cannot be a symlink."),
             )
-            return False
-        failures: list[str] = []
-        for name in names:
-            folder = mods_dir / name
-            try:
-                if folder.is_symlink():
-                    failures.append(f"{name} (symlink, skipped)")
-                    continue
-                if not folder.exists():
-                    continue
-                shutil.rmtree(folder)
-            except OSError as exc:
-                failures.append(f"{name} ({exc})")
+            return
+        if self._delete_task is not None:
+            return
+        self.window.set_install_busy(True, "delete_mods")
+        task = BackgroundTask(_delete_mod_folders, mods_dir, names, parent=self)
+        task.result.connect(
+            lambda failures: self._on_mod_folders_deleted(failures, indexes)
+        )
+        task.error.connect(self._on_mod_folders_delete_error)
+        self._delete_task = task
+        task.start()
+
+    def _on_mod_folders_delete_error(self, message: str) -> None:
+        self._delete_task = None
+        self.window.set_install_busy(False)
+        QMessageBox.warning(self, tr("Error"), message)
+
+    def _on_mod_folders_deleted(
+        self, failures: list[str], indexes: list[int]
+    ) -> None:
+        self._delete_task = None
+        self.window.set_install_busy(False)
         if failures:
             QMessageBox.warning(
                 self,
                 tr("Some folders were not deleted"),
                 "\n".join(failures),
             )
-            return False
-        return True
+            return
+        # Actual files under gamma/mods just changed - Verify Integrity's
+        # MD5 baseline must not compare against them.
+        try:
+            invalidate_baseline(self._active_profile().gamma)
+        except RuntimeError:
+            pass
+        self._commit_mod_deletion(indexes)
+
+    def _commit_mod_deletion(self, indexes: list[int]) -> None:
+        new_lines = list(self._lines)
+        for idx in sorted(indexes, reverse=True):
+            new_lines = delete_at(new_lines, idx)
+        if not self._write_lines(new_lines):
+            return
+        self._load_mods()
 
     def _move_selected(self, delta: int) -> None:
         if self.window.install_busy:
@@ -2413,6 +2552,8 @@ class ModManagerPage(QWidget):
         delete_action.setEnabled(not blocked)
 
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        # Parented to the page: without this every right-click leaked one.
+        menu.deleteLater()
         if chosen is None:
             return
         if chosen == rename_action:
@@ -2497,6 +2638,8 @@ class ModManagerPage(QWidget):
             delete_action = menu.addAction(tr("Delete Category..."))
             delete_action.setEnabled(not blocked)
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        # Parented to the page: without this every right-click leaked one.
+        menu.deleteLater()
         if chosen == rename_action:
             self._rename_category(category)
         elif chosen == move_up_action:
@@ -2561,9 +2704,10 @@ class ModManagerPage(QWidget):
             tr("Also remove these {count} mod(s) from the modlist", count=len(mods))
         )
         box.setCheckBox(delete_mods_check)
-        confirm = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        confirm = box.addButton(tr("Delete"), QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
+        box.deleteLater()
         if box.clickedButton() != confirm:
             return
         try:
@@ -2662,51 +2806,57 @@ class ModManagerPage(QWidget):
                 continue
         self._write_lines(restored, quiet=True, snapshot=False)
 
-    def _tracked_user_categories(self) -> list[str]:
+    def _tracked_categories_key(self) -> tuple[dict, str | None, list[str]]:
+        """``(all tracked, this list's key, its names)``.
+
+        Keyed per COMMANDER profile *and* MO2 profile: keyed by the COMMANDER
+        profile alone, switching the MO2-profile combo wrote one MO2
+        profile's categories into another's modlist.txt on the next load.
+        A list saved under the old profile-only key still belongs to the
+        profile's configured MO2 profile.
+        """
+        tracked = dict(gui_settings.load_gui_settings().get("user_created_categories", {}))
         profile = self.window.settings.active_profile
         if profile is None:
-            return []
-        tracked = gui_settings.load_gui_settings().get("user_created_categories", {})
-        return list(tracked.get(profile.profile_name, []))
+            return tracked, None, []
+        mo2_profile = self.profile_combo.currentText() or profile.mo2_profile
+        key = f"{profile.profile_name}/{mo2_profile}"
+        if key in tracked:
+            names = list(tracked[key])
+        elif mo2_profile == profile.mo2_profile:
+            names = list(tracked.get(profile.profile_name, []))
+        else:
+            names = []
+        return tracked, key, names
+
+    def _save_tracked_categories(self, tracked: dict, key: str, names: list[str]) -> None:
+        tracked[key] = names
+        gui_settings.save_gui_settings(user_created_categories=tracked)
+
+    def _tracked_user_categories(self) -> list[str]:
+        return self._tracked_categories_key()[2]
 
     def _add_tracked_user_category(self, name: str) -> None:
-        profile = self.window.settings.active_profile
-        if profile is None:
+        tracked, key, names = self._tracked_categories_key()
+        if key is None:
             return
-        tracked = dict(
-            gui_settings.load_gui_settings().get("user_created_categories", {})
-        )
-        names = list(tracked.get(profile.profile_name, []))
         if name not in names:
             names.append(name)
-        tracked[profile.profile_name] = names
-        gui_settings.save_gui_settings(user_created_categories=tracked)
+        self._save_tracked_categories(tracked, key, names)
 
     def _rename_tracked_user_category(self, old_name: str, new_name: str) -> None:
-        profile = self.window.settings.active_profile
-        if profile is None:
+        tracked, key, names = self._tracked_categories_key()
+        if key is None or old_name not in names:
             return
-        tracked = dict(
-            gui_settings.load_gui_settings().get("user_created_categories", {})
+        self._save_tracked_categories(
+            tracked, key, [new_name if n == old_name else n for n in names]
         )
-        names = list(tracked.get(profile.profile_name, []))
-        if old_name not in names:
-            return
-        tracked[profile.profile_name] = [
-            new_name if n == old_name else n for n in names
-        ]
-        gui_settings.save_gui_settings(user_created_categories=tracked)
 
     def _remove_tracked_user_category(self, name: str) -> None:
-        profile = self.window.settings.active_profile
-        if profile is None:
+        tracked, key, names = self._tracked_categories_key()
+        if key is None:
             return
-        tracked = dict(
-            gui_settings.load_gui_settings().get("user_created_categories", {})
-        )
-        names = [n for n in tracked.get(profile.profile_name, []) if n != name]
-        tracked[profile.profile_name] = names
-        gui_settings.save_gui_settings(user_created_categories=tracked)
+        self._save_tracked_categories(tracked, key, [n for n in names if n != name])
 
     def _move_selected_to_category(self, category: str) -> None:
         if self.window.install_busy or self._mo2_running():
@@ -2957,29 +3107,50 @@ class ModManagerPage(QWidget):
             QMessageBox.warning(self, tr("Could Not Rename Profile"), str(exc))
             return
 
+        def finish_rename() -> None:
+            # Any app-level CliProfile pointing at this MO2 profile (by
+            # folder name, for this same GAMMA install) would otherwise be
+            # left referencing a ghost folder.
+            settings = self.window.settings
+            changed = False
+            for cli_profile in settings.profiles:
+                if cli_profile.gamma == gamma and cli_profile.mo2_profile == old_name:
+                    cli_profile.mo2_profile = new_name
+                    changed = True
+            if changed:
+                settings.save()
+                self.window.refresh_settings()
+            self._pending_profile_select = new_name
+            self._load_profiles(self._profiles_generation)
+
         # MO2 would otherwise be left pointing at a folder that no longer
         # exists - only touch selected_profile when it actually named the
-        # profile just renamed.
-        if self._mo2_selected_profile == old_name:
-            run_sync(
-                ["mo2", "config", "set", "selected-profile", new_name],
-                timeout=_QUERY_TIMEOUT,
-            )
-        # Likewise, any app-level CliProfile pointing at this MO2 profile
-        # (by folder name, for this same GAMMA install) would otherwise be
-        # left referencing a ghost folder.
-        settings = self.window.settings
-        changed = False
-        for cli_profile in settings.profiles:
-            if cli_profile.gamma == gamma and cli_profile.mo2_profile == old_name:
-                cli_profile.mo2_profile = new_name
-                changed = True
-        if changed:
-            settings.save()
-            self.window.refresh_settings()
+        # profile just renamed. A CLI call, so it runs off the GUI thread
+        # like the other MO2 profile commands (delete, below); its result
+        # was never checked even when this ran synchronously, so errors
+        # here are swallowed the same way.
+        if self._mo2_selected_profile != old_name:
+            finish_rename()
+            return
+        self.manage_profile_button.setEnabled(False)
+        task = BackgroundTask(
+            run_sync,
+            ["mo2", "config", "set", "selected-profile", new_name],
+            timeout=_QUERY_TIMEOUT,
+            parent=self,
+        )
 
-        self._pending_profile_select = new_name
-        self._load_profiles(self._profiles_generation)
+        def done(_result: object) -> None:
+            self.manage_profile_button.setEnabled(True)
+            finish_rename()
+
+        def failed(_message: str) -> None:
+            self.manage_profile_button.setEnabled(True)
+            finish_rename()
+
+        task.result.connect(done)
+        task.error.connect(failed)
+        task.start()
 
     def _delete_mo2_profile(self) -> None:
         if self.window.install_busy or self._mo2_running():
@@ -3008,6 +3179,7 @@ class ModManagerPage(QWidget):
         confirm = box.addButton(tr("Delete"), QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
+        box.deleteLater()
         if box.clickedButton() != confirm:
             return
 
@@ -3110,6 +3282,8 @@ class ModManagerPage(QWidget):
 
         Scans every enabled mod's game files, so it runs in the background.
         """
+        if self._mod_conflicts_task is not None:
+            return
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
@@ -3213,14 +3387,11 @@ class ModManagerPage(QWidget):
 
     def _open_mo2(self) -> None:
         mo2_profile = self.profile_combo.currentText()
-        state = gui_settings.load_gui_settings()
-        kind = state.get("runner") or "auto"
-        # resolve_runner wants the raw configured path (STEAM_COMPAT_DATA_PATH
-        # for Proton), not the resolved WINEPREFIX.
-        prefix = state.get("wine_prefix") or ""
         try:
             profile = self._active_profile()
-            runner = resolve_runner(kind, prefix)
+            # The prefix saved for the current runner - not the legacy
+            # wine_prefix key, which goes stale when the runner changes.
+            runner = gui_settings.configured_runner()
             command, env, cwd = build_command(
                 profile.gamma, runner, profile=mo2_profile or None
             )
@@ -3337,7 +3508,7 @@ class ModManagerPage(QWidget):
         tmp = path.with_name(path.name + ".restore.tmp")
         try:
             if path.is_file():
-                shutil.copy2(path, self._timestamped_backup_path(path))
+                snapshot_modlist_backup(path)
                 if not current_backup.exists():
                     shutil.copy2(path, current_backup)
             shutil.copy2(bak, tmp)

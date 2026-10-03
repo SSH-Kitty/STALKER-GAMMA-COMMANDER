@@ -5,10 +5,9 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from .. import __version__, __version_label__, gui_settings
+from .. import __version_label__
 from ..config import cli_binary_path, gui_settings_path, logs_dir, settings_path
-from ..updates import check_commander_update, effective_update_channel
-from .common import BackgroundTask, info_label, make_card, open_url, section_label, tr
+from .common import info_label, make_card, open_url, section_label, tr
 
 _GITHUB = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
 #: Permanent invite to the STALKER COMMANDER Discord server (lands on #welcome).
@@ -68,7 +67,11 @@ class AboutPage(QWidget):
         root.addStretch(1)
 
         self.refresh()
-        self._check_for_commander_update()
+        # The status bar's check is the one check: reuse its result.
+        found = getattr(window, "commander_update_found", None)
+        if found is not None:
+            found.connect(self._on_commander_update_checked)
+        self._on_commander_update_checked(getattr(window, "_commander_update_tag", None))
 
     def _hero_card(self) -> QWidget:
         card, layout = make_card()
@@ -89,23 +92,6 @@ class AboutPage(QWidget):
         )
         layout.addWidget(self.update_button)
         return card
-
-    def _check_for_commander_update(self) -> None:
-        """Best-effort, non-blocking check for a newer COMMANDER release.
-
-        Just a notice with a link to the Releases page - not an
-        auto-updater, so there is no elevated-permissions or
-        replace-the-running-binary complexity to get right.
-        """
-        # The channel is read here, on the GUI thread; the worker only fetches.
-        channel = effective_update_channel(
-            gui_settings.load_gui_settings().get("update_channel"), __version__
-        )
-        task = BackgroundTask(
-            check_commander_update, __version__, channel=channel, parent=self
-        )
-        task.result.connect(self._on_commander_update_checked)
-        task.start()
 
     def _on_commander_update_checked(self, tag: object) -> None:
         if not tag or not isinstance(tag, str):

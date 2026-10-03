@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -145,3 +146,42 @@ def child_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
         if value and any(part.startswith(prefix) for part in value.split(os.pathsep)):
             environ.pop(key, None)
     return environ
+
+
+#: The dynamic loader's complaint about an LD_PRELOAD entry it cannot load.
+#: Started from Steam, COMMANDER inherits both the 32- and 64-bit
+#: gameoverlayrenderer.so, so every child prints one of these for the
+#: wrong-bitness copy - noise, but it lands in output callers parse.
+_LD_PRELOAD_NOISE_RE = re.compile(
+    r"ld\.so: object '[^']*' from LD_PRELOAD cannot be pre?loaded"
+)
+
+
+def _strip_loader_noise(text: str) -> str:
+    """Drop the loader's LD_PRELOAD failure lines from captured output."""
+    if "LD_PRELOAD" not in text:
+        return text
+    return "\n".join(
+        line for line in text.split("\n") if not _LD_PRELOAD_NOISE_RE.search(line)
+    )
+
+
+def _query_environment() -> dict[str, str]:
+    """Child environment for quick CLI commands, minus Steam's overlay.
+
+    The overlay only matters to the game; for the CLI it just makes the
+    loader print errors (see _LD_PRELOAD_NOISE_RE).
+    """
+    env = child_environment()
+    preload = env.get("LD_PRELOAD")
+    if preload:
+        kept = [
+            entry
+            for entry in re.split(r"[:\s]+", preload)
+            if entry and "gameoverlayrenderer" not in entry
+        ]
+        if kept:
+            env["LD_PRELOAD"] = ":".join(kept)
+        else:
+            env.pop("LD_PRELOAD")
+    return env

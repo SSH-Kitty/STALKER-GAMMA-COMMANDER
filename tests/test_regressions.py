@@ -13,17 +13,18 @@ import unittest
 import urllib.request
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from commander_gui import assistant_launcher, autostart, gui_settings, network
 from commander_gui.assistant_launcher import assistant_command, launch_assistant
 from commander_gui.atomic import write_text
 from commander_gui.dependencies import (
     check_umu,
+    check_winetricks,
     detect_package_manager,
     install_command,
 )
-from commander_gui.diagnostics import _redact
+from commander_gui.diagnostics import redact as _redact
 from commander_gui.integrity import (
     CacheArchiveVerifyResult,
     scan_mods_md5,
@@ -111,6 +112,7 @@ from commander_gui.winetricks import (
     umu_binary,
     umu_install_command,
     winetricks_install_command,
+    winetricks_tool_install_command,
 )
 
 #: The first bytes of a real type-2 AppImage: ELF magic, then "AI\\x02" at 8.
@@ -1875,9 +1877,24 @@ class RegressionTests(unittest.TestCase):
                 patch.object(page, "_mo2_running", return_value=False),
                 patch.object(page, "_cached_archive_for", return_value=archive),
                 patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
-                patch.object(page, "_start_mod_install") as mock_start,
+                # The real one marks the install active as it starts.
+                patch.object(
+                    page,
+                    "_start_mod_install",
+                    side_effect=lambda *_a: setattr(page, "_install_active", True),
+                ) as mock_start,
             ):
                 page._reinstall_mod_from_cache("Some Mod")
+                # Moving the existing folder aside now runs on a
+                # BackgroundTask (real QThread) instead of blocking the
+                # caller.
+                app = QApplication.instance()
+                deadline = time.monotonic() + 5
+                while not mock_start.called and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                for _ in range(20):
+                    app.processEvents()
 
             self.assertFalse(existing.exists())
             self.assertTrue(page._install_is_reinstall)
@@ -1951,11 +1968,20 @@ class RegressionTests(unittest.TestCase):
                 patch.object(page, "_load_mods"),
             ):
                 page._finish_install()
+                self.assertIsNone(page._reinstall_backup)
+                self.assertFalse(page._install_is_reinstall)
+                # The actual restore now runs on a BackgroundTask (real
+                # QThread) instead of blocking the caller.
+                app = QApplication.instance()
+                deadline = time.monotonic() + 5
+                while not (destination / "original.txt").exists() and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                for _ in range(20):
+                    app.processEvents()
 
             self.assertTrue((destination / "original.txt").is_file())
             self.assertFalse(backup.exists())
-            self.assertIsNone(page._reinstall_backup)
-            self.assertFalse(page._install_is_reinstall)
 
     def test_finish_install_discards_the_backup_when_the_reinstall_succeeded(self):
         import tempfile
@@ -1989,6 +2015,15 @@ class RegressionTests(unittest.TestCase):
                 patch.object(page, "_load_mods"),
             ):
                 page._finish_install()
+                # The actual cleanup now runs on a BackgroundTask (real
+                # QThread) instead of blocking the caller.
+                app = QApplication.instance()
+                deadline = time.monotonic() + 5
+                while backup.exists() and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                for _ in range(20):
+                    app.processEvents()
 
             self.assertTrue((destination / "new.txt").is_file())
             self.assertFalse(backup.exists())
@@ -5013,6 +5048,37 @@ class ModCounterTests(unittest.TestCase):
             # ModC is listed but its folder never got extracted.
             self.assertEqual(count_active_mods(str(gamma_dir), "G.A.M.M.A"), (1, 2))
 
+    def test_main_window_own_title_bar_toggles_frameless_and_buttons(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.main_window import MainWindow
+
+        QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            window = MainWindow()
+            try:
+                # Offscreen (tests) never goes frameless.
+                self.assertFalse(window.custom_title_bar)
+                with patch(
+                    "commander_gui.ui.main_window.QGuiApplication.platformName",
+                    return_value="wayland",
+                ):
+                    window.apply_title_bar(True)
+                self.assertTrue(window.custom_title_bar)
+                self.assertTrue(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+                self.assertFalse(window._title_strip.isHidden())
+                window.apply_title_bar(False)
+                self.assertFalse(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+                self.assertTrue(window._title_strip.isHidden())
+                self.assertEqual(window._win_max.kind, "max")
+            finally:
+                window._mod_counter_timer.stop()
+                window.close()
+
     def test_main_window_mod_counter_timer_keeps_the_count_live(self):
         from PySide6.QtWidgets import QApplication
 
@@ -6278,7 +6344,7 @@ class ModCounterTests(unittest.TestCase):
         """
         from PySide6.QtWidgets import QApplication
 
-        from commander_gui.themes import active_theme
+        from commander_gui.themes import active_theme, set_active_theme
         from commander_gui.ui.main_window import MainWindow
 
         QApplication.instance() or QApplication([])
@@ -6288,6 +6354,13 @@ class ModCounterTests(unittest.TestCase):
         ):
             window = MainWindow()
             self.assertEqual(window._status_theme_combo.currentData(), active_theme())
+            # The style is app-wide: left on "dusk"/18px/"Inter" (a font that
+            # may not be installed), every widget any later test builds pays
+            # for it - the rest of the suite ran minutes slower.
+            app = QApplication.instance()
+            self.addCleanup(set_active_theme, active_theme())
+            self.addCleanup(app.setPalette, app.palette())
+            self.addCleanup(app.setStyleSheet, app.styleSheet())
 
             # Exactly what settings_page.py's pickers call.
             window.apply_theme("dusk")
@@ -6889,10 +6962,9 @@ class UserModsTrackerTests(unittest.TestCase):
         class FakeWindow:
             settings = CliSettings(profiles=[])
 
-        with patch("commander_gui.ui.about_page.BackgroundTask") as mock_task_cls:
-            page = AboutPage(FakeWindow())
+        # No network check of its own: it shows the status bar's result.
+        page = AboutPage(FakeWindow())
         self.assertTrue(page.update_button.isHidden())
-        mock_task_cls.assert_called_once()
 
         page._on_commander_update_checked(None)
         self.assertTrue(page.update_button.isHidden())
@@ -9119,6 +9191,8 @@ class UserModsTrackerTests(unittest.TestCase):
             mock_run_sync.assert_not_called()
 
     def test_rename_mo2_profile_updates_mo2_selected_profile_when_it_matched(self):
+        from PySide6.QtWidgets import QApplication
+
         with (
             tempfile.TemporaryDirectory() as tmp,
             tempfile.TemporaryDirectory() as xdg,
@@ -9135,8 +9209,28 @@ class UserModsTrackerTests(unittest.TestCase):
                 patch.object(page, "_load_profiles"),
             ):
                 page._rename_mo2_profile()
-            mock_run_sync.assert_called_once_with(
-                ["mo2", "config", "set", "selected-profile", "Renamed"], timeout=30
+                # The MO2 CLI call now runs on a BackgroundTask (real
+                # QThread) instead of blocking the caller.
+                # Only the selected-profile write counts: pumping events also
+                # lets earlier tests' leftover pages run their own (patched)
+                # "mo2 profiles list" queries here.
+                app = QApplication.instance()
+
+                def set_calls():
+                    return [
+                        c for c in mock_run_sync.call_args_list
+                        if c.args and c.args[0][:3] == ["mo2", "config", "set"]
+                    ]
+
+                deadline = time.monotonic() + 5
+                while not set_calls() and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                for _ in range(20):
+                    app.processEvents()
+            self.assertEqual(
+                set_calls(),
+                [call(["mo2", "config", "set", "selected-profile", "Renamed"], timeout=30)],
             )
 
     def test_delete_mo2_profile_calls_the_cli_after_confirmation(self):
@@ -9225,7 +9319,7 @@ class UserModsTrackerTests(unittest.TestCase):
             # and must never be tracked as deletable.
             self.assertNotIn("Foo", page._tracked_user_categories())
             self.assertEqual(
-                gui_settings.load_gui_settings()["user_created_categories"]["Test"],
+                gui_settings.load_gui_settings()["user_created_categories"]["Test/G.A.M.M.A"],
                 ["My Category"],
             )
 
@@ -9574,10 +9668,259 @@ class UserModsTrackerTests(unittest.TestCase):
             ):
                 page._import_profile()
 
-            self.assertEqual(page.threads_spin.value(), 17)
+            self.assertEqual(page._form_values().download_threads, 17)
             self.assertEqual(page._form_state, "")
             # Install paths must never come from the bundle.
             self.assertNotEqual(page.gamma_edit.text(), str(Path(tmp) / "g"))
+
+    def _profiles_page(self, profiles):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.profiles_page import ProfilesPage
+
+        QApplication.instance() or QApplication([])
+
+        class FakeWindow:
+            settings = CliSettings(profiles=profiles)
+            install_busy = False
+
+            def refresh_settings(self):
+                pass
+
+        return ProfilesPage(FakeWindow())
+
+    def test_profiles_page_shows_empty_state_without_profiles(self):
+        page = self._profiles_page([])
+        self.assertEqual(page.pages.currentIndex(), 0)
+        page._new_profile()
+        self.assertEqual(page.pages.currentIndex(), 1)
+        self.assertEqual(page._mode, "create")
+
+    def test_profiles_page_cancelled_switch_keeps_unsaved_edits(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        page = self._profiles_page(
+            [
+                CliProfile(active=True, profile_name="One", anomaly="/tmp/a1", gamma="/tmp/g1", cache="/tmp/c1"),
+                CliProfile(profile_name="Two", anomaly="/tmp/a2", gamma="/tmp/g2", cache="/tmp/c2"),
+            ]
+        )
+        self.assertEqual(page._form_state, "One")
+        self.assertEqual(page._mode, "view")
+        page._begin_edit()
+        page.name_edit.setText("One edited")
+        with patch(
+            "commander_gui.ui.profiles_page.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Cancel,
+        ):
+            page.profile_list.setCurrentRow(1)
+        self.assertEqual(page._form_state, "One")
+        self.assertEqual(page.name_edit.text(), "One edited")
+        self.assertEqual(page.profile_list.currentRow(), 0)
+        # Coming back to the page (main window calls refresh) keeps them too.
+        page.refresh()
+        self.assertEqual(page.name_edit.text(), "One edited")
+        self.assertTrue(page._is_dirty())
+
+    def test_profiles_page_shared_install_profile_gets_its_own_mo2_profile(self):
+        base = CliProfile(active=True, profile_name="Main", anomaly="/tmp/a", gamma="/tmp/g", cache="/tmp/c")
+        page = self._profiles_page([base])
+        page._start_new(page._derived_profile(base, name=""), source_mo2=base.mo2_profile)
+        self.assertEqual(page._mode, "create")
+        self.assertNotEqual(page._form_values().mo2_profile, "G.A.M.M.A")
+        self.assertEqual(page._source_mo2, "G.A.M.M.A")
+        self.assertIsNone(self._profiles_page([])._source_mo2)
+
+    def test_compare_modlists_lines_up_both_profiles(self):
+        from commander_gui.ui.profiles_page import compare_modlists
+
+        left = ["# header", "+A", "+B", "-C", "+Cat_separator", "+D"]
+        right = ["+A", "+New", "+B", "+C", "+Cat_separator"]
+        rows = compare_modlists(left, right)
+        self.assertEqual([r.name for r in rows], ["A", "New", "B", "C", "D"])
+        by_name = {r.name: r for r in rows}
+        self.assertEqual((by_name["New"].left, by_name["New"].right), (None, True))
+        self.assertEqual((by_name["C"].left, by_name["C"].right), (False, True))
+        self.assertEqual((by_name["D"].left, by_name["D"].right), (True, None))
+        self.assertFalse(by_name["A"].differs)
+        self.assertEqual(sum(r.differs for r in rows), 3)
+
+    def _compare(self, page):
+        return page.compare_view
+
+    def test_profiles_page_compare_is_read_only(self):
+        from PySide6.QtCore import Qt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._two_profiles_page(tmp, "+A\n+B\n", "+A\n")
+            self.assertFalse(page.compare_card.isHidden())
+            view = self._compare(page)
+            self.assertFalse(hasattr(view, "copy_right_button"))
+            self.assertNotEqual(
+                view.compare_table.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            self.assertEqual(view.compare_table.rowCount(), 2)  # "All mods" is the default
+
+    def test_profiles_page_compares_any_two_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma"
+            for name, text in (("One", "+A\n+B\n"), ("Two", "+A\n"), ("Three", "-A\n+C\n")):
+                (gamma / "profiles" / name).mkdir(parents=True)
+                (gamma / "profiles" / name / "modlist.txt").write_text(text)
+            page = self._profiles_page(
+                [
+                    CliProfile(active=True, profile_name=name, anomaly="/tmp/a", gamma=str(gamma), cache="/tmp/c", mo2_profile=name)
+                    if name == "One"
+                    else CliProfile(profile_name=name, anomaly="/tmp/a", gamma=str(gamma), cache="/tmp/c", mo2_profile=name)
+                    for name in ("One", "Two", "Three")
+                ]
+            )
+            page = self._compare(page)
+            left, right = page.compare_left_combo, page.compare_combo
+            self.assertEqual(left.currentData(), "One")
+            self.assertNotEqual(right.currentData(), "One")
+            # Neither side has to be the profile on screen.
+            left.setCurrentIndex(left.findData("Two"))
+            right.setCurrentIndex(right.findData("Three"))
+            self.assertEqual((left.currentData(), right.currentData()), ("Two", "Three"))
+            table = page.compare_table
+            self.assertEqual(table.columnCount(), 3)
+            names = [table.item(r, 0).text() for r in range(table.rowCount())]
+            self.assertEqual(sorted(names), ["A", "C"])
+            self.assertIn("Two", table.horizontalHeaderItem(1).text())
+            self.assertIn("Three", table.horizontalHeaderItem(2).text())
+            # Picking the other side's profile swaps the two.
+            left.setCurrentIndex(left.findData("Three"))
+            self.assertEqual((left.currentData(), right.currentData()), ("Three", "Two"))
+            page._swap_compare()
+            self.assertEqual((left.currentData(), right.currentData()), ("Two", "Three"))
+
+    def _two_profiles_page(self, tmp, left_text, right_text):
+        gamma = Path(tmp) / "gamma"
+        for name, text in (("One", left_text), ("Two", right_text)):
+            (gamma / "profiles" / name).mkdir(parents=True)
+            (gamma / "profiles" / name / "modlist.txt").write_text(text)
+        return self._profiles_page(
+            [
+                CliProfile(active=True, profile_name="One", anomaly="/tmp/a", gamma=str(gamma), cache="/tmp/c", mo2_profile="One"),
+                CliProfile(profile_name="Two", anomaly="/tmp/a", gamma=str(gamma), cache="/tmp/c", mo2_profile="Two"),
+            ]
+        )
+
+    def test_profiles_page_says_so_when_compared_lists_are_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._compare(self._two_profiles_page(tmp, "+A\n-B\n", "+A\n-B\n"))
+            # "All mods" is the default; the empty note is for "Differences only".
+            self.assertEqual(page.compare_filter.currentIndex(), 1)
+            page.compare_filter.setCurrentIndex(0)
+            self.assertTrue(page.compare_table.isHidden())
+            self.assertFalse(page.compare_empty.isHidden())
+            self.assertIn("same mods", page.compare_empty.text())
+            page.compare_filter.setCurrentIndex(1)
+            self.assertFalse(page.compare_table.isHidden())
+            self.assertTrue(page.compare_empty.isHidden())
+            self.assertEqual(page.compare_table.rowCount(), 2)
+
+    def test_profiles_page_refills_a_long_compare_table_quickly(self):
+        """Regression test: ResizeToContents status columns re-measured every
+        row on each setItem(), so refreshing a ~700-row "All mods" table froze
+        the window for ~8 seconds."""
+        import time
+
+        from PySide6.QtWidgets import QApplication
+
+        mods = "".join(f"+Mod {i}\n" for i in range(700))
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._compare(self._two_profiles_page(tmp, mods, mods + "+Extra\n"))
+            # Only a visible table re-measures its rows.
+            page.page.resize(1200, 900)
+            page.page.show()
+            QApplication.processEvents()
+            page.compare_filter.setCurrentIndex(1)
+            QApplication.processEvents()
+            started = time.perf_counter()
+            page.page.refresh()
+            page.page.refresh()
+            self.assertEqual(page.compare_table.rowCount(), 701)
+            self.assertLess(time.perf_counter() - started, 2.0)
+            page.page.close()
+
+    def test_profile_note_and_color_follow_rename_and_delete(self):
+        from commander_gui.ui import profiles_page
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": tmp}
+        ):
+            profiles_page.set_profile_note("Old", "keep me")
+            profiles_page.set_profile_color("Old", "blue")
+            profiles_page.move_profile_extras("Old", "New")
+            self.assertEqual(profiles_page.profile_note("New"), "keep me")
+            self.assertEqual(profiles_page.profile_color("New"), "blue")
+            self.assertEqual(profiles_page.profile_note("Old"), "")
+            profiles_page.forget_profile_extras("New")
+            self.assertEqual(profiles_page.profile_note("New"), "")
+            self.assertIsNone(profiles_page.profile_color("New"))
+            gui_settings.save_gui_settings(profile_colors={"X": "not-a-color"}, profile_notes={"Y": 5})
+            self.assertIsNone(profiles_page.profile_color("X"))
+            self.assertEqual(gui_settings.load_gui_settings()["profile_notes"], {})
+
+    def test_profiles_page_marks_active_and_selected_cards(self):
+        from PySide6.QtWidgets import QFrame
+
+        page = self._profiles_page(
+            [
+                CliProfile(active=True, profile_name="One", anomaly="/tmp/a1", gamma="/tmp/g1", cache="/tmp/c1"),
+                CliProfile(profile_name="Two", anomaly="/tmp/a2", gamma="/tmp/g2", cache="/tmp/c2"),
+            ]
+        )
+        frames = [
+            page.profile_list.itemWidget(page.profile_list.item(i)).findChild(QFrame, "profileCard")
+            for i in range(2)
+        ]
+        self.assertEqual([f.property("active") for f in frames], [True, False])
+        self.assertEqual([f.property("selected") for f in frames], [True, False])
+        page.profile_list.setCurrentRow(1)
+        self.assertEqual([f.property("selected") for f in frames], [False, True])
+
+    def test_seed_replace_overwrites_the_cli_downloaded_modlist(self):
+        """Regression test: "config create" downloads the official modlist.txt
+
+        into a new MO2 profile, so a duplicated profile kept that stock list
+        instead of a copy of its source's - its mod count differed.
+        """
+        from commander_gui.modlist import seed_new_mo2_profile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            profiles = Path(tmp) / "profiles"
+            (profiles / "Mine").mkdir(parents=True)
+            (profiles / "Mine" / "modlist.txt").write_text("+Custom\n+ModA\n")
+            (profiles / "Copy").mkdir()
+            (profiles / "Copy" / "modlist.txt").write_text("+ModA\n")
+            self.assertFalse(seed_new_mo2_profile(tmp, "Copy", "Mine"))
+            self.assertTrue(seed_new_mo2_profile(tmp, "Copy", "Mine", replace=True))
+            self.assertEqual(
+                (profiles / "Copy" / "modlist.txt").read_text(),
+                (profiles / "Mine" / "modlist.txt").read_text(),
+            )
+
+    def test_profiles_page_always_saves_official_sources(self):
+        from commander_gui.profile_bundle import non_default_sources
+
+        page = self._profiles_page(
+            [
+                CliProfile(
+                    active=True, profile_name="Main", anomaly="/tmp/a", gamma="/tmp/g", cache="/tmp/c",
+                    mo2_profile="Mine", download_threads=9,
+                    stalker_gamma_repo_url="https://example.com/fork",
+                )
+            ]
+        )
+        page._begin_edit()
+        self.assertFalse(page._is_dirty())
+        values = page._form_values()
+        self.assertEqual(non_default_sources(values), [])
+        # Fields no longer on the form are kept from the saved profile.
+        self.assertEqual((values.mo2_profile, values.download_threads), ("Mine", 9))
 
     def test_export_import_profile_bundle_round_trips_portable_settings(self):
         from commander_gui.profile_bundle import (
@@ -10059,16 +10402,18 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_dependencies_progress_maps_stages_onto_overall_bar(self):
         """Audit follow-up: determinate staged bar for Install Dependencies."""
         self.assertIsNone(_dependencies_progress("umu", None))
-        # Stage boundaries: umu 0-15, tools 15-35, verbs 35-100.
-        self.assertEqual(_dependencies_progress("umu", 0), 0)
-        self.assertEqual(_dependencies_progress("umu", 100), 15)
-        self.assertEqual(_dependencies_progress("tools", 0), 15)
-        self.assertEqual(_dependencies_progress("tools", 100), 35)
-        self.assertEqual(_dependencies_progress("verbs", 0), 35)
-        self.assertEqual(_dependencies_progress("verbs", 50), 68)
+        # Stage boundaries: winetricks 0-10, umu 10-25, tools 25-40, verbs 40-100.
+        self.assertEqual(_dependencies_progress("winetricks", 0), 0)
+        self.assertEqual(_dependencies_progress("winetricks", 100), 10)
+        self.assertEqual(_dependencies_progress("umu", 0), 10)
+        self.assertEqual(_dependencies_progress("umu", 100), 25)
+        self.assertEqual(_dependencies_progress("tools", 0), 25)
+        self.assertEqual(_dependencies_progress("tools", 100), 40)
+        self.assertEqual(_dependencies_progress("verbs", 0), 40)
+        self.assertEqual(_dependencies_progress("verbs", 50), 70)
         self.assertEqual(_dependencies_progress("verbs", 100), 100)
         # Out-of-range input clamps instead of leaving the stage range.
-        self.assertEqual(_dependencies_progress("verbs", -5), 35)
+        self.assertEqual(_dependencies_progress("verbs", -5), 40)
         self.assertEqual(_dependencies_progress("verbs", 150), 100)
         # Unknown stages fall back to the full range.
         self.assertEqual(_dependencies_progress("future", 25), 25)
@@ -10210,6 +10555,34 @@ class UserModsTrackerTests(unittest.TestCase):
             path.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
             result = local_modpack_records(tmp, "profile")
             self.assertIsNone(result)
+
+    def test_modpack_list_falls_back_to_another_mo2_profile_of_the_install(self):
+        """Regression test: the list lives in the MO2 profile the full install
+        ran for; a different active MO2 profile (e.g. "G.A.M.M.A", recreated
+        by MO2) made Updates report "No modpack list found" on a working
+        install."""
+        with tempfile.TemporaryDirectory() as tmp:
+            profiles = Path(tmp) / "profiles"
+            for name, addon in (("old", "Old Addon"), ("installed", "New Addon")):
+                (profiles / name).mkdir(parents=True)
+                (profiles / name / "modpack_maker_list.json").write_text(
+                    json.dumps([{"addonName": addon}]), encoding="utf-8"
+                )
+            os.utime(profiles / "old" / "modpack_maker_list.json", (1, 1))
+            (profiles / "G.A.M.M.A").mkdir()
+            (profiles / "G.A.M.M.A" / "modlist.txt").write_text("+A\n")
+            records = local_modpack_records(tmp, "G.A.M.M.A")
+            self.assertEqual([r.addon_name for r in records.values()], ["New Addon"])
+            # The newest list wins even over the profile's own older one: a
+            # later full install for another profile changed the shared mods.
+            records = local_modpack_records(tmp, "old")
+            self.assertEqual([r.addon_name for r in records.values()], ["New Addon"])
+            # On a tie (a seeded copy keeps the timestamp) the profile's own wins.
+            os.utime(profiles / "old" / "modpack_maker_list.json", (5, 5))
+            os.utime(profiles / "installed" / "modpack_maker_list.json", (5, 5))
+            records = local_modpack_records(tmp, "old")
+            self.assertEqual([r.addon_name for r in records.values()], ["Old Addon"])
+            self.assertIsNone(local_modpack_records(Path(tmp) / "none", "G.A.M.M.A"))
 
     def test_corrupt_md5_baseline_reports_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -11041,6 +11414,7 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertFalse(page._applying)
 
     def test_mod_manager_deleting_on_disk_files_invalidates_the_baseline(self):
+        from PySide6.QtCore import QCoreApplication
         from PySide6.QtWidgets import QApplication, QMessageBox
 
         from commander_gui.ui.mod_manager_page import ModManagerPage
@@ -11064,6 +11438,9 @@ class UserModsTrackerTests(unittest.TestCase):
                 def refresh_settings(self):
                     pass
 
+                def set_install_busy(self, busy, operation=None):
+                    self.install_busy = busy
+
             page = ModManagerPage(FakeWindow())
             page._lines = ["+SomeMod"]
 
@@ -11081,7 +11458,10 @@ class UserModsTrackerTests(unittest.TestCase):
             with (
                 patch.object(page, "_selected_mod_indexes", return_value=[0]),
                 patch.object(page, "_selected_mod_names", return_value=["SomeMod"]),
-                patch.object(page, "_delete_mod_folders", return_value=True),
+                patch(
+                    "commander_gui.ui.mod_manager_page._delete_mod_folders",
+                    return_value=[],
+                ),
                 patch.object(page, "_write_lines", return_value=True),
                 patch.object(page, "_load_mods"),
                 patch("commander_gui.ui.mod_manager_page.invalidate_baseline") as mock_invalidate,
@@ -11100,6 +11480,15 @@ class UserModsTrackerTests(unittest.TestCase):
                 ),
             ):
                 page._delete_selected_mods()
+                # Deleting folders now runs on a BackgroundTask (real
+                # QThread) instead of blocking the caller. Wait for it and
+                # deliver only its own queued result: pumping the whole event
+                # loop this late in the suite segfaults (see conftest.py).
+                task = page._delete_task
+                thread = task._thread
+                self.assertTrue(thread.wait(5000))
+                QCoreApplication.sendPostedEvents(task)
+                QCoreApplication.sendPostedEvents(thread)
 
             mock_invalidate.assert_called_once_with(profile.gamma)
 
@@ -11681,10 +12070,18 @@ class UserModsTrackerTests(unittest.TestCase):
             with (
                 patch("commander_gui.ui.install_page.restore_from_quarantine", return_value=[]),
                 patch("commander_gui.ui.install_page.purge_quarantine") as mock_purge,
-                patch.object(page, "_finish_verify"),
+                patch.object(page, "_finish_verify") as mock_finish,
             ):
+                page._repair_runner = Mock(was_cancelled=True)
+                records = list(page._quarantine_records)
+                # The cancel signal arrives while full-install is still
+                # exiting: nothing may be restored or unlocked yet.
                 page._on_repair_install_cancelled()
+                self.assertEqual(page._quarantine_records, records)
+                mock_finish.assert_not_called()
+                page._on_repair_install_finished(-15, "")
             mock_purge.assert_not_called()
+            mock_finish.assert_called_once()
             self.assertEqual(page._quarantine_records, [])
 
     def test_on_gamma_verify_done_handles_a_plan_less_clean_scan(self):
@@ -12041,6 +12438,48 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_umu_binary_returns_empty_when_not_found(self):
         with patch("commander_gui.winetricks.shutil.which", return_value=None):
             self.assertEqual(umu_binary(), "")
+
+    def test_check_winetricks_returns_false_when_found(self):
+        with patch(
+            "commander_gui.dependencies.shutil.which", return_value="/usr/bin/winetricks"
+        ):
+            need_install, msg = check_winetricks()
+        self.assertFalse(need_install)
+        self.assertIsNone(msg)
+
+    def test_check_winetricks_returns_true_when_missing_but_curl_available(self):
+        with patch(
+            "commander_gui.dependencies.shutil.which",
+            side_effect=lambda tool: "/usr/bin/curl" if tool == "curl" else None,
+        ):
+            need_install, msg = check_winetricks()
+        self.assertTrue(need_install)
+        self.assertIsNone(msg)
+
+    def test_check_winetricks_returns_error_when_no_curl(self):
+        with patch("commander_gui.dependencies.shutil.which", return_value=None):
+            need_install, msg = check_winetricks()
+        self.assertTrue(need_install)
+        self.assertIn("curl", msg)
+
+    def test_winetricks_tool_install_command_is_atomic_and_verified(self):
+        with patch(
+            "commander_gui.winetricks.shutil.which", return_value="/usr/bin/curl"
+        ):
+            cmd = winetricks_tool_install_command()
+        self.assertEqual(cmd[0], "bash")
+        script = cmd[2]
+        self.assertIn("src/winetricks", script)
+        self.assertIn("~/.local/bin/winetricks", script)
+        # Verified before being trusted, unlike the umu-run download.
+        self.assertIn("sha256sum -c", script)
+        self.assertIn("mktemp", script)
+        self.assertIn("mv -f", script)
+
+    def test_winetricks_tool_install_command_returns_empty_without_curl(self):
+        with patch("commander_gui.winetricks.shutil.which", return_value=None):
+            cmd = winetricks_tool_install_command()
+        self.assertEqual(cmd, [])
 
 
 class XrayAnalyzerTests(unittest.TestCase):
@@ -12574,7 +13013,7 @@ class RepairPreviewTests(unittest.TestCase):
             added=["mods/Mine/extra.ltx"],
         )
         with patch("commander_gui.repair.find_record_for_folder") as find:
-            find.side_effect = lambda folder, _records: (
+            find.side_effect = lambda folder, _records, **_kw: (
                 None if folder == names[-1] else Mock(archive_names=lambda: ["x.zip"])
             )
             plan = classify_problems(scan, {})
@@ -12652,7 +13091,6 @@ class AssistantThemeFollowTests(unittest.TestCase):
                 os.utime(path, (time.time() + 5, time.time() + 5))
                 window._follow_saved_theme()
                 self.assertEqual(theme.active_theme(), "reactor")
-                self.assertEqual(window.theme_combo.currentData(), "reactor")
             finally:
                 theme.apply_theme(app, "gamma")
                 window.close()
@@ -12775,6 +13213,8 @@ class UpdateStatusRecheckTests(unittest.TestCase):
         with (
             patch("commander_gui.ui.main_window.commander_appimage_path", return_value=Path("/x.AppImage")),
             patch.object(MainWindow, "_offer_commander_self_update", lambda self, tag: clicks.append(tag)),
+            # A __new__()-built window has no live Qt signal to emit on.
+            patch.object(MainWindow, "commander_update_found", Mock()),
         ):
             window._on_commander_update_status_checked("v1.3.0")
             window._on_commander_update_status_checked("v1.3.0H1")
@@ -12956,3 +13396,62 @@ class UnstableBuildTests(unittest.TestCase):
                 page._render_build()
                 self.assertFalse(page._switch_build_button.isEnabled())
                 self.assertIn("git switch", page._build_note.text())
+
+
+class AssistantGammaOverlayTests(unittest.TestCase):
+    def test_gamma_modified_files_are_ok_not_corrupt(self):
+        from assistant.analyzers.cli_log import analyze_cli
+        from assistant.findings import Severity
+
+        lines = [
+            "~/Games/Gamma/anomaly/fsgame.ltx                | CORRUPT",
+            "~/Games/Gamma/anomaly/bin/AnomalyDX10.exe       | CORRUPT",
+            "~/Games/Gamma/anomaly/bin/AnomalyDX11AVX.exe    | CORRUPT",
+            "~/Games/Gamma/anomaly/gamedata/real_problem.xml | CORRUPT",
+        ]
+        findings = analyze_cli("cli.log", "COMMANDER", lines)
+        self.assertEqual(
+            [f.severity for f in findings], [Severity.OK] * 3 + [Severity.ERROR]
+        )
+        self.assertIn("real_problem.xml", findings[-1].detail)
+
+
+class TaskOwnerDeletedMidRunTests(unittest.TestCase):
+    """Closing the Welcome overlay while it was still fetching patch notes
+    aborted the app: deleting the owner destroyed the task's running QThread
+    ("QThread: Destroyed while thread is still running")."""
+
+    def test_deleting_the_owner_detaches_a_running_task(self):
+        import threading
+
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        from commander_gui.ui.common import _ACTIVE_TASKS, BackgroundTask, StreamTask
+
+        QApplication.instance() or QApplication([])
+        gate = threading.Event()
+        for cls, fn in (
+            (BackgroundTask, lambda: gate.wait(5)),
+            (StreamTask, lambda _emit: gate.wait(5)),
+        ):
+            with self.subTest(cls=cls.__name__):
+                gate.clear()
+                owner = QWidget()
+                task = cls(fn, parent=owner)
+                results = []
+                task.result.connect(results.append)
+                task.start()
+                thread = task._thread
+                owner.deleteLater()
+                # Only this test's own objects: pumping the whole event loop
+                # this late in the suite segfaults (see conftest.py).
+                QCoreApplication.sendPostedEvents(owner, QEvent.Type.DeferredDelete)
+                self.assertIsNone(task.parent())
+                self.assertIn(task, _ACTIVE_TASKS)
+                gate.set()
+                self.assertTrue(thread.wait(5000))
+                QCoreApplication.sendPostedEvents(task)
+                QCoreApplication.sendPostedEvents(thread)
+                self.assertNotIn(task, _ACTIVE_TASKS)
+                self.assertEqual(results, [])

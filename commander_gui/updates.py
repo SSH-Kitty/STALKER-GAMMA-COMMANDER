@@ -68,7 +68,13 @@ class UpdateStatus:
         # a newer version is an update whatever went wrong with the list -
         # checking the error first hid it exactly when the list was down.
         if self.latest and self.installed and self.latest != self.installed:
-            return True
+            # Build numbers: a local build ahead of a lagging remote marker
+            # is not an update.
+            if self.latest.isdigit() and self.installed.isdigit():
+                if int(self.latest) > int(self.installed):
+                    return True
+            else:
+                return True
         if self.error:
             return False
         return bool(self.diffs)
@@ -138,14 +144,21 @@ def installed_version(gamma_dir: str | None) -> str | None:
 
 def _repo_owner_and_name(profile) -> tuple[str, str]:
     repo_url = (getattr(profile, "stalker_gamma_repo_url", "") or "").strip()
-    # str.split("/") always returns at least one (possibly empty) element,
-    # even for "" - so `len(parts) >= 1` can never actually be False and the
-    # "Stalker_GAMMA" fallback below it was dead code; an emptied repo URL
-    # produced "https://.../Grokitach//refs/heads/..." (empty repo segment)
-    # instead of ever reaching that fallback. Check emptiness directly.
-    parts = repo_url.rstrip("/").split("/") if repo_url else []
-    owner = parts[-2] if len(parts) >= 2 else "Grokitach"
-    repo = parts[-1] if parts and parts[-1] else "Stalker_GAMMA"
+    # Splitting the whole URL on "/" also counts the scheme and host, so a
+    # URL with too few path segments to actually contain "owner/repo" (a
+    # bare host, or a host plus one segment like "https://github.com/Owner")
+    # still has plenty of elements - just none of them a real owner - and
+    # the previous `len(parts) >= 2` check never caught that shape. Parse
+    # the path alone and require an owner AND a repo segment in it before
+    # trusting either.
+    segments = (
+        [s for s in urllib.parse.urlsplit(repo_url).path.split("/") if s]
+        if repo_url
+        else []
+    )
+    if len(segments) < 2:
+        return "Grokitach", "Stalker_GAMMA"
+    owner, repo = segments[-2], segments[-1]
     # A clone URL ("…/Stalker_GAMMA.git") names the same repo, but
     # raw.githubusercontent.com 404s on the ".git" suffix.
     repo = repo.removesuffix(".git") or "Stalker_GAMMA"
@@ -520,11 +533,40 @@ def local_modpack_records(
 ) -> dict[str, ModPackRecord] | None:
     """Records of what this install contains, or None if the profile has none.
 
-    The CLI writes ``modpack_maker_list.txt`` (and a JSON twin) into the active
-    profile after a full install. The TSV is preferred; the JSON is parsed when
-    only it exists.
+    The CLI writes ``modpack_maker_list.txt`` (and a JSON twin) into the
+    profile the full install ran for. The TSV is preferred; the JSON is
+    parsed when only it exists.
+
+    The list describes the install's shared ``mods`` folder, not one MO2
+    profile - so the newest list among all profiles of the install is used,
+    whichever profile holds it: the active one may have none (made later,
+    or recreated by MO2) or only an older one from before a later full
+    install for another profile. *mo2_profile* only wins a tie (a copy made
+    by ``seed_new_mo2_profile()`` keeps the original's timestamp).
     """
-    profile_dir = Path(gamma_dir, "profiles", mo2_profile)
+    found = []
+    try:
+        for candidate in Path(gamma_dir, "profiles").iterdir():
+            for name in _MODPACK_LIST_FILES:
+                path = candidate / name
+                if path.is_file() and not path.is_symlink():
+                    found.append(
+                        (path.stat().st_mtime, candidate.name == mo2_profile, candidate)
+                    )
+                    break
+    except OSError:
+        return None
+    if not found:
+        return None
+    profile_dir = max(found, key=lambda item: item[:2])[2]
+    return _read_modpack_list(profile_dir)
+
+
+#: What the CLI's full install leaves in an MO2 profile folder.
+_MODPACK_LIST_FILES = ("modpack_maker_list.txt", "modpack_maker_list.json")
+
+
+def _read_modpack_list(profile_dir: Path) -> dict[str, ModPackRecord] | None:
     txt_path = profile_dir / "modpack_maker_list.txt"
     json_path = profile_dir / "modpack_maker_list.json"
     try:

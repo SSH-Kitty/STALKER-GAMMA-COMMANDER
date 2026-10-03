@@ -40,6 +40,10 @@ def _private_data_home(tmp_path, monkeypatch):
     ``~/.local/share``: installs, updates and repairs now back up settings
     first, and many tests drive those flows against temporary installs."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    # Same for settings.json / gui-settings.json: tests that save GUI state
+    # (an install's resume point, window size...) otherwise wrote it into
+    # the developer's real ~/.config/stalker-gamma.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
 
 
 def pytest_collection_modifyitems(items):
@@ -58,7 +62,12 @@ def pytest_collection_modifyitems(items):
     healthy process have one.
     """
     early = ("test_steamdeck.py", "test_desktop_event_loop.py")
-    items.sort(key=lambda item: item.path.name not in early)
+    # Single tests elsewhere that show a window and pump its events: run
+    # late, this one segfaulted the suite intermittently.
+    early_tests = ("test_profiles_page_refills_a_long_compare_table_quickly",)
+    items.sort(
+        key=lambda item: item.path.name not in early and item.name not in early_tests
+    )
 
 
 def pytest_sessionfinish(session, exitstatus):

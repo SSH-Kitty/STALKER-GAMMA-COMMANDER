@@ -55,6 +55,26 @@ def scanned_files(dump: DumpArchive) -> tuple[list[str], list[str]]:
     return text, binary
 
 
+_CLI_DATE_RE = re.compile(r"cli(\d{4})(\d{2})(\d{2})\.log$")
+_USVFS_DATE_RE = re.compile(r"^usvfs-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})")
+
+
 def _where_label(entry: DumpFile) -> str:
+    """Plain-language name for a log file; the raw path stays in ``arcname``."""
+    name = entry.arcname.rsplit("/", 1)[-1].lower()
+    if match := _CLI_DATE_RE.search(name):
+        return f"Installer log ({match[1]}-{match[2]}-{match[3]})"
+    if match := _USVFS_DATE_RE.match(name):
+        return f"MO2 virtual file system log ({match[1]} {match[2]}:{match[3]})"
+    if name == "launcher.log":
+        return "Game launcher log"
+    if name.startswith("xray") and name.endswith(".log"):
+        return "Game engine log"
+    if name == "mo_interface.log":
+        return "Mod Organizer log"
+    if name == "winetricks.log":
+        return "Wine prefix runtime list"
+    if "vcredist" in name or "vcdist" in name:
+        return "Visual C++ installer log"
     group = SOURCE_LABELS.get(entry.source, entry.source)
     return f"{group} · {entry.short_name}"

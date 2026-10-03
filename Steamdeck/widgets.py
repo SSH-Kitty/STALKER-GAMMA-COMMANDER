@@ -272,23 +272,6 @@ def deck_divider_v(height: int = 26) -> QFrame:
     return divider
 
 
-def deck_columns_card(count: int) -> tuple[DeckCard, list[QVBoxLayout]]:
-    """A :class:`DeckCard` split into ``count`` equal columns by dividers."""
-    card = DeckCard()
-    row = QHBoxLayout()
-    row.setSpacing(px(20))
-    columns: list[QVBoxLayout] = []
-    for index in range(count):
-        if index:
-            row.addWidget(deck_divider())
-        column = QVBoxLayout()
-        column.setSpacing(px(8))
-        row.addLayout(column, 1)
-        columns.append(column)
-    card.body.addLayout(row)
-    return card, columns
-
-
 def side_by_side(*widgets: QWidget, spacing: int = ROW_GAP) -> QHBoxLayout:
     """Equal-width columns - two cards, two rows - sharing one line."""
     row = QHBoxLayout()

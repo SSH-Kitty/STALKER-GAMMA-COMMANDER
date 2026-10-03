@@ -45,8 +45,10 @@ TEXT_SUFFIXES: frozenset[str] = frozenset(
     }
 )
 
-#: Refuse to decode absurdly large entries into memory.
-MAX_TEXT_BYTES = 32_000_000
+#: Refuse to decode absurdly large entries into memory. Matches the
+#: per-file cap COMMANDER's own log dump writes (log_dump.MAX_FILE_BYTES):
+#: lower, and a long session's log it bundled was silently never analyzed.
+MAX_TEXT_BYTES = 64_000_000
 #: Bound archive metadata and aggregate text allocations as well as entries.
 MAX_ENTRIES = 10_000
 MAX_TOTAL_TEXT_BYTES = 256_000_000

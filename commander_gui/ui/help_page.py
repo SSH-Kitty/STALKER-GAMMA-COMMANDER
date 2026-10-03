@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import logs_dir
-from ..gui_settings import load_gui_settings
+from ..gui_settings import load_gui_settings, saved_prefix_for
 from .common import (
     _kv_row,
     assistant_token,
@@ -499,5 +499,9 @@ class HelpPage(QWidget):
         self._set_snapshot_value(tr("MO2 profile"), profile.mo2_profile)
         self._set_snapshot_value(tr("Download threads"), str(profile.download_threads))
         self._set_snapshot_value(tr("Runner"), gui.get("runner", "auto"))
-        self._set_snapshot_value(tr("Prefix"), gui.get("wine_prefix", tr("Not configured")))
+        self._set_snapshot_value(
+            tr("Prefix"),
+            saved_prefix_for(gui.get("runner") or "auto", gui)
+            or tr("Not configured"),
+        )
         self._set_snapshot_value(tr("Launch target"), gui.get("target", tr("Auto")))

@@ -64,6 +64,7 @@ from .common import (
     info_label,
     make_card,
     mo2_running,
+    populate_runner_combo,
     section_label,
     steam_running,
     tr,
@@ -194,6 +195,7 @@ class SettingsPage(QWidget):
         self._unstable_offer: str | None = None
         self._unstable_checked = False
         self._unstable_task: BackgroundTask | None = None
+        self._export_task: BackgroundTask | None = None
         build_row.addWidget(self._switch_build_button)
         layout.addLayout(build_row)
         self._build_note = info_label("")
@@ -342,6 +344,12 @@ class SettingsPage(QWidget):
             self._language_combo.addItem(native, code)
         self._language_combo.currentIndexChanged.connect(self._on_language)
         layout.addLayout(_option_row(tr("Language:"), self._language_combo))
+        self._title_bar_check = QCheckBox(tr("Use COMMANDER's own title bar"))
+        self._title_bar_check.setToolTip(
+            tr("Turn off to use your desktop's normal title bar instead.")
+        )
+        self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
+        layout.addWidget(self._title_bar_check)
         layout.addWidget(
             info_label(tr("Applies immediately, unless a background task is running."))
         )
@@ -681,17 +689,32 @@ class SettingsPage(QWidget):
         task.start()
 
     def _on_discord_test(self) -> None:
-        if self._discord_test_rpc is not None:
+        if self._discord_test_rpc is not None or not self._discord_test_button.isEnabled():
             return
-        rpc = start_presence(self._discord_client_id())
-        if rpc is None:
-            self._set_discord_status(False)
-            return
+        client_id = self._discord_client_id()
         profile = getattr(getattr(self.window, "settings", None), "active_profile", None)
         state = discord_presence_state(profile, gui_settings.load_gui_settings())
-        update_presence(rpc, DETAILS_TEXT, state=state)
-        self._discord_test_rpc = rpc
+
+        # The IPC connect blocks up to ~2s per socket path when Discord is
+        # wedged - off the GUI thread, like the Play page's presence.
+        def _connect():
+            rpc = start_presence(client_id)
+            if rpc is not None:
+                update_presence(rpc, DETAILS_TEXT, state=state)
+            return rpc
+
         self._discord_test_button.setEnabled(False)
+        task = BackgroundTask(_connect, parent=self)
+        task.result.connect(self._on_discord_test_connected)
+        task.error.connect(lambda _m: self._on_discord_test_connected(None))
+        task.start()
+
+    def _on_discord_test_connected(self, rpc) -> None:
+        if rpc is None:
+            self._discord_test_button.setEnabled(True)
+            self._set_discord_status(False)
+            return
+        self._discord_test_rpc = rpc
         self._discord_test_button.setText(tr("Showing on Discord..."))
         QTimer.singleShot(15_000, self._end_discord_test)
 
@@ -732,6 +755,9 @@ class SettingsPage(QWidget):
             gui_settings.save_gui_settings(
                 mo2_display_dpi=int(self._display_scale_combo.itemData(index))
             )
+            # A previous "Applied" label is stale the moment the selection
+            # changes - it hasn't actually been applied for this new value.
+            self._apply_display_scale_button.setText(tr("Apply"))
 
     def _apply_display_scale(self) -> None:
         dpi = self._display_scale_combo.currentData()
@@ -774,6 +800,12 @@ class SettingsPage(QWidget):
         except (LaunchError, OSError) as exc:
             QMessageBox.warning(self, tr("Could not apply display scale"), str(exc))
 
+    def _on_title_bar_toggled(self, on: bool) -> None:
+        gui_settings.save_gui_settings(custom_title_bar=on)
+        apply = getattr(self.window, "apply_title_bar", None)
+        if callable(apply):
+            apply(on)
+
     def _on_font_size(self, *_args) -> None:
         size = self._font_size_combo.currentData()
         if size:
@@ -804,10 +836,10 @@ class SettingsPage(QWidget):
             self.window.refresh_settings()
 
     def _on_export_log(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-
         from ..diagnostics import export_diagnostics
 
+        if self._export_task is not None:
+            return
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("Export Diagnostics"),
@@ -816,19 +848,33 @@ class SettingsPage(QWidget):
         )
         if not path:
             return
-        try:
-            export_diagnostics(Path(path))
-            QMessageBox.information(
-                self,
-                tr("Export Complete"),
-                tr("Diagnostics exported to:\n{path}", path=path),
-            )
-        except (OSError, ValueError) as exc:
-            QMessageBox.critical(
-                self,
-                tr("Export Failed"),
-                tr("Could not export diagnostics:\n{exc}", exc=exc),
-            )
+        # Gathers system info and log files - runs off the GUI thread so a
+        # large log doesn't freeze Settings while it collects everything.
+        task = BackgroundTask(export_diagnostics, Path(path), parent=self)
+        task.result.connect(lambda _r: self._on_export_log_done(path))
+        task.error.connect(self._on_export_log_error)
+        self._export_task = task
+        task.start()
+
+    def _on_export_log_done(self, path: str) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        self._export_task = None
+        QMessageBox.information(
+            self,
+            tr("Export Complete"),
+            tr("Diagnostics exported to:\n{path}", path=path),
+        )
+
+    def _on_export_log_error(self, message: str) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        self._export_task = None
+        QMessageBox.critical(
+            self,
+            tr("Export Failed"),
+            tr("Could not export diagnostics:\n{exc}", exc=message),
+        )
 
     # ---------------------------------------------------------------- refresh
     def _on_deck_mode(self, _index: int) -> None:
@@ -855,6 +901,9 @@ class SettingsPage(QWidget):
         self._welcome_check.blockSignals(True)
         self._welcome_check.setChecked(not state.get("welcome_hidden", False))
         self._welcome_check.blockSignals(False)
+        self._title_bar_check.blockSignals(True)
+        self._title_bar_check.setChecked(bool(state.get("custom_title_bar", True)))
+        self._title_bar_check.blockSignals(False)
         self._update_notify_check.blockSignals(True)
         self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
         self._update_notify_check.blockSignals(False)
@@ -870,20 +919,9 @@ class SettingsPage(QWidget):
         self._deck_mode_combo.setCurrentIndex(max(index, 0))
         self._deck_mode_combo.blockSignals(False)
 
-        self._runner_combo.blockSignals(True)
-        self._runner_combo.clear()
-        self._runner_combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
-        extra_protons = find_extra_protons()
-        if extra_protons:
-            self._runner_combo.insertSeparator(self._runner_combo.count())
-            for label, path in extra_protons:
-                self._runner_combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
-        saved_runner = state.get("runner") or "auto"
-        runner_index = self._runner_combo.findData(saved_runner)
-        if runner_index < 0:
-            runner_index = self._runner_combo.findData("auto")
-        self._runner_combo.setCurrentIndex(max(runner_index, 0))
-        self._runner_combo.blockSignals(False)
+        populate_runner_combo(
+            self._runner_combo, find_extra_protons(), state.get("runner") or "auto"
+        )
 
         self._font_size_combo.blockSignals(True)
         font_size_index = self._font_size_combo.findData(int(state.get("font_size") or 13))
