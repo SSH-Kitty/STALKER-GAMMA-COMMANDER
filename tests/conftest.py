@@ -30,7 +30,15 @@ def _network_disabled_in_tests(*_args, **_kwargs):
 
 @pytest.fixture(autouse=True)
 def _block_real_network_calls():
-    with patch("urllib.request.urlopen", side_effect=_network_disabled_in_tests):
+    # Also skip urlopen_with_retry's backoff (patching only network's own
+    # ``time`` name, not the global module): a page's background fetch sat
+    # ~2s in those sleeps, outlived its test and this patch, made its last
+    # attempt for real, then delivered the result to a destroyed page during
+    # a later test's processEvents() - a segfault in CI.
+    with (
+        patch("urllib.request.urlopen", side_effect=_network_disabled_in_tests),
+        patch("commander_gui.network.time"),
+    ):
         yield
 
 
