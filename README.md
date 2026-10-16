@@ -4,20 +4,16 @@
 
 <br>
 
-<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img alt="Latest stable release" src="https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?style=for-the-badge&logo=github&logoColor=white&label=stable&color=5f9a3c&labelColor=0d130c"></a>
-<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"><img alt="Latest unstable release" src="https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?include_prereleases&style=for-the-badge&label=unstable&color=e0a33a&labelColor=0d130c"></a>
-<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"><img alt="Total downloads" src="https://img.shields.io/github/downloads/SSH-Kitty/STALKER-GAMMA-COMMANDER/total?style=for-the-badge&label=downloads&color=9fe96f&labelColor=0d130c"></a>
-<a href="LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/license-GPLv3-9fe96f?style=for-the-badge&labelColor=0d130c"></a>
-<br>
-<a href="#install"><img alt="Linux x86_64" src="https://img.shields.io/badge/Linux-x86__64-24301f?style=for-the-badge&logo=linux&logoColor=white"></a>
-<a href="#steam-deck-mode"><img alt="Steam Deck" src="https://img.shields.io/badge/Steam%20Deck-ready-24301f?style=for-the-badge&logo=steamdeck&logoColor=white"></a>
-<a href="https://doc.qt.io/qtforpython-6/"><img alt="Built with PySide6 and Qt 6" src="https://img.shields.io/badge/built%20with-PySide6%20%2F%20Qt%206-41cd52?style=for-the-badge&logo=qt&logoColor=white&labelColor=0d130c"></a>
-<a href="https://discord.gg/6A9psrtYhh"><img alt="Join the Discord" src="https://img.shields.io/badge/Discord-join-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=0d130c"></a>
+<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"><img alt="Total downloads" src="https://img.shields.io/github/downloads/SSH-Kitty/STALKER-GAMMA-COMMANDER/total?label=downloads&style=for-the-badge&labelColor=141b15&color=5fb548"></a>
+<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/SSH-Kitty/STALKER-GAMMA-COMMANDER?label=release&style=for-the-badge&labelColor=141b15&color=5fb548"></a>
+<a href="#install"><img alt="Platform: Linux and Steam Deck" src="https://img.shields.io/badge/platform-Linux%20%7C%20Steam%20Deck-5fb548?style=for-the-badge&labelColor=141b15&color=5fb548"></a>
+<a href="LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/license-GPLv3-5fb548?style=for-the-badge&labelColor=141b15&color=5fb548"></a>
 
 <br>
 
-<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img alt="Download the AppImage" src="docs/readme/button-download.svg" width="400"></a>
-<a href="https://discord.gg/6A9psrtYhh"><img alt="Join the Discord" src="docs/readme/button-discord.svg" width="400"></a>
+<a href="https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases/latest"><img alt="Download the AppImage" src="docs/readme/button-download.svg" width="300"></a>
+&nbsp;
+<a href="https://discord.gg/6A9psrtYhh"><img alt="Join the Discord" src="docs/readme/button-discord.svg" width="300"></a>
 
 ### Get into the Zone without touching a terminal
 
@@ -34,7 +30,7 @@ Progress tables, a mod manager, Proton handling, co-op and a Play button, all in
 
 <br>
 
-<a href="https://github.com/user-attachments/assets/16576eb6-a9e1-4135-bc3d-9a93a59b7202"><img alt="The COMMANDER Dashboard" src="https://github.com/user-attachments/assets/16576eb6-a9e1-4135-bc3d-9a93a59b7202" width="100%"></a>
+<a href="docs/readme/screens/dashboard.png"><img alt="The COMMANDER Dashboard" src="docs/readme/screens/dashboard.png" width="100%"></a>
 
 <sub>The Dashboard: profile, install status, dependencies, storage, playtime and updates at a glance.</sub>
 
@@ -93,6 +89,8 @@ what COMMANDER sends over the network.
 <details>
 <summary><b>How co-op works</b></summary>
 <br>
+
+<img alt="The Multiplayer page" src="docs/readme/screens/multiplayer.png" width="100%">
 
 - **Two halves, handled separately.** The Anomaly part (engine exes, Steam networking DLLs, loose files) is kept in
   `<anomaly>/commander-coop/files`, and every original it replaces in `<anomaly>/commander-coop/backup`. The
@@ -204,7 +202,7 @@ the page. Total playtime is tracked per profile, and the Game stats card opens y
 <summary><b>Install</b></summary>
 <br>
 
-<img alt="The Install page" src="https://github.com/user-attachments/assets/bacd6e10-0645-4b80-a3f7-819fc8630254" width="100%">
+<img alt="The Install page" src="docs/readme/screens/install.png" width="100%">
 
 Installs S.T.A.L.K.E.R. Anomaly and GAMMA with a **live per-addon progress table** (name, operation, percent) and an
 overall completion bar. Pick a base folder and press **Create folders** to generate the Anomaly, GAMMA and cache layout.
@@ -227,7 +225,7 @@ overall completion bar. Pick a base folder and press **Create folders** to gener
 <summary><b>Play</b></summary>
 <br>
 
-<img alt="The Play page" src="https://github.com/user-attachments/assets/fb91b2e0-6422-4517-bd1f-f9a3cd401fbe" width="100%">
+<img alt="The Play page" src="docs/readme/screens/play.png" width="100%">
 
 Launch GAMMA through Mod Organizer 2, open MO2 directly, or run Anomaly's executable without MO2's virtual file system.
 Targets are read straight from `ModOrganizer.ini`, with `AnomalyLauncher.exe` as a fallback.
@@ -252,7 +250,7 @@ Targets are read straight from `ModOrganizer.ini`, with `AnomalyLauncher.exe` as
 <summary><b>Updates</b></summary>
 <br>
 
-<img alt="The Updates page" src="https://github.com/user-attachments/assets/6d54ad35-921d-46be-9501-454b8d8a2137" width="100%">
+<img alt="The Updates page" src="docs/readme/screens/update.png" width="100%">
 
 Compares your installed GAMMA version and addon list with the latest official data, without hitting the rate-limited
 GitHub REST API, and shows exactly what changed: added, modified, removed, and renamed archives.
@@ -268,7 +266,7 @@ once a day** even if you never open this page, with a desktop notification when 
 <summary><b>Mod Manager</b></summary>
 <br>
 
-<img alt="The Mod Manager" src="https://github.com/user-attachments/assets/ebfc0f97-bcdd-447e-a81b-5bd66e4df603" width="100%">
+<img alt="The Mod Manager" src="docs/readme/screens/modmanager.png" width="100%">
 
 Careful editing of the active MO2 profile's `modlist.txt`: search, enable, disable, delete and reorder mods, grouped by
 the `_separator` categories GAMMA ships.
@@ -305,6 +303,8 @@ touched, and anything with no known download source is reported instead.
 <summary><b>Profiles</b></summary>
 <br>
 
+<img alt="The Profiles page" src="docs/readme/screens/profiles.png" width="100%">
+
 Create, edit, activate and delete CLI profiles, each with its own Anomaly, GAMMA, cache, MO2 profile, download-thread
 and repository settings. Creating, activating and deleting go through `stalker-gamma config`, so its side effects
 (MO2's `selected_profile`, mod list downloads) happen exactly as the CLI intends. Advanced fields expose every repository
@@ -319,7 +319,7 @@ back up or share. Install folders are always chosen fresh on import, since they'
 <summary><b>System Check</b></summary>
 <br>
 
-<img alt="The System Check page" src="https://github.com/user-attachments/assets/425ffc07-522d-4a52-a611-3dc0e7c46a4f" width="100%">
+<img alt="The System Check page" src="docs/readme/screens/systemcheck.png" width="100%">
 
 Checks every dependency GAMMA and MO2 need: the CLI, Wine, Winetricks, Protontricks, `umu-run`, Vulkan (including the
 32-bit loader), each Winetricks runtime, GE-Proton builds, GameMode and MangoHud. Every check shows its status and a
@@ -331,7 +331,7 @@ copyable install command for your distro, and manual overrides let you point COM
 <summary><b>Utilities</b></summary>
 <br>
 
-<img alt="The Utilities page" src="https://github.com/user-attachments/assets/114caa0d-24a3-4d56-a38f-c2c1b1890221" width="100%">
+<img alt="The Utilities page" src="docs/readme/screens/utilities.png" width="100%">
 
 - **Cache cleanup.** Preview which archives are out of date and how much space they free, then clean them.
 - **Clear shader cache** and **Remove ReShade** for a clean slate after driver or mod changes.
@@ -346,7 +346,7 @@ copyable install command for your distro, and manual overrides let you point COM
   doing anything, and back up your saves and settings first. Your Wine prefix always survives.
 - Opens the bundled **COMMANDER ASSISTANT** log analyser.
 
-<img alt="COMMANDER ASSISTANT" src="https://github.com/user-attachments/assets/ca097673-6b6f-4c5b-92d5-b14632568efb" width="100%">
+<img alt="COMMANDER ASSISTANT" src="docs/readme/screens/assistant.png" width="100%">
 
 </details>
 
@@ -367,20 +367,24 @@ copyable install command for your distro, and manual overrides let you point COM
 </details>
 
 <a id="screens"></a>
-<img src="docs/readme/h-screens.svg" width="100%" alt="Field report">
+<img src="docs/readme/h-screens.svg" width="100%" alt="Screenshots">
 
 <table>
 <tr>
-<td width="50%"><a href="https://github.com/user-attachments/assets/bacd6e10-0645-4b80-a3f7-819fc8630254"><img src="https://github.com/user-attachments/assets/bacd6e10-0645-4b80-a3f7-819fc8630254" alt="Install with live per-addon progress"></a><br><sub>Install: live per-addon progress</sub></td>
-<td width="50%"><a href="https://github.com/user-attachments/assets/fb91b2e0-6422-4517-bd1f-f9a3cd401fbe"><img src="https://github.com/user-attachments/assets/fb91b2e0-6422-4517-bd1f-f9a3cd401fbe" alt="Play: runners, prefixes and launch targets"></a><br><sub>Play: runners, prefixes and launch targets</sub></td>
+<td width="50%"><a href="docs/readme/screens/multiplayer.png"><img src="docs/readme/screens/multiplayer.png" alt="Multiplayer: xrRazom co-op"></a><br><sub>Multiplayer: xrRazom co-op</sub></td>
+<td width="50%"><a href="docs/readme/screens/profiles.png"><img src="docs/readme/screens/profiles.png" alt="Profiles: several installs side by side"></a><br><sub>Profiles: several installs side by side</sub></td>
 </tr>
 <tr>
-<td width="50%"><a href="https://github.com/user-attachments/assets/6d54ad35-921d-46be-9501-454b8d8a2137"><img src="https://github.com/user-attachments/assets/6d54ad35-921d-46be-9501-454b8d8a2137" alt="Updates: every changed addon"></a><br><sub>Updates: every changed addon</sub></td>
-<td width="50%"><a href="https://github.com/user-attachments/assets/ebfc0f97-bcdd-447e-a81b-5bd66e4df603"><img src="https://github.com/user-attachments/assets/ebfc0f97-bcdd-447e-a81b-5bd66e4df603" alt="Mod Manager: GAMMA's categories, drag to reorder"></a><br><sub>Mod Manager: GAMMA's categories, drag to reorder</sub></td>
+<td width="50%"><a href="docs/readme/screens/install.png"><img src="docs/readme/screens/install.png" alt="Install with live per-addon progress"></a><br><sub>Install: live per-addon progress</sub></td>
+<td width="50%"><a href="docs/readme/screens/play.png"><img src="docs/readme/screens/play.png" alt="Play: runners, prefixes and launch targets"></a><br><sub>Play: runners, prefixes and launch targets</sub></td>
 </tr>
 <tr>
-<td width="50%"><a href="https://github.com/user-attachments/assets/425ffc07-522d-4a52-a611-3dc0e7c46a4f"><img src="https://github.com/user-attachments/assets/425ffc07-522d-4a52-a611-3dc0e7c46a4f" alt="System Check: every dependency in one place"></a><br><sub>System Check: every dependency in one place</sub></td>
-<td width="50%"><a href="https://github.com/user-attachments/assets/114caa0d-24a3-4d56-a38f-c2c1b1890221"><img src="https://github.com/user-attachments/assets/114caa0d-24a3-4d56-a38f-c2c1b1890221" alt="Utilities: maintenance and recovery"></a><br><sub>Utilities: maintenance and recovery</sub></td>
+<td width="50%"><a href="docs/readme/screens/update.png"><img src="docs/readme/screens/update.png" alt="Updates: every changed addon"></a><br><sub>Updates: every changed addon</sub></td>
+<td width="50%"><a href="docs/readme/screens/modmanager.png"><img src="docs/readme/screens/modmanager.png" alt="Mod Manager: GAMMA's categories, drag to reorder"></a><br><sub>Mod Manager: GAMMA's categories, drag to reorder</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/readme/screens/systemcheck.png"><img src="docs/readme/screens/systemcheck.png" alt="System Check: every dependency in one place"></a><br><sub>System Check: every dependency in one place</sub></td>
+<td width="50%"><a href="docs/readme/screens/utilities.png"><img src="docs/readme/screens/utilities.png" alt="Utilities: maintenance and recovery"></a><br><sub>Utilities: maintenance and recovery</sub></td>
 </tr>
 </table>
 

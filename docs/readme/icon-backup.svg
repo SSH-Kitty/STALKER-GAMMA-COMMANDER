@@ -2,6 +2,5 @@
 <defs><filter id="g" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="1.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 <linearGradient id="p" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f281d"/><stop offset="1" stop-color="#0d130c"/></linearGradient></defs>
 <rect x="1" y="1" width="62" height="62" rx="10" fill="url(#p)" stroke="#9fe96f" stroke-opacity=".35"/>
-<path d="M1 54 L10 63 M54 1 L63 10" stroke="#e0a33a" stroke-opacity=".5" stroke-width="2"/>
 <g fill="none" stroke="#9fe96f" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" filter="url(#g)"><path d="M14 18h28l8 8v24H14z"/><path d="M22 18v10h16V18"/><rect x="21" y="36" width="22" height="14"/></g>
 </svg>
