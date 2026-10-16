@@ -1319,9 +1319,8 @@ class MultiplayerPage(QWidget):
             self._say(tr("Failed: {error}", error=tr(error)))
         else:
             if not quiet:
-                self._say(done or tr("Done."))
-                if done:  # switch confirmations; nothing to act on, so they fade
-                    self._say_clear.start(3000)
+                self._say(done or tr("Done"))
+                self._say_clear.start(5000)  # nothing to act on, so it fades
             if on_done:
                 on_done(result)
         self.refresh()
@@ -1354,7 +1353,7 @@ class MultiplayerPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Install anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._start(tr("Installing {name}…", name=path.name), self._install_job, path, profile)
+        self._start(tr("Installing {name}…", name=path.name), self._install_job, path, profile, done=tr("xrRazom Co-op installed"))
 
     def _install_job(self, path: Path, profile):
         return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit)
@@ -1365,7 +1364,7 @@ class MultiplayerPage(QWidget):
             return
         fn = coop.switch_to_coop if to_coop else coop.switch_to_singleplayer
         label = tr("Switching to co-op…") if to_coop else tr("Switching to singleplayer…")
-        done = tr("Switched to co-op.") if to_coop else tr("Switched to singleplayer.")
+        done = tr("Switched to co-op") if to_coop else tr("Switched to singleplayer")
         self._start(label, fn, profile.anomaly, profile.gamma, profile.mo2_profile, done=done)
 
     def _set_appid(self, appid: int) -> None:
@@ -1374,7 +1373,7 @@ class MultiplayerPage(QWidget):
         if profile is None or (self._dirty and not self._save()):
             self._update_address()  # puts the pills back
             return
-        # A few small file writes: no progress bar or "Done." popping in and out.
+        # A few small file writes: no progress bar or "Done" popping in and out.
         self._start(tr("Switching Steam game…"), coop.set_steam_appid, profile.anomaly, appid, quiet=True)
 
     def _uninstall(self) -> None:
@@ -1388,7 +1387,7 @@ class MultiplayerPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Uninstall"), QMessageBox.StandardButton.No: tr("Cancel")},
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._start(tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile)
+        self._start(tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile, done=tr("xrRazom Co-op uninstalled"))
 
     # -------------------------------------------------------------- settings
     def _save(self) -> bool:
