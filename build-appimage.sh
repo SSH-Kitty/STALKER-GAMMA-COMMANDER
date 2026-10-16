@@ -23,7 +23,7 @@ set -euo pipefail
 
 # ----------------------------------------------------------------- settings
 PY_SERIES=3.12
-PY_FULL=3.12.14
+PY_FULL=3.12.15
 PY_ABI=cp312
 PY_PLATFORM=manylinux_2_28_x86_64
 # Qt wheels, pinned by version AND hash (pip's hash-checking mode): they
@@ -55,7 +55,7 @@ TOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.1/appim
 TOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
 RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH}"
 RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
-BASE_SHA256="cefdd1b6e08dfb6c977d4233a4177ed3ee55a526991a122c8d92263f5901544f"
+BASE_SHA256="929ce69b45955bfc74af81fd65a65c3ad240593c99b3574466a94ebf0f987ebf"
 
 # xcb/xkb helper libraries. Qt hard-requires these but stock Ubuntu/Debian
 # often ship without them, which is the classic "could not load the Qt

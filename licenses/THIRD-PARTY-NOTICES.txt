@@ -96,11 +96,11 @@ certifi (Python package)
   License: MPL-2.0 (texts/MPL-2.0.txt)
   Source:  https://github.com/certifi/python-certifi
 
-Python 3.12.14                                     (opt/python3.12)
+Python 3.12.15                                     (opt/python3.12)
   Copyright (c) 2001 Python Software Foundation; All Rights Reserved.
   License: PSF License Agreement, with the notices of the libraries Python
            includes (Python-LICENSE.txt)
-  Source:  https://github.com/python/cpython/tree/v3.12.14
+  Source:  https://github.com/python/cpython/tree/v3.12.15
   Packaged as an AppImage base by python-appimage
   (https://github.com/niess/python-appimage).
 
