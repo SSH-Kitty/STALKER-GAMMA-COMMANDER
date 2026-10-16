@@ -1,4 +1,6 @@
 -r requirements.txt
+# The Qt the AppImage bundles (build-appimage.sh QT_REQUIREMENTS).
+PySide6==6.11.1
 ruff==0.16.4
 pytest==9.1.1
 pytest-xdist==3.8.0
