@@ -11,6 +11,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum
 
+from commander_gui.i18n import tr
+
 CATEGORY_GAME = "Game crash"
 CATEGORY_INSTALL = "Install & download"
 CATEGORY_LAUNCHER = "Launcher & Wine"
@@ -18,7 +20,8 @@ CATEGORY_MO2 = "Mods (MO2)"
 CATEGORY_SYSTEM = "System & runtime"
 CATEGORY_INFO = "Information"
 
-#: Display order for categories in the UI filter box.
+#: Display order for categories in the UI filter box. The names are identities
+#: (filters, ordering); show them through ``tr()``.
 CATEGORIES: tuple[str, ...] = (
     CATEGORY_GAME,
     CATEGORY_INSTALL,
@@ -41,6 +44,7 @@ class Severity(IntEnum):
     FATAL = 3
 
 
+#: English labels; show them through :func:`severity_label`.
 SEVERITY_LABEL: dict[Severity, str] = {
     Severity.FATAL: "CRASH",
     Severity.ERROR: "PROBLEM",
@@ -48,6 +52,10 @@ SEVERITY_LABEL: dict[Severity, str] = {
     Severity.INFO: "NOTE",
     Severity.OK: "NORMAL",
 }
+
+def severity_label(severity: Severity) -> str:
+    return tr(SEVERITY_LABEL[severity])
+
 
 SEVERITY_COLOR: dict[Severity, str] = {
     Severity.FATAL: "#ff5f52",
@@ -86,9 +94,9 @@ class Finding:
         """Human-readable location string, e.g. ``file.log · line 24 · 3x``."""
         parts: list[str] = [self.where_label or self.arcname]
         if self.line_no is not None:
-            parts.append(f"line {self.line_no}")
+            parts.append(tr("line {number}", number=self.line_no))
         if self.count > 1:
-            parts.append(f"happened {self.count} times")
+            parts.append(tr("happened {count} times", count=self.count))
         return " · ".join(parts)
 
 
@@ -108,6 +116,26 @@ def sort_findings(findings: Iterable[Finding]) -> list[Finding]:
 _COLLAPSE_KEY_FIELDS = ("severity", "category", "arcname")
 
 
+def _collapse_key(finding: Finding) -> tuple:
+    return (
+        *(getattr(finding, name) for name in _COLLAPSE_KEY_FIELDS),
+        finding.dedup_key or finding.title,
+    )
+
+
+def _merge_into(existing: Finding, finding: Finding) -> None:
+    existing.count += finding.count
+    if finding.line_no is not None and (
+        existing.line_no is None or finding.line_no < existing.line_no
+    ):
+        existing.line_no = finding.line_no
+    if not existing.excerpt and finding.excerpt:
+        existing.excerpt = finding.excerpt
+    if finding.technical:
+        combined = (existing.technical + "\n" + finding.technical).strip("\n")
+        existing.technical = combined[-8000:]
+
+
 def collapse_findings(findings: Iterable[Finding]) -> list[Finding]:
     """Merge repeats of the same finding into a single entry with a count.
 
@@ -122,27 +150,41 @@ def collapse_findings(findings: Iterable[Finding]) -> list[Finding]:
     key_to_index: dict[tuple, int] = {}
     merged: list[Finding] = []
     for finding in findings:
-        key = (
-            *(getattr(finding, name) for name in _COLLAPSE_KEY_FIELDS),
-            finding.dedup_key or finding.title,
-        )
+        key = _collapse_key(finding)
         index = key_to_index.get(key)
         if index is None:
             key_to_index[key] = len(merged)
             merged.append(finding)
             continue
-        existing = merged[index]
-        existing.count += finding.count
-        if finding.line_no is not None and (
-            existing.line_no is None or finding.line_no < existing.line_no
-        ):
-            existing.line_no = finding.line_no
-        if not existing.excerpt and finding.excerpt:
-            existing.excerpt = finding.excerpt
-        if finding.technical:
-            combined = (existing.technical + "\n" + finding.technical).strip("\n")
-            existing.technical = combined[-8000:]
+        _merge_into(merged[index], finding)
     return merged
+
+
+class FindingCollector(list):
+    """A findings list that merges repeats as they are appended.
+
+    Same merge as :func:`collapse_findings`, done per line instead of after
+    the whole file: a log with 200k error lines otherwise held 200k Finding
+    objects at once. At most *limit* distinct findings are kept; the rest
+    are only counted in ``dropped``.
+    """
+
+    def __init__(self, limit: int = 500) -> None:
+        super().__init__()
+        self._by_key: dict[tuple, Finding] = {}
+        self._limit = limit
+        self.dropped = 0
+
+    def append(self, finding: Finding) -> None:
+        key = _collapse_key(finding)
+        existing = self._by_key.get(key)
+        if existing is not None:
+            _merge_into(existing, finding)
+        elif len(self) >= self._limit:
+            self.dropped += finding.count
+        else:
+            self._by_key[key] = finding
+            super().append(finding)
 
 
 @dataclass
@@ -173,37 +215,50 @@ class HealthSummary:
     def headline(self) -> str:
         """Plain-language verdict phrase."""
         if self.problems:
-            noun = "problem" if self.problems == 1 else "problems"
-            lead = "Crash found: " if self.fatal else ""
-            return f"{lead}{self.problems} {noun} to fix"
+            if self.fatal:
+                if self.problems == 1:
+                    return tr("Crash found: 1 problem to fix")
+                return tr("Crash found: {count} problems to fix", count=self.problems)
+            if self.problems == 1:
+                return tr("1 problem to fix")
+            return tr("{count} problems to fix", count=self.problems)
         if self.warning:
-            noun = "warning" if self.warning == 1 else "warnings"
-            return f"No serious problems, {self.warning} {noun} to check"
-        return "All clear, no problems found"
+            if self.warning == 1:
+                return tr("No serious problems, 1 warning to check")
+            return tr("No serious problems, {count} warnings to check", count=self.warning)
+        return tr("All clear, no problems found")
 
     def sentence(self) -> str:
         """Full human-readable summary sentence."""
         if self.problems:
             parts = [
-                (
+                tr(
                     "Start with the first item in the list. Each one explains "
                     "what happened and how to fix it."
                 )
             ]
-            if self.warning:
-                noun = "warning is" if self.warning == 1 else "warnings are"
-                parts.append(f"{self.warning} smaller {noun} also worth a look.")
+            if self.warning == 1:
+                parts.append(tr("1 smaller warning is also worth a look."))
+            elif self.warning:
+                parts.append(
+                    tr("{count} smaller warnings are also worth a look.", count=self.warning)
+                )
         elif self.warning:
-            parts = ["Nothing here should stop the game from working."]
+            parts = [tr("Nothing here should stop the game from working.")]
         else:
-            parts = ["The scanned logs show no crashes, errors or warnings."]
-        if self.info:
-            noun = "entry is" if self.info == 1 else "entries are"
-            parts.append(f"{self.info} other {noun} normal and need no action.")
+            parts = [tr("The scanned logs show no crashes, errors or warnings.")]
+        if self.info == 1:
+            parts.append(tr("1 other entry is normal and needs no action."))
+        elif self.info:
+            parts.append(
+                tr("{count} other entries are normal and need no action.", count=self.info)
+            )
         if self.partial_scan:
             parts.append(
-                "(Partial scan: this ZIP does not look like a standard COMMANDER "
-                "log dump.)"
+                tr(
+                    "(Partial scan: this ZIP does not look like a standard COMMANDER "
+                    "log dump.)"
+                )
             )
         return " ".join(parts)
 

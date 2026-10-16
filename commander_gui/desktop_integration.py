@@ -204,6 +204,9 @@ def ensure_menu_entry() -> Path | None:
     except ValueError:
         return None
     icon = _current_icon(bundled_icon(), ICON_DEST, install_icon) or DESKTOP_ID
+    if any(ch in str(value) for value in (icon, start_dir or "") for ch in "\r\n\0"):
+        # A line break in a path would add keys of its own to the entry.
+        return None
     content = menu_entry_content(exec_line, icon, start_dir)
     try:
         if target.is_file() and target.read_text(encoding="utf-8") == content:

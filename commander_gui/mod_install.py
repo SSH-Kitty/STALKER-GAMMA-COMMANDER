@@ -297,21 +297,30 @@ def _unwrap_tarball(
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [str(archiver), "x", str(inner), f"-o{staging}", "-y", "-p"],
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
-            timeout=3600,
-            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError) as exc:
         raise ModInstallError(f"Could not unpack the inner tar archive: {exc}") from exc
-    if result.returncode != 0:
-        detail = "\n".join(result.stdout.splitlines()[-8:])
+    # Polled, not one blocking run(): Cancel must stop a multi-GB unpack now.
+    while True:
+        try:
+            output, _ = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and cancel_event.is_set():
+                process.kill()
+                process.communicate()
+                raise ModInstallError("Mod installation cancelled") from None
+    if process.returncode != 0:
+        detail = "\n".join(output.splitlines()[-8:])
         raise ModInstallError(
-            f"Archive extraction failed (exit code {result.returncode})\n{detail}"
+            f"Archive extraction failed (exit code {process.returncode})\n{detail}"
         )
     inner.unlink()
 

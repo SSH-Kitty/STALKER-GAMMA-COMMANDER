@@ -11,9 +11,11 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QMimeData, QUrl
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from commander_gui.modlist import mod_conflicts
+from commander_gui.ui.dialogs import MessageBox as QMessageBox
+from commander_gui.ui.mod_manager_page import _mod_name
 
 
 def _write(root: Path, relative: str) -> None:
@@ -209,6 +211,89 @@ class UpdateFromArchiveTest(_Page):
             app.processEvents()
         self.assertTrue((mods / "Mine" / "gamedata" / "old.ltx").is_file())
         self.assertIsNone(page._reinstall_done_message)
+
+
+class DragReorderWarningTest(_Page):
+    def _drop(self, page, answer):
+        with (
+            patch.object(QMessageBox, "question", return_value=answer) as question,
+            patch.object(page, "_write_lines", return_value=False) as write,
+        ):
+            page._on_tree_drop("A", "B", "Cat", True)
+            for _ in range(5):
+                QApplication.instance().processEvents()
+        return question, write
+
+    def test_first_drag_asks_and_cancel_moves_nothing(self):
+        page = self._page()
+        page._lines = ["+A", "+B", "-Cat_separator"]
+        question, write = self._drop(page, QMessageBox.StandardButton.No)
+        question.assert_called_once()
+        write.assert_not_called()
+        question, write = self._drop(page, QMessageBox.StandardButton.Yes)
+        question.assert_called_once()
+        write.assert_called_once()
+        # Asked once per session, like Move Up/Down.
+        question, write = self._drop(page, QMessageBox.StandardButton.Yes)
+        question.assert_not_called()
+        write.assert_called_once()
+
+
+class ModNicknameTest(_Page):
+    def _page_with_mod(self):
+        page = self._page()
+        mods = Path(self.tmp.name) / "mods"
+        _write(mods, "Real Name/gamedata/a.ltx")
+        page._lines = ["+Real Name", "+Other"]
+        page._populate_tree()
+        return page, mods
+
+    def _rename(self, page, nickname):
+        with (
+            patch.object(page, "_selected_mod_names", return_value=["Real Name"]),
+            patch(
+                "commander_gui.ui.mod_manager_page.QInputDialog.getText",
+                return_value=(nickname, True),
+            ),
+        ):
+            page._rename_selected_mod()
+
+    def _texts(self, page):
+        header = page.tree.topLevelItem(0)
+        return {
+            _mod_name(header.child(i)): header.child(i).text(0)
+            for i in range(header.childCount())
+        }
+
+    def test_nickname_changes_only_what_commander_shows(self):
+        from commander_gui import gui_settings
+
+        page, mods = self._page_with_mod()
+        self._rename(page, "Nice Name")
+        self.assertEqual(self._texts(page)["Real Name"], "Nice Name")
+        # Nothing Mod Organizer reads is touched.
+        self.assertEqual(page._lines, ["+Real Name", "+Other"])
+        self.assertTrue((mods / "Real Name" / "gamedata" / "a.ltx").is_file())
+        self.assertEqual(page._selected_mod_names(), ["Real Name"])
+        # It survives a reload: stored per GAMMA folder.
+        stored = gui_settings.load_gui_settings()["mod_nicknames"]
+        self.assertEqual(stored[str(Path(self.tmp.name))], {"Real Name": "Nice Name"})
+
+    def test_search_finds_both_names(self):
+        page, _mods = self._page_with_mod()
+        self._rename(page, "Nice Name")
+        header = page.tree.topLevelItem(0)
+        for needle in ("nice", "real"):
+            page.search.setText(needle)
+            visible = [_mod_name(header.child(i)) for i in range(header.childCount()) if not header.child(i).isHidden()]
+            self.assertEqual(visible, ["Real Name"])
+
+    def test_empty_or_real_name_resets_the_nickname(self):
+        page, _mods = self._page_with_mod()
+        self._rename(page, "Nice Name")
+        self._rename(page, "")
+        self.assertEqual(self._texts(page)["Real Name"], "Real Name")
+        self.assertEqual(page._nicknames(), {})
 
 
 class UpdateNotificationTest(unittest.TestCase):

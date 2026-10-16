@@ -16,20 +16,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 from commander_gui.steam_shortcuts import (
+    COOP_SHORTCUT_NAME,
     ShortcutsFileError,
     add_commander_shortcuts,
     add_or_update_shortcut,
     add_to_steam,
+    autologin_shortcuts_vdf,
     commander_launch_target,
+    compat_tool_name,
+    coop_launch_options,
+    coop_launch_url,
+    coop_shortcut_current,
     find_shortcuts_vdf,
     find_userdata_config_dirs,
     get_shortcuts_map,
     install_icon,
     list_steam_accounts,
+    mapped_compat_tool,
     read_shortcuts,
     restart_steam,
+    rungameid,
+    set_compat_tool,
     set_shortcuts_map,
+    setup_coop_shortcut,
     steam_launch_command,
+    unsigned_appid,
+    write_coop_shortcut,
     write_shortcuts,
 )
 
@@ -251,6 +263,25 @@ class ListSteamAccountsTests(unittest.TestCase):
             label, _vdf_path = accounts[0]
             self.assertEqual(label, "Tester")
 
+    def test_the_auto_login_account_is_picked_among_several(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Steam"
+            users = ""
+            for account_id, login in (("111", "first"), ("222", "second")):
+                (root / "userdata" / account_id / "config").mkdir(parents=True)
+                steamid64 = int(account_id) + 76561197960265728
+                users += f'\t"{steamid64}"\n\t{{\n\t\t"AccountName"\t\t"{login}"\n\t}}\n'
+            (root / "config").mkdir()
+            (root / "config" / "loginusers.vdf").write_text('"users"\n{\n' + users + "}\n")
+            registry = Path(tmp) / "registry.vdf"
+            registry.write_text('"Registry"\n{\n\t"AutoLoginUser"\t\t"second"\n}\n')
+            with patch("commander_gui.launcher.STEAM_ROOT_CANDIDATES", (root,)):
+                self.assertEqual(
+                    autologin_shortcuts_vdf((registry,)),
+                    (root / "userdata" / "222" / "config" / "shortcuts.vdf").resolve(),
+                )
+                self.assertIsNone(autologin_shortcuts_vdf((Path(tmp) / "missing.vdf",)))
+
     def test_two_accounts_get_two_distinct_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "Steam"
@@ -350,6 +381,52 @@ class RestartSteamTests(unittest.TestCase):
             self.assertRaises(OSError),
         ):
             restart_steam(Path("/home/user/.steam/steam"), while_stopped=failing_write)
+        popen.assert_called_once()
+
+    def test_relaunch_args_only_follow_a_successful_write(self):
+        """A co-op launch relaunches Steam with its steam:// link - one
+        start, since a second racing ``steam`` leaves both stuck. A failed
+        write must not launch the stale shortcut."""
+
+        def failing_write():
+            raise OSError("disk full")
+
+        for write, expected in ((lambda: None, ["steam", "steam://x"]), (failing_write, ["steam"])):
+            with (
+                patch("commander_gui.steam_shortcuts.subprocess.run"),
+                patch("commander_gui.steam_shortcuts.subprocess.Popen") as popen,
+                patch("commander_gui.steam_shortcuts._wait_for_steam_to_exit", return_value=True),
+            ):
+                try:
+                    restart_steam(
+                        Path("/home/user/.steam/steam"),
+                        while_stopped=write,
+                        relaunch_args=("steam://x",),
+                    )
+                except OSError:
+                    pass
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], expected)
+
+    def test_a_hung_steam_is_stopped_then_the_write_goes_ahead(self):
+        """A Steam that ignores -shutdown (hung, often windowless) is
+        terminated - it swallows every steam:// link otherwise."""
+        written = []
+        with (
+            patch("commander_gui.steam_shortcuts.subprocess.run") as run,
+            patch("commander_gui.steam_shortcuts.subprocess.Popen") as popen,
+            patch("commander_gui.steam_shortcuts.shutil.which", return_value="/usr/bin/pkill"),
+            patch(
+                "commander_gui.steam_shortcuts._wait_for_steam_to_exit",
+                side_effect=[False, True],
+            ),
+        ):
+            restart_steam(
+                Path("/home/user/.steam/steam"),
+                while_stopped=lambda: written.append(True),
+            )
+        self.assertEqual(written, [True])
+        self.assertIn(["/usr/bin/pkill", "-TERM", "-x", "steam"], [c.args[0] for c in run.call_args_list])
         popen.assert_called_once()
 
     def test_nothing_is_written_if_steam_will_not_close(self):
@@ -452,3 +529,166 @@ class AddToSteamTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoopShortcutTests(unittest.TestCase):
+    """The co-op shortcut Steam co-op sessions launch through."""
+
+    CONFIG = (
+        '"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+        '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n'
+        '\t\t\t\t\t"0"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"proton_9"\n\t\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t\t"priority"\t\t"75"\n\t\t\t\t\t}\n'
+        '\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n'
+    )
+
+    def _setup(self, tmp: str) -> Path:
+        config_dir = Path(tmp) / "Steam" / "userdata" / "111" / "config"
+        config_dir.mkdir(parents=True)
+        vdf = config_dir / "shortcuts.vdf"
+        vdf.write_bytes(_sample_bytes())
+        (Path(tmp) / "Steam" / "config").mkdir()
+        (Path(tmp) / "Steam" / "config" / "config.vdf").write_text(self.CONFIG)
+        return vdf
+
+    def _fields(self, profile="Default", appid=41700):
+        return {
+            "exe": "/games/GAMMA/ModOrganizer.exe",
+            "start_dir": "/games/GAMMA",
+            "launch_options": coop_launch_options("/pfx dir", profile, "Anomaly (DX11-AVX)", appid),
+            "proton_name": "GE-Proton10-4",
+        }
+
+    def test_launch_options_point_proton_at_the_prefix_and_cop(self):
+        self.assertEqual(
+            coop_launch_options("/p", "Default", "Anomaly", 41700),
+            "STEAM_COMPAT_DATA_PATH=/p SteamAppId=41700 %command% -p Default run -e Anomaly",
+        )
+
+    def test_launch_options_keep_shell_characters_literal(self):
+        import shlex
+
+        options = coop_launch_options('/my "pfx"', 'a"$(touch x)`id`', "Anomaly (DX11)", 41700)
+        words = shlex.split(options.replace("%command%", "CMD"))
+        self.assertEqual(words[0], 'STEAM_COMPAT_DATA_PATH=/my "pfx"')
+        self.assertEqual(words[4], 'a"$(touch x)`id`')
+        self.assertEqual(words[-1], "Anomaly (DX11)")
+        self.assertIn("SteamAppId=480 ", coop_launch_options("/p", "Default", "Anomaly", 480))
+
+    def test_rungameid_is_the_64_bit_shortcut_id(self):
+        self.assertEqual(rungameid(0x80000001), str((0x80000001 << 32) | 0x02000000))
+
+    def test_writes_shortcut_and_compat_tool_keeping_everything_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            fields = self._fields()
+            self.assertFalse(coop_shortcut_current(vdf, **fields))
+            appid = write_coop_shortcut(vdf, **fields)
+            self.assertTrue(coop_shortcut_current(vdf, **fields))
+            names = [
+                {k: v for k, _t, v in value}["appname"]
+                for _k, _t, value in get_shortcuts_map(read_shortcuts(vdf))
+            ]
+            self.assertEqual(names, ["Existing Game", "Another Game", COOP_SHORTCUT_NAME])
+            config = (vdf.parents[3] / "config" / "config.vdf").read_text()
+            self.assertEqual(mapped_compat_tool(config, appid), "GE-Proton10-4")
+            self.assertEqual(mapped_compat_tool(config, 0), "proton_9")
+            self.assertEqual(appid, unsigned_appid(fields["exe"]))
+            # Nothing of ours left behind in Steam's folders but the backups.
+            for folder in (vdf.parent, vdf.parents[3] / "config"):
+                self.assertEqual(list(folder.glob(".*")), [], folder)
+
+    def test_a_changed_profile_updates_the_one_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            write_coop_shortcut(vdf, **self._fields("Default"))
+            write_coop_shortcut(vdf, **self._fields("Other"))
+            entries = get_shortcuts_map(read_shortcuts(vdf))
+            coop = [
+                {k: v for k, _t, v in value}
+                for _k, _t, value in entries
+                if {k: v for k, _t, v in value}["appname"] == COOP_SHORTCUT_NAME
+            ]
+            self.assertEqual(len(coop), 1)
+            self.assertIn("-p Other ", coop[0]["LaunchOptions"])
+            self.assertTrue(coop_shortcut_current(vdf, **self._fields("Other")))
+
+    def test_switching_to_spacewar_restarts_steam_and_launches_it(self):
+        """A CoP/Spacewar switch changes the launch options, so the next launch
+        rewrites the shortcut with Steam closed, then starts Steam with the game."""
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            cop = write_coop_shortcut(vdf, **self._fields())
+            fields = self._fields(appid=480)
+            self.assertFalse(coop_shortcut_current(vdf, **fields))
+            with (
+                patch("commander_gui.steam_shortcuts.subprocess.run") as run,
+                patch("commander_gui.steam_shortcuts.subprocess.Popen") as popen,
+                patch("commander_gui.steam_shortcuts._wait_for_steam_to_exit", return_value=True),
+            ):
+                setup_coop_shortcut(vdf, restart=True, **fields)
+            self.assertIn("-shutdown", run.call_args.args[0])
+            self.assertEqual(popen.call_args.args[0][-1], coop_launch_url(fields["exe"]))
+            self.assertTrue(coop_shortcut_current(vdf, **fields))
+            # Same shortcut id: the Proton mapping and launch link still apply.
+            self.assertEqual(write_coop_shortcut(vdf, **fields), cop)
+            self.assertTrue(coop_shortcut_current(vdf, **self._fields(appid=480)))
+            self.assertFalse(coop_shortcut_current(vdf, **self._fields()))
+
+    def test_writes_library_artwork_into_the_grid_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            grid = vdf.parent / "grid"
+            grid.mkdir()
+            appid = unsigned_appid(self._fields()["exe"])
+            (grid / f"{appid}p.png").write_bytes(b"old")  # would shadow ours
+            write_coop_shortcut(vdf, **self._fields())
+            names = sorted(p.name for p in grid.iterdir())
+            self.assertEqual(
+                names, sorted(f"{appid}{s}" for s in ("p.jpg", "_hero.jpg", "_logo.png", ".png"))
+            )
+
+    def test_an_old_gamma_coop_entry_is_renamed_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            root = read_shortcuts(vdf)
+            old = add_or_update_shortcut(
+                get_shortcuts_map(root), "GAMMA Co-op", "/old/ModOrganizer.exe", "/old"
+            )
+            write_shortcuts(vdf, set_shortcuts_map(root, old))
+            write_coop_shortcut(vdf, **self._fields())
+            names = [
+                {k: v for k, _t, v in value}["appname"]
+                for _k, _t, value in get_shortcuts_map(read_shortcuts(vdf))
+            ]
+            self.assertEqual(names, ["Existing Game", "Another Game", COOP_SHORTCUT_NAME])
+
+    def test_a_config_without_a_mapping_gets_one(self):
+        text = '"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"x"\t"1"\n\t\t\t}\n\t\t}\n\t}\n}\n'
+        out = set_compat_tool(text, 5, "GE-Proton10-4")
+        self.assertEqual(mapped_compat_tool(out, 5), "GE-Proton10-4")
+        self.assertIn('"x"\t"1"', out)
+        self.assertEqual(mapped_compat_tool(set_compat_tool(out, 5, "GE-Proton10-5"), 5), "GE-Proton10-5")
+
+    def test_an_unrecognised_config_is_refused(self):
+        with self.assertRaises(ValueError):
+            set_compat_tool('"Other"\n{\n}\n', 5, "GE-Proton10-4")
+
+    def test_compat_tool_name_reads_the_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp) / "GE-Proton10-4"
+            build.mkdir()
+            self.assertEqual(compat_tool_name(build), "GE-Proton10-4")
+            (build / "compatibilitytool.vdf").write_text(
+                '"compatibilitytools"\n{\n  "compat_tools"\n  {\n    "GE-Proton10-4-custom"\n    {\n    }\n  }\n}\n'
+            )
+            self.assertEqual(compat_tool_name(build), "GE-Proton10-4-custom")
+
+    def test_valve_proton_builds_get_steams_own_names(self):
+        for folder, name in (
+            ("Proton 9.0", "proton_9"),
+            ("Proton 10.0", "proton_10"),
+            ("Proton 6.3", "proton_63"),
+            ("Proton - Experimental", "proton_experimental"),
+            ("Proton Hotfix", "proton_hotfix"),
+        ):
+            self.assertEqual(compat_tool_name(Path("/nowhere") / folder), name)

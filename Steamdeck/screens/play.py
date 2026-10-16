@@ -13,7 +13,7 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout
 
-from commander_gui import gui_settings
+from commander_gui import coop, gui_settings
 from commander_gui.assistant_launcher import AssistantLaunchError, launch_assistant
 from commander_gui.deck_launch import in_game_mode
 from commander_gui.game_stats import (
@@ -23,7 +23,7 @@ from commander_gui.game_stats import (
     stat_value,
 )
 from commander_gui.i18n import tr
-from commander_gui.launcher import Mo2Executable
+from commander_gui.launcher import Mo2Executable, set_mo2_selected_title
 from commander_gui.log_dump import create_log_dump
 from commander_gui.modlist import looks_flipped, modlist_path_for, read_lines, unflip
 from commander_gui.ui.common import (
@@ -82,7 +82,7 @@ class PlayScreen(DeckScreen):
         # has no other way out - and it is the button already under the
         # thumb.
         self.hero = deck_button(
-            "\u25b6   " + tr("Play GAMMA"), role="hero", on_click=self._hero_clicked
+            "\u25b6   " + self._play_text(), role="hero", on_click=self._hero_clicked
         )
         self.body.addWidget(self.hero)
 
@@ -149,7 +149,7 @@ class PlayScreen(DeckScreen):
         state = gui_settings.load_gui_settings()
         self._targets, default = self.controller.targets(profile)
         saved = state.get("target") or ""
-        current = saved if saved in self._targets else default
+        current = default
         if current and current != saved:
             gui_settings.save_gui_settings(target=current)
         self.target_row.set_value(current or tr("Not installed"))
@@ -159,7 +159,11 @@ class PlayScreen(DeckScreen):
         # Quit Game stays pressable while a game runs, whatever else is busy.
         self.hero.setEnabled((bool(current) and not busy) or self.controller.is_active())
         self.mo2_button.setEnabled(not busy)
-        self.anomaly_button.setEnabled(bool(current) and not busy)
+        coop_on = coop.is_active(profile.anomaly)
+        # Anomaly without MO2 would run co-op's engine without its mod.
+        self.anomaly_button.setEnabled(bool(current) and not busy and not coop_on)
+        if not self.controller.is_active():
+            self.hero.setText("\u25b6   " + self._play_text())
         self.update_hints()
         if not self.controller.is_active():
             if current:
@@ -186,7 +190,9 @@ class PlayScreen(DeckScreen):
             return
         self.hero.setEnabled(not busy and bool(self._targets))
         self.mo2_button.setEnabled(not busy)
-        self.anomaly_button.setEnabled(not busy and bool(self._targets))
+        profile = self.profile()
+        coop_on = profile is not None and coop.is_active(profile.anomaly)
+        self.anomaly_button.setEnabled(not busy and bool(self._targets) and not coop_on)
         self.update_hints()
 
     # -- shortcuts --------------------------------------------------------
@@ -224,6 +230,12 @@ class PlayScreen(DeckScreen):
         return self.hero
 
     # -- actions ----------------------------------------------------------
+    def _play_text(self) -> str:
+        profile = self.profile()
+        if profile is not None and coop.is_active(profile.anomaly):
+            return tr("Play GAMMA Co-op")
+        return tr("Play GAMMA")
+
     def play(self) -> None:
         """Launch, if the Play button itself could be pressed right now."""
         if self.hero.isEnabled() and not self.controller.is_active():
@@ -340,6 +352,12 @@ class PlayScreen(DeckScreen):
     def _apply_target(self, title: object) -> None:
         self.window.dismiss_overlay()
         gui_settings.save_gui_settings(target=str(title))
+        profile = self.profile()
+        if profile is not None:
+            try:
+                set_mo2_selected_title(profile.gamma, str(title))
+            except OSError:
+                pass  # MO2 just keeps its own pick.
         self.refresh()
 
     def _pick_runner(self) -> None:
@@ -452,7 +470,7 @@ class PlayScreen(DeckScreen):
             self.hero.setObjectName("deckHeroDanger")
             self.hero.setEnabled(True)
         else:
-            self.hero.setText("\u25b6   " + tr("Play GAMMA"))
+            self.hero.setText("\u25b6   " + self._play_text())
             self.hero.setObjectName("deckHero")
             self.hero.setEnabled(bool(self._targets) and not self.window.install_busy)
         repolish(self.hero)
@@ -553,14 +571,17 @@ class PlayScreen(DeckScreen):
                     (tr("Close"), self.window.dismiss_overlay, "normal"),
                 ],
                 panel_width=1100,
-            )
+            ),
+            # Over whatever is open (a mod install's FOMOD wizard): replacing
+            # it would cancel that install.
+            stacked=True,
         )
 
     def _analyze_crash(self) -> None:
         self.window.dismiss_overlay()
         if self._crash_task is not None:
             return
-        self.window.notify(tr("Collecting logs for ASSISTANT..."), 0)
+        self.window.notify(tr("Collecting logs for ASSISTANT"), 0)
         task = BackgroundTask(create_log_dump, parent=self)
         self._crash_task = task
         task.result.connect(self._on_crash_dump_done)

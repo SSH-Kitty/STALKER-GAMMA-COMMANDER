@@ -1,11 +1,15 @@
 """Knowledge base of plain-language explanations and suggested fixes.
 
 The wording is aligned with GAMMA COMMANDER's own troubleshooting guidance
-(Help page and Play-page diagnostics) so the Assistant gives the same
+(About page and Play-page diagnostics) so the Assistant gives the same
 advice the main app would.
+Module-level constants stay plain English (they are evaluated at import,
+before the language is known); callers pass them through ``tr()``.
 """
 
 import re
+
+from commander_gui.i18n import tr
 
 # --- Launcher and Wine -------------------------------------------------------
 
@@ -20,6 +24,14 @@ PREFIX_MISMATCH = (
     "then either select the original runner again on COMMANDER's Play page or configure a "
     "separate prefix for the new runner. Do not switch runners while a prefix is "
     "in use."
+)
+
+PROTON_TOO_OLD = (
+    "Wine stopped because part of it called a function the rest of it does not "
+    "have. This usually means the Proton build is older than the files in the "
+    "prefix, for example after another tool ran the prefix with a newer Proton. "
+    "Install the latest GE-Proton in COMMANDER's Proton Manager, select it on the "
+    "Play page, and launch again."
 )
 
 GRAPHICS_DXVK = (
@@ -71,8 +83,8 @@ QTPDF_HARMLESS = (
 def launch_exit_code(code: str) -> tuple[str, str]:
     """Title/detail pair for a non-zero exit code line."""
     return (
-        f"The game or Mod Organizer closed with an error (exit code {code}).",
-        (
+        tr("The game or Mod Organizer closed with an error (exit code {code}).", code=code),
+        tr(
             "A non-zero exit code means the program closed abnormally. The lines "
             "around this entry in launcher.log may show the underlying cause."
         ),
@@ -93,12 +105,12 @@ XRAY_FATAL_GENERIC = (
 def xray_missing_section(section: str) -> tuple[str, str, str]:
     """(title, detail, suggestion) for a missing config section crash."""
     return (
-        f"Game crash: a mod setting is missing ('{section}').",
-        (
+        tr("Game crash: a mod setting is missing ('{section}').", section=section),
+        tr(
             "This is a common symptom of a mod conflict: two mods edit the same "
             "settings file and one removed or renamed a section another mod expects."
         ),
-        (
+        tr(
             "Recently added or updated mods are a common cause. Disable suspect "
             "mods in COMMANDER's Mod Manager (or MO2), then run Verify Integrity on "
             "COMMANDER's Install page; it can repair broken modpack files."
@@ -127,57 +139,71 @@ def cli_failed(reason_kind: str, reason: str) -> tuple[str, str, str]:
     subject = _subject(reason)
     if reason_kind == "canceled":
         return (
-            "An install was stopped before it finished.",
-            (
+            tr("An install was stopped before it finished."),
+            tr(
                 "The operation received a cancel request (or lost its connection) "
                 "and stopped cleanly."
             ),
-            (
+            tr(
                 "This does not indicate a problem. Run the install again when ready; "
                 "already downloaded mods are kept and reused."
             ),
         )
+    if reason_kind == "cloudflare":
+        return (
+            tr("moddb blocked a download with a Cloudflare challenge."),
+            tr(
+                "moddb answered with a Cloudflare \"Just a moment...\" page instead of "
+                "the file, so the installer stopped the remaining downloads."
+            ),
+            tr(
+                "Switch to a VPN in another country or wait a while, then run the "
+                "install again; completed downloads are kept."
+            ),
+        )
     if reason_kind == "download":
         return (
-            f"Download failed: {subject}" if subject else f"A download failed: {reason}",
-            (
+            tr("Download failed: {subject}", subject=subject)
+            if subject
+            else tr("A download failed: {reason}", reason=reason),
+            tr(
                 "The installer could not download a file from ModDB or GitHub. This "
                 "is usually a temporary network problem or a busy server, not a "
                 "problem with your PC."
             ),
-            (
+            tr(
                 "Run the install again — completed downloads are cached and reused. "
                 "If it keeps failing, try later or check your connection/VPN."
             ),
         )
     if reason_kind == "integrity":
         return (
-            f"A file failed its integrity check: {reason}",
-            (
+            tr("A file failed its integrity check: {reason}", reason=reason),
+            tr(
                 "The MD5 check found a mod archive or installed file that does not "
                 "match the official checksums."
             ),
-            (
+            tr(
                 "Use Verify Integrity on COMMANDER's Install page. It can repair "
                 "corrupted or missing files by re-downloading them."
             ),
         )
     if reason_kind == "storage":
         return (
-            f"Couldn't write files to disk: {subject or reason}",
-            (
+            tr("Couldn't write files to disk: {reason}", reason=subject or reason),
+            tr(
                 "Extraction or file operations failed, often due to low disk space "
                 "or permission problems."
             ),
-            (
+            tr(
                 "Free up space on the install drive (GAMMA needs ~150 GB) and make "
                 "sure the folders are writable, then run the install again."
             ),
         )
     return (
-        f"The installation failed: {reason}",
-        "The stalker-gamma CLI reported a failure while installing.",
-        (
+        tr("The installation failed: {reason}", reason=reason),
+        tr("The stalker-gamma CLI reported a failure while installing."),
+        tr(
             "Read the technical details below for the root cause, then retry the "
             "install. Verify Integrity can repair partial installs."
         ),

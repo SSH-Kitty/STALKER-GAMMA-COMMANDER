@@ -324,6 +324,44 @@ class BackupReviewFixTests(unittest.TestCase):
         self.assertIsNone(apply_pending_settings_restore(profile))
         self.assertEqual(self.mcm.read_text(), "changed later")
 
+    def test_restoring_the_oldest_restore_backup_does_not_prune_it(self) -> None:
+        from commander_gui.game_backup import create_backup_of_files
+
+        folder = game_backup.profile_backup_dir("p")
+        user_ltx = self.anomaly / "appdata" / "user.ltx"
+        original = user_ltx.read_text()
+        files = [("user.ltx", user_ltx)]
+        for index in range(5):
+            with patch("commander_gui.game_backup.time.time", return_value=2e9 + index):
+                create_backup_of_files("p", files, lambda _l: None, folder=folder)
+        oldest = list_backups("p")[-1]
+        user_ltx.write_text("changed\n")
+        restore_backup(oldest, self.anomaly, self.gamma)
+        self.assertTrue(oldest.path.exists())
+        self.assertEqual(user_ltx.read_text(), original)
+
+    def test_failed_pending_settings_restore_stays_pending(self) -> None:
+        from commander_gui import gui_settings
+        from commander_gui.game_backup import (
+            apply_pending_settings_restore,
+            mark_settings_restore,
+        )
+
+        profile = SimpleNamespace(
+            profile_name="p", anomaly=str(self.anomaly), gamma=str(self.gamma)
+        )
+        info = backup_before_wipe(profile, {"GAMMA"}, "gamma-reset", lambda _l: None)
+        mark_settings_restore("p", info, user_ltx=True, mcm=True)
+        with patch(
+            "commander_gui.game_backup.restore_backup", side_effect=OSError("disk full")
+        ):
+            self.assertIn("disk full", apply_pending_settings_restore(profile))
+        pending = gui_settings.load_gui_settings().get(game_backup._PENDING_KEY) or {}
+        self.assertIn("p", pending)
+        self.assertIn("Restored", apply_pending_settings_restore(profile))
+        pending = gui_settings.load_gui_settings().get(game_backup._PENDING_KEY) or {}
+        self.assertNotIn("p", pending)
+
     def test_mcm_only_restore_leaves_user_ltx(self) -> None:
         info = create_backup("p", self.anomaly, self.gamma, saves=False)
         (self.anomaly / "appdata" / "user.ltx").write_text("new keys")

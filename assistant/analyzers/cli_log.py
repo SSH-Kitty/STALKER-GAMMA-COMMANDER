@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from commander_gui.i18n import tr
 from commander_gui.integrity import is_gamma_overlay_corrupt_line
 
 from .. import knowledge
@@ -21,7 +22,9 @@ _FAILED_RE = re.compile(
 )
 _DEPENDENCY_RE = re.compile(r"^Dependency not found:\s*(.+)$")
 _CORRUPT_RE = re.compile(r"\b(CORRUPT|MD5 mismatch|hash mismatch)\b", re.IGNORECASE)
-_EXCEPTION_TYPE_RE = re.compile(r"([\w.]+(?:Exception|Error))")
+# Anchored at a token start: unanchored, a long word-character run (base64,
+# a long URL) was retried from every position in it - quadratic time.
+_EXCEPTION_TYPE_RE = re.compile(r"(?<![\w.])([\w.]+(?:Exception|Error))")
 _STACK_HINTS = ("Exception Message:", "--->", "End of inner exception")
 
 #: Not the bare stem "cancel": that matches inside "CancellationToken", the
@@ -74,26 +77,31 @@ def analyze_cli(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                 factory.make(
                     Severity.ERROR,
                     CATEGORY_SYSTEM,
-                    f"A required tool is missing: {missing}",
+                    tr("A required tool is missing: {missing}", missing=missing),
                     index + 1,
-                    detail="The installer could not find this dependency on the "
-                    "system or in the configured paths.",
-                    suggestion=knowledge.DEPENDENCY_MISSING,
+                    detail=tr(
+                        "The installer could not find this dependency on the "
+                        "system or in the configured paths."
+                    ),
+                    suggestion=tr(knowledge.DEPENDENCY_MISSING),
                     excerpt_text=excerpt(lines, index),
                 )
             )
             index += 1
             continue
-        if stripped == "No active profile":
+        # CLI 1.37 adds ", create one with 'config create' or ...".
+        if stripped.startswith("No active profile"):
             findings.append(
                 factory.make(
                     Severity.WARNING,
                     CATEGORY_INSTALL,
-                    "COMMANDER has no active profile.",
+                    tr("COMMANDER has no active profile."),
                     index + 1,
-                    detail="The CLI cannot install without an active profile "
-                    "pointing at Anomaly/GAMMA folders.",
-                    suggestion=knowledge.NO_ACTIVE_PROFILE,
+                    detail=tr(
+                        "The CLI cannot install without an active profile "
+                        "pointing at Anomaly/GAMMA folders."
+                    ),
+                    suggestion=tr(knowledge.NO_ACTIVE_PROFILE),
                     excerpt_text=excerpt(lines, index),
                 )
             )
@@ -104,14 +112,18 @@ def analyze_cli(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                 factory.make(
                     Severity.OK,
                     CATEGORY_INSTALL,
-                    "GAMMA's patched game files are flagged as CORRUPT (this is normal).",
+                    tr("GAMMA's patched game files are flagged as CORRUPT (this is normal)."),
                     index + 1,
-                    detail="GAMMA ships its own patched engine executables and "
-                    "fsgame.ltx. Anomaly's file checker only knows the original "
-                    "versions, so these files always show as CORRUPT there. They "
-                    "are not damaged and not a virus.",
-                    suggestion="Nothing to fix. COMMANDER's Verify Integrity marks "
-                    'these files as "OK (GAMMA-modified, expected)".',
+                    detail=tr(
+                        "GAMMA ships its own patched engine executables and "
+                        "fsgame.ltx. Anomaly's file checker only knows the original "
+                        "versions, so these files always show as CORRUPT there. They "
+                        "are not damaged and not a virus."
+                    ),
+                    suggestion=tr(
+                        "Nothing to fix. COMMANDER's Verify Integrity marks "
+                        'these files as "OK (GAMMA-modified, expected)".'
+                    ),
                     excerpt_text=excerpt(lines, index),
                 )
             )
@@ -122,12 +134,19 @@ def analyze_cli(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                 factory.make(
                     Severity.ERROR,
                     CATEGORY_INSTALL,
-                    "A mod archive failed its checksum check.",
+                    tr("A mod archive failed its checksum check."),
                     index + 1,
-                    detail="This file does not match its official checksum, so "
-                    "it may be damaged or incomplete:\n" + line.strip()[:200],
+                    detail=tr(
+                        "This file does not match its official checksum, so "
+                        "it may be damaged or incomplete:"
+                    )
+                    + "\n"
+                    + line.strip()[:200],
                     suggestion=knowledge.cli_failed("integrity", line.strip())[2],
                     excerpt_text=excerpt(lines, index),
+                    # Repeats merge into one finding; this keeps every
+                    # broken file listed, not only the first.
+                    technical=line.strip()[:200],
                 )
             )
         index += 1
@@ -143,10 +162,10 @@ def _failed_finding(
     """Build the failure finding; also return the first unconsumed line index."""
     technical, next_index = _collect_exception_block(lines, index)
     kind = _classify(reason.lower(), technical.lower())
-    title, detail, suggestion = knowledge.cli_failed(kind, reason or "unknown reason")
+    title, detail, suggestion = knowledge.cli_failed(kind, reason or tr("unknown reason"))
     cause = _root_cause(technical)
     if cause and kind != "canceled" and cause.lower() not in reason.lower():
-        detail += f"\n\nReason given by the installer: {cause}"
+        detail += "\n\n" + tr("Reason given by the installer: {cause}", cause=cause)
     severity = Severity.INFO if kind == "canceled" else Severity.ERROR
     finding = factory.make(
         severity,
@@ -191,7 +210,16 @@ def _classify(reason: str, technical: str) -> str:
     mentions extracting/downloading. Stack frames can otherwise mention
     unrelated words (a hash check inside a download failure), so the
     technical block only breaks ties after the reason.
+    Cloudflare goes first: CLI 1.37+ cancels the remaining downloads after a
+    challenge, so its trace also carries an OperationCanceledException.
     """
+    if "cloudflare challenge" in reason or "cloudflare challenge" in technical:
+        return "cloudflare"
+    # .NET reports an HttpClient timeout as a TaskCanceledException ("The
+    # request was canceled due to the configured HttpClient.Timeout"): a
+    # network failure, not the user stopping the install.
+    if "httpclient.timeout" in technical or "timeoutexception" in technical:
+        return "download"
     if any(word in reason for word in _CANCEL_WORDS) or any(
         word in technical for word in _CANCEL_WORDS
     ):

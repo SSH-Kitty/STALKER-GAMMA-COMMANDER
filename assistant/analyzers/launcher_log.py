@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from commander_gui.i18n import tr
+
 from .. import knowledge
 from ..findings import CATEGORY_LAUNCHER, Finding, Severity
 from .common import FindingFactory, excerpt
@@ -21,12 +23,18 @@ _GRAPHICS_MARKERS = (
     "wined3d_swapchain",
     "d3d11_swapchain_setcolorspace",
 )
+_UNIMPLEMENTED_RE = re.compile(
+    r"wine: Call from \S+ to unimplemented function (\S+), aborting"
+)
 _EXIT_RE = re.compile(r"exited with an error \(code (-?\d+)\)")
 _GAMEMODE_DLOPEN_RE = re.compile(r"gamemodeauto: dlopen failed - (lib[\w.]+)")
 _LD_PRELOAD_GAMEMODE_RE = re.compile(
     r"ld\.so: object '(libgamemode[\w.]*)' from LD_PRELOAD cannot be pre?loaded"
 )
 _PRESSURE_VESSEL_RE = re.compile(r"ld\.so: object '/tmp/pressure-vessel-libs-[^'/]+/")
+#: pressure-vessel's own error lines ("pressure-vessel-wrap[12]: E: Failed
+#: to run bwrap: ...") mean the container, and so the game, never started.
+_PRESSURE_VESSEL_ERROR_RE = re.compile(r": E: |\berror\b|\bfailed\b", re.IGNORECASE)
 _TOOLMANIFEST_RE = re.compile(r"toolmanifest\.vdf not found", re.IGNORECASE)
 _QTPDF_RE = re.compile(r"qtpdf\.dll", re.IGNORECASE)
 _GENERIC_ERROR_RE = re.compile(r"^ERROR:\s*(.+)$")
@@ -65,6 +73,12 @@ def analyze_launcher(arcname: str, where: str, lines: list[str]) -> list[Finding
         if any(marker in lower for marker in _GRAPHICS_MARKERS):
             findings.append(_graphics_finding(factory, lines, index))
             continue
+        unimplemented = _UNIMPLEMENTED_RE.search(stripped)
+        if unimplemented:
+            findings.append(
+                _unimplemented_finding(factory, lines, index, unimplemented.group(1))
+            )
+            continue
         exit_match = _EXIT_RE.search(stripped)
         if exit_match:
             title, detail = knowledge.launch_exit_code(exit_match.group(1))
@@ -75,8 +89,31 @@ def analyze_launcher(arcname: str, where: str, lines: list[str]) -> list[Finding
                     title,
                     index + 1,
                     detail=detail,
-                    suggestion=knowledge.LAUNCH_EXITED,
+                    suggestion=tr(knowledge.LAUNCH_EXITED),
                     excerpt_text=excerpt(lines, index),
+                )
+            )
+            continue
+        if "pressure-vessel" in lower and not _PRESSURE_VESSEL_RE.search(stripped) and (
+            _PRESSURE_VESSEL_ERROR_RE.search(stripped)
+        ):
+            message = stripped[:200]
+            findings.append(
+                factory.make(
+                    Severity.ERROR,
+                    CATEGORY_LAUNCHER,
+                    tr("The Steam Linux Runtime container reported an error: {message}", message=message),
+                    index + 1,
+                    detail=tr(
+                        "Steam's container (pressure-vessel) failed while starting, "
+                        "so the game may not have started at all."
+                    ),
+                    suggestion=tr(
+                        "If the game starts and plays normally you can ignore "
+                        "this. If it does not, include this log when asking for help."
+                    ),
+                    excerpt_text=excerpt(lines, index),
+                    dedup_key=message,
                 )
             )
             continue
@@ -107,13 +144,20 @@ def analyze_launcher(arcname: str, where: str, lines: list[str]) -> list[Finding
                     factory.make(
                         Severity.WARNING,
                         CATEGORY_LAUNCHER,
-                        f"The launcher reported an error: {message}",
+                        tr("The launcher reported an error: {message}", message=message),
                         index + 1,
-                        detail="An ERROR-prefixed line appeared in the launch output; "
-                        "its impact is not known from this line alone.",
-                        suggestion="If the game starts and plays normally you can ignore "
-                        "this. If it does not, include this log when asking for help.",
+                        detail=tr(
+                            "An ERROR-prefixed line appeared in the launch output; "
+                            "its impact is not known from this line alone."
+                        ),
+                        suggestion=tr(
+                            "If the game starts and plays normally you can ignore "
+                            "this. If it does not, include this log when asking for help."
+                        ),
                         excerpt_text=excerpt(lines, index),
+                        # The title is cut at 130 characters: two different
+                        # errors must not merge because their starts match.
+                        dedup_key=generic_error.group(1),
                     )
                 )
     if protonfixes_count:
@@ -121,11 +165,15 @@ def analyze_launcher(arcname: str, where: str, lines: list[str]) -> list[Finding
             factory.make(
                 Severity.OK,
                 CATEGORY_LAUNCHER,
-                f"ProtonFixes printed {protonfixes_count} routine "
-                f"{'message' if protonfixes_count == 1 else 'messages'} (normal).",
+                tr("ProtonFixes printed 1 routine message (normal).")
+                if protonfixes_count == 1
+                else tr(
+                    "ProtonFixes printed {count} routine messages (normal).",
+                    count=protonfixes_count,
+                ),
                 protonfixes_first_line,
-                detail=knowledge.PROTONFIXES_SUMMARY,
-                suggestion="Nothing to do. This is normal.",
+                detail=tr(knowledge.PROTONFIXES_SUMMARY),
+                suggestion=tr("Nothing to do. This is normal."),
             )
         )
     return findings
@@ -137,10 +185,29 @@ def _prefix_finding(
     return factory.make(
         Severity.ERROR,
         CATEGORY_LAUNCHER,
-        "The Wine prefix was made by a different Proton/Wine version.",
+        tr("The Wine prefix was made by a different Proton/Wine version."),
         index + 1,
-        detail="Wine refused to start with this prefix: " + stripped[:160],
-        suggestion=knowledge.PREFIX_MISMATCH,
+        detail=tr("Wine refused to start with this prefix: {line}", line=stripped[:160]),
+        suggestion=tr(knowledge.PREFIX_MISMATCH),
+        excerpt_text=excerpt(lines, index),
+    )
+
+
+def _unimplemented_finding(
+    factory: FindingFactory, lines: list[str], index: int, function: str
+) -> Finding:
+    # Fixed title so every aborting call merges into one entry.
+    return factory.make(
+        Severity.ERROR,
+        CATEGORY_LAUNCHER,
+        tr("The selected Proton build is too old for this prefix."),
+        index + 1,
+        detail=tr(
+            "Wine aborted on a call to {function}, which this Proton build "
+            "does not provide.",
+            function=function,
+        ),
+        suggestion=tr(knowledge.PROTON_TOO_OLD),
         excerpt_text=excerpt(lines, index),
     )
 
@@ -149,11 +216,13 @@ def _concrt_finding(factory: FindingFactory, lines: list[str], index: int) -> Fi
     return factory.make(
         Severity.ERROR,
         CATEGORY_LAUNCHER,
-        "Mod Organizer is missing a Microsoft C++ runtime file (concrt140.dll).",
+        tr("Mod Organizer is missing a Microsoft C++ runtime file (concrt140.dll)."),
         index + 1,
-        detail="Without this runtime Mod Organizer exits immediately "
-        "on many Wine/Proton versions.",
-        suggestion=knowledge.CONCRT140,
+        detail=tr(
+            "Without this runtime Mod Organizer exits immediately "
+            "on many Wine/Proton versions."
+        ),
+        suggestion=tr(knowledge.CONCRT140),
         excerpt_text=excerpt(lines, index),
     )
 
@@ -162,11 +231,13 @@ def _graphics_finding(factory: FindingFactory, lines: list[str], index: int) -> 
     return factory.make(
         Severity.WARNING,
         CATEGORY_LAUNCHER,
-        "The game is rendering through WineD3D instead of DXVK.",
+        tr("The game is rendering through WineD3D instead of DXVK."),
         index + 1,
-        detail="This fallback works but performs noticeably worse "
-        "than the Vulkan-based renderer.",
-        suggestion=knowledge.GRAPHICS_DXVK,
+        detail=tr(
+            "This fallback works but performs noticeably worse "
+            "than the Vulkan-based renderer."
+        ),
+        suggestion=tr(knowledge.GRAPHICS_DXVK),
         excerpt_text=excerpt(lines, index),
     )
 
@@ -175,10 +246,10 @@ def _pressure_vessel_finding(factory: FindingFactory, line_no: int) -> Finding:
     return factory.make(
         Severity.OK,
         CATEGORY_LAUNCHER,
-        knowledge.PRESSURE_VESSEL_TITLE,
+        tr(knowledge.PRESSURE_VESSEL_TITLE),
         line_no,
-        detail=knowledge.PRESSURE_VESSEL,
-        suggestion="Nothing to do. This is normal.",
+        detail=tr(knowledge.PRESSURE_VESSEL),
+        suggestion=tr("Nothing to do. This is normal."),
     )
 
 
@@ -187,11 +258,13 @@ def _gamemode_finding(factory: FindingFactory, lines: list[str], index: int) -> 
     return factory.make(
         Severity.INFO,
         CATEGORY_LAUNCHER,
-        knowledge.GAMEMODE_TITLE,
+        tr(knowledge.GAMEMODE_TITLE),
         index + 1,
-        detail="A launch attempted to enable GameMode, an optional performance "
-        "booster, but its library is not installed on this system.",
-        suggestion=knowledge.GAMEMODE_OPTIONAL,
+        detail=tr(
+            "A launch attempted to enable GameMode, an optional performance "
+            "booster, but its library is not installed on this system."
+        ),
+        suggestion=tr(knowledge.GAMEMODE_OPTIONAL),
         excerpt_text=excerpt(lines, index),
     )
 
@@ -202,11 +275,13 @@ def _toolmanifest_finding(
     return factory.make(
         Severity.WARNING,
         CATEGORY_LAUNCHER,
-        "A Proton runtime file is missing (toolmanifest.vdf).",
+        tr("A Proton runtime file is missing (toolmanifest.vdf)."),
         index + 1,
-        detail="Some Proton runtime metadata could not be read; the "
-        "launch may still work.",
-        suggestion=knowledge.TOOLMANIFEST_MISSING,
+        detail=tr(
+            "Some Proton runtime metadata could not be read; the "
+            "launch may still work."
+        ),
+        suggestion=tr(knowledge.TOOLMANIFEST_MISSING),
         excerpt_text=excerpt(lines, index),
     )
 
@@ -215,10 +290,10 @@ def _qtpdf_finding(factory: FindingFactory, lines: list[str], index: int) -> Fin
     return factory.make(
         Severity.OK,
         CATEGORY_LAUNCHER,
-        "MO2 printed a non-critical QtPdf plugin warning.",
+        tr("MO2 printed a non-critical QtPdf plugin warning."),
         index + 1,
-        detail=knowledge.QTPDF_HARMLESS,
-        suggestion="Nothing to do. This is normal.",
+        detail=tr(knowledge.QTPDF_HARMLESS),
+        suggestion=tr("Nothing to do. This is normal."),
         excerpt_text=excerpt(lines, index),
     )
 
@@ -229,13 +304,16 @@ def _protonfixes_error_finding(
     return factory.make(
         Severity.WARNING,
         CATEGORY_LAUNCHER,
-        f"ProtonFixes error: {message[:120]}",
+        tr("ProtonFixes error: {message}", message=message[:120]),
         index + 1,
-        detail="ProtonFixes failed while preparing the runtime environment "
-        "for this launch.",
-        suggestion=(
+        detail=tr(
+            "ProtonFixes failed while preparing the runtime environment "
+            "for this launch."
+        ),
+        suggestion=tr(
             "If the game fails to start, try a different GE-Proton/UMU-Proton "
             "build on COMMANDER's Play page."
         ),
         excerpt_text=excerpt(lines, index),
+        dedup_key=message,
     )

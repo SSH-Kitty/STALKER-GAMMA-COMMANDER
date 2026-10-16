@@ -937,14 +937,18 @@ QPushButton#deckHeroDanger:focus {
    Deck Mode uses in-window overlays, but a handful of shared helpers in
    commander_gui.ui.common raise a real QMessageBox. Size those up too so
    they are usable with a thumbstick rather than merely present. */
-QMessageBox {
+QMessageBox, QDialog#messageDialog, QDialog#popupWindow {
     background-color: $card;
 }
-QMessageBox QLabel {
+QMessageBox QLabel, QDialog#messageDialog QLabel {
     font-size: 18px;
     color: $text;
 }
-QMessageBox QPushButton {
+QDialog#messageDialog QLabel#section1, QDialog#popupWindow QLabel#section1 {
+    font-size: 24px;
+    font-weight: bold;
+}
+QMessageBox QPushButton, QDialog#messageDialog QPushButton {
     min-width: 140px;
     min-height: 56px;
 }

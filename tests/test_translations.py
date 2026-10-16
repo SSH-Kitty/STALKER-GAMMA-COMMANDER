@@ -67,6 +67,47 @@ class TranslationCoverageTest(unittest.TestCase):
         missing = sorted(self.literals - set(template.TRANSLATIONS))
         self.assertEqual(missing, [], "add these to commander_gui/locales/template.py")
 
+    def test_template_lists_every_about_page_string(self):
+        """about_docs.py is plain data that about_page.py runs through tr()."""
+        from commander_gui.ui.about_docs import TOPICS
+        from commander_gui.ui.about_page import _strings
+
+        found = set()
+        for topic in TOPICS:
+            no_code = [
+                (heading, [b for b in blocks if not (isinstance(b, tuple) and b[0] == "code")])
+                for heading, blocks in topic["sections"]
+            ]
+            found.update(_strings({**topic, "sections": no_code}))
+        # Live rows contribute their captions and their keys; keys are not text.
+        live_keys = {
+            key for topic in TOPICS for _h, blocks in topic["sections"]
+            for b in blocks if isinstance(b, tuple) and b[0] == "live" for _c, key in b[1]
+        }
+        missing = sorted(found - live_keys - set(template.TRANSLATIONS))
+        self.assertEqual(missing, [], "add these to commander_gui/locales/template.py")
+
+    def test_template_lists_every_assistant_label_shown_through_tr(self):
+        """ASSISTANT keeps some English constants as identities and translates
+        them only when shown (knowledge texts, categories, severities...)."""
+        from assistant import knowledge
+        from assistant.analyzers.winetricks_vcredist import _CODE_MEANINGS
+        from assistant.dump import SOURCE_LABELS
+        from assistant.findings import CATEGORIES, SEVERITY_LABEL
+        from assistant.ui.widgets import FINDING_GROUPS
+
+        found = {
+            value
+            for name, value in vars(knowledge).items()
+            if name.isupper() and isinstance(value, str)
+        }
+        found.update(knowledge.XRAY_FATAL_GENERIC, CATEGORIES, SEVERITY_LABEL.values())
+        found.update(name for name, _severities in FINDING_GROUPS)
+        found.update(SOURCE_LABELS.values())
+        found.update(text for text, _level in _CODE_MEANINGS.values())
+        missing = sorted(found - set(template.TRANSLATIONS))
+        self.assertEqual(missing, [], "add these to commander_gui/locales/template.py")
+
     def test_every_language_translates_every_template_string(self):
         for code, table in self.tables.items():
             with self.subTest(language=code):

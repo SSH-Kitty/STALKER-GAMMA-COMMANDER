@@ -163,7 +163,7 @@ def _connect(client_id: str) -> _IpcClient | None:
             sock.connect(str(path))
             if client.handshake(client_id):
                 return client
-        except (OSError, ValueError, struct.error):
+        except (OSError, ValueError, AttributeError, struct.error):
             pass
         sock.close()
     return None

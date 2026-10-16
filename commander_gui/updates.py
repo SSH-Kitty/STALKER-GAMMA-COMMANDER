@@ -67,14 +67,17 @@ class UpdateStatus:
         # The version marker is fetched even when the addon list fails, so
         # a newer version is an update whatever went wrong with the list -
         # checking the error first hid it exactly when the list was down.
-        if self.latest and self.installed and self.latest != self.installed:
-            # Build numbers: a local build ahead of a lagging remote marker
-            # is not an update.
-            if self.latest.isdigit() and self.installed.isdigit():
-                if int(self.latest) > int(self.installed):
-                    return True
-            else:
-                return True
+        # The remote marker is a build number; anything else (a captive
+        # portal's HTML page) is not a version and never an update.
+        if (
+            self.latest
+            and self.installed
+            and self.latest != self.installed
+            and self.latest.isdigit()
+            # A local build ahead of a lagging remote marker is not an update.
+            and (not self.installed.isdigit() or int(self.latest) > int(self.installed))
+        ):
+            return True
         if self.error:
             return False
         return bool(self.diffs)
@@ -134,7 +137,7 @@ def installed_version(gamma_dir: str | None) -> str | None:
         return None
     try:
         text = Path(gamma_dir, "version.txt").read_text(
-            encoding="utf-8", errors="replace"
+            encoding="utf-8-sig", errors="replace"
         )
     except (OSError, ValueError, UnicodeError):
         return None
@@ -179,18 +182,6 @@ def _raw_repo_url(profile, filename: str) -> str:
     )
 
 
-def changelog_web_url(profile) -> str:
-    """Browser-facing (non-raw) GitHub URL for the repo's Patchnotes.md.
-
-    For the "View full changelog on GitHub" link - same owner/repo/branch
-    resolution as _raw_repo_url(), just a normal blob view a person can
-    actually open instead of a raw-text fetch URL.
-    """
-    owner, repo = _repo_owner_and_name(profile)
-    branch = _repo_branch(profile)
-    return f"https://github.com/{owner}/{repo}/blob/{branch}/{PATCHNOTES_FILENAME}"
-
-
 def remote_version(profile) -> str | None:
     """Fetch the latest GAMMA version marker; None if unreachable."""
     try:
@@ -201,7 +192,7 @@ def remote_version(profile) -> str | None:
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             version = (
                 read_response_bytes(resp, _MAX_VERSION_BYTES)
-                .decode("utf-8", errors="replace")
+                .decode("utf-8-sig", errors="replace")
                 .strip()
             )
     except (OSError, ValueError, UnicodeError):
@@ -321,10 +312,11 @@ def _numeric_version_tuple(text: str) -> tuple[int, ...] | None:
     if not match:
         return None
     base = tuple(int(part) for part in match.group("base").split("."))
-    # Padded to major.minor.patch before the hotfix is appended: otherwise
-    # "v1.3H5" -> (1, 3, 5) outranked "1.3.2" -> (1, 3, 2, 0), and "1.3"
-    # vs "1.3.0" compared unequal.
-    base = (base + (0, 0, 0))[:3] if len(base) < 3 else base
+    # A fixed width before the hotfix is appended: otherwise "v1.3H5" ->
+    # (1, 3, 5) outranked "1.3.2" -> (1, 3, 2, 0), "1.3" vs "1.3.0" compared
+    # unequal, and a four-part "1.2.9.1" compared its 4th part against
+    # "1.2.9H1"'s hotfix.
+    base = (base + (0, 0, 0, 0))[:4]
     # Then (stage, n): a stable build is (1, 0) and "-unstableN" is (0, N),
     # so 1.3.1-unstable < 1.3.1-unstable2 < 1.3.1 < 1.3.1H1.
     unstable = match.group("unstable")

@@ -165,6 +165,10 @@ class CliWorker(QObject):
                 proc.send_signal(_CANCEL_SIGNAL)
             else:
                 os.killpg(pid, _CANCEL_SIGNAL)
+                # A paused (SIGSTOPped) group only acts on the cancel signal
+                # once continued; otherwise only the 3s SIGKILL ends it and
+                # the CLI never runs its own cancel cleanup.
+                os.killpg(pid, signal.SIGCONT)
         except OSError:
             try:
                 proc.kill()

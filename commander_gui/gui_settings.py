@@ -6,16 +6,24 @@ cover GUI behaviour, currently the game-launcher runner selection.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
+import os
 import shutil
+import threading
 from pathlib import Path
 
 from .atomic import write_text
 from .config import gui_settings_path
 from .i18n import LANGUAGE_INFO
 from .themes import THEME_INFO
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 
 _allowed_languages = {code for code, _native, _english in LANGUAGE_INFO}
 _allowed_themes = {key for key, _label, _description, _swatches in THEME_INFO}
@@ -41,15 +49,18 @@ _DEFAULTS = {
     "custom_title_bar": True,  # draw COMMANDER's own title bar instead of the desktop's
     "window_width": 1080,
     "window_height": 950,
+    "window_maximized": False,  # reopen maximized when it was closed maximized
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
     "update_notifications": True,  # desktop notification when a GAMMA or COMMANDER update comes out
     "notified_gamma_version": "",  # latest GAMMA version already notified about (notify once per version)
     "notified_commander_tag": "",  # COMMANDER release tag already notified about
+    "dismissed_update_tag": "",  # COMMANDER release tag whose update banner was closed
     "playtime_seconds": {},  # accumulated play time per profile name, in seconds
     "last_played_ts": {},  # time.time() a session last ended, per profile name
     "profile_notes": {},  # profile name -> the note shown on the Profiles page
     "profile_colors": {},  # profile name -> color tag key (see profiles_page.PROFILE_COLORS)
     "user_created_categories": {},  # profile name -> list of category names the user created (deletable); official GAMMA categories are never in this list
+    "mod_nicknames": {},  # GAMMA folder -> {real mod name: name shown in COMMANDER only}; modlist.txt and mod folders are never renamed
     "discord_rpc_enabled": False,  # show "Playing S.T.A.L.K.E.R. GAMMA" on Discord
     "discord_show_mods": True,  # add the enabled mod count under the presence line
     "discord_show_playtime": True,  # add the profile's total playtime there too
@@ -71,6 +82,7 @@ _DEFAULTS = {
 }
 
 _cache: dict | None = None
+_SAVE_LOCK = threading.RLock()
 _cache_path_str: str = ""
 _cache_file_mtime: float = 0.0
 
@@ -125,13 +137,14 @@ def load_gui_settings() -> dict:
         "dashboard",
         "systemcheck",
         "play",
+        "multiplayer",
         "install",
         "update",
         "modmanager",
         "profiles",
         "utilities",
-        "help",
         "about",
+        "credits",
     }:
         data["start_page"] = "dashboard"
     if not isinstance(data.get("deck_mode_preference"), str) or data[
@@ -195,7 +208,7 @@ def load_gui_settings() -> dict:
         data["discord_client_id"] = ""
     if not isinstance(data.get("update_notifications"), bool):
         data["update_notifications"] = True
-    for key in ("notified_gamma_version", "notified_commander_tag"):
+    for key in ("notified_gamma_version", "notified_commander_tag", "dismissed_update_tag"):
         if not isinstance(data.get(key), str):
             data[key] = ""
     for key in (
@@ -273,6 +286,18 @@ def load_gui_settings() -> dict:
         if isinstance(user_categories, dict)
         else {}
     )
+    nicknames = data.get("mod_nicknames")
+    data["mod_nicknames"] = (
+        {
+            str(k): {
+                str(name): nick for name, nick in v.items() if isinstance(nick, str) and nick
+            }
+            for k, v in nicknames.items()
+            if isinstance(v, dict)
+        }
+        if isinstance(nicknames, dict)
+        else {}
+    )
     if not isinstance(data.get("move_dest"), str):
         data["move_dest"] = ""
     if not isinstance(data.get("move_expected"), list):
@@ -295,12 +320,36 @@ def load_gui_settings() -> dict:
     return data
 
 
+@contextlib.contextmanager
+def _settings_update_lock(path: Path):
+    """Hold the read-modify-write of *path* exclusive, across threads and
+    processes: two savers that both loaded before either wrote lost one
+    change. A lock file of its own - atomic.write_text() already flocks
+    ``.<name>.lock``, and a second flock on that from this process would
+    wait on itself."""
+    with _SAVE_LOCK:
+        if fcntl is None:
+            yield
+            return
+        fd = os.open(path.parent / f".{path.name}.update.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # releases the flock
+
+
 def save_gui_settings(**changes) -> None:
-    global _cache, _cache_path_str, _cache_file_mtime
     path = gui_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _settings_update_lock(path):
+        _save_locked(path, changes)
+
+
+def _save_locked(path: Path, changes: dict) -> None:
+    global _cache, _cache_path_str, _cache_file_mtime
     data = load_gui_settings()
     data.update(changes)
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Preserve a last-known-good backup before overwriting - but only if the
     # current file is actually valid JSON. Copying a corrupted file over the
     # backup would destroy the one thing load_gui_settings() falls back to

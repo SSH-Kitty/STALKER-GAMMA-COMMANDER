@@ -823,6 +823,19 @@ class DeckLayoutTests(DeckWindowFixture):
         self.pump()
         self.assertFalse(first.is_open())
 
+    def test_update_screen_forgets_the_old_profiles_updates(self):
+        from types import SimpleNamespace
+
+        page = self.goto("update")
+        status = SimpleNamespace(update_available=True, diffs=[], patchnotes="")
+        with patch("Steamdeck.screens.update.status_summary", return_value=("Update available", "warn")):
+            page._on_checked(status)
+        self.assertIs(page._status, status)
+        page.forget_cached_checks()
+        self.assertIsNone(page._status)
+        self.assertIsNone(page._task)
+        self.assertEqual(page.action_button.text(), "Check for updates")
+
     def test_mod_list_scrolls_smoothly_by_pixel(self):
         from PySide6.QtWidgets import QAbstractItemView
 
@@ -1081,6 +1094,18 @@ class DeckUtilitiesTests(DeckWindowFixture):
             runner_cls.assert_not_called()
         self.assertFalse(self.window.install_busy)
 
+    def test_ge_proton_install_button_needs_the_exact_build(self):
+        install = self.goto("install")
+        install._proton_version = "GE-Proton9-1"
+        protons = [("GE-Proton9-10", "/s/compatibilitytools.d/GE-Proton9-10/proton")]
+        with patch("Steamdeck.screens.install.find_extra_protons", return_value=protons):
+            install._update_proton_button()
+        self.assertNotIn("installed", install.proton_install_button.text())
+        protons.append(("GE-Proton9-1", "/s/compatibilitytools.d/GE-Proton9-1/proton"))
+        with patch("Steamdeck.screens.install.find_extra_protons", return_value=protons):
+            install._update_proton_button()
+        self.assertIn("installed", install.proton_install_button.text())
+
     def test_busy_blocks_a_tool_before_any_confirm_is_shown(self):
         utilities = self.goto("utilities")
         self.window.install_busy = True
@@ -1332,6 +1357,22 @@ class DeckBehaviourTests(DeckWindowFixture):
         # Generously bounded: the regression this guards against was ten
         # seconds, so anything near a second would already be the bug back.
         self.assertLess(elapsed, 1.0, f"cancel took {elapsed:.2f}s")
+
+    def test_rebuild_does_not_wait_for_background_checks(self):
+        import time
+
+        from commander_gui.ui.common import BackgroundTask
+
+        task = BackgroundTask(time.sleep, 1.5, parent=self.window.current_page())
+        task.start()
+        self.pump(2)
+        thread = task._thread
+        started = time.perf_counter()
+        self.window.rebuild()
+        elapsed = time.perf_counter() - started
+        thread.wait(5000)  # no thread left running for later tests
+        self.pump()
+        self.assertLess(elapsed, 1.0, f"rebuild took {elapsed:.2f}s")
 
     def test_install_busy_fans_out_to_every_screen(self):
         for key in SCREEN_KEYS:
@@ -1588,6 +1629,14 @@ class DeckGamepadTests(unittest.TestCase):
         self.monitor.feed(pad.EV_ABS, pad.ABS_HAT0X, -1)
         self.monitor.feed(pad.EV_ABS, pad.ABS_HAT0X, 0)
         self.assertEqual(self.actions, [pad.DOWN, pad.LEFT])
+        self.assertFalse(self.monitor._repeat.isActive())
+
+    def test_dropped_events_release_a_held_direction(self):
+        pad = self.pad
+        self.monitor.feed(pad.EV_ABS, pad.ABS_HAT0Y, 1)
+        self.assertTrue(self.monitor._repeat.isActive())
+        # The release was among the events the kernel dropped.
+        self.monitor.feed(pad.EV_SYN, pad.SYN_DROPPED, 0)
         self.assertFalse(self.monitor._repeat.isActive())
 
     def test_stick_has_hysteresis(self):
@@ -2425,21 +2474,50 @@ class DeckRound4Tests(DeckWindowFixture):
         play._on_state_changed(False)
 
     def test_mo2_only_follows_the_launch_kind(self):
+        import time
         from types import SimpleNamespace
 
         play = self.goto("play")
         controller = play.controller
         profile = SimpleNamespace(gamma="", anomaly="", mo2_profile="", profile_name="Deck")
+        failures = []
+        controller.failed.connect(lambda title, message: failures.append(message))
         with (
             patch("Steamdeck.launch.resolve_runner", side_effect=OSError("stop")),
         ):
             controller.launch(profile, target=None)
+            deadline = time.monotonic() + 5
+            while not failures and time.monotonic() < deadline:
+                self.pump(1)
+        self.assertEqual(failures, ["stop"])
         # Failed launch leaves nothing active.
         self.assertFalse(controller.mo2_only())
         controller._mo2_only = True
         controller._active = True
         self.assertTrue(controller.mo2_only())
         controller._active = False
+
+    def test_a_launch_stopped_while_preparing_never_starts(self):
+        import time
+        from types import SimpleNamespace
+
+        controller = self.goto("play").controller
+        profile = SimpleNamespace(gamma="", anomaly="", mo2_profile="", profile_name="Deck")
+        prepared = {
+            "runner_env": {}, "command": ["true"], "env": {}, "cwd": None,
+            "watch_exe": None, "pre_pids": set(), "pre_mo2": set(), "crash_baseline": set(),
+        }
+        with (
+            patch("Steamdeck.launch._prepare_launch", return_value=prepared),
+            patch("Steamdeck.launch.launch_detached") as launched,
+        ):
+            controller.launch(profile, target=None)
+            controller.force_stop()  # before the worker reports back
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                self.pump(1)
+        launched.assert_not_called()
+        self.assertFalse(controller.is_active())
 
     def test_welcome_overlay_and_dont_show_again(self):
         gui_settings.save_gui_settings(welcome_hidden=False)
@@ -2681,7 +2759,7 @@ class DeckVersionTests(unittest.TestCase):
 
         self.assertEqual(Steamdeck.__version__, commander_gui.__version__)
         self.assertEqual(Steamdeck.__version_label__, commander_gui.__version_label__)
-        self.assertEqual(commander_gui.__version_label__, "1.3.1")
+        self.assertEqual(commander_gui.__version_label__, "1.4.0")
 
 
 class DeckAuditTests(DeckWindowFixture):
@@ -2787,6 +2865,25 @@ class DeckCrashDetectionTests(unittest.TestCase):
         seen = []
         controller.crashed.connect(lambda: seen.append(True))
         return controller, seen
+
+    def test_an_mo2_open_before_launch_is_not_this_session(self):
+        import time
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+        ):
+            controller, _seen = self._controller(tmp)
+            controller._watch_exe = None
+            controller._pre_launch_mo2 = {111}
+            controller._started_at = time.time()
+            controller._log_path = Path(tmp) / "launch.log"
+            with patch("Steamdeck.launch.mo2_pids", return_value={111}):
+                controller._poll()
+            self.assertFalse(controller._game_seen)
+            with patch("Steamdeck.launch.mo2_pids", return_value={111, 222}):
+                controller._poll()
+            self.assertTrue(controller._game_seen)
 
     def test_new_dump_after_a_session_reports_a_crash(self):
         with (

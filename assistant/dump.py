@@ -14,11 +14,13 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from commander_gui.i18n import tr
+
 #: ANSI colour escapes appear throughout Wine/Proton output; strip them once
 #: at read time so titles, excerpts and matching stay clean.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-#: Friendly names for the top-level folders inside a dump.
+#: Friendly names for the top-level folders inside a dump (shown through tr()).
 SOURCE_LABELS: dict[str, str] = {
     "commander": "COMMANDER",
     "anomaly": "Anomaly",
@@ -57,6 +59,9 @@ _ZIP_READ_ERRORS = (
     OSError,
     EOFError,
     KeyError,
+    # An unsupported compression method (Deflate64, zstd); RuntimeError
+    # below covers encrypted entries.
+    NotImplementedError,
     RuntimeError,
     ValueError,
     zipfile.BadZipFile,
@@ -153,18 +158,16 @@ class DumpArchive:
         """Open *path*, decoding every text entry. Raises :class:`DumpError`."""
         resolved = Path(path)
         if not resolved.is_file():
-            raise DumpError(f"File not found: {resolved}")
+            raise DumpError(tr("File not found: {path}", path=resolved))
         try:
             zf = zipfile.ZipFile(resolved)
         except _ZIP_READ_ERRORS as exc:
-            raise DumpError(f"{resolved.name} is not a readable zip archive.") from exc
+            raise DumpError(tr("{name} is not a readable zip archive.", name=resolved.name)) from exc
         try:
             archive = cls(path=resolved, size=resolved.stat().st_size)
             infos = zf.infolist()
             if len(infos) > MAX_ENTRIES:
-                raise DumpError(
-                    f"{resolved.name} contains too many archive entries."
-                )
+                raise DumpError(tr("{name} contains too many archive entries.", name=resolved.name))
             declared_text_bytes = 0
             decoded_text_bytes = 0
             for info in infos:
@@ -178,12 +181,13 @@ class DumpArchive:
                     suffix in TEXT_SUFFIXES
                     or not suffix  # extensionless files like MANIFEST
                 ) and info.file_size <= MAX_TEXT_BYTES
-                is_text_candidate = suffix in TEXT_SUFFIXES or not suffix
-                if is_text_candidate:
+                if is_text:
+                    # Only what will be read counts: an oversized entry that
+                    # is skipped as too big must not push the total over.
                     declared_text_bytes += info.file_size
                     if declared_text_bytes > MAX_TOTAL_TEXT_BYTES:
                         raise DumpError(
-                            f"{resolved.name} contains too much declared text."
+                            tr("{name} contains too much declared text.", name=resolved.name)
                         )
                 entry = DumpFile(
                     arcname=arcname,
@@ -194,15 +198,10 @@ class DumpArchive:
                 )
                 if is_text:
                     # A zip entry's declared file_size is attacker-controlled
-                    # metadata, not verified against the actual compressed
-                    # payload - zf.read() would decompress the whole thing
-                    # into memory in one call before any size check runs,
-                    # so a crafted entry claiming a small size but expanding
-                    # to gigabytes bypasses MAX_TEXT_BYTES/MAX_TOTAL_TEXT_BYTES
-                    # entirely (only failing on a CRC mismatch afterward,
-                    # once the memory is already allocated). Reading in
-                    # bounded chunks caps the ACTUAL bytes decompressed
-                    # regardless of what the entry claims.
+                    # metadata. zipfile itself stops reading at the declared
+                    # size (and a lying entry then fails its CRC check), but
+                    # reading in bounded chunks keeps the byte caps below
+                    # independent of that library detail.
                     chunks: list[bytes] = []
                     read_bytes = 0
                     try:
@@ -218,22 +217,24 @@ class DumpArchive:
                                     > MAX_TOTAL_TEXT_BYTES
                                 ):
                                     raise DumpError(
-                                        f"{resolved.name} contains an entry "
-                                        "larger than its declared size."
+                                        tr(
+                                            "{name} contains an entry larger than its declared size.",
+                                            name=resolved.name,
+                                        )
                                     )
                                 chunks.append(chunk)
                     except DumpError:
                         raise
                     except _ZIP_READ_ERRORS as exc:
                         raise DumpError(
-                            f"Could not read {resolved.name}: {exc}"
+                            tr("Could not read {name}: {error}", name=resolved.name, error=exc)
                         ) from exc
                     raw = b"".join(chunks)
                     del chunks  # the joined copy replaces them
                     decoded_text_bytes += len(raw)
                     if decoded_text_bytes > MAX_TOTAL_TEXT_BYTES:
                         raise DumpError(
-                            f"{resolved.name} contains too much decoded text."
+                            tr("{name} contains too much decoded text.", name=resolved.name)
                         )
                     entry.text = _ANSI_RE.sub("", raw.decode("utf-8", errors="replace"))
                     # Released now rather than at the next file: the raw
@@ -247,7 +248,7 @@ class DumpArchive:
         except DumpError:
             raise
         except _ZIP_READ_ERRORS as exc:
-            raise DumpError(f"Could not read {resolved.name}: {exc}") from exc
+            raise DumpError(tr("Could not read {name}: {error}", name=resolved.name, error=exc)) from exc
         finally:
             zf.close()
 

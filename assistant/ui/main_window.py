@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -26,6 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from commander_gui.gui_settings import load_gui_settings
+from commander_gui.i18n import tr
+from commander_gui.ui.dialogs import MessageBox as QMessageBox
 from commander_gui.ui.title_bar import (
     EdgeResizeFilter,
     WindowDragFilter,
@@ -124,31 +125,35 @@ class MainWindow(QMainWindow):
         # Follow the theme picked in COMMANDER, also while ASSISTANT is open: both
         # share gui-settings.json, which is cheap to stat.
         self._theme_mtime = self._settings_mtime()
+        self._font_size = theme.load_saved_font_size()
         self._theme_watch = QTimer(self)
         self._theme_watch.setInterval(1500)
         self._theme_watch.timeout.connect(self._follow_saved_theme)
         self._theme_watch.start()
-        open_logs_button = QPushButton("Log folder")
-        open_logs_button.setToolTip(
-            f"Open the folder where log dumps are stored:\n{default_dumps_dir()}"
-        )
-        open_logs_button.clicked.connect(self._open_dumps_folder)
-        top_bar.addWidget(open_logs_button)
-        open_button = QPushButton("Open ZIP...")
-        open_button.setToolTip("Open a log dump ZIP (Ctrl+O). You can also drop one anywhere on this window.")
-        open_button.clicked.connect(self._browse)
-        top_bar.addWidget(open_button)
-        self.recent_combo = QComboBox()
-        self.recent_combo.setMinimumWidth(280)
-        self.recent_combo.setToolTip("Recently created or opened log dumps")
-        self.recent_combo.activated.connect(self._on_recent_selected)
-        top_bar.addWidget(self.recent_combo)
-        self.save_button = QPushButton("Save report")
-        self.save_button.setToolTip("Save this analysis as a Markdown report (Ctrl+S)")
+        # First in the group, away from the window buttons in the corner.
+        self.save_button = QPushButton(tr("Save report"))
+        self.save_button.setToolTip(tr("Save this analysis as a Markdown report (Ctrl+S)"))
         self.save_button.setObjectName("primary")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self._save_analysis)
         top_bar.addWidget(self.save_button)
+        open_logs_button = QPushButton(tr("Log folder"))
+        open_logs_button.setToolTip(
+            tr("Open the folder where log dumps are stored:\n{path}", path=default_dumps_dir())
+        )
+        open_logs_button.clicked.connect(self._open_dumps_folder)
+        top_bar.addWidget(open_logs_button)
+        open_button = QPushButton(tr("Open ZIP..."))
+        open_button.setToolTip(
+            tr("Open a log dump ZIP (Ctrl+O). You can also drop one anywhere on this window.")
+        )
+        open_button.clicked.connect(self._browse)
+        top_bar.addWidget(open_button)
+        self.recent_combo = QComboBox()
+        self.recent_combo.setMinimumWidth(280)
+        self.recent_combo.setToolTip(tr("Recently created or opened log dumps"))
+        self.recent_combo.activated.connect(self._on_recent_selected)
+        top_bar.addWidget(self.recent_combo)
         root.addWidget(header)
         self._header = header
         for widget in (header, wordmark_block, wordmark, byline):
@@ -206,21 +211,23 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         # Page title, mirroring COMMANDER's #section1 page headers.
-        page_title = QLabel("LOG ANALYSIS")
+        page_title = QLabel(tr("Log analysis").upper())
         page_title.setObjectName("pageTitle")
         page_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(page_title)
 
-        headline = QLabel("From crash logs to clear answers.")
+        headline = QLabel(tr("From crash logs to clear answers."))
         headline.setObjectName("heroTitle")
         headline.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(headline)
 
         subtitle = QLabel(
-            "Open a COMMANDER log dump ZIP created by GAMMA COMMANDER.\n"
-            "Every log inside is scanned. STALKER GAMMA crashes, installer "
-            "failures, and Wine/MO2 problems are explained in plain language, "
-            "with the exact file, line number, and a suggested fix."
+            tr(
+                "Open a COMMANDER log dump ZIP created by GAMMA COMMANDER.\n"
+                "Every log inside is scanned. STALKER GAMMA crashes, installer "
+                "failures, and Wine/MO2 problems are explained in plain language, "
+                "with the exact file, line number, and a suggested fix."
+            )
         )
         subtitle.setObjectName("heroSub")
         subtitle.setWordWrap(True)
@@ -241,15 +248,15 @@ class MainWindow(QMainWindow):
         steps = [
             (
                 1,
-                (
+                tr(
                     "In COMMANDER, run Utilities → Create Log Dump to bundle your "
                     "logs into one ZIP."
                 ),
             ),
-            (2, "Drop that ZIP anywhere on this window, or click to browse."),
+            (2, tr("Drop that ZIP anywhere on this window, or click to browse.")),
             (
                 3,
-                "Read the findings, follow the fixes, and export a shareable report.",
+                tr("Read the findings, follow the fixes, and export a shareable report."),
             ),
         ]
         for number, text in steps:
@@ -263,14 +270,14 @@ class MainWindow(QMainWindow):
         card_layout = QVBoxLayout(self.recent_card)
         card_layout.setContentsMargins(14, 12, 14, 12)
         card_layout.setSpacing(6)
-        card_header = QLabel("Recent log dumps")
+        card_header = QLabel(tr("Recent log dumps"))
         card_header.setObjectName("section2")
         card_layout.addWidget(card_header)
         self.recent_list = QListWidget()
         self.recent_list.setMaximumHeight(150)
         self.recent_list.itemDoubleClicked.connect(self._recent_item_activated)
         card_layout.addWidget(self.recent_list)
-        self.recent_caption = QLabel(f"Stored in {default_dumps_dir()}")
+        self.recent_caption = QLabel(tr("Stored in {path}", path=default_dumps_dir()))
         self.recent_caption.setObjectName("dim")
         card_layout.addWidget(self.recent_caption)
         layout.addWidget(self.recent_card)
@@ -297,7 +304,8 @@ class MainWindow(QMainWindow):
         for label in getattr(self, "_theme_step_labels", []):
             label.setText(
                 f"<span style='color:{theme.token('ACCENT')}; font-weight:700;'>"
-                f"Step {label.property('step_number')}.</span> "
+                + tr("Step {number}.", number=label.property("step_number"))
+                + "</span> "
                 f"{label.property('step_text')}"
             )
 
@@ -324,8 +332,10 @@ class MainWindow(QMainWindow):
             return
         self._theme_mtime = mtime
         name = theme.load_saved_theme()
-        if name == theme.active_theme():
+        font_size = theme.load_saved_font_size()
+        if name == theme.active_theme() and font_size == self._font_size:
             return
+        self._font_size = font_size
         self._apply_theme_ui(name)
 
     def _build_analysis(self) -> QWidget:
@@ -365,9 +375,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.verdict)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search findings, e.g. download, prefix, MO2")
+        self.search_box.setPlaceholderText(tr("Search findings, e.g. download, prefix, MO2"))
         self.search_box.setClearButtonEnabled(True)
-        self.search_box.textChanged.connect(self._apply_filters)
+        # Debounced: each filter rebuilds every finding card, which took
+        # over a second per keystroke on a big dump.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(200)
+        self._filter_timer.timeout.connect(self._apply_filters)
+        self.search_box.textChanged.connect(lambda _text: self._filter_timer.start())
         layout.addWidget(self.search_box)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -396,9 +412,12 @@ class MainWindow(QMainWindow):
         if not open_in_file_manager(directory):
             QMessageBox.warning(
                 self,
-                "File Manager Not Found",
-                "No file manager was found to open:\n"
-                f"{directory}\n\nOpen this location manually in your terminal.",
+                tr("Couldn't open the folder"),
+                tr(
+                    "No file manager was found to open:\n{path}\n\n"
+                    "Open this folder yourself in your file manager or terminal.",
+                    path=directory,
+                ),
             )
 
     def _browse(self) -> None:
@@ -415,9 +434,9 @@ class MainWindow(QMainWindow):
             pass
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open COMMANDER Log Dump Archive",
+            tr("Open COMMANDER log dump archive"),
             start if Path(start).is_dir() else str(Path.home()),
-            "Log dump archives (*.zip);;All files (*)",
+            tr("Log dump archives (*.zip);;All files (*)"),
         )
         if path:
             self._open_paths([Path(path)])
@@ -438,7 +457,7 @@ class MainWindow(QMainWindow):
         if paths:
             self._open_paths(paths)
             return
-        self._flash_reject("Only .zip archives can be analyzed.")
+        self._flash_reject(tr("Only .zip archives can be analyzed."))
 
     def _run_in_background(self, fn, *args, on_result, on_error, **kwargs) -> None:
         """Run ``fn(*args, **kwargs)`` off the UI thread; deliver the result back on it.
@@ -501,9 +520,11 @@ class MainWindow(QMainWindow):
             event.ignore()
             QMessageBox.information(
                 self,
-                "Still Analyzing",
-                "The archive is still being analyzed. Close the window "
-                "again once it finishes.",
+                tr("Still checking the log dump"),
+                tr(
+                    "ASSISTANT is still reading the log dump. Close the window "
+                    "again once it's done."
+                ),
             )
             return
         super().closeEvent(event)
@@ -533,8 +554,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_open_error(self, exc: object) -> None:
-        message = str(exc) if isinstance(exc, DumpError) else f"Unexpected error: {exc}"
-        QMessageBox.warning(self, "Could Not Open Archive", message)
+        message = str(exc) if isinstance(exc, DumpError) else tr("Unexpected error: {error}", error=exc)
+        QMessageBox.warning(self, tr("Couldn't open the log dump"), message)
 
     def _on_dump_opened(self, dump: object) -> None:
         assert isinstance(dump, DumpArchive)
@@ -542,11 +563,17 @@ class MainWindow(QMainWindow):
         if partial:
             answer = QMessageBox.question(
                 self,
-                "Unrecognised Archive",
-                "This ZIP does not look like a COMMANDER log dump (no "
-                "MANIFEST.txt or standard folders).\n\nAnalyze it anyway with a "
-                "generic scan?",
+                tr("This isn't a COMMANDER log dump"),
+                tr(
+                    "The ZIP doesn't have the files a COMMANDER log dump has "
+                    "(MANIFEST.txt and the usual folders). ASSISTANT can still "
+                    "scan it for common errors, but the results may be less useful."
+                ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                labels={
+                    QMessageBox.StandardButton.Yes: tr("Scan anyway"),
+                    QMessageBox.StandardButton.No: tr("Cancel"),
+                },
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -574,13 +601,21 @@ class MainWindow(QMainWindow):
         )
 
     def _on_analysis_error(self, exc: object) -> None:
-        QMessageBox.warning(self, "Analysis Failed", f"Could not analyze the archive: {exc}")
+        QMessageBox.warning(
+            self,
+            tr("Couldn't check the log dump"),
+            tr("Something went wrong while reading it:\n{error}", error=exc),
+        )
 
     def _on_analysis_done(self, findings: object) -> None:
         assert isinstance(findings, list)
         self._dump = self._pending_dump
         self._findings = findings
         self._partial = self._pending_partial
+        # Analysis is done with the decoded text (up to ~1 GB of str for a
+        # 256 MB dump); from here on only names and sizes are shown.
+        for entry in self._dump.files:
+            entry.text = None
         self._populate_analysis_view()
         self.stack.setCurrentIndex(1)
         self._refresh_recents()
@@ -599,8 +634,9 @@ class MainWindow(QMainWindow):
         self.verdict_title.setText(summary.headline)
         self.verdict_sub.setText(summary.sentence())
         self.verdict_meta.setText(
-            f"{dump_name}  ·  {len(text_files)} logs scanned  ·  "
-            f"{human_size(self._dump.size)}"
+            f"{dump_name}  ·  "
+            + tr("{count} logs scanned", count=len(text_files))
+            + f"  ·  {human_size(self._dump.size)}"
         )
         self.search_box.blockSignals(True)
         self.search_box.clear()
@@ -621,15 +657,15 @@ class MainWindow(QMainWindow):
         target = suggested_dir / f"{self._dump.path.stem}-analysis.md"
         chosen, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Analysis Report",
+            tr("Save analysis report"),
             str(target),
-            "Markdown (*.md);;All files (*)",
+            tr("Markdown (*.md);;All files (*)"),
         )
         if not chosen:
             return
         try:
-            # The exporter honors the exact chosen name (collision-safe), so
-            # no intermediate auto-named file is written first.
+            # The exporter writes the exact chosen name: the dialog already
+            # asked before replacing an existing file.
             written = report_mod.export_report(
                 self._dump,
                 self._findings,
@@ -639,13 +675,18 @@ class MainWindow(QMainWindow):
             )
         except OSError as exc:
             QMessageBox.warning(
-                self, "Save Failed", f"Could not write the report:\n{exc}"
+                self,
+                tr("Couldn't save the report"),
+                tr("The report file couldn't be written:\n{error}", error=exc),
             )
             return
         QMessageBox.information(
             self,
-            "Analysis Saved",
-            f"Your analysis has been saved to:\n\n{written}",
+            tr("Report saved"),
+            tr(
+                "Saved to:\n{path}\n\nAttach it when you ask for help on Discord or GitHub.",
+                path=written,
+            ),
         )
 
     # -------------------------------------------------------------- recents
@@ -662,7 +703,7 @@ class MainWindow(QMainWindow):
         merged = merged[:10]
         self.recent_combo.blockSignals(True)
         self.recent_combo.clear()
-        self.recent_combo.addItem("Recent log dumps...")
+        self.recent_combo.addItem(tr("Recent log dumps..."))
         for path in merged:
             self.recent_combo.addItem(path.name, str(path))
         self.recent_combo.blockSignals(False)

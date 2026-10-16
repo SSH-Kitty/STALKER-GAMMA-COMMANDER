@@ -49,16 +49,9 @@ WINETRICKS_VERBS = (
 #: Hardcoded UMU release version for zipapp downloads. Pinned to an exact
 #: release (never "latest") so a run always fetches a known-good build.
 #:
-#: Unlike the Proton-GE downloads in proton_installer.py and COMMANDER's own
-#: self_update.py, upstream umu-launcher releases do not publish a checksum
-#: asset alongside the zipapp tarball, so there is nothing to verify the
-#: download against without querying api.github.com for it - and this
-#: project deliberately avoids that rate-limited API for routine operations
-#: (see updates.py's module docstring). The residual risk is the same one
-#: self_update.py documents for its own same-release checksum: a compromised
-#: GitHub release for this repo could still serve a tampered build. If
-#: upstream ever starts publishing a checksum file, verify against it here
-#: the same way self_update.py's ``_published_sha512`` does.
+#: Upstream publishes no checksum asset for the zipapp tarball, so the
+#: SHA-256 below was computed once for this exact pinned release, the same
+#: way WINETRICKS_SCRIPT_SHA256 is. Bump both together.
 UMU_VERSION = "1.4.4"
 if not re.fullmatch(r"[0-9][0-9A-Za-z.]*", UMU_VERSION):
     raise ValueError(f"Unexpected UMU_VERSION format: {UMU_VERSION!r}")
@@ -66,6 +59,7 @@ UMU_ZIPAPP_URL = (
     f"https://github.com/Open-Wine-Components/umu-launcher/releases/"
     f"download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar"
 )
+UMU_ZIPAPP_SHA256 = "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48cc851"
 
 def winetricks_binary() -> str:
     """Path to winetricks, or '' when it is not on PATH."""
@@ -180,6 +174,7 @@ def umu_install_command() -> list[str]:
             'trap \'rm -f "$tmp_tar" "$tmp_bin"\' EXIT && '
             f'curl -fL --retry 3 --connect-timeout 30 --max-time 600 '
             f'"{UMU_ZIPAPP_URL}" -o "$tmp_tar" && '
+            f'echo "{UMU_ZIPAPP_SHA256}  $tmp_tar" | sha256sum -c - && '
             'member="$(tar -tf "$tmp_tar" | grep -E "(^|/)umu-run$" | head -n1)" && '
             '[ -n "$member" ] && '
             'tar -xOf "$tmp_tar" "$member" > "$tmp_bin" && '
@@ -191,8 +186,8 @@ def umu_install_command() -> list[str]:
 
 
 #: Pinned upstream winetricks release tag. winetricks is a single POSIX
-#: shell script (not a compiled binary), so - unlike umu-run above - it can
-#: be verified against a checksum computed once for this exact pinned tag.
+#: shell script (not a compiled binary), so it can be verified
+#: against a checksum computed once for this exact pinned tag.
 WINETRICKS_VERSION = "20260125"
 if not re.fullmatch(r"[0-9]+", WINETRICKS_VERSION):
     raise ValueError(f"Unexpected WINETRICKS_VERSION format: {WINETRICKS_VERSION!r}")

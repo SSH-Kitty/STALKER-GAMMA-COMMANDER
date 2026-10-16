@@ -28,13 +28,17 @@ class WindowDragFilter(QObject):
     """Moves (drag) and maximizes (double-click) the frameless window from
     the empty parts of its title strip and top bar."""
 
+    #: Set in __init__; None until then. Qt can deliver an event while
+    #: super().__init__ is still running, before _window exists.
+    _window = None
+
     def __init__(self, window) -> None:
         super().__init__(window)
         self._window = window
         self._press_pos = None
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if not self._window.custom_title_bar:
+        if self._window is None or not self._window.custom_title_bar:
             return False
         kind = event.type()
         if kind == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
@@ -121,6 +125,9 @@ class EdgeResizeFilter(QObject):
     (startSystemResize), so it works the same on Wayland and X11.
     """
 
+    #: See WindowDragFilter._window.
+    _window = None
+
     def __init__(self, window) -> None:
         super().__init__(window)
         self._window = window
@@ -175,6 +182,8 @@ class EdgeResizeFilter(QObject):
             self._cursor_set = True
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if self._window is None:
+            return False
         kind = event.type()
         if kind == QEvent.Type.MouseMove and event.buttons() == Qt.MouseButton.NoButton:
             self._set_cursor(self._edges(event.position()))

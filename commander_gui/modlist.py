@@ -1301,3 +1301,55 @@ def custom_mod_names(lines: list[str]) -> set[str]:
         if name.strip().lower() == _CUSTOM_MODS_CATEGORY:
             return {mod_name for _status, mod_name, _idx in mods}
     return set()
+
+
+def merge_after_update(
+    old: list[str],
+    new: list[str],
+    *,
+    official_before: set[str],
+    mods_dir: str | Path,
+) -> list[str]:
+    """Carry the user's own choices from *old* into the CLI-written *new* list.
+
+    ``update apply`` and ``full-install`` replace modlist.txt with GAMMA's
+    stock list, which drops every mod the user installed themselves and
+    resets every enable/disable choice. This puts both back:
+
+    * A mod in both lists gets its old enabled state back. GAMMA folder
+      names start with a list counter that shifts between versions, so the
+      match ignores that counter (and is skipped when it is ambiguous).
+    * A mod only in *old* is re-added under "Custom Mods" with its old state
+      when its folder is still in *mods_dir* and it was not one of GAMMA's
+      own mods before the update (*official_before*: folder names from the
+      pre-update modpack list) - those were dropped or renamed on purpose.
+
+    ponytail: re-added mods land in "Custom Mods", not their old category or
+    position; carry the user's own separators over if that matters.
+    """
+    from .repair import _name_only
+
+    old_states: dict[str, list[bool]] = {}
+    for status, name in entries(old):
+        if separator_name(name) is None:
+            old_states.setdefault(_name_only(name), []).append(status == "Enabled")
+    out = list(new)
+    for index, line in enumerate(out):
+        info = _line_info(line)
+        if info is None or separator_name(info[1]) is not None:
+            continue
+        states = old_states.get(_name_only(info[1]), [])
+        if len(states) == 1:
+            out = set_status_at(out, index, states[0])
+    present = {_name_only(name) for _status, name in entries(out)}
+    official = {_name_only(name) for name in official_before}
+    mods = Path(mods_dir)
+    for status, name in entries(old):
+        key = _name_only(name)
+        if separator_name(name) is not None or key in present or key in official:
+            continue
+        if not (mods / name).is_dir():
+            continue
+        out = add_custom_mod(out, name, enabled=status == "Enabled")
+        present.add(key)
+    return out

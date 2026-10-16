@@ -7,3 +7,6 @@
 # Some test modules import shared fixtures as "tests.<module>"; bare
 # `pytest` (what CI runs) only puts tests/ itself on sys.path.
 pythonpath = ["."]
+# Parallel by default (pytest-xdist), one test class per worker so the big
+# test_regressions.py spreads out too. Pass -n0 to run in a single process.
+addopts = "-n auto --dist loadscope"

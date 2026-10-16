@@ -86,9 +86,10 @@ class _Base(unittest.TestCase):
 
 class ModManagerTest(_Base):
     def test_warning_shows_and_the_fix_restores_the_list_with_a_backup(self):
-        from PySide6.QtWidgets import QMessageBox, QStatusBar
+        from PySide6.QtWidgets import QStatusBar
 
         from commander_gui.ui import mod_manager_page
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
         from commander_gui.ui.mod_manager_page import ModManagerPage
 
         with (
@@ -150,7 +151,7 @@ class PlayPagePromptTest(_Base):
 
     def _answer(self, label: str):
         """Make the load-order question pick the button called ``label``."""
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         def exec_(box):
             for button in box.buttons():
@@ -190,7 +191,7 @@ class PlayPagePromptTest(_Base):
             self.assertEqual(modlist.read_text(encoding="utf-8").splitlines(), flipped)
 
     def test_a_correct_list_launches_without_asking(self):
-        from PySide6.QtWidgets import QMessageBox
+        from commander_gui.ui.dialogs import MessageBox as QMessageBox
 
         with (
             tempfile.TemporaryDirectory() as tmp,

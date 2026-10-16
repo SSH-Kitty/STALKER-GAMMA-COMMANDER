@@ -41,6 +41,7 @@ from commander_gui.updates import check_updates, format_version
 
 from .. import gamepad as pad
 from ..profiles import ProfilePanel
+from ..welcome import open_url
 from ..widgets import (
     DeckCard,
     DeckRow,
@@ -63,6 +64,12 @@ _SIZE_CACHE_S = 30.0
 #: tab switch back to the Dashboard used to repeat both; now a result stays
 #: good for this long (an install finishing clears it early).
 _CHECK_CACHE_S = 300.0
+
+
+DECK_GUIDE_URL = (
+    "https://www.reddit.com/r/stalker/comments/1v01f8o/"
+    "guide_the_easiest_fastest_way_to_run_stalker/"
+)
 
 
 class DashboardScreen(DeckScreen):
@@ -140,6 +147,12 @@ class DashboardScreen(DeckScreen):
         # active one's folders, or start a new one.
         self.profile_panel = ProfilePanel(self.window)
         self.body.addWidget(self.profile_panel)
+
+        # A community guide with Deck-specific tips (moving a PC install
+        # and saves over, 60 FPS settings).
+        self.guide_row = DeckRow(tr("Steam Deck guide"), "Reddit")
+        self.guide_row.activated.connect(lambda: open_url(self.window, DECK_GUIDE_URL))
+        self.body.addWidget(self.guide_row)
         self.body.addStretch(1)
 
     @staticmethod
@@ -437,7 +450,9 @@ class DashboardScreen(DeckScreen):
     def _start_size_check(self, profile) -> None:
         if self._size_task is not None:
             return
-        if time.monotonic() - self._sizes_at < _SIZE_CACHE_S:
+        # 0.0 means never measured; time.monotonic() counts from boot, so
+        # without the first check an autostart right after boot skipped it.
+        if self._sizes_at and time.monotonic() - self._sizes_at < _SIZE_CACHE_S:
             return
         self.storage_row.set_value(tr("Checking..."))
         paths = [profile.anomaly, profile.gamma, profile.cache]

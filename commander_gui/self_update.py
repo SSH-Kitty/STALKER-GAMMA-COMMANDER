@@ -13,9 +13,9 @@ Nothing is swapped in unless the download proves itself first:
   used to replace the working AppImage);
 * it must actually be an AppImage (ELF header plus the type-2 AppImage
   magic), not an HTML error page or a truncated stub;
-* when the release carries a ``<AppImage>.sha512sum`` asset (``build-
-  appimage.sh`` writes one next to every build), the file must match it.
-  Older releases without one fall back to the checks above.
+* it must match the release's ``<AppImage>.sha512sum`` asset (``build-
+  appimage.sh`` writes one next to every build); a release without one is
+  refused.
 
 A checksum published in the same release protects against corruption, not
 against someone who controls the release itself; that needs a signing key
@@ -209,7 +209,13 @@ def download_commander_update(
             )
         verify_appimage_file(tmp_path)
         expected = _published_sha512(url)
-        if expected is not None and sha512_file(tmp_path) != expected:
+        if expected is None:
+            # Every release since checksums began publishes one; a missing
+            # file means a broken or tampered release, not an old one.
+            raise CommanderSelfUpdateError(
+                "The update has no published checksum - nothing was changed."
+            )
+        if sha512_file(tmp_path) != expected:
             raise CommanderSelfUpdateError(
                 "The update does not match its published checksum - nothing was changed."
             )
@@ -264,18 +270,28 @@ def download_and_install_commander_update(
     tag: str,
     cancel_event: threading.Event | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    dest_dir: Path | None = None,
 ) -> Path:
-    """Download and install *tag* over the running AppImage. Returns its path."""
+    """Download and install *tag*. Returns the installed AppImage's path.
+
+    By default - or when *dest_dir* is the running AppImage's own folder -
+    the new version replaces the running AppImage in place. Any other
+    *dest_dir* gets it under the release's own file name, leaving the
+    running one untouched.
+    """
     running_path = commander_appimage_path()
     if running_path is None:
         raise CommanderSelfUpdateError(
             "COMMANDER is not running as an AppImage - it cannot update itself."
         )
+    target = running_path
+    if dest_dir is not None and dest_dir.resolve() != running_path.parent.resolve():
+        target = dest_dir / commander_update_asset_url(tag).rsplit("/", 1)[1]
     downloaded = download_commander_update(
-        tag, running_path, cancel_event=cancel_event, progress_cb=progress_cb
+        tag, target, cancel_event=cancel_event, progress_cb=progress_cb
     )
-    install_commander_update(downloaded, running_path)
-    return running_path
+    install_commander_update(downloaded, target)
+    return target
 
 
 def switch_commander_build(

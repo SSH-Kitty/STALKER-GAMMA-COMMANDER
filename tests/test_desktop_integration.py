@@ -106,5 +106,13 @@ class MenuEntryTest(unittest.TestCase):
         self.assertEqual(own.read_text(encoding="utf-8"), "[Desktop Entry]\nName=Mine\n")
 
 
+    def test_refuses_a_start_dir_with_a_line_break(self):
+        with patch(
+            "commander_gui.steam_shortcuts.commander_launch_target",
+            return_value=("/opt/run.sh", "/opt\nExec=evil", ""),
+        ):
+            self.assertIsNone(di.ensure_menu_entry())
+        self.assertFalse((self.home / "applications").exists())
+
 if __name__ == "__main__":
     unittest.main()

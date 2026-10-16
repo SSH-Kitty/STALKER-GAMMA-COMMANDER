@@ -1084,6 +1084,16 @@ class DeckWindow(QMainWindow):
 
     def _quit(self) -> None:
         self.dismiss_overlay()
+        if self.session_active():
+            # The game outlives COMMANDER (it runs detached), but the timer
+            # counting its playtime does not - say so, as switch_mode does.
+            self.confirm(
+                tr("Quit COMMANDER"),
+                tr("Your game keeps running, but this session's playtime won't be counted."),
+                self.close,
+                confirm_text=tr("Quit"),
+            )
+            return
         self.close()
 
     # ----------------------------------------------------------- lifecycle
@@ -1099,9 +1109,11 @@ class DeckWindow(QMainWindow):
         # size scan, system checks, ...) run on a QThread owned by that
         # screen. Deleting a screen while one is still running destroys a
         # live QThread, which Qt answers by aborting the whole process -
-        # so cancel them first, detaching any that won't stop in time, the
-        # same way MainWindow.switch_language() does.
-        shutdown_active_runners(timeout_ms=2000)
+        # so cancel them first and detach them, the same way
+        # MainWindow.switch_language() does. No wait: the new screens start
+        # their checks again anyway, and waiting froze the UI for up to 2s
+        # (the Deck rescales right after starting, mid-checks).
+        shutdown_active_runners(timeout_ms=0)
         # An overlay that knows how to re-open itself (the Welcome screen)
         # survives the rebuild; the rest are dropped as before. Read before
         # _overlay is cleared below - reading it after always found None,

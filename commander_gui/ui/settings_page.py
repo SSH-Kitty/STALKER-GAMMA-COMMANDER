@@ -1,4 +1,5 @@
-"""Settings page: launch behaviour, launcher defaults and appearance.
+"""Settings page: launch behaviour, launcher defaults and appearance,
+grouped into tabs like the Multiplayer page's.
 
 Start page and default runner persist to the GUI settings file and take
 effect immediately or on the next launch as described next to each
@@ -16,10 +17,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -50,8 +49,6 @@ from ..self_update import commander_appimage_path
 from ..steam_shortcuts import (
     ShortcutsFileError,
     add_to_steam,
-    find_shortcuts_vdf,
-    list_steam_accounts,
 )
 from ..themes import THEME_INFO, active_theme
 from ..updates import is_unstable_version, newer_unstable_tag
@@ -64,11 +61,14 @@ from .common import (
     info_label,
     make_card,
     mo2_running,
+    pick_shortcuts_vdf,
     populate_runner_combo,
-    section_label,
     steam_running,
     tr,
 )
+from .dashboard import _card_title
+from .dialogs import MessageBox as QMessageBox
+from .multiplayer_page import _columns, _divider, _hint, _panel, _section, _Stat, _tab
 
 
 def _swatch(color: str) -> QFrame:
@@ -96,8 +96,34 @@ def _option_row(label: str, widget: QWidget, description: str = "") -> QHBoxLayo
     return row
 
 
+#: Tab names, in order. Each one is built by the matching ``_<name>_tab``.
+_TABS = (
+    ("General", "general"),
+    ("Game", "game"),
+    ("Appearance", "appearance"),
+    ("Integrations", "integrations"),
+    ("Maintenance", "maintenance"),
+)
+
+
+def _button_row(*buttons: QPushButton) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    for button in buttons:
+        row.addWidget(button)
+    row.addStretch(1)
+    return row
+
+
+def _footer(layout: QVBoxLayout, text: str) -> None:
+    """A dim note on a divider at the bottom of a box, like Multiplayer's."""
+    layout.addStretch(1)
+    layout.addWidget(_divider())
+    layout.addWidget(_hint(text))
+
+
 class SettingsPage(QWidget):
-    """Launch behaviour, launcher defaults, appearance and themes."""
+    """Launch behaviour, launcher defaults, appearance and themes, in tabs."""
 
     def __init__(self, window) -> None:
         super().__init__()
@@ -120,27 +146,77 @@ class SettingsPage(QWidget):
         root.setSpacing(14)
         scroll.setWidget(content)
 
-        root.addWidget(self._launch_card())
-        root.addWidget(self._launcher_card())
-        root.addWidget(self._appearance_card())
-        root.addWidget(self._themes_card())
-        root.addWidget(self._discord_card())
-        root.addWidget(self._playtime_card())
-        root.addWidget(self._steam_card())
-        root.addWidget(self._diagnostics_card())
+        root.addWidget(self._header_card())
+        root.addWidget(self._tabs_card())
         root.addStretch(1)
 
         self.refresh()
 
-    # ------------------------------------------------------------------ cards
-    def _launch_card(self) -> QWidget:
+    # ----------------------------------------------------------------- header
+    def _header_card(self) -> QWidget:
         card, layout = make_card()
-        layout.addWidget(section_label(tr("Startup"), level=2))
-        layout.addWidget(info_label(tr("Choose the page COMMANDER opens when it starts.")))
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        text = QVBoxLayout()
+        text.setSpacing(4)
+        text.addWidget(_card_title(tr("Settings")))
+        text.addWidget(
+            _hint(tr("Changes save as you make them. Most apply right away."))
+        )
+        text.addStretch(1)
+        row.addLayout(text, 1)
+        version = _Stat(tr("COMMANDER version"))
+        version.set(__version_label__)
+        row.addWidget(version)
+        self._build_stat = _Stat(tr("Build"))
+        self._build_label = self._build_stat.value
+        row.addWidget(self._build_stat)
+        layout.addLayout(row)
+        return card
+
+    # ------------------------------------------------------------------- tabs
+    def _tabs_card(self) -> QWidget:
+        # Same sub-tabs as the Multiplayer page: buttons over a divider,
+        # one page shown at a time.
+        card, layout = make_card()
+        layout.setSpacing(14)
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        self.tab_group = QButtonGroup(self)
+        self._tab_pages: list[QWidget] = []
+        body = QVBoxLayout()
+        body.setSpacing(0)
+        for index, (name, key) in enumerate(_TABS):
+            button = _tab(tr(name), "subTab")
+            self.tab_group.addButton(button, index)
+            header.addWidget(button)
+            page = getattr(self, f"_{key}_tab")()
+            body.addWidget(page)
+            self._tab_pages.append(page)
+        self.tab_group.idClicked.connect(self._show_tab)
+        header.addStretch(1)
+        tabs = QVBoxLayout()
+        tabs.setSpacing(0)
+        tabs.addLayout(header)
+        tabs.addWidget(_divider())
+        layout.addLayout(tabs)
+        layout.addLayout(body)
+        self.tab_group.button(0).setChecked(True)
+        self._show_tab(0)
+        return card
+
+    def _show_tab(self, index: int) -> None:
+        for i, page in enumerate(self._tab_pages):
+            page.setVisible(i == index)
+
+    def _general_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+
+        startup, left = _section(tr("Startup"))
         self._start_page_combo = NoWheelComboBox()
         self._start_page_combo.currentIndexChanged.connect(self._on_start_page)
-        layout.addLayout(_option_row(tr("Page on startup:"), self._start_page_combo))
-
+        left.addLayout(_option_row(tr("Page on startup:"), self._start_page_combo))
         # Shown on every machine, not only Deck hardware: Deck Mode's "When
         # COMMANDER starts" can set "Always" on a desktop PC too, and this
         # is the way back from the full interface.
@@ -152,17 +228,16 @@ class SettingsPage(QWidget):
         ):
             self._deck_mode_combo.addItem(label, value)
         self._deck_mode_combo.currentIndexChanged.connect(self._on_deck_mode)
-        layout.addLayout(
-            _option_row(tr("When COMMANDER starts:"), self._deck_mode_combo)
-        )
+        left.addLayout(_option_row(tr("When COMMANDER starts:"), self._deck_mode_combo))
+        _footer(left, tr("Choose the page COMMANDER opens when it starts."))
 
+        behaviour, right = _section(tr("Behaviour"))
         self._autostart_check = QCheckBox(tr("Start COMMANDER when I log in"))
         self._autostart_check.setToolTip(
-            tr("Add COMMANDER to your desktop's autostart list so it starts automatically when you log in.")
+            tr("Start COMMANDER automatically when you log in.")
         )
         self._autostart_check.toggled.connect(self._on_autostart_toggled)
-        layout.addWidget(self._autostart_check)
-
+        right.addWidget(self._autostart_check)
         self._welcome_check = QCheckBox(tr("Show the Welcome screen on startup"))
         self._welcome_check.setToolTip(
             tr("The latest COMMANDER patch notes and links to GitHub, Discord and the credits.")
@@ -170,43 +245,251 @@ class SettingsPage(QWidget):
         self._welcome_check.toggled.connect(
             lambda on: gui_settings.save_gui_settings(welcome_hidden=not on)
         )
-        layout.addWidget(self._welcome_check)
-
+        right.addWidget(self._welcome_check)
         self._update_notify_check = QCheckBox(tr("Notify me about GAMMA and COMMANDER updates"))
         self._update_notify_check.setToolTip(
-            tr("A desktop notification when a new GAMMA or COMMANDER version comes out - once per version, checked in the background while COMMANDER is open.")
+            tr("Notify you when a new GAMMA or COMMANDER version is out, once per version.")
         )
         self._update_notify_check.toggled.connect(
             lambda on: gui_settings.save_gui_settings(update_notifications=on)
         )
-        layout.addWidget(self._update_notify_check)
+        right.addWidget(self._update_notify_check)
+        right.addStretch(1)
+        _columns(layout, startup, behaviour)
 
-        # Stable or unstable COMMANDER: which one is running, and one button
-        # to move to the other. The update channel follows the build.
-        build_row = QHBoxLayout()
-        build_row.addWidget(QLabel(tr("COMMANDER build:")))
-        self._build_label = QLabel()
-        build_row.addWidget(self._build_label, 1)
+        # Stable or unstable COMMANDER: which one is running (header tile),
+        # and one button to move to the other. The update channel follows
+        # the build.
+        build, box = _section(tr("COMMANDER build"))
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self._build_note = info_label("")
+        row.addWidget(self._build_note, 1)
         self._switch_build_button = QPushButton()
+        self._switch_build_button.setObjectName("secondary")
         self._switch_build_button.setMinimumWidth(240)
         self._switch_build_button.clicked.connect(self._on_switch_build)
+        row.addWidget(self._switch_build_button, 0, Qt.AlignmentFlag.AlignTop)
+        box.addLayout(row)
         #: The unstable tag worth switching to (newer than stable), once the
         #: background check has answered; None while unknown or none.
         self._unstable_offer: str | None = None
         self._unstable_checked = False
         self._unstable_task: BackgroundTask | None = None
         self._export_task: BackgroundTask | None = None
-        build_row.addWidget(self._switch_build_button)
-        layout.addLayout(build_row)
-        self._build_note = info_label("")
-        layout.addWidget(self._build_note)
+        layout.addWidget(build)
         self._render_build()
-        return card
+        return page
+
+    def _game_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+
+        runner, left = _section(tr("Runner"))
+        self._runner_combo = NoWheelComboBox()
+        self._runner_combo.currentIndexChanged.connect(self._on_runner_changed)
+        left.addLayout(_option_row(tr("Default runner:"), self._runner_combo))
+        self._winecfg_button = QPushButton(tr("Open Winecfg"))
+        self._winecfg_button.setObjectName("secondary")
+        self._winecfg_button.setToolTip(
+            tr("Open Wine Configuration for the default runner and prefix.")
+        )
+        self._winecfg_button.clicked.connect(self._open_winecfg)
+        left.addLayout(_button_row(self._winecfg_button))
+        _footer(
+            left,
+            tr("Choose the runner used by default on the Play page. You can override it for each launch."),
+        )
+
+        display, right = _section(tr("MO2 display"))
+        self._display_scale_combo = NoWheelComboBox()
+        for percent, dpi in ((100, 96), (125, 120), (150, 144), (175, 168), (200, 192)):
+            self._display_scale_combo.addItem(f"{percent}% ({dpi} DPI)", dpi)
+        self._display_scale_combo.currentIndexChanged.connect(
+            self._on_display_scale_changed
+        )
+        right.addLayout(_option_row(tr("MO2 Display Scale"), self._display_scale_combo))
+        self._apply_display_scale_button = QPushButton(tr("Apply"))
+        self._apply_display_scale_button.setObjectName("secondary")
+        # A minimum width, not a fixed one: longer translations (e.g. Polish
+        # "Zastosowano" for "Applied") grow the button instead of clipping.
+        self._apply_display_scale_button.setMinimumWidth(120)
+        self._apply_display_scale_button.clicked.connect(self._apply_display_scale)
+        right.addLayout(_button_row(self._apply_display_scale_button))
+        _footer(
+            right,
+            tr("125% is recommended for small MO2 text. Restart MO2 after applying."),
+        )
+        _columns(layout, runner, display)
+        return page
+
+    def _appearance_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+
+        interface, left = _section(tr("Interface"))
+        self._font_family_combo = NoWheelComboBox()
+        for family in (
+            "Exo 2",
+            "Noto Sans",
+            "DejaVu Sans",
+            "Liberation Sans",
+            "Inter",
+        ):
+            self._font_family_combo.addItem(family, family)
+        self._font_family_combo.currentIndexChanged.connect(self._on_font_family)
+        left.addLayout(_option_row(tr("Font family:"), self._font_family_combo))
+        self._font_size_combo = NoWheelComboBox()
+        for size in range(9, 23):
+            self._font_size_combo.addItem(f"{size} px", size)
+        self._font_size_combo.currentIndexChanged.connect(self._on_font_size)
+        left.addLayout(_option_row(tr("Interface font size:"), self._font_size_combo))
+        self._language_combo = NoWheelComboBox()
+        for code, native, _english in LANGUAGE_INFO:
+            self._language_combo.addItem(native, code)
+        self._language_combo.currentIndexChanged.connect(self._on_language)
+        left.addLayout(_option_row(tr("Language:"), self._language_combo))
+        self._title_bar_check = QCheckBox(tr("Use COMMANDER's own title bar"))
+        self._title_bar_check.setToolTip(
+            tr("Turn off to use your desktop's normal title bar instead.")
+        )
+        self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
+        left.addWidget(self._title_bar_check)
+        _footer(left, tr("Applies immediately, unless a background task is running."))
+
+        themes, right = _section(tr("Themes"))
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        for index, (key, label, description, swatches) in enumerate(THEME_INFO):
+            if index:
+                right.addWidget(_divider())
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            text = QVBoxLayout()
+            text.setSpacing(2)
+            radio = QRadioButton(tr(label))
+            radio.setToolTip(tr(description))
+            radio.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._group.addButton(radio)
+            self._radios[key] = radio
+            text.addWidget(radio)
+            text.addWidget(_hint(tr(description)))
+            row.addLayout(text, 1)
+            for color in swatches:
+                row.addWidget(_swatch(color), 0, Qt.AlignmentFlag.AlignVCenter)
+            right.addLayout(row)
+        self._group.buttonToggled.connect(self._on_toggled)
+        _footer(right, tr("Choose a COMMANDER theme. The selection is saved and applied on every launch."))
+        _columns(layout, interface, themes)
+        return page
+
+    def _integrations_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+
+        discord, left = _section(tr("Discord Rich Presence"))
+        self._discord_enable_check = QCheckBox(tr("Show my game activity on Discord"))
+        self._discord_enable_check.toggled.connect(self._on_discord_enabled_toggled)
+        left.addWidget(self._discord_enable_check)
+        self._discord_mods_check = QCheckBox(tr("Include the mod count"))
+        self._discord_mods_check.toggled.connect(self._on_discord_mods_toggled)
+        left.addWidget(self._discord_mods_check)
+        self._discord_playtime_check = QCheckBox(tr("Include the total playtime"))
+        self._discord_playtime_check.toggled.connect(self._on_discord_playtime_toggled)
+        left.addWidget(self._discord_playtime_check)
+        left.addWidget(_divider())
+        self._discord_status_label = QLabel()
+        self._discord_status_label.setWordWrap(True)
+        left.addWidget(self._discord_status_label)
+        self._discord_check_button = QPushButton(tr("Check again"))
+        self._discord_check_button.setObjectName("secondary")
+        self._discord_check_button.clicked.connect(self._check_discord)
+        self._discord_test_button = QPushButton(tr("Test"))
+        self._discord_test_button.setObjectName("secondary")
+        self._discord_test_button.setToolTip(
+            tr("Show the activity on your Discord profile for 15 seconds.")
+        )
+        self._discord_test_button.clicked.connect(self._on_discord_test)
+        self._discord_advanced_button = QPushButton(tr("Advanced"))
+        self._discord_advanced_button.setObjectName("secondary")
+        self._discord_advanced_button.setCheckable(True)
+        self._discord_advanced_button.toggled.connect(self._on_discord_advanced_toggled)
+        left.addLayout(_button_row(
+            self._discord_check_button, self._discord_test_button, self._discord_advanced_button,
+        ))
+        self._discord_task: BackgroundTask | None = None
+        self._discord_test_rpc = None
+        self._discord_advanced = QWidget()
+        self._discord_advanced.setObjectName("panelTransparent")
+        advanced = QVBoxLayout(self._discord_advanced)
+        advanced.setContentsMargins(0, 0, 0, 0)
+        advanced.addWidget(
+            _hint(
+                tr("Only if you want the activity to come from your own Discord application. Leave empty to use COMMANDER's.")
+            )
+        )
+        self._discord_client_id_edit = QLineEdit()
+        self._discord_client_id_edit.setPlaceholderText(DEFAULT_CLIENT_ID)
+        self._discord_client_id_edit.editingFinished.connect(self._on_discord_client_id_changed)
+        id_row = _option_row(tr("Application ID:"), self._discord_client_id_edit)
+        reset = QPushButton(tr("Reset to default"))
+        reset.setObjectName("secondary")
+        reset.clicked.connect(self._on_discord_client_id_reset)
+        id_row.addWidget(reset)
+        advanced.addLayout(id_row)
+        self._discord_advanced.setVisible(False)
+        left.addWidget(self._discord_advanced)
+        _footer(
+            left,
+            tr("Show that you're playing S.T.A.L.K.E.R. GAMMA on your Discord profile while the game runs. Just have the Discord app open - no setup needed."),
+        )
+        self._set_discord_status(None)
+
+        steam, right = _section(tr("Steam"))
+        add_btn = QPushButton(tr("Add COMMANDER to Steam"))
+        add_btn.setObjectName("secondary")
+        add_btn.clicked.connect(self._on_add_to_steam)
+        right.addLayout(_button_row(add_btn))
+        _footer(
+            right,
+            tr(
+                "Add COMMANDER and its Deck Mode to your Steam library, "
+                "so you can launch either one straight from Steam "
+                "(including Big Picture and Game Mode) without using "
+                "Steam's own \"Add a Non-Steam Game\" dialog."
+            ),
+        )
+        _columns(layout, discord, steam)
+        return page
+
+    def _maintenance_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+
+        playtime, left = _section(tr("Playtime"))
+        reset_btn = QPushButton(tr("Reset Playtime"))
+        reset_btn.setObjectName("secondary")
+        reset_btn.clicked.connect(self._on_reset_playtime)
+        left.addLayout(_button_row(reset_btn))
+        _footer(left, tr("Reset the total playtime tracked for the active profile."))
+
+        diagnostics, right = _section(tr("Diagnostics"))
+        export_btn = QPushButton(tr("Export diagnostics"))
+        export_btn.setObjectName("secondary")
+        export_btn.clicked.connect(self._on_export_log)
+        right.addLayout(_button_row(export_btn))
+        _footer(
+            right,
+            tr("Export system information, settings, and launcher output for troubleshooting."),
+        )
+        _columns(layout, playtime, diagnostics)
+        return page
+
 
     def _render_build(self) -> None:
         unstable = is_unstable_version(__version__)
         kind = tr("Unstable") if unstable else tr("Stable")
-        self._build_label.setText(f"{__version_label__}   ·   {kind}")
+        self._build_label.setText(kind)
         self._build_label.setStyleSheet(
             f"color: {(WARN if unstable else OK_GREEN).name()}; font-weight: bold;"
         )
@@ -234,7 +517,9 @@ class SettingsPage(QWidget):
                 note = tr(
                     "There's no unstable build newer than the stable one right now."
                 )
-            if appimage and not self._unstable_checked:
+            # Also from source: the note still says whether one exists, and
+            # skipping the check left "Checking..." on screen for good.
+            if not self._unstable_checked:
                 self._check_unstable()
         if not appimage:
             self._switch_build_button.setEnabled(False)
@@ -267,253 +552,21 @@ class SettingsPage(QWidget):
         if callable(switch):
             switch(target)
 
-    def _launcher_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Runner"), level=2))
-        layout.addWidget(
-            info_label(
-                tr("Choose the runner used by default on the Play page. You can override it for each launch.")
-            )
-        )
-        self._runner_combo = NoWheelComboBox()
-        self._runner_combo.currentIndexChanged.connect(self._on_runner_changed)
-        layout.addLayout(_option_row(tr("Default runner:"), self._runner_combo))
-
-        self._winecfg_button = QPushButton(tr("Open Winecfg"))
-        self._winecfg_button.setObjectName("secondary")
-        self._winecfg_button.setToolTip(
-            tr("Open Wine Configuration for the default runner and prefix.")
-        )
-        self._winecfg_button.clicked.connect(self._open_winecfg)
-        layout.addWidget(self._winecfg_button, 0, Qt.AlignmentFlag.AlignLeft)
-
-        display_row = QHBoxLayout()
-        display_row.addWidget(QLabel(tr("MO2 Display Scale")))
-        self._display_scale_combo = NoWheelComboBox()
-        for percent, dpi in ((100, 96), (125, 120), (150, 144), (175, 168), (200, 192)):
-            self._display_scale_combo.addItem(f"{percent}% ({dpi} DPI)", dpi)
-        self._display_scale_combo.currentIndexChanged.connect(
-            self._on_display_scale_changed
-        )
-        display_row.addWidget(self._display_scale_combo, 1)
-        self._apply_display_scale_button = QPushButton(tr("Apply"))
-        self._apply_display_scale_button.setObjectName("secondary")
-        # A fixed pixel width sized for the English text clips or overlaps
-        # longer translations (e.g. Polish "Zastosowano" for "Applied") -
-        # a minimum width still keeps the button a consistent size for the
-        # common case, but lets it grow for longer text instead of clipping.
-        self._apply_display_scale_button.setMinimumSize(64, 30)
-        self._apply_display_scale_button.setFixedHeight(30)
-        self._apply_display_scale_button.setStyleSheet("padding: 0 6px;")
-        self._apply_display_scale_button.clicked.connect(self._apply_display_scale)
-        display_row.addWidget(self._apply_display_scale_button)
-        layout.addLayout(display_row)
-        layout.addWidget(
-            info_label(
-                tr("125% is recommended for small MO2 text. Restart MO2 after applying.")
-            )
-        )
-        return card
-
-    def _appearance_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Appearance"), level=2))
-        layout.addWidget(
-            info_label(
-                tr("Set the interface font family and size. Changes apply immediately.")
-            )
-        )
-        self._font_family_combo = NoWheelComboBox()
-        for family in (
-            "Exo 2",
-            "Noto Sans",
-            "DejaVu Sans",
-            "Liberation Sans",
-            "Inter",
-        ):
-            self._font_family_combo.addItem(family, family)
-        self._font_family_combo.currentIndexChanged.connect(self._on_font_family)
-        layout.addLayout(_option_row(tr("Font family:"), self._font_family_combo))
-        self._font_size_combo = NoWheelComboBox()
-        for size in range(9, 23):
-            self._font_size_combo.addItem(f"{size} px", size)
-        self._font_size_combo.currentIndexChanged.connect(self._on_font_size)
-        layout.addLayout(_option_row(tr("Interface font size:"), self._font_size_combo))
-        self._language_combo = NoWheelComboBox()
-        for code, native, _english in LANGUAGE_INFO:
-            self._language_combo.addItem(native, code)
-        self._language_combo.currentIndexChanged.connect(self._on_language)
-        layout.addLayout(_option_row(tr("Language:"), self._language_combo))
-        self._title_bar_check = QCheckBox(tr("Use COMMANDER's own title bar"))
-        self._title_bar_check.setToolTip(
-            tr("Turn off to use your desktop's normal title bar instead.")
-        )
-        self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
-        layout.addWidget(self._title_bar_check)
-        layout.addWidget(
-            info_label(tr("Applies immediately, unless a background task is running."))
-        )
-        return card
-
-    def _themes_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Themes"), level=2))
-        layout.addWidget(
-            info_label(
-                tr("Choose a COMMANDER theme. The selection is saved and applied on every launch.")
-            )
-        )
-        self._group = QButtonGroup(self)
-        self._group.setExclusive(True)
-        for key, label, description, swatches in THEME_INFO:
-            row = QHBoxLayout()
-            row.setSpacing(10)
-
-            radio = QRadioButton(tr(label))
-            radio.setToolTip(tr(description))
-            self._group.addButton(radio)
-            self._radios[key] = radio
-            row.addWidget(radio)
-
-            desc = QLabel(tr(description))
-            desc.setObjectName("info")
-            desc.setWordWrap(True)
-            row.addWidget(desc, 1)
-
-            row.addStretch(0)
-            for color in swatches:
-                row.addWidget(_swatch(color))
-
-            container = QWidget()
-            container.setLayout(row)
-            layout.addWidget(container)
-
-        self._group.buttonToggled.connect(self._on_toggled)
-        return card
-
-    def _discord_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Discord Rich Presence"), level=2))
-        layout.addWidget(
-            info_label(
-                tr("Show that you're playing S.T.A.L.K.E.R. GAMMA on your Discord profile while the game runs. Just have the Discord app open - no setup needed.")
-            )
-        )
-        self._discord_enable_check = QCheckBox(tr("Show my game activity on Discord"))
-        self._discord_enable_check.toggled.connect(self._on_discord_enabled_toggled)
-        layout.addWidget(self._discord_enable_check)
-        self._discord_mods_check = QCheckBox(tr("Include the mod count"))
-        self._discord_mods_check.toggled.connect(self._on_discord_mods_toggled)
-        layout.addWidget(self._discord_mods_check)
-        self._discord_playtime_check = QCheckBox(tr("Include the total playtime"))
-        self._discord_playtime_check.toggled.connect(self._on_discord_playtime_toggled)
-        layout.addWidget(self._discord_playtime_check)
-
-        status_row = QHBoxLayout()
-        status_row.setSpacing(10)
-        self._discord_status_label = QLabel()
-        self._discord_status_label.setWordWrap(True)
-        status_row.addWidget(self._discord_status_label, 1)
-        self._discord_check_button = QPushButton(tr("Check again"))
-        self._discord_check_button.clicked.connect(self._check_discord)
-        status_row.addWidget(self._discord_check_button)
-        self._discord_test_button = QPushButton(tr("Test"))
-        self._discord_test_button.setToolTip(
-            tr("Show the activity on your Discord profile for 15 seconds.")
-        )
-        self._discord_test_button.clicked.connect(self._on_discord_test)
-        status_row.addWidget(self._discord_test_button)
-        layout.addLayout(status_row)
-        self._discord_task: BackgroundTask | None = None
-        self._discord_test_rpc = None
-
-        self._discord_advanced_button = QPushButton(tr("Advanced"))
-        self._discord_advanced_button.setCheckable(True)
-        self._discord_advanced_button.setFlat(True)
-        self._discord_advanced_button.toggled.connect(self._on_discord_advanced_toggled)
-        layout.addWidget(self._discord_advanced_button, 0, Qt.AlignmentFlag.AlignLeft)
-        self._discord_advanced = QWidget()
-        advanced = QVBoxLayout(self._discord_advanced)
-        advanced.setContentsMargins(0, 0, 0, 0)
-        advanced.addWidget(
-            info_label(
-                tr("Only if you want the activity to come from your own Discord application. Leave empty to use COMMANDER's.")
-            )
-        )
-        self._discord_client_id_edit = QLineEdit()
-        self._discord_client_id_edit.setPlaceholderText(DEFAULT_CLIENT_ID)
-        self._discord_client_id_edit.editingFinished.connect(self._on_discord_client_id_changed)
-        id_row = _option_row(tr("Application ID:"), self._discord_client_id_edit)
-        reset = QPushButton(tr("Reset to default"))
-        reset.clicked.connect(self._on_discord_client_id_reset)
-        id_row.addWidget(reset)
-        advanced.addLayout(id_row)
-        self._discord_advanced.setVisible(False)
-        layout.addWidget(self._discord_advanced)
-        self._set_discord_status(None)
-        return card
-
-    def _playtime_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Playtime"), level=2))
-        layout.addWidget(
-            info_label(
-                tr("Reset the total playtime tracked for the active profile.")
-            )
-        )
-        reset_btn = QPushButton(tr("Reset Playtime"))
-        reset_btn.setObjectName("secondary")
-        reset_btn.clicked.connect(self._on_reset_playtime)
-        layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        return card
-
-    def _steam_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Steam"), level=2))
-        layout.addWidget(
-            info_label(
-                tr(
-                    "Add COMMANDER and its Deck Mode to your Steam library, "
-                    "so you can launch either one straight from Steam "
-                    "(including Big Picture and Game Mode) without using "
-                    "Steam's own \"Add a Non-Steam Game\" dialog."
-                )
-            )
-        )
-        add_btn = QPushButton(tr("Add COMMANDER to Steam"))
-        add_btn.setObjectName("secondary")
-        add_btn.clicked.connect(self._on_add_to_steam)
-        layout.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        return card
-
-    def _diagnostics_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Diagnostics"), level=2))
-        layout.addWidget(
-            info_label(
-                tr("Export system information, settings, and launcher output for troubleshooting.")
-            )
-        )
-        export_btn = QPushButton(tr("Export diagnostics"))
-        export_btn.setObjectName("secondary")
-        export_btn.clicked.connect(self._on_export_log)
-        layout.addWidget(export_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        return card
-
     # --------------------------------------------------------------- handlers
     def _on_reset_playtime(self) -> None:
         profile = self.window.settings.active_profile
         if profile is None:
             QMessageBox.information(
-                self, tr("Reset Playtime"), tr("No active profile.")
+                self, tr("No profile selected"), tr("Pick a profile first, then reset its playtime.")
             )
             return
         name = profile.profile_name or tr("this profile")
         answer = QMessageBox.question(
             self,
-            tr("Reset Playtime"),
-            tr("Reset total playtime for profile '{name}' to 0?", name=name),
+            tr("Reset playtime?"),
+            tr("The total playtime for '{name}' goes back to 0. This can't be undone.", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Reset"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -530,43 +583,25 @@ class SettingsPage(QWidget):
                 page.refresh()
 
     def _on_add_to_steam(self) -> None:
-        vdf_path = find_shortcuts_vdf()
+        vdf_path = pick_shortcuts_vdf(
+            self,
+            tr("Pick your Steam account"),
+            tr("This computer has more than one Steam account. Pick the one to add COMMANDER to:"),
+        )
         if vdf_path is None:
-            accounts = list_steam_accounts()
-            if not accounts:
-                QMessageBox.warning(
-                    self,
-                    tr("Add to Steam"),
-                    tr("Could not find a Steam installation on this machine."),
-                )
-                return
-            labels = [label for label, _path in accounts]
-            label, ok = QInputDialog.getItem(
-                self,
-                tr("Add to Steam"),
-                tr(
-                    "More than one Steam account was found on this machine. "
-                    "Choose which one to add COMMANDER to:"
-                ),
-                labels,
-                0,
-                False,
-            )
-            if not ok:
-                return
-            vdf_path = dict(accounts)[label]
+            return
 
         added = tr(
-            "Added \"STALKER COMMANDER\" and \"STALKER COMMANDER DECK\" to "
+            "\"STALKER COMMANDER\" and \"STALKER COMMANDER DECK\" are now in "
             "your Steam library."
         )
         if not steam_running():
             try:
                 add_to_steam(vdf_path, restart=False)
             except (OSError, ShortcutsFileError) as exc:
-                QMessageBox.warning(self, tr("Add to Steam"), str(exc))
+                QMessageBox.warning(self, tr("Couldn't add COMMANDER to Steam"), str(exc))
                 return
-            QMessageBox.information(self, tr("Add to Steam"), added)
+            QMessageBox.information(self, tr("Added to Steam"), added)
             return
 
         # Steam must be closed while the file is written: a running client
@@ -574,14 +609,15 @@ class SettingsPage(QWidget):
         # the new one on exit. So the only safe offer is close-write-restart.
         answer = QMessageBox.question(
             self,
-            tr("Add to Steam"),
+            tr("Restart Steam to add COMMANDER?"),
             tr(
-                "Steam is running. To add the shortcuts it has to close and "
-                "start again - this closes anything currently running "
-                "through Steam. Restart Steam now?"
+                "Steam only picks up new library shortcuts after a restart. "
+                "COMMANDER closes Steam, adds them, and opens Steam again."
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
+            note=tr("Anything running through Steam right now will close."),
+            labels={QMessageBox.StandardButton.Yes: tr("Restart Steam"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -592,7 +628,7 @@ class SettingsPage(QWidget):
             lambda _r: self.window.statusBar().showMessage(added, 6000)
         )
         self._steam_restart_task.error.connect(
-            lambda err: QMessageBox.warning(self, tr("Add to Steam"), err)
+            lambda err: QMessageBox.warning(self, tr("Couldn't add COMMANDER to Steam"), err)
         )
         self._steam_restart_task.start()
         self.window.statusBar().showMessage(tr("Restarting Steam..."), 0)
@@ -617,8 +653,8 @@ class SettingsPage(QWidget):
             reason = last_error()
             QMessageBox.warning(
                 self,
-                tr("Autostart"),
-                tr("Could not update the autostart entry.")
+                tr("Couldn't change autostart"),
+                tr("COMMANDER couldn't change whether it starts when you log in.")
                 + (f"\n\n{reason}" if reason else ""),
             )
 
@@ -644,8 +680,8 @@ class SettingsPage(QWidget):
         if text and not text.isdigit():
             QMessageBox.warning(
                 self,
-                tr("Discord Rich Presence"),
-                tr("An Application ID is a number. Leave the field empty to use COMMANDER's."),
+                tr("That's not an Application ID"),
+                tr("A Discord Application ID is a number. Leave the box empty to use COMMANDER's own."),
             )
             return
         gui_settings.save_gui_settings(discord_client_id=text)
@@ -734,8 +770,8 @@ class SettingsPage(QWidget):
             # The game holds the Wine prefix; winecfg must not touch it live.
             QMessageBox.information(
                 self,
-                tr("Game Running"),
-                tr("Mod Organizer / the game is currently running.\n\nClose it before opening Winecfg."),
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then open Winecfg again."),
             )
             return
         try:
@@ -748,7 +784,7 @@ class SettingsPage(QWidget):
             command, env, cwd = build_runner_tool_command(runner, "winecfg", cwd=cwd)
             launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
         except (LaunchError, OSError) as exc:
-            QMessageBox.warning(self, tr("Could not open Winecfg"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't open Winecfg"), str(exc))
 
     def _on_display_scale_changed(self, index: int) -> None:
         if index >= 0:
@@ -768,8 +804,8 @@ class SettingsPage(QWidget):
             # risks the same corruption already guarded against for winetricks.
             QMessageBox.information(
                 self,
-                tr("Game Running"),
-                tr("Mod Organizer / the game is currently running.\n\nClose it before applying a display scale change."),
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then change the display scale again."),
             )
             return
         try:
@@ -798,7 +834,7 @@ class SettingsPage(QWidget):
             launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
             self._apply_display_scale_button.setText(tr("Applied"))
         except (LaunchError, OSError) as exc:
-            QMessageBox.warning(self, tr("Could not apply display scale"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't change the display scale"), str(exc))
 
     def _on_title_bar_toggled(self, on: bool) -> None:
         gui_settings.save_gui_settings(custom_title_bar=on)
@@ -862,8 +898,8 @@ class SettingsPage(QWidget):
         self._export_task = None
         QMessageBox.information(
             self,
-            tr("Export Complete"),
-            tr("Diagnostics exported to:\n{path}", path=path),
+            tr("Diagnostics saved"),
+            tr("Saved to:\n{path}\n\nAttach this file when you ask for help on Discord or GitHub.", path=path),
         )
 
     def _on_export_log_error(self, message: str) -> None:
@@ -872,8 +908,8 @@ class SettingsPage(QWidget):
         self._export_task = None
         QMessageBox.critical(
             self,
-            tr("Export Failed"),
-            tr("Could not export diagnostics:\n{exc}", exc=message),
+            tr("Couldn't save diagnostics"),
+            tr("The diagnostics file couldn't be written.\n\n{exc}", exc=message),
         )
 
     # ---------------------------------------------------------------- refresh

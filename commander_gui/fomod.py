@@ -16,7 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import safe_xml
-from .mod_install import ModInstallError
+from .i18n import tr
+from .mod_install import (
+    _GAME_DATA_FOLDER_NAMES,
+    ModInstallError,
+    default_mod_name,
+    payload_root,
+)
 
 
 @dataclass(frozen=True)
@@ -196,6 +202,111 @@ def _parse_type(option: ET.Element) -> tuple[str, tuple[tuple[FomodCondition, st
 def _named(element: ET.Element, child: str, default: str) -> str:
     """Read a standard name attribute, with compatibility for child elements."""
     return element.attrib.get("name", "").strip() or _text(element.find(child), default)
+
+
+def find_fomod(staging: Path, max_depth: int = 2) -> tuple[Path, Path] | None:
+    """``(ModuleConfig.xml, archive root)`` for an extracted FOMOD, else None.
+
+    Matched case-insensitively (``FOMOD/moduleconfig.xml`` is common in
+    archives made on Windows), at the top level or under up to *max_depth*
+    wrapper folders. The shallowest match wins; two at the same depth are
+    ambiguous and treated as not a FOMOD.
+    """
+    level = [staging]
+    for _depth in range(max_depth + 1):
+        found = []
+        for root in level:
+            fomod_dir = next(
+                (d for d in _subdirs(root) if d.name.lower() == "fomod"), None
+            )
+            if fomod_dir is None:
+                continue
+            config = next(
+                (
+                    f
+                    for f in _files(fomod_dir)
+                    if f.name.lower() == "moduleconfig.xml"
+                ),
+                None,
+            )
+            if config is not None:
+                found.append((config, root))
+        if found:
+            return found[0] if len(found) == 1 else None
+        level = [d for root in level for d in _subdirs(root)]
+    return None
+
+
+def _squash(name: str) -> str:
+    return "".join(char for char in name.lower() if char.isalnum())
+
+
+def bundle_config(staging: Path, archive_name: str = "") -> tuple[FomodConfig, Path] | None:
+    """A one-step installer for an archive that bundles several mods.
+
+    Some archives ship a main mod and its optional add-ons side by side,
+    each in its own folder with its own ``gamedata`` and no ``fomod``
+    folder (Anomaly Popup Messages, for one). Installed as-is, none of
+    them has game data at the mod's top level, so MO2 ignores the mod;
+    MO2 itself asks which folder to use. Each folder becomes an option,
+    and the one named like the archive starts ticked.
+    """
+    root = payload_root(staging)
+    if any(child.name.lower() in _GAME_DATA_FOLDER_NAMES for child in root.iterdir()):
+        return None
+    parts = [
+        folder
+        for folder in _subdirs(root)
+        if any(child.name.lower() in _GAME_DATA_FOLDER_NAMES for child in _subdirs(folder))
+    ]
+    if len(parts) < 2:
+        return None
+    archive_key = _squash(archive_name)
+
+    def is_main(folder: Path) -> bool:
+        return bool(archive_key) and archive_key.startswith(_squash(folder.name))
+
+    options = tuple(
+        FomodOption(
+            name=folder.name,
+            files=(FomodFile(source=folder.name, destination="", is_folder=True),),
+            default_type=RECOMMENDED if is_main(folder) else OPTIONAL,
+        )
+        # The main mod first, then its add-ons.
+        for folder in sorted(parts, key=lambda folder: not is_main(folder))
+    )
+    group = FomodGroup(tr("Parts to install"), "SelectAtLeastOne", options)
+    step = FomodStep(tr("This archive holds several parts. Tick the ones you want."), (group,))
+    name = default_mod_name(Path(archive_name)) if archive_name else root.name
+    return FomodConfig(name=name, author="", steps=(step,)), root
+
+
+def find_installer(staging: Path, archive_name: str = "") -> tuple[FomodConfig, Path] | None:
+    """``(config, archive root)`` to show the installer for, else None.
+
+    A real FOMOD wins; otherwise a bundle of several mod folders gets a
+    generated one (see :func:`bundle_config`). Raises ModInstallError for a
+    broken ModuleConfig.xml.
+    """
+    fomod = find_fomod(staging)
+    if fomod is not None:
+        config_path, root = fomod
+        return parse_config(config_path), root
+    return bundle_config(staging, archive_name)
+
+
+def _subdirs(path: Path) -> list[Path]:
+    try:
+        return sorted(p for p in path.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return []
+
+
+def _files(path: Path) -> list[Path]:
+    try:
+        return sorted(p for p in path.iterdir() if p.is_file() and not p.is_symlink())
+    except OSError:
+        return []
 
 
 def parse_config(path: Path) -> FomodConfig:
@@ -588,13 +699,14 @@ def _place_item(item: FomodFile, root: Path, destination: Path) -> None:
             ) from exc
         if current.is_symlink():
             raise ModInstallError("FOMOD destination contains a symlink")
+    # Checked before resolve(): a resolved path is never a symlink.
+    if target.is_symlink():
+        raise ModInstallError("FOMOD destination is a symlink")
     target = target.resolve()
     try:
         target.relative_to(destination)
     except ValueError as exc:
         raise ModInstallError("FOMOD destination escapes the mod folder") from exc
-    if target.exists() and target.is_symlink():
-        raise ModInstallError("FOMOD destination is a symlink")
     if item.is_folder:
         shutil.copytree(source, target, dirs_exist_ok=True)
     else:

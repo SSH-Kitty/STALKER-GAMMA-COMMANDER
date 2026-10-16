@@ -15,12 +15,10 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
@@ -41,8 +39,10 @@ from .common import (
     info_label,
     mo2_running,
     open_in_file_manager,
-    section_label,
 )
+from .dialogs import InputDialog as QInputDialog
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import style_window
 
 
 def backup_summary(info: BackupInfo) -> str:
@@ -69,10 +69,10 @@ class BackupDialog(QDialog):
         self.window = window
         self._task: StreamTask | None = None
         self.setWindowTitle(tr("Saves & Settings Backup"))
-        self.setMinimumSize(640, 460)
+        self.setMinimumSize(780, 480)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
-        layout.addWidget(section_label(tr("Saves & Settings Backup"), level=2))
+        style_window(self, tr("Saves & Settings Backup"))
         layout.addWidget(
             info_label(
                 tr(
@@ -130,7 +130,7 @@ class BackupDialog(QDialog):
         self.list.clear()
         profile = self._profile()
         if profile is None:
-            self.status.setText(tr("Create or activate a profile first (Profiles page)."))
+            self.status.setText(tr("Create or pick a profile on the Profiles page first."))
             self._update_buttons()
             return
         backups = list_backups(profile.profile_name)
@@ -176,7 +176,7 @@ class BackupDialog(QDialog):
     # -- actions -----------------------------------------------------------
     def _start(self, fn, on_done, busy_text: str) -> None:
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("Another task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         self.window.set_install_busy(True)
         self.status.setText(busy_text)
@@ -200,10 +200,11 @@ class BackupDialog(QDialog):
             return
         label, ok = QInputDialog.getText(
             self,
-            tr("Back Up Now"),
-            tr("Name this backup (optional):"),
+            tr("Name this backup"),
+            tr("Give it a name so you can find it later. You can leave it empty."),
             QLineEdit.EchoMode.Normal,
             "",
+            confirm=tr("Back up now"),
         )
         if not ok:
             return
@@ -212,7 +213,7 @@ class BackupDialog(QDialog):
 
         def done(info, error) -> None:
             if error:
-                QMessageBox.warning(self, tr("Backup failed"), error)
+                QMessageBox.warning(self, tr("The backup didn't finish"), error)
             elif info is None:
                 self.status.setText(tr("No saves, user.ltx or MCM settings found - nothing to back up."))
             else:
@@ -234,27 +235,31 @@ class BackupDialog(QDialog):
         saves = self.saves_box.isChecked()
         settings = self.settings_box.isChecked()
         if not (saves or settings):
-            QMessageBox.information(self, tr("Restore"), tr("Tick Saves, settings, or both."))
+            QMessageBox.information(self, tr("Nothing selected"), tr("Tick Saves, settings, or both, then press Restore."))
             return
         if mo2_running(force=True):
             QMessageBox.information(
                 self,
-                tr("Game Running"),
-                tr("Mod Organizer / the game is currently running.\n\nClose it before running this action."),
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then try again."),
             )
             return
         answer = QMessageBox.question(
             self,
-            tr("Restore"),
+            tr("Restore this backup?"),
             tr(
-                "Restore {what} from the backup of {when} into profile '{name}'?\n\n"
-                "Files with the same name are replaced. Nothing else is deleted, and "
-                "the files being replaced are kept in a new \"Before restore\" backup.",
+                "Restores {what} from {when} into the profile '{name}'.",
                 what=backup_summary(info),
                 when=backup_title(info),
                 name=profile.profile_name,
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=(
+                tr("Files with the same name are replaced."),
+                tr("Nothing else is deleted."),
+                tr("The replaced files are saved in a new \"Before restore\" backup first."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Restore"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -262,7 +267,7 @@ class BackupDialog(QDialog):
 
         def done(count, error) -> None:
             if error:
-                QMessageBox.warning(self, tr("Restore failed"), error)
+                QMessageBox.warning(self, tr("The restore didn't finish"), error)
             else:
                 self.status.setText(tr("Restored {count} files.", count=count))
 
@@ -280,16 +285,17 @@ class BackupDialog(QDialog):
             return
         answer = QMessageBox.question(
             self,
-            tr("Delete"),
-            tr("Permanently delete the backup of {when}?", when=backup_title(info)),
+            tr("Delete this backup?"),
+            tr("The backup from {when} is deleted for good.", when=backup_title(info)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Delete"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
 
         def done(_result, error) -> None:
             if error:
-                QMessageBox.warning(self, tr("Delete"), error)
+                QMessageBox.warning(self, tr("Couldn't delete the backup"), error)
 
         self._start(lambda report: delete_backup(info), done, tr("Removing..."))
 

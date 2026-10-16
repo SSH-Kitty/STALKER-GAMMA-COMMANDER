@@ -18,10 +18,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from commander_gui.i18n import tr
+
 from ..findings import (
-    SEVERITY_LABEL,
     Finding,
     Severity,
+    severity_label,
 )
 from . import theme
 
@@ -88,7 +90,7 @@ class DropZone(QFrame):
             return
         event.acceptProposedAction()
         self.flash_reject()
-        self.rejected_drop.emit("Only .zip archives can be analyzed.")
+        self.rejected_drop.emit(tr("Only .zip archives can be analyzed."))
 
     # --- click handling ----------------------------------------------------
 
@@ -162,7 +164,7 @@ class DropZone(QFrame):
             painter.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignCenter,
-                "+ Open another dump: drop a ZIP here or click",
+                tr("+ Open another dump: drop a ZIP here or click"),
             )
             return
 
@@ -195,7 +197,7 @@ class DropZone(QFrame):
         painter.drawText(
             title_rect,
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-            "Drop a COMMANDER log dump ZIP here",
+            tr("Drop a COMMANDER log dump ZIP here"),
         )
 
         # Subtitle in the lower zone.
@@ -208,7 +210,7 @@ class DropZone(QFrame):
         painter.drawText(
             sub_rect,
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-            "or click to browse. Every log inside is analyzed automatically",
+            tr("or click to browse. Every log inside is analyzed automatically"),
         )
 
 
@@ -236,6 +238,7 @@ _SEVERITY_KEYS = {
 
 #: How the findings list is split, most urgent first. The last group holds
 #: entries that need no action and starts collapsed when anything else exists.
+#: Names are English identities, shown through tr().
 FINDING_GROUPS: tuple[tuple[str, tuple[Severity, ...]], ...] = (
     ("Fix these first", (Severity.FATAL, Severity.ERROR)),
     ("Worth checking", (Severity.WARNING,)),
@@ -250,7 +253,7 @@ def _repolish(widget: QWidget) -> None:
 
 def severity_pill(severity: Severity) -> QLabel:
     """Solid-background severity pill (COMMANDER status style)."""
-    pill = QLabel(SEVERITY_LABEL[severity])
+    pill = QLabel(severity_label(severity))
     pill.setObjectName("sevPill")
     pill.setProperty("sev", _SEVERITY_KEYS[severity])
     pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -264,7 +267,7 @@ def _display_title(finding: Finding) -> str:
 def _location(finding: Finding) -> str:
     where = finding.where_label or finding.arcname
     if finding.line_no is not None:
-        where += f", line {finding.line_no}"
+        where += ", " + tr("line {number}", number=finding.line_no)
     return where
 
 
@@ -296,7 +299,7 @@ class FindingCard(QFrame):
         title.setTextFormat(Qt.TextFormat.PlainText)
         title.setWordWrap(True)
         text.addWidget(title)
-        meta = QLabel(f"{finding.category}  ·  {_location(finding)}")
+        meta = QLabel(f"{tr(finding.category)}  ·  {_location(finding)}")
         meta.setObjectName("findingMeta")
         meta.setTextFormat(Qt.TextFormat.PlainText)
         meta.setWordWrap(True)
@@ -306,7 +309,7 @@ class FindingCard(QFrame):
         if finding.count > 1:
             badge = QLabel(f"{finding.count}×")
             badge.setObjectName("countBadge")
-            badge.setToolTip(f"Seen {finding.count} times")
+            badge.setToolTip(tr("Seen {count} times", count=finding.count))
             row.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_selected(self, selected: bool) -> None:
@@ -356,7 +359,7 @@ class FindingList(QScrollArea):
         if not self._needle:
             return True
         haystack = (
-            f"{finding.title} {finding.detail} {finding.category} "
+            f"{finding.title} {finding.detail} {tr(finding.category)} "
             f"{finding.arcname} {finding.where_label}"
         ).lower()
         return self._needle in haystack
@@ -386,13 +389,13 @@ class FindingList(QScrollArea):
             collapsed = is_minor and not self._minor_open and not self._needle
             header = QHBoxLayout()
             header.setContentsMargins(2, 10 if self._cards else 0, 0, 2)
-            label = QLabel(f"{name.upper()}  ·  {len(group)}")
+            label = QLabel(f"{tr(name).upper()}  ·  {len(group)}")
             label.setObjectName("groupHeader")
             label.setProperty("sev", _SEVERITY_KEYS[severities[0]])
             header.addWidget(label)
             header.addStretch(1)
             if is_minor and not self._needle and len(visible) > len(group):
-                toggle = QPushButton("Show" if collapsed else "Hide")
+                toggle = QPushButton(tr("Show") if collapsed else tr("Hide"))
                 toggle.setObjectName("linkButton")
                 toggle.setCursor(Qt.CursorShape.PointingHandCursor)
                 toggle.clicked.connect(self._toggle_minor)
@@ -408,10 +411,12 @@ class FindingList(QScrollArea):
 
         if not visible:
             empty = QLabel(
-                f"Nothing matches \u201c{self._needle}\u201d."
+                tr("Nothing matches \u201c{query}\u201d.", query=self._needle)
                 if self._needle
-                else "No findings. The scanned logs contain no crashes, "
-                "errors or warnings."
+                else tr(
+                    "No findings. The scanned logs contain no crashes, "
+                    "errors or warnings."
+                )
             )
             empty.setObjectName("emptyState")
             empty.setWordWrap(True)
@@ -484,7 +489,7 @@ class DetailPane(QFrame):
         layout.addWidget(self.title_label)
         layout.addSpacing(8)
 
-        self.what_caption = _caption("What happened")
+        self.what_caption = _caption(tr("What happened"))
         layout.addWidget(self.what_caption)
         self.detail_label = _wrapped(selectable=True)
         layout.addWidget(self.detail_label)
@@ -503,7 +508,7 @@ class DetailPane(QFrame):
         layout.addWidget(self.fix_card)
         layout.addSpacing(8)
 
-        self.where_caption = _caption("Where it was found")
+        self.where_caption = _caption(tr("Where it was found"))
         layout.addWidget(self.where_caption)
         self.where_label = _wrapped(selectable=True)
         layout.addWidget(self.where_label)
@@ -512,26 +517,36 @@ class DetailPane(QFrame):
         layout.addSpacing(10)
 
         buttons = QHBoxLayout()
-        self.excerpt_toggle = QPushButton("Show log lines")
+        self.excerpt_toggle = QPushButton(tr("Show log lines"))
         self.excerpt_toggle.setCheckable(True)
         self.excerpt_toggle.toggled.connect(self._toggle_excerpt)
         buttons.addWidget(self.excerpt_toggle)
-        self.tech_toggle = QPushButton("Show technical details")
+        self.tech_toggle = QPushButton(tr("Show technical details"))
         self.tech_toggle.setCheckable(True)
         self.tech_toggle.toggled.connect(self._toggle_technical)
         buttons.addWidget(self.tech_toggle)
         buttons.addStretch(1)
-        self.copy_button = QPushButton("Copy for bug report")
+        # The copy button gets its own row: translated labels are longer than
+        # English and three buttons in one row would push the pane wider than
+        # the window.
+        copy_row = QHBoxLayout()
+        self.copy_button = QPushButton(tr("Copy for bug report"))
         self.copy_button.setToolTip(
-            "Copy this finding and its log lines to the clipboard "
-            "(personal paths and tokens are removed)"
+            tr(
+                "Copy this finding and its log lines to the clipboard "
+                "(personal paths and tokens are removed)"
+            )
         )
         self.copy_button.clicked.connect(self._copy)
-        buttons.addWidget(self.copy_button)
+        copy_row.addWidget(self.copy_button)
+        copy_row.addStretch(1)
+        rows = QVBoxLayout()
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.addLayout(buttons)
+        rows.addLayout(copy_row)
         self.buttons = QWidget()
         self.buttons.setObjectName("detailButtons")
-        self.buttons.setLayout(buttons)
-        buttons.setContentsMargins(0, 0, 0, 0)
+        self.buttons.setLayout(rows)
         layout.addWidget(self.buttons)
 
         self.excerpt_view = _code_view("excerpt")
@@ -558,25 +573,27 @@ class DetailPane(QFrame):
         self._finding = finding
         for widget in self._content:
             widget.show()
-        self.pill.setText(SEVERITY_LABEL[finding.severity])
+        self.pill.setText(severity_label(finding.severity))
         self.pill.setProperty("sev", _SEVERITY_KEYS[finding.severity])
         _repolish(self.pill)
-        self.category_label.setText(finding.category)
+        self.category_label.setText(tr(finding.category))
         self.title_label.setText(_display_title(finding))
-        self.detail_label.setText(finding.detail or "No further explanation available.")
+        self.detail_label.setText(finding.detail or tr("No further explanation available."))
         self.detail_label.setVisible(True)
 
         actionable = finding.severity >= Severity.WARNING
-        self.fix_caption.setText("HOW TO FIX IT" if actionable else "DO I NEED TO DO ANYTHING?")
+        self.fix_caption.setText(
+            tr("How to fix it").upper() if actionable else tr("Do I need to do anything?").upper()
+        )
         self.fix_card.setProperty("tone", "action" if actionable else "calm")
         _repolish(self.fix_card)
-        self.suggestion_label.setText(finding.suggestion or "Nothing to do.")
+        self.suggestion_label.setText(finding.suggestion or tr("Nothing to do."))
 
         where = _location(finding)
         if finding.count > 1:
-            where += f", seen {finding.count} times"
+            where += ", " + tr("seen {count} times", count=finding.count)
         self.where_label.setText(where)
-        self.file_label.setText(f"File in the dump: {finding.arcname}")
+        self.file_label.setText(tr("File in the dump: {name}", name=finding.arcname))
 
         self.excerpt_view.setPlainText(finding.excerpt)
         self.technical_view.setPlainText(finding.technical)
@@ -594,16 +611,16 @@ class DetailPane(QFrame):
         self.detail_label.hide()
         self.category_label.setText("")
         self.title_label.setText(
-            "Pick an item on the left to see what it means and how to fix it."
+            tr("Pick an item on the left to see what it means and how to fix it.")
         )
 
     def _toggle_excerpt(self, checked: bool) -> None:
-        self.excerpt_toggle.setText("Hide log lines" if checked else "Show log lines")
+        self.excerpt_toggle.setText(tr("Hide log lines") if checked else tr("Show log lines"))
         self.excerpt_view.setVisible(checked)
 
     def _toggle_technical(self, checked: bool) -> None:
         self.tech_toggle.setText(
-            "Hide technical details" if checked else "Show technical details"
+            tr("Hide technical details") if checked else tr("Show technical details")
         )
         self.technical_view.setVisible(checked)
 
@@ -621,16 +638,20 @@ class DetailPane(QFrame):
         text = "\n".join(
             part
             for part in (
-                f"[{SEVERITY_LABEL[finding.severity]}] {finding.title}",
+                f"[{severity_label(finding.severity)}] {finding.title}",
                 f"{finding.arcname}"
-                + (f" line {finding.line_no}" if finding.line_no is not None else ""),
+                + (
+                    " " + tr("line {number}", number=finding.line_no)
+                    if finding.line_no is not None
+                    else ""
+                ),
                 finding.excerpt,
             )
             if part
         )
         QGuiApplication.clipboard().setText(_redact(text))
-        self.copy_button.setText("Copied")
-        QTimer.singleShot(1500, lambda: self.copy_button.setText("Copy for bug report"))
+        self.copy_button.setText(tr("Copied"))
+        QTimer.singleShot(1500, lambda: self.copy_button.setText(tr("Copy for bug report")))
 
 
 def _wrapped(name: str = "", selectable: bool = False) -> QLabel:
@@ -669,7 +690,7 @@ def fill_recent_list(widget, dumps: Iterable[Path]) -> None:
             stamp = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
             when = stamp.strftime("%Y-%m-%d %H:%M")
         except OSError:
-            when = "unknown date"
+            when = tr("unknown date")
         item_text = f"{path.name}   ({when})"
         widget.addItem(item_text)
         item = widget.item(widget.count() - 1)

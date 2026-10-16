@@ -373,7 +373,9 @@ def quarantine_mod_and_archive(
     """
     result = QuarantineRecord(folder=folder)
     base = Path(gamma_dir)
-    mods_root = base / "mods"
+    # Resolved like downloads below: gamma/mods moved to another drive and
+    # symlinked back must not make every mod "outside mods/".
+    mods_root = (base / "mods").resolve()
     mod_path = mods_root / folder
     # This moves user data, so never act on a name that escapes mods/.
     if not _is_direct_child(mods_root, mod_path):
@@ -427,9 +429,18 @@ def restore_from_quarantine(record: QuarantineRecord) -> list[str]:
     failures: list[str] = []
     for item in record.items:
         try:
-            if item.quarantined.exists() and not item.original.exists():
-                item.original.parent.mkdir(parents=True, exist_ok=True)
-                item.quarantined.rename(item.original)
+            if not item.quarantined.exists():
+                continue
+            if item.original.exists() or item.original.is_symlink():
+                # A cancelled/failed reinstall left a partial copy in the
+                # way. Park it in the quarantine (purged later) rather than
+                # skip the item: skipping left the only good copy in the
+                # quarantine for the next purge to delete.
+                item.original.rename(
+                    _quarantine_dest(item.quarantined.parent, item.original.name + ".partial")
+                )
+            item.original.parent.mkdir(parents=True, exist_ok=True)
+            item.quarantined.rename(item.original)
         except OSError as exc:
             failures.append(f"{item.quarantined} -> {item.original}: {exc}")
     return failures

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from commander_gui.i18n import tr
+
 from ..findings import CATEGORY_LAUNCHER, CATEGORY_SYSTEM, Finding, Severity
 from .common import FindingFactory, excerpt
 
@@ -29,10 +31,10 @@ def scan_generic(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                 factory.make(
                     Severity.FATAL,
                     CATEGORY_LAUNCHER,
-                    "A process encountered a segmentation fault and stopped.",
+                    tr("A process encountered a segmentation fault and stopped."),
                     index + 1,
                     detail=line.strip()[:180],
-                    suggestion=(
+                    suggestion=tr(
                         "Segmentation faults often come from the game or a Wine "
                         "component. Check surrounding lines for the failing "
                         "module, and try Verify Integrity plus a GE-Proton "
@@ -67,17 +69,19 @@ def _traceback_finding(
     summary = (
         f"{last_error_line[:150]}"
         if last_error_line
-        else "An unhandled Python error occurred."
+        else tr("An unhandled Python error occurred.")
     )
     return factory.make(
         Severity.ERROR,
         CATEGORY_SYSTEM,
-        f"A tool crashed with a Python error: {summary}",
+        tr("A tool crashed with a Python error: {summary}", summary=summary),
         start + 1,
-        detail="A component written in Python raised an unhandled exception. "
-        "The last line identifies the reported problem; the frames above show how it "
-        "was reached.",
-        suggestion=(
+        detail=tr(
+            "A component written in Python raised an unhandled exception. "
+            "The last line identifies the reported problem; the frames above show how it "
+            "was reached."
+        ),
+        suggestion=tr(
             "Include this traceback if you report the issue. Restarting the "
             "tool often clears one-off failures."
         ),

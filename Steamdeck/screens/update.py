@@ -19,6 +19,7 @@ from commander_gui.cli_runner import cli_command
 from commander_gui.game_backup import backup_settings_before
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
+from commander_gui.keep_state import capture, discard, restore
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
 from commander_gui.themes import active_theme_tokens
@@ -166,6 +167,24 @@ class UpdateScreen(DeckScreen):
         )
         if self._status is None and self._task is None:
             self._check()
+
+    def forget_cached_checks(self) -> None:
+        """A different profile is active: its updates aren't the old one's.
+
+        Without this the old profile's diffs stayed listed and "Apply
+        updates" ran against the new profile. A check still in flight for
+        the old profile is dropped.
+        """
+        task, self._task = self._task, None
+        if task is not None:
+            for signal in (task.result, task.error):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+        self._status = None
+        self._render_changes([])
+        self.action_button.setText(tr("Check for updates"))
 
     def on_busy_changed(self, busy: bool) -> None:
         self.action_button.setEnabled(not busy and self._runner is None)
@@ -403,6 +422,7 @@ class UpdateScreen(DeckScreen):
         error = backup_settings_before(self.profile(), "update")
         if error:
             self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
+        self._kept = capture(self.profile())
         self._heavy = {}
         self.window.set_install_busy(True, "gamma")
         self.progress.reset()
@@ -440,6 +460,12 @@ class UpdateScreen(DeckScreen):
         cancelled = self._runner is not None and self._runner.was_cancelled
         self.progress.on_finished(rc, output)
         self._runner = None
+        kept, self._kept = getattr(self, "_kept", None), None
+        if kept is not None:
+            if not cancelled and cli_ok(rc, output, ""):
+                restore(kept)
+            else:
+                discard(kept)
         self.window.set_install_busy(False)
         self.progress.hide()
         self.action_button.show()

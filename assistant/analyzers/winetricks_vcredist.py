@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from commander_gui.i18n import tr
+
 from .. import knowledge
 from ..findings import CATEGORY_SYSTEM, Finding, Severity
 from .common import FindingFactory, excerpt
@@ -20,7 +22,8 @@ REQUIRED_VERBS: tuple[str, ...] = (
     "vcrun2022",
 )
 
-_EXIT_CODE_RE = re.compile(r"exit code[:= ]+(\d{1,10})\b", re.IGNORECASE)
+# The VC++ bootstrapper logs write hex: "Exit code: 0x643" is 1603.
+_EXIT_CODE_RE = re.compile(r"exit code[:= ]+(0x[0-9a-f]{1,8}|\d{1,10})\b", re.IGNORECASE)
 _STATUS_CODE_RE = re.compile(r"installation success or error status:\s*(\d{1,10})\b", re.IGNORECASE)
 _HISTORY_VERB_RE = re.compile(
     r"(?<![\w-])(" + "|".join(map(re.escape, REQUIRED_VERBS)) + r")(?![\w-])",
@@ -31,7 +34,7 @@ _HISTORY_FAILURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: Windows installer codes worth translating.
+#: Windows installer codes worth translating (titles go through tr() when used).
 _CODE_MEANINGS: dict[int, tuple[str, str]] = {
     1603: ("A runtime installer failed (Windows code 1603).", "error"),
     5100: (
@@ -66,24 +69,30 @@ def analyze_winetricks(arcname: str, where: str, lines: list[str]) -> list[Findi
             factory.make(
                 Severity.WARNING,
                 CATEGORY_SYSTEM,
-                f"{len(missing)} expected runtime"
-                f"{'s' if len(missing) != 1 else ''} not found in winetricks "
-                f"history ({pretty}).",
+                tr("1 expected runtime not found in winetricks history ({names}).", names=pretty)
+                if len(missing) == 1
+                else tr(
+                    "{count} expected runtimes not found in winetricks history ({names}).",
+                    count=len(missing),
+                    names=pretty,
+                ),
                 None,
-                detail="These DirectX/VC++ runtimes are required by MO2 and the "
-                "game. Note: winetricks history can be incomplete if runtimes "
-                "were installed outside winetricks.",
-                suggestion=knowledge.WINETRICKS_MISSING,
+                detail=tr(
+                    "These DirectX/VC++ runtimes are required by MO2 and the "
+                    "game. Note: winetricks history can be incomplete if runtimes "
+                    "were installed outside winetricks."
+                ),
+                suggestion=tr(knowledge.WINETRICKS_MISSING),
             )
         ]
     return [
         factory.make(
             Severity.OK,
             CATEGORY_SYSTEM,
-            "All expected game runtimes are recorded as installed.",
+            tr("All expected game runtimes are recorded as installed."),
             None,
-            detail=knowledge.WINETRICKS_ALL_GOOD,
-            suggestion="Nothing to do. This is normal.",
+            detail=tr(knowledge.WINETRICKS_ALL_GOOD),
+            suggestion=tr("Nothing to do. This is normal."),
         )
     ]
 
@@ -97,21 +106,23 @@ def analyze_vcredist(arcname: str, where: str, lines: list[str]) -> list[Finding
         match = _EXIT_CODE_RE.search(line) or _STATUS_CODE_RE.search(line)
         if not match:
             continue
-        code = int(match.group(1))
+        code = int(match.group(1), 0) if match.group(1).lower().startswith("0x") else int(match.group(1))
         if code == 0 or code in seen_codes:
             continue
         seen_codes.add(code)
-        meaning, level = _CODE_MEANINGS.get(
-            code,
-            (f"A runtime installer exited with Windows error code {code}.", "error"),
-        )
+        if code in _CODE_MEANINGS:
+            meaning, level = _CODE_MEANINGS[code]
+            meaning = tr(meaning)
+        else:
+            meaning = tr("A runtime installer exited with Windows error code {code}.", code=code)
+            level = "error"
         severity = {"error": Severity.ERROR, "ok": Severity.OK}.get(level, Severity.INFO)
         if level == "error":
-            suggestion = knowledge.VCREDIST_FAILED
+            suggestion = tr(knowledge.VCREDIST_FAILED)
         elif code == 1638:
-            suggestion = knowledge.VCREDIST_DUPLICATE
+            suggestion = tr(knowledge.VCREDIST_DUPLICATE)
         else:
-            suggestion = knowledge.VCREDIST_REBOOT
+            suggestion = tr(knowledge.VCREDIST_REBOOT)
         findings.append(
             factory.make(
                 severity,

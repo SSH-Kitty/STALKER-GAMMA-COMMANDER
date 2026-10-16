@@ -40,6 +40,7 @@ from ..fomod import (
 )
 from ..i18n import tr
 from .common import clear_layout, info_label, make_card, section_label
+from .dialogs import style_window
 
 _IMAGE_MAX_H = 300
 
@@ -70,6 +71,7 @@ class FomodWizardDialog(QDialog):
         self.setMinimumSize(820, 560)
 
         layout = QVBoxLayout(self)
+        style_window(self)
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(12)
 

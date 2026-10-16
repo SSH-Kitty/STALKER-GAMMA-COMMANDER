@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+from commander_gui.i18n import tr
+
 from ..dump import SOURCE_LABELS, DumpArchive, DumpFile
 from ..findings import Finding, collapse_findings, sort_findings
 from . import cli_log, generic, launcher_log, mo2, winetricks_vcredist, xray
@@ -63,18 +65,20 @@ def _where_label(entry: DumpFile) -> str:
     """Plain-language name for a log file; the raw path stays in ``arcname``."""
     name = entry.arcname.rsplit("/", 1)[-1].lower()
     if match := _CLI_DATE_RE.search(name):
-        return f"Installer log ({match[1]}-{match[2]}-{match[3]})"
+        return tr("Installer log ({date})", date=f"{match[1]}-{match[2]}-{match[3]}")
     if match := _USVFS_DATE_RE.match(name):
-        return f"MO2 virtual file system log ({match[1]} {match[2]}:{match[3]})"
+        return tr(
+            "MO2 virtual file system log ({date})", date=f"{match[1]} {match[2]}:{match[3]}"
+        )
     if name == "launcher.log":
-        return "Game launcher log"
+        return tr("Game launcher log")
     if name.startswith("xray") and name.endswith(".log"):
-        return "Game engine log"
+        return tr("Game engine log")
     if name == "mo_interface.log":
-        return "Mod Organizer log"
+        return tr("Mod Organizer log")
     if name == "winetricks.log":
-        return "Wine prefix runtime list"
+        return tr("Wine prefix runtime list")
     if "vcredist" in name or "vcdist" in name:
-        return "Visual C++ installer log"
-    group = SOURCE_LABELS.get(entry.source, entry.source)
+        return tr("Visual C++ installer log")
+    group = tr(SOURCE_LABELS.get(entry.source, entry.source))
     return f"{group} · {entry.short_name}"

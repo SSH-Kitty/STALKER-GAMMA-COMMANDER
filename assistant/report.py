@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 
 from commander_gui import __version_label__
+from commander_gui.i18n import tr
 
 from .dump import DumpArchive, human_size
 from .findings import (
@@ -19,6 +20,7 @@ from .findings import (
     SEVERITY_LABEL,
     Finding,
     Severity,
+    severity_label,
     summarize,
 )
 
@@ -34,9 +36,10 @@ def export_report(
     """Write a shareable markdown analysis next to the dump (or in *dest_dir*).
 
     ``filename`` overrides the default auto-generated name (used when the
-    user picked an exact path in the save dialog). Returns the path of the
-    written report; collisions get ``-2``/``-3`` suffixes instead of
-    overwriting.
+    user picked an exact path in the save dialog, which already asked
+    before replacing a file - so that name is written as is). Returns the
+    path of the written report; an auto-generated name gets ``-2``/``-3``
+    suffixes instead of overwriting.
     """
     directory = dest_dir if dest_dir is not None else dump.path.parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -45,7 +48,7 @@ def export_report(
         if filename is None
         else _validate_filename(filename)
     )
-    target = _unique_path(directory, base)
+    target = _unique_path(directory, base) if filename is None else directory / base
     stamp = (
         (now or datetime.now().astimezone()).strftime("%Y-%m-%d %H:%M:%S %Z").strip()
     )
@@ -53,22 +56,32 @@ def export_report(
     summary = summarize(findings, total_files=len(dump.files), partial=partial)
 
     lines: list[str] = [
-        "# COMMANDER Assistant — Log Analysis",
+        "# COMMANDER Assistant — " + tr("Log analysis"),
         "",
-        f"- **Dump file:** {_code(dump.path.name)}",
-        f"- **Analyzed:** {stamp}",
-        f"- **COMMANDER version:** {__version_label__}",
+        f"- **{tr('Dump file:')}** {_code(dump.path.name)}",
+        f"- **{tr('Analyzed:')}** {stamp}",
+        f"- **{tr('COMMANDER version:')}** {__version_label__}",
         (
-            f"- **Archive size:** {human_size(dump.size)} · "
-            f"{len(dump.files)} files ({len(text_files)} scanned, "
-            f"{len(binary_files)} binary/skipped)"
+            f"- **{tr('Archive size:')}** {human_size(dump.size)} · "
+            + tr(
+                "{files} files ({scanned} scanned, {binary} binary/skipped)",
+                files=len(dump.files),
+                scanned=len(text_files),
+                binary=len(binary_files),
+            )
         ),
         (
-            f"- **Findings:** {summary.fatal} critical · {summary.error} problems · "
-            f"{summary.warning} warnings · {summary.info} notes"
+            f"- **{tr('Findings:')}** "
+            + tr(
+                "{fatal} critical · {error} problems · {warning} warnings · {info} notes",
+                fatal=summary.fatal,
+                error=summary.error,
+                warning=summary.warning,
+                info=summary.info,
+            )
         ),
         "",
-        "## Analysis summary",
+        "## " + tr("Analysis summary"),
         "",
         f"**{summary.headline}.** {summary.sentence()}",
         "",
@@ -78,28 +91,29 @@ def export_report(
         group = [f for f in findings if f.severity is severity]
         if not group:
             continue
-        label = SEVERITY_LABEL[severity]
+        label = severity_label(severity)
         lines.append(f"## {_safe_inline(label)} ({len(group)})")
         lines.append("")
         for category in CATEGORIES:
             bucket = [f for f in group if f.category == category]
             if not bucket:
                 continue
-            lines.append(f"### {_safe_inline(category)}")
+            lines.append(f"### {_safe_inline(tr(category))}")
             lines.append("")
             for finding in bucket:
                 lines.extend(_finding_lines(finding, severity))
         lines.append("")
 
-    lines.append("## Files scanned")
+    lines.append("## " + tr("Files scanned"))
     lines.append("")
+    by_name = {f.arcname: f for f in dump.files}  # one lookup per file, not a scan
     for arcname in text_files:
-        entry = dump.file_by_arcname(arcname)
+        entry = by_name.get(arcname)
         size = human_size(entry.size) if entry else "?"
         lines.append(f"- {_code(arcname)} ({size})")
     if binary_files:
         lines.append("")
-        lines.append("**Binary files not scanned:**")
+        lines.append("**" + tr("Binary files not scanned:") + "**")
         lines.append("")
         for arcname in binary_files:
             lines.append(f"- {_code(arcname)}")
@@ -138,10 +152,10 @@ def _finding_lines(finding: Finding, severity: Severity) -> list[str]:
     if finding.detail:
         out += [_paragraph(finding.detail), ""]
     if finding.suggestion:
-        out += [f"**Suggested action:** {_paragraph(finding.suggestion)}", ""]
+        out += [f"**{tr('Suggested action:')}** {_paragraph(finding.suggestion)}", ""]
     if finding.technical:
         out += [
-            "<details><summary>Technical details</summary>",
+            "<details><summary>" + tr("Technical details") + "</summary>",
             "",
             *_code_block(finding.technical),
             "</details>",
@@ -174,7 +188,9 @@ _CREDENTIAL_JSON = re.compile(
 )
 _BEARER = re.compile(r"(?i)(\bbearer\s+)[^\s]+")
 _KNOWN_TOKEN = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_./-]+")
-_URL_CREDENTIALS = re.compile(r"(?i)(://)[^/@\s]+:[^/@\s]+@")
+# Bounded and ":"-free on the user side: unbounded, "://a:a:a:..." took
+# seconds per line on the UI thread during export.
+_URL_CREDENTIALS = re.compile(r"(?i)(://)[^/@\s:]{1,256}:[^/@\s]{1,256}@")
 
 
 def _user_path_patterns() -> list[tuple[re.Pattern[str], str]]:
@@ -184,7 +200,9 @@ def _user_path_patterns() -> list[tuple[re.Pattern[str], str]]:
     covering Wine's own spellings of the same path ("Z:\\home\\deck",
     "C:\\users\\deck") that a plain home-path replace misses.
     """
-    patterns = [(re.compile(re.escape(str(Path.home())) + r"(?![\w.-])"), "~")]
+    home = str(Path.home())
+    # HOME="/" would turn every "/" into "~" (log_dump.py has the same guard).
+    patterns = [(re.compile(re.escape(home) + r"(?![\w.-])"), "~")] if len(home) > 1 else []
     try:
         user = getpass.getuser()
     except Exception:  # noqa: BLE001 - no login name: nothing more to hide
@@ -193,7 +211,9 @@ def _user_path_patterns() -> list[tuple[re.Pattern[str], str]]:
         patterns.append(
             (
                 re.compile(
-                    r"(?i)([/\\](?:home|users)[/\\]+)" + re.escape(user) + r"(?![\w.-])"
+                    # /run/media/<user> and /media/<user> are where a second
+                    # drive or the Deck's SD card mounts.
+                    r"(?i)([/\\](?:home|users|media)[/\\]+)" + re.escape(user) + r"(?![\w.-])"
                 ),
                 r"\1<user>",
             )

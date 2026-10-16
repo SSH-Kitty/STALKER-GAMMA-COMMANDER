@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QFontDatabase, QPalette
@@ -45,6 +46,15 @@ def load_saved_theme() -> str:
     return value if value in THEMES else "gamma"
 
 
+def load_saved_font_size() -> int:
+    """COMMANDER's base font size (Settings > Font size), 13 by default."""
+    try:
+        value = int(json.loads(config_path().read_text(encoding="utf-8")).get("font_size", 13))
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+        value = 13
+    return min(22, max(9, value))
+
+
 def save_theme(name: str) -> None:
     if name not in THEMES:
         return
@@ -83,7 +93,19 @@ def token(name: str) -> str:
     return values.get(aliases.get(name, name), values["text"])
 
 
+_FONT_SIZE_RE = re.compile(r"font-size:(\d+)px")
+
+
 def _stylesheet() -> str:
+    """The theme's QSS, with every font size scaled to COMMANDER's setting."""
+    scale = load_saved_font_size() / 13.0
+    return _FONT_SIZE_RE.sub(
+        lambda m: f"font-size:{max(1, round(int(m.group(1)) * scale))}px",
+        _base_stylesheet(),
+    )
+
+
+def _base_stylesheet() -> str:
     t = THEMES[_ACTIVE]
     return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"Exo 2\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
 QLabel {{ background:transparent; }} QWidget#topbar {{ background:{t['panel']}; border-bottom:1px solid {t['border']}; }}
@@ -97,6 +119,7 @@ QTableWidget, QListWidget, QTreeWidget, QTextEdit, QPlainTextEdit {{ background:
 QSplitter::handle {{ background:transparent; }} QToolButton {{ background:transparent; border:none; color:{t['dim']}; }}
 QPushButton:checked {{ border-color:{t['accent']}; color:{t['accent']}; }} QPushButton:disabled {{ color:{t['dim']}; }}
 QPushButton#linkButton {{ background:transparent; border:none; color:{t['accent']}; padding:2px 4px; }} QPushButton#linkButton:hover {{ text-decoration:underline; }}
+QDialog#messageDialog {{ background:{t['panel']}; border:1px solid {t['border']}; }} QDialog#messageDialog QLabel#section1 {{ color:{t['text']}; font-size:20px; font-weight:bold; }} QDialog#messageDialog QLabel#warn {{ color:{t['warn']}; }} QDialog#messageDialog QLabel#accent {{ color:{t['accent']}; }} QPushButton#danger {{ background:{t['danger']}; color:{t['text']}; border:none; }}
 QFrame#verdictCard {{ background:{t['panel']}; border:1px solid {t['border']}; border-left:4px solid {t['accent']}; border-radius:10px; }}
 QFrame#verdictCard[verdict="bad"] {{ border-left-color:{t['danger']}; }} QFrame#verdictCard[verdict="warn"] {{ border-left-color:{t['warn']}; }}
 QLabel#verdictIcon {{ background:{t['accent']}; color:{t['bg']}; border-radius:22px; font-size:24px; font-weight:bold; }}

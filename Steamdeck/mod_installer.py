@@ -23,7 +23,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QLineEdit, QScroller, QVBoxLayout, QWidget
 
-from commander_gui.fomod import apply_options, parse_config
+from commander_gui.fomod import apply_options, find_installer
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
 from commander_gui.mod_install import (
@@ -67,17 +67,6 @@ def list_archives(directory: Path) -> list[Path]:
         )
     except OSError:
         return []
-
-
-def find_fomod(staging: Path) -> tuple[Path, Path] | None:
-    """``(ModuleConfig.xml, archive root)`` for an extracted FOMOD, else None."""
-    config = staging / "fomod" / "ModuleConfig.xml"
-    if config.is_file():
-        return config, staging
-    candidates = list(staging.glob("*/fomod/ModuleConfig.xml"))
-    if len(candidates) == 1:
-        return candidates[0], candidates[0].parent.parent
-    return None
 
 
 class DeckArchivePicker(QWidget):
@@ -459,16 +448,16 @@ class DeckModInstaller(QObject):
 
     def _extracted(self, staging: Path) -> None:
         self._task = None
-        fomod = find_fomod(staging)
-        if fomod is None:
-            self._finalize(staging, None)
-            return
-        config_path, root = fomod
+        archive_name = self._archive.name if self._archive is not None else ""
         try:
-            config = parse_config(config_path)
+            installer = find_installer(staging, archive_name)
         except ModInstallError as exc:
             self._fail(str(exc))
             return
+        if installer is None:
+            self._finalize(staging, None)
+            return
+        config, root = installer
         from .fomod_panel import show_fomod
 
         # The progress overlay gives way to the installer, and comes back
@@ -518,7 +507,20 @@ class DeckModInstaller(QObject):
             lines = read_lines(path)
             new_lines = add_custom_mod(lines, destination.name, enabled=False)
             write_lines(self.window, path, new_lines, snapshot=True)
-        except (OSError, ValueError, ModlistWriteBlocked) as exc:
+        except ModlistWriteBlocked as exc:
+            # The mod itself installed fine; only the list edit was refused
+            # (MO2 opened meanwhile). Keep it: MO2 lists new folders itself.
+            self.window.notify(
+                tr(
+                    "Installed '{name}', but the modlist was not changed: {reason}",
+                    name=destination.name,
+                    reason=str(exc),
+                ),
+                8000,
+            )
+            self.screen.refresh()
+            return
+        except (OSError, ValueError) as exc:
             shutil.rmtree(destination, ignore_errors=True)
             self.window.notify(tr("Mod installation failed") + ": " + str(exc), 8000)
             self.screen.refresh()

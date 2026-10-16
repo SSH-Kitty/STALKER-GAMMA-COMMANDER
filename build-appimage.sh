@@ -26,8 +26,14 @@ PY_SERIES=3.12
 PY_FULL=3.12.14
 PY_ABI=cp312
 PY_PLATFORM=manylinux_2_28_x86_64
-QT_PACKAGE="PySide6-Essentials==6.11.1"   # QtCore/QtGui/QtWidgets
-QT_ADDONS_PACKAGE="PySide6-Addons==6.11.1"   # QtMultimedia - Essentials does not include it
+# Qt wheels, pinned by version AND hash (pip's hash-checking mode): they
+# ship inside every AppImage, so a tampered or swapped wheel - downloaded or
+# already sitting in the wheel cache - must fail the build. Essentials has
+# QtCore/QtGui/QtWidgets; Addons has QtMultimedia. Bump versions and hashes
+# together (hashes from https://pypi.org/pypi/<package>/<version>/json).
+QT_REQUIREMENTS='PySide6-Essentials==6.11.1 --hash=sha256:e3ef7027b41e4e55fadb56e3b3257dc8ee92154b639fe67fc4c8e05e9d976c60
+PySide6-Addons==6.11.1 --hash=sha256:8e6c65fbd73a512d6f72cda8d8277444a85a34dc99dd1dae9c21d35b8671bb1f
+shiboken6==6.11.1 --hash=sha256:9a8bccfafc8805254cabcfa1edfaf55cd52889f4998c91ad0d9a4433fb1bcdbe'
 APP_NAME="STALKER-GAMMA-COMMANDER"
 APP_TITLE="STALKER GAMMA Commander"
 APP_ID="stalker-gamma-commander"
@@ -77,6 +83,17 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 [ -d "$PROJECT_DIR/commander_gui" ] || die "run this from the project root"
 [ -f "$PROJECT_DIR/assistant/__main__.py" ] || die "assistant package missing"
 [ -x "$PROJECT_DIR/cli/usr/bin/stalker-gamma" ] || die "cli/usr/bin/stalker-gamma missing or not executable"
+
+# The payload is copied straight from the working tree: an uncommitted or
+# untracked file would ship in a release that nobody can rebuild from git.
+# ALLOW_DIRTY=1 builds anyway (local test builds).
+if [ "${ALLOW_DIRTY:-0}" != 1 ] && git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  dirty="$(git -C "$PROJECT_DIR" status --porcelain -- commander_gui assistant Steamdeck cli)"
+  if [ -n "$dirty" ]; then
+    printf '%s\n' "$dirty" | head -n 20 >&2
+    die "uncommitted changes in the payload above - commit them, or set ALLOW_DIRTY=1 for a test build"
+  fi
+fi
 
 for required in curl sha256sum awk grep sed sort tail cut du install readlink cp mv rm objdump ldconfig find dirname basename; do
   command -v "$required" >/dev/null 2>&1 || die "required build command missing: $required"
@@ -148,14 +165,15 @@ log "extracting manylinux Python base"
 # install first; only a missing wheel goes to the network.
 WHEEL_DIR="$CACHE_DIR/wheels"
 mkdir -p "$WHEEL_DIR"
-log "installing $QT_PACKAGE and $QT_ADDONS_PACKAGE"
+QT_REQ_FILE="$BUILD_DIR/qt-requirements.txt"
+printf '%s\n' "$QT_REQUIREMENTS" > "$QT_REQ_FILE"
+log "installing the pinned Qt wheels"
 if ! "$PY" -m pip install --no-cache-dir -q --no-index --find-links "$WHEEL_DIR" \
-       "$QT_PACKAGE" "$QT_ADDONS_PACKAGE" 2>/dev/null; then
+       --require-hashes -r "$QT_REQ_FILE" 2>/dev/null; then
   log "downloading Qt wheels into the cache"
-  "$PY" -m pip install --no-cache-dir -q --upgrade pip
-  "$PY" -m pip download --no-cache-dir -q -d "$WHEEL_DIR" "$QT_PACKAGE" "$QT_ADDONS_PACKAGE"
+  "$PY" -m pip download --no-cache-dir -q -d "$WHEEL_DIR" --require-hashes -r "$QT_REQ_FILE"
   "$PY" -m pip install --no-cache-dir -q --no-index --find-links "$WHEEL_DIR" \
-    "$QT_PACKAGE" "$QT_ADDONS_PACKAGE"
+    --require-hashes -r "$QT_REQ_FILE"
 fi
 
 # ------------------------------------------------------------------- prune
@@ -333,7 +351,12 @@ cp -r "$PROJECT_DIR/assistant" "$PAYLOAD/"
 cp -r "$PROJECT_DIR/Steamdeck" "$PAYLOAD/"
 cp -r "$PROJECT_DIR/cli" "$PAYLOAD/"
 [ -f "$PROJECT_DIR/README.md" ] && cp "$PROJECT_DIR/README.md" "$PAYLOAD/"
-[ -f "$PROJECT_DIR/LICENSE" ] && cp "$PROJECT_DIR/LICENSE" "$PAYLOAD/"
+# License texts are a distribution requirement, not optional extras: a
+# missing one must fail the build. licenses/ holds every bundled
+# component's license; the About page opens these local copies.
+cp "$PROJECT_DIR/LICENSE" "$PAYLOAD/"
+cp -r "$PROJECT_DIR/licenses" "$PAYLOAD/"
+cp "$PYLIB/LICENSE.txt" "$PAYLOAD/licenses/Python-LICENSE.txt"
 find "$PAYLOAD/commander_gui" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PAYLOAD/assistant" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PAYLOAD/assistant" -name '*.pyc' -delete 2>/dev/null || true
@@ -374,7 +397,10 @@ fi
 export APPDIR
 
 # Bundled CA bundle, so urllib (modlist / modpack fetches) can verify TLS.
-if [ -z "\${SSL_CERT_FILE:-}" ] && [ -f "\$APPDIR/opt/_internal/certs.pem" ]; then
+# Also replace one that no longer exists: COMMANDER 1.3.0's self-update
+# relaunched the new AppImage with SSL_CERT_FILE still pointing into its
+# own, by then unmounted, /tmp/.mount_* - every HTTPS request then failed.
+if [ ! -f "\${SSL_CERT_FILE:-}" ] && [ -f "\$APPDIR/opt/_internal/certs.pem" ]; then
     export SSL_CERT_FILE="\$APPDIR/opt/_internal/certs.pem"
 fi
 

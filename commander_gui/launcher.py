@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gui_settings
-from .atomic import write_bytes
+from .atomic import write_bytes, write_text
 from .config import child_environment
 from .dependencies import configured_tool
 from .proton_installer import version_key
@@ -234,6 +234,7 @@ class Mo2Executable:
     binary: str = ""
     arguments: str = ""
     working_directory: str = ""
+    hidden: bool = False
 
 
 @dataclass
@@ -635,7 +636,117 @@ def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
             exe.arguments = value
         elif field_name == "workingdirectory":
             exe.working_directory = mo2_path_to_host(value)
-    return [exe for exe in entries.values() if exe.title]
+        elif field_name == "hide":
+            exe.hidden = value.lower() == "true"
+    return [entries[index] for index in sorted(entries) if entries[index].title]
+
+
+MO2_SELECTED_KEY = "MainWindow_executablesListBox_index"
+
+
+def mo2_selected_title(gamma_dir: str) -> str:
+    """Title of the executable picked in MO2's toolbar dropdown, or ``""``.
+
+    MO2 keeps only the dropdown's row number in ``[Widgets]``. Row 0 is its
+    "<Edit...>" entry; the rest are the executables MO2 does not hide.
+    """
+    try:
+        text = (Path(gamma_dir) / "ModOrganizer.ini").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return ""
+    row = None
+    section = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.lower()
+        elif section == "[widgets]" and stripped.startswith(MO2_SELECTED_KEY + "="):
+            try:
+                row = int(stripped.partition("=")[2])
+            except ValueError:
+                return ""
+    if row is None:
+        return ""
+    visible = [exe.title for exe in parse_mo2_executables(gamma_dir) if not exe.hidden]
+    return visible[row - 1] if 1 <= row <= len(visible) else ""
+
+
+def set_mo2_selected_title(gamma_dir: str, title: str) -> bool:
+    """Pick *title* in MO2's toolbar dropdown, so MO2 and Commander agree.
+
+    Returns True when ModOrganizer.ini was changed. MO2 rewrites the ini
+    when it closes, so a pick made while MO2 is open is MO2's to keep.
+    """
+    ini = Path(gamma_dir) / "ModOrganizer.ini"
+    visible = [exe.title for exe in parse_mo2_executables(gamma_dir) if not exe.hidden]
+    if title not in visible or mo2_selected_title(gamma_dir) == title:
+        return False
+    # Row 0 of the dropdown is "<Edit...>".
+    wanted = f"{MO2_SELECTED_KEY}={visible.index(title) + 1}"
+    text = ini.read_text(encoding="utf-8", errors="surrogateescape")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    out: list[str] = []
+    section = ""
+    written = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            if section == "[widgets]" and not written:
+                out.append(wanted)
+                written = True
+            section = stripped.lower()
+        elif section == "[widgets]" and stripped.startswith(MO2_SELECTED_KEY + "="):
+            line = wanted
+            written = True
+        out.append(line)
+    if not written:
+        if section != "[widgets]":
+            out += ["", "[Widgets]"]
+        out.append(wanted)
+    write_text(ini, newline.join(out) + newline)
+    return True
+
+
+def unblock_mo2_python(gamma_dir: str) -> bool:
+    """Take ``plugin_python`` off MO2's plugin blacklist.
+
+    MO2 offers to blacklist a plugin that was loading when it last died
+    (a Steam restart or a quick quit can do that). Without plugin_python
+    the STALKER Anomaly game plugin never loads and MO2 refuses to open
+    the instance. Returns True when ModOrganizer.ini was changed.
+    """
+    ini = Path(gamma_dir) / "ModOrganizer.ini"
+    try:
+        text = ini.read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        return False
+    newline = "\r\n" if "\r\n" in text else "\n"
+    out: list[str] = []
+    names: list[str] = []
+    section = ""
+    start = -1
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.lower()
+            if section == "[pluginblacklist]":
+                start = len(out) + 1
+        elif section == "[pluginblacklist]":
+            key, _, value = stripped.partition("=")
+            if key.endswith("\\name"):
+                names.append(value)
+            if key == "size" or key.endswith("\\name"):
+                continue
+        out.append(line)
+    kept = [name for name in names if name.lower() != "plugin_python"]
+    if start < 0 or kept == names:
+        return False
+    entries = [f"size={len(kept)}"] + [f"{i}\\name={name}" for i, name in enumerate(kept, 1)]
+    out[start:start] = entries
+    write_text(ini, newline.join(out) + newline)
+    return True
 
 
 def available_commands() -> dict[str, str]:
@@ -950,7 +1061,12 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
     )
 
 
-def default_launch_target(titles: list[str]) -> str:
+def default_launch_target(titles: list[str], gamma_dir: str = "", saved: str = "") -> str:
+    # MO2's dropdown is the one shared choice (Commander writes its picks
+    # there too), then Commander's last pick, then GAMMA's stock default.
+    for choice in (mo2_selected_title(gamma_dir) if gamma_dir else "", saved):
+        if choice and choice in titles:
+            return choice
     for preferred in PREFERRED_TARGETS:
         if preferred in titles:
             return preferred
@@ -1188,15 +1304,12 @@ def launch_detached(
             raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc
 
 
-def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
-    """Kill ``winedbg`` processes that belong to *this* game's Wine prefix.
+def prefix_debugger_pids(runner_env: dict[str, str] | None) -> list[int]:
+    """``winedbg`` processes that belong to *this* game's Wine prefix.
 
-    A Wine crash loop answers every fault with winedbg, whose own process
-    faults too; the ones that escaped the launch's process group are
-    stopped here. Only processes whose environment points at the same
-    prefix (WINEPREFIX or Proton's STEAM_COMPAT_DATA_PATH) and that run as
-    this user are touched - ``pkill -f winedbg`` also killed debuggers of
-    unrelated Wine games. Returns how many were signalled.
+    Only processes whose environment points at the same prefix (WINEPREFIX
+    or Proton's STEAM_COMPAT_DATA_PATH) and that run as this user count -
+    ``pgrep winedbg`` would also match debuggers of unrelated Wine games.
     """
     env = runner_env or {}
     wanted = {
@@ -1205,9 +1318,9 @@ def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
         if value
     }
     if not wanted:
-        return 0
+        return []
     uid = os.getuid()
-    killed = 0
+    pids = []
     for entry in Path("/proc").iterdir() if Path("/proc").is_dir() else ():
         if not entry.name.isdigit():
             continue
@@ -1226,9 +1339,33 @@ def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
             if key in (b"WINEPREFIX", b"STEAM_COMPAT_DATA_PATH") and value:
                 prefixes.add(os.path.realpath(value.decode("utf-8", "replace")))
         if prefixes & wanted:
-            try:
-                os.kill(int(entry.name), signal.SIGKILL)
-                killed += 1
-            except OSError:
-                pass
+            pids.append(int(entry.name))
+    return pids
+
+
+def debugger_crash_loop(runner_env: dict[str, str] | None) -> bool:
+    """True when this prefix has a pile of winedbg processes at once.
+
+    The same crash loop ``runner_crash_loop`` reads from the log, seen in the
+    process list instead - so it also works when Steam, not COMMANDER, owns
+    the game's output (a Steam co-op launch).
+    """
+    return len(prefix_debugger_pids(runner_env)) >= RUNNER_CRASH_LOOP_THRESHOLD
+
+
+def kill_stray_debuggers(runner_env: dict[str, str] | None) -> int:
+    """Kill ``winedbg`` processes that belong to *this* game's Wine prefix.
+
+    A Wine crash loop answers every fault with winedbg, whose own process
+    faults too; the ones that escaped the launch's process group are
+    stopped here (see ``prefix_debugger_pids`` for what counts as this
+    prefix's). Returns how many were signalled.
+    """
+    killed = 0
+    for pid in prefix_debugger_pids(runner_env):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except OSError:
+            pass
     return killed

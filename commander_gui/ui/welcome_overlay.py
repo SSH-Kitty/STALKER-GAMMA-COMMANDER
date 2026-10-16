@@ -7,17 +7,17 @@ and a "Don't show again" box in the bottom-right corner - the same
 
 Drawn inside the main window rather than as a QDialog: a dimmed scrim over
 the whole window and a panel in the theme's card colour at partial opacity,
-so the app behind still shows through. Both are painted from
-``active_theme_tokens()`` on every paint, and a theme change restyles the
-whole application (which repaints this too), so it follows the theme live.
+so the app behind still shows through. The scrim is a dimmed snapshot of
+the window, painted opaque: a see-through overlay made Qt repaint the whole
+window behind it (backdrop, pages) on every hover and scroll inside it.
 """
 
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QEvent, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -44,6 +44,7 @@ from .common import (
     BackgroundTask,
     info_label,
     open_url,
+    open_web_links,
     section_label,
     tr,
 )
@@ -194,6 +195,15 @@ class WelcomeOverlay(QWidget):
         self._showing_credits = False
         self.setObjectName("welcomeOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        # Paints every pixel (the snapshot), so Qt never repaints the window
+        # underneath for an update in here.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._backdrop = QPixmap()
+        # Re-snapshot once a resize has settled into the new layout.
+        self._regrab = QTimer(self)
+        self._regrab.setSingleShot(True)
+        self._regrab.setInterval(80)
+        self._regrab.timeout.connect(self._grab_backdrop)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         outer = QVBoxLayout(self)
@@ -233,7 +243,7 @@ class WelcomeOverlay(QWidget):
         notes_column.addWidget(self.notes_title)
         self.notes = QTextBrowser()
         self.notes.setObjectName("welcomeNotes")
-        self.notes.setOpenExternalLinks(True)
+        open_web_links(self.notes)
         self.notes.setMinimumHeight(300)
         self.notes.setPlainText(tr("Loading patch notes..."))
         notes_column.addWidget(self.notes, 1)
@@ -304,28 +314,90 @@ class WelcomeOverlay(QWidget):
 
         window.installEventFilter(self)
         self.setGeometry(window.rect())
+        self._grab_backdrop()
         self._load_notes()
 
     # -- geometry / closing ------------------------------------------------
     def eventFilter(self, obj, event) -> bool:
         if obj is self.window and event.type() == QEvent.Type.Resize:
             self.setGeometry(self.window.rect())
+            self._regrab.start()
         return super().eventFilter(obj, event)
+
+    def _grab_backdrop(self) -> None:
+        """Snapshot the window without this overlay, dimmed by the scrim."""
+        shown = self.isVisible()
+        focus = self.focusWidget() if shown else None
+        if shown:
+            self.hide()
+        pixmap = self.window.grab()
+        if shown:
+            self.show()
+            (focus or self).setFocus(Qt.FocusReason.OtherFocusReason)
+        painter = QPainter(pixmap)
+        try:
+            painter.fillRect(QRectF(0, 0, pixmap.width(), pixmap.height()), QColor(0, 0, 0, _SCRIM_ALPHA))
+        finally:
+            painter.end()
+        self._backdrop = pixmap
+        self.update()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         try:
-            painter.fillRect(self.rect(), QColor(0, 0, 0, _SCRIM_ALPHA))
+            # Stretched until a resize's re-snapshot lands.
+            painter.drawPixmap(self.rect(), self._backdrop)
         finally:
             painter.end()
 
+    # The window's own title bar stays usable under the overlay: drag to
+    # move, double-click to maximize, and its window buttons still work.
+    def _title_bar_at(self, pos: QPoint) -> bool:
+        bar = getattr(self.window, "_topbar", None)
+        if bar is None or not getattr(self.window, "custom_title_bar", False):
+            return False
+        return QRect(bar.mapTo(self.window, QPoint(0, 0)), bar.size()).contains(pos)
+
+    def _window_button_at(self, pos: QPoint) -> QPushButton | None:
+        strip = getattr(self.window, "_title_strip", None)
+        if strip is None or not strip.isVisible():
+            return None
+        child = strip.childAt(strip.mapFrom(self.window, pos))
+        return child if isinstance(child, QPushButton) else None
+
+    def _drag(self, event) -> bool:
+        drag = getattr(self.window, "_drag_filter", None)
+        return drag is not None and drag.eventFilter(self, event)
+
     def mousePressEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        if self._title_bar_at(pos):
+            button = self._window_button_at(pos)
+            if button is not None:
+                button.click()
+            else:
+                self._drag(event)
+            return
         # A click on the dimmed area outside the panel closes it, like
         # clicking away from any popup.
-        if not self.panel.geometry().contains(event.position().toPoint()):
+        if not self.panel.geometry().contains(pos):
             self.close_overlay()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._drag(event):
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag(event)
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._title_bar_at(event.position().toPoint()):
+            self._drag(event)
+            return
+        super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -351,6 +423,8 @@ class WelcomeOverlay(QWidget):
 
     def _show_notes(self, result: object) -> None:
         self._task = None
+        # The pages behind have had time to load their data by now.
+        self._regrab.start()
         if not isinstance(result, tuple) or len(result) != 2 or not result[1]:
             self.version_bar.set_latest("")
             self._notes = (

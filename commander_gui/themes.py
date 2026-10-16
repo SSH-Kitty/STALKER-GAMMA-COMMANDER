@@ -133,6 +133,36 @@ QScrollArea {
     background: transparent;
     border: none;
 }
+/* Slim rounded scrollbars: no arrows, clear track, thumb lights up on hover. */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+QScrollBar::handle {
+    background: $border_strong;
+    border-radius: 3px;
+}
+QScrollBar::handle:vertical { min-height: 32px; }
+QScrollBar::handle:horizontal { min-width: 32px; }
+QScrollBar::handle:hover,
+QScrollBar::handle:pressed {
+    background: $accent_strong;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+    border: none;
+    background: none;
+}
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: none;
+}
 QScrollArea > QWidget#qt_scrollarea_viewport,
 QWidget#pageContent {
     background: transparent;
@@ -272,33 +302,125 @@ QPushButton#winClose:pressed {
     margin-top: 4px;
     margin-bottom: 2px;
 }
+/* Verify Integrity: same frames as #statTile/#chip, status colours from
+   the theme (accent = pass, warn = worth a look, danger = broken, neutral
+   text = info). */
+/* Plain dot + text, like the other cards' "Installed" status. */
+#verifyPill {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: $text_info;
+}
+/* Fixed green, same as InstallStatusRow's OK_GREEN "Installed". */
+#verifyPill[level="healthy"] { color: #7dc963; }
+#verifyPill[level="running"] { color: $accent_strong; }
+#verifyPill[level="snapshot"] { color: $text_bright; }
+#verifyPill[level="attention"] { color: $warn; }
+#verifyPill[level="failed"] { color: $danger_text; }
+#verifyTile {
+    background: transparent;
+    border: none;
+    min-height: 76px;
+}
+#verifyTileTitle {
+    color: $text_info;
+    font-size: 13px;
+    font-weight: bold;
+}
+#verifyTileValue {
+    color: $text_bright;
+    font-size: 22px;
+    font-weight: bold;
+}
+#verifyTileValue[state="idle"] { color: $text_dim; font-weight: normal; }
+#verifyTileValue[state="ok"] { color: $accent_strong; }
+#verifyTileValue[state="warn"] { color: $warn; }
+#verifyTileValue[state="info"] { color: $text_bright; }
+#verifyTileValue[state="problem"] { color: $danger_border; }
+#verifyTileCaption {
+    color: $text_dim;
+    font-size: 12px;
+}
+#verifyFinding {
+    background-color: $input;
+    border: 1px solid $border;
+    border-left: 3px solid $border_strong;
+    border-radius: 8px;
+}
+#verifyFinding[level="ok"] { border-left-color: $accent_strong; }
+#verifyFinding[level="info"] { border-left-color: $text_info; }
+#verifyFinding[level="warn"] { border-left-color: $warn; }
+#verifyFinding[level="problem"] { border-left-color: $danger_border; }
+#verifyFindingIcon {
+    font-size: 14px;
+    font-weight: bold;
+    color: $text_info;
+}
+#verifyFindingIcon[level="ok"] { color: $accent_strong; }
+#verifyFindingIcon[level="warn"] { color: $warn; }
+#verifyFindingIcon[level="problem"] { color: $danger_border; }
+#verifyFindingTitle {
+    color: $text_bright;
+    font-weight: bold;
+}
+#verifyFindingDetail {
+    color: $text_info;
+    font-size: 12px;
+}
+#verifyFindingItems {
+    color: $text_mono;
+    background-color: $mono;
+    border: 1px solid $border;
+    border-radius: 5px;
+    padding: 6px 8px;
+    font-family: monospace;
+    font-size: 12px;
+}
 #installPage QLabel#section3 {
     color: $accent_section;
     font-size: 13px;
     font-weight: bold;
     letter-spacing: 0.5px;
 }
-#installPage QGroupBox {
+#installPage QGroupBox, #updatePage QGroupBox {
     margin-top: 12px;
     padding-top: 10px;
     background-color: transparent;
 }
+#installPage QGroupBox {
+    border: none;
+}
 #installPage QGroupBox::title {
+    left: 0;
+    padding: 0;
+}
+#installPage QGroupBox::title, #updatePage QGroupBox::title {
     font-size: 13px;
     font-weight: bold;
 }
 #installPage QLineEdit {
     min-height: 30px;
 }
-#installPage QCheckBox {
+#installPage QLineEdit#pathEdit:hover, #playPage QLineEdit#pathEdit:hover {
+    border-color: $focus;
+}
+#installPage QLineEdit#pathEdit:disabled, #playPage QLineEdit#pathEdit:disabled {
+    color: $text_disabled;
+}
+#installPage QCheckBox, #updatePage QCheckBox {
     padding: 3px 0;
 }
 #installPage QFrame#installDivider,
+#playPage QFrame#installDivider,
 #updatePage QFrame#installDivider {
     background-color: $border;
 }
+QFrame#rowDivider {
+    background-color: $border;
+}
 QLabel#section3 {
-    color: #7dc963;
+    color: $accent_section;
 }
 #statusReady, #statusNotReady, #statusOptional, #statusChecking {
     font-size: 11px;
@@ -363,12 +485,41 @@ QPushButton#iconButton::menu-indicator {
 #achievementNameLocked {
     color: $text_dim;
 }
-QListWidget#achievementList::item {
+QListWidget#achievementList::item, QListWidget#helpTopics::item {
     border-left: 3px solid transparent;
 }
-QListWidget#achievementList::item:selected {
+QListWidget#achievementList::item:selected, QListWidget#helpTopics::item:selected {
     background-color: $btn_hover;
     border-left: 3px solid $accent_strong;
+}
+QListWidget#helpTopics {
+    background-color: $card;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 4px;
+}
+QListWidget#helpTopics::item {
+    padding: 8px 10px;
+    color: $text;
+}
+QListWidget#helpTopics::item:selected {
+    color: $text_bright;
+}
+#helpTerm {
+    font-weight: bold;
+    color: $text_bright;
+}
+QPushButton#docSection {
+    background: transparent;
+    border: none;
+    padding: 0;
+    text-align: left;
+    font-size: 15px;
+    font-weight: bold;
+    color: $accent_section;
+}
+QPushButton#docSection:hover {
+    color: $accent_strong;
 }
 QProgressBar#storageMeter, QProgressBar#storageMeterLow {
     border: none;
@@ -502,6 +653,14 @@ QPushButton#secondary {
     color: $text_btn_hover;
     font-size: 14px;
 }
+/* A secondary button sitting beside a primary one (Undo last update):
+   the primary's height and font, keeping the secondary colours. */
+QPushButton#secondary[besidePrimary="true"] {
+    padding-top: 0;
+    padding-bottom: 0;
+    font-size: %FONT_SIZE%;
+    font-weight: bold;
+}
 QPushButton#secondary:hover {
     background-color: $btn_hover;
     border-color: $secondary_hover_border;
@@ -545,23 +704,47 @@ QPushButton#consoleToggle:disabled {
     background-color: $btn_disabled;
     border-color: $btn_disabled;
 }
-QPushButton#releaseNotesToggle {
-    background-color: $card;
-    border: 1px solid $border;
-    border-radius: 6px;
-    padding: 3px 8px;
-    text-align: left;
+/* Multiplayer settings tabs: the main nav bar's look, an accent
+   underline on the picked tab, resting on the divider below. */
+QPushButton#subTab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 0 14px;
+    color: $text_nav;
+    font-weight: 600;
+}
+QPushButton#subTab:hover {
     color: $text_bright;
-    font-weight: bold;
-    font-size: 12px;
+    border-bottom-color: $border_strong;
 }
-QPushButton#releaseNotesToggle:hover {
-    background-color: $btn_hover;
-    border-color: $border_strong;
-}
-QPushButton#releaseNotesToggle:checked {
+QPushButton#subTab:checked {
     color: $accent_strong;
+    border-bottom-color: $accent_strong;
+}
+QPushButton#subTab:disabled {
+    color: $text_disabled;
+    border-bottom-color: transparent;
+}
+/* Multiplayer page tabs: the Dashboard's pill buttons, latched when picked. */
+QPushButton#segment {
+    background: transparent;
+    border: 1px solid $border;
+    border-radius: 17px;
+    padding: 0 16px;
+    color: $text;
+    font-weight: 600;
+}
+QPushButton#segment:hover {
+    background-color: $btn_hover;
     border-color: $accent_strong;
+    color: $accent_strong;
+}
+QPushButton#segment:checked {
+    background-color: $chip;
+    border-color: $accent_strong;
+    color: $accent_strong;
 }
 QPushButton#tertiary {
     background: transparent;
@@ -639,6 +822,12 @@ QProgressBar::chunk {
     );
     border-radius: 4px;
 }
+QProgressBar[full="true"] {
+    color: $accent_text;
+}
+/* Verify Integrity results that aren't a pass (see set_success_state). */
+QProgressBar[level="snapshot"]::chunk { background: $text_info; }
+QProgressBar[level="attention"]::chunk { background: $warn; }
 QProgressBar::text {
     color: $text_btn;
     background: rgba(0, 0, 0, 0.55);
@@ -833,8 +1022,38 @@ QPushButton#commanderUpdateStatus {
 QPushButton#commanderUpdateStatus:disabled {
     background: transparent;
 }
-QMessageBox, QFileDialog {
+QFrame#updateBanner {
     background-color: $card;
+    border: none;
+    border-top: 1px solid $border;
+    border-bottom: 2px solid $accent_strong;
+}
+QLabel#updateBannerText {
+    color: $accent;
+    font-weight: bold;
+    background: transparent;
+}
+QPushButton#updateBannerClose {
+    background: transparent;
+    border: none;
+    padding: 0;
+    min-width: 0;
+    font-size: 15px;
+    color: $text_dim;
+}
+QPushButton#updateBannerClose:hover {
+    color: $text_bright;
+}
+QLabel#updateVersions {
+    color: $accent;
+    font-size: 16px;
+    font-weight: bold;
+}
+QMessageBox, QFileDialog, QDialog#messageDialog, QDialog#popupWindow {
+    background-color: $card;
+}
+QDialog#messageDialog, QDialog#popupWindow {
+    border: 1px solid $border_strong;
 }
 QToolTip {
     color: $text_info;

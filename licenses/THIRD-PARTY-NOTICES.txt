@@ -1,0 +1,142 @@
+STALKER GAMMA COMMANDER - third-party notices
+=============================================
+
+COMMANDER
+  Copyright (C) 2026 SSH-Kitty and contributors.
+  Licensed under the GNU General Public License version 3 (see ../LICENSE,
+  also texts/GPL-3.0-only.txt). This program comes with ABSOLUTELY NO
+  WARRANTY, to the extent permitted by law (sections 15 and 16 of the GPL).
+  Source: https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER
+
+COMMANDER is not affiliated with GSC Game World or the GAMMA team.
+S.T.A.L.K.E.R. is a trademark of GSC Game World. Discord and GitHub are
+trademarks of their owners; they are named and their logos are shown only to
+identify those projects and services.
+
+The COMMANDER AppImage also contains the software listed below. Each part
+keeps its own copyright and license. The full license texts are in this
+folder: generic texts under texts/, and project-specific files in the
+folder named after each project. Every program and library listed here is
+shipped unmodified, as built by its upstream project, and the source code
+for each is available at the address given.
+
+Where a license (GPL or LGPL) requires the corresponding source code to be
+available, the address given is the source of the exact version that ships.
+
+Libraries covered by the LGPL (Qt, PySide6, Shiboken6, FFmpeg, libfuse) are
+separate shared libraries, or in libfuse's case part of the AppImage
+runtime, and can be replaced: extract the AppImage with
+"--appimage-extract", replace the library in squashfs-root, and run
+squashfs-root/AppRun.
+
+
+stalker-gamma-cli 1.37.1                     (cli/usr/bin/stalker-gamma)
+  Copyright (C) FaithBeam and contributors.
+  License: GPL-3.0 (texts/GPL-3.0-only.txt)
+  Source:  https://github.com/FaithBeam/stalker-gamma-cli/tree/1.37.1
+
+  The CLI is a .NET native (AOT) program and contains:
+  - .NET runtime and libraries - Copyright (c) .NET Foundation and
+    Contributors - MIT (texts/MIT.txt) - https://github.com/dotnet/runtime
+  - HtmlAgilityPack - Copyright (c) ZZZ Projects Inc. - MIT (texts/MIT.txt)
+    - https://github.com/zzzprojects/html-agility-pack
+  - LibGit2Sharp - Copyright (c) LibGit2Sharp contributors - MIT
+    (texts/MIT.txt) - https://github.com/libgit2/libgit2sharp
+  - Microsoft.IO.RecyclableMemoryStream - Copyright (c) Microsoft
+    Corporation - MIT (texts/MIT.txt)
+    - https://github.com/microsoft/Microsoft.IO.RecyclableMemoryStream
+  - Microsoft Kiota libraries - Copyright (c) Microsoft Corporation - MIT
+    (texts/MIT.txt) - https://github.com/microsoft/kiota-dotnet
+  - Polly - Copyright (c) App vNext - BSD-3-Clause (texts/BSD-3-Clause.txt)
+    - https://github.com/App-vNext/Polly
+  - Serilog, Serilog.Sinks.Console, Serilog.Sinks.File - Copyright (c)
+    Serilog Contributors - Apache-2.0 (texts/Apache-2.0.txt)
+    - https://github.com/serilog/serilog
+
+libgit2 (commit 5853918)              (cli/usr/bin/libgit2-5853918.so)
+  Copyright (C) the libgit2 contributors.
+  License: GPL-2.0 with the GCC linking exception, plus the licenses of the
+           code it includes (libgit2/COPYING, which contains all of them)
+  Source:  https://github.com/libgit2/libgit2/tree/5853918
+
+curl-impersonate                   (cli/usr/bin/libcurl-impersonate.so)
+  Copyright (c) curl_cffi developers (lexiforest) and contributors.
+  License: MIT (curl-impersonate/LICENSE)
+  Source:  https://github.com/lexiforest/curl-impersonate
+  It is statically built with these libraries, each under the license file
+  of the same name in curl-impersonate/:
+  - curl - Copyright (c) Daniel Stenberg and contributors - curl license
+    (LICENSE_CURL)
+  - BoringSSL - Copyright Google Inc. and others - Apache-2.0 and the
+    other licenses listed in LICENSE_BORINGSSL
+  - brotli - MIT (LICENSE_BROTLI)
+  - nghttp2, nghttp3, ngtcp2 - MIT (LICENSE_NGHTTP2, LICENSE_NGHTTP3,
+    LICENSE_NGTCP2)
+  - zlib - zlib license (LICENSE_ZLIB)
+  - zstd - BSD-3-Clause (LICENSE_ZSTD)
+  - libidn2 - LGPL-3.0-or-later or GPL-2.0-or-later
+    (LICENSE_LIBIDN2_LGPL3, LICENSE_LIBIDN2_GPL2, LICENSE_LIBIDN2_GPL3,
+    LICENSE_LIBIDN2_UNICODE) - source: https://ftp.gnu.org/gnu/libidn/
+
+7-Zip 26.03                               (cli/usr/bin/resources/7zz)
+  Copyright (C) 1999-2026 Igor Pavlov.
+  License: GNU LGPL-2.1-or-later, BSD-3-Clause for some parts, and the
+           unRAR license restriction for the RAR code
+           (7-Zip/License.txt, 7-Zip/unRarLicense.txt,
+           texts/LGPL-2.1-or-later.txt)
+  Source:  https://www.7-zip.org/a/7z2603-src.tar.xz
+
+Mozilla CA certificate bundle          (cli/usr/bin/cacert.pem)
+  Root certificate data from Mozilla, as extracted by the curl project.
+  License: MPL-2.0 (texts/MPL-2.0.txt)
+  Source:  https://curl.se/docs/caextract.html
+
+certifi (Python package)
+  Copyright (c) Kenneth Reitz and contributors.
+  License: MPL-2.0 (texts/MPL-2.0.txt)
+  Source:  https://github.com/certifi/python-certifi
+
+Python 3.12.14                                     (opt/python3.12)
+  Copyright (c) 2001 Python Software Foundation; All Rights Reserved.
+  License: PSF License Agreement, with the notices of the libraries Python
+           includes (Python-LICENSE.txt)
+  Source:  https://github.com/python/cpython/tree/v3.12.14
+  Packaged as an AppImage base by python-appimage
+  (https://github.com/niess/python-appimage).
+
+Qt 6.11.1, PySide6 6.11.1 and Shiboken6 6.11.1
+  Copyright (C) The Qt Company Ltd. and other contributors.
+  License: LGPL-3.0-only (texts/LGPL-3.0-only.txt, which builds on
+           texts/GPL-3.0-only.txt)
+  Source:  https://download.qt.io/official_releases/qt/6.11/6.11.1/single/
+           https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/
+  Qt includes third-party code under the other licenses in texts/ (for
+  example FreeType, HarfBuzz, PCRE2, libpng, libjpeg, zlib, MD4C). The full
+  list, with each component's copyright, is at
+  https://doc.qt.io/qt-6/licenses-used-in-qt.html
+
+FFmpeg 7.1.1 (shipped with Qt Multimedia)
+  Copyright (c) the FFmpeg developers.
+  License: LGPL-2.1-or-later (texts/LGPL-2.1-or-later.txt)
+  Source:  https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
+
+ICU 73.2 (shipped with Qt)
+  Copyright (c) Unicode, Inc. and others.
+  License: Unicode-3.0 (texts/Unicode-3.0.txt)
+  Source:  https://github.com/unicode-org/icu/releases/tag/release-73-2
+
+xcb-util, xcb-util-cursor, xcb-util-image, xcb-util-keysyms,
+xcb-util-renderutil, xcb-util-wm, libxkbcommon, libxkbcommon-x11
+  Copyright the X.Org Foundation, the XCB and xkbcommon authors.
+  License: MIT / X11 (xcb-util/*.txt, libxkbcommon/LICENSE)
+  Source:  https://gitlab.freedesktop.org/xorg/lib
+           https://github.com/xkbcommon/libxkbcommon
+
+AppImage type 2 runtime 20251108          (the start of the AppImage file)
+  Copyright (c) 2004-23 probonopd and contributors.
+  License: MIT (AppImage-runtime/LICENSE)
+  Source:  https://github.com/AppImage/type2-runtime/tree/20251108
+  It is statically linked with musl libc (MIT), libfuse 3.15.0
+  (LGPL-2.1, texts/LGPL-2.1-or-later.txt; source:
+  https://github.com/libfuse/libfuse/releases/tag/fuse-3.15.0), squashfuse
+  0.5.2 (BSD-2-Clause, texts/BSD-2-Clause.txt), zlib and zstd.

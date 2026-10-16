@@ -400,6 +400,8 @@ def steam_compat_tool_names() -> set[str]:
         if start < 0:
             continue
         brace = text.find("{", start)
+        if brace < 0:
+            continue  # unparsable: never scan from the wrong place
         depth, end = 0, len(text)
         for index in range(brace, len(text)):
             if text[index] == "{":

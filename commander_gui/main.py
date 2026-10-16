@@ -23,7 +23,7 @@ from PySide6.QtCore import (
     qInstallMessageHandler,
 )
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication, QCheckBox, QMessageBox
+from PySide6.QtWidgets import QApplication, QCheckBox
 
 from . import gui_settings
 from .applog import install_crash_handler, install_excepthook
@@ -46,6 +46,7 @@ from .fonts import load_bundled_font
 from .i18n import set_active_language, tr
 from .themes import build_palette, build_stylesheet, set_active_theme
 from .ui.common import begin_shutdown, shutdown_active_runners
+from .ui.dialogs import MessageBox as QMessageBox
 from .ui.main_window import MainWindow
 
 _INSTANCE_LOCK: QLockFile | None = None
@@ -160,16 +161,22 @@ def _cli_binary_problem() -> tuple[str, str] | None:
     binary = cli_binary_path()
     if not binary.is_file():
         return (
-            "CLI Not Found",
-            (f"Could not locate the stalker-gamma CLI at:\n{binary}\n\n"
-            "Place the extracted CLI bundle under Project/cli/usr/bin/ "
-            "or set the STALKER_GAMMA_CLI environment variable."),
+            tr("A COMMANDER file is missing"),
+            tr(
+                "COMMANDER can't find its stalker-gamma tool at:\n{path}\n\n"
+                "Download COMMANDER again, or put the tool under cli/usr/bin/ "
+                "(or point the STALKER_GAMMA_CLI environment variable at it).",
+                path=binary,
+            ),
         )
     if not os.access(binary, os.X_OK):
         return (
-            "CLI Not Executable",
-            (f"The stalker-gamma CLI is not executable:\n{binary}\n\n"
-            f"Run:  chmod +x '{binary}'"),
+            tr("COMMANDER can't run one of its files"),
+            tr(
+                "The stalker-gamma tool isn't allowed to run:\n{path}\n\n"
+                "Fix it from a terminal with:  chmod +x '{path}'",
+                path=binary,
+            ),
         )
     return None
 
@@ -200,20 +207,23 @@ def _ask_deck_mode() -> bool:
     """
     box = QMessageBox()
     box.setIcon(QMessageBox.Icon.Question)
-    box.setWindowTitle(tr("Steam Deck detected"))
-    box.setText(tr("Use Deck Mode?"))
-    box.setInformativeText(
+    box.setWindowTitle(tr("Use Deck Mode?"))
+    box.setText(
         tr(
-            "Deck Mode is a simplified, controller- and touch-friendly "
-            "interface sized for the Steam Deck's screen. You can switch back "
-            "to the full interface at any time from Deck Mode's settings."
+            "This looks like a Steam Deck. Deck Mode is a simpler interface "
+            "made for its screen, controller and touch."
         )
     )
+    box.setInformativeText(tr("You can switch back to the full interface at any time from Deck Mode's settings."))
     remember = QCheckBox(tr("Remember my choice"))
     box.setCheckBox(remember)
     box.setStandardButtons(
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
     )
+    box.set_labels({
+        QMessageBox.StandardButton.Yes: tr("Use Deck Mode"),
+        QMessageBox.StandardButton.No: tr("Use full interface"),
+    })
     box.setDefaultButton(QMessageBox.StandardButton.Yes)
     chose_deck = box.exec() == QMessageBox.StandardButton.Yes
     if remember.isChecked():
@@ -296,21 +306,29 @@ def _cleanup_interrupted_move(saved: dict) -> None:
         gui_settings.save_gui_settings(move_dest="", move_expected=[], move_sources=[])
         QMessageBox.information(
             None,
-            "Move Game Interrupted",
-            "A previous Move Game operation did not finish cleanly.\n\n"
-            f"The game folders at:\n{move_dest}\n"
-            "are now the only copy and were left untouched. Check that your "
-            "profile and ModOrganizer.ini point there before deleting anything.",
+            tr("Moving the game didn't finish"),
+            tr(
+                "The last Move Game stopped partway. The folders at:\n{path}\n"
+                "are now the only copy, so COMMANDER left them alone.",
+                path=move_dest,
+            ),
+            note=tr("Check that your profile and ModOrganizer.ini point to that folder before deleting anything."),
         )
         return
     answer = QMessageBox.question(
         None,
-        "Move Game Interrupted",
-        "A previous Move Game operation was interrupted.\n\n"
-        f"Orphaned folders found at:\n{move_dest}\n"
-        f"Folders: {', '.join(orphans)}\n\n"
-        "Delete them?",
+        tr("Moving the game didn't finish"),
+        tr(
+            "The last Move Game stopped partway and left half-copied folders in:\n{path}\n\n"
+            "Your original game folders are fine. These copies can be deleted.",
+            path=move_dest,
+        ),
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        points=tuple(orphans),
+        labels={
+            QMessageBox.StandardButton.Yes: tr("Delete the copies"),
+            QMessageBox.StandardButton.No: tr("Keep them"),
+        },
     )
     if answer == QMessageBox.StandardButton.Yes:
         for name in orphans:
@@ -359,8 +377,8 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         QMessageBox.critical(
             None,
-            "COMMANDER",
-            f"Could not create the Commander instance lock:\n{exc}",
+            tr("COMMANDER couldn't start"),
+            tr("COMMANDER couldn't create its lock file, which stops two copies running at once.\n\n{error}", error=exc),
         )
         return 1
     if _INSTANCE_LOCK is None:
@@ -369,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         # one - which is what the title bar goes on to say.
         if not multiple_instances_allowed():
             QMessageBox.information(
-                None, "COMMANDER", "COMMANDER is already running."
+                None, tr("COMMANDER is already open"), tr("Switch to the COMMANDER window that's already running.")
             )
             return 0
         mark_secondary_instance()
@@ -441,7 +459,10 @@ def main(argv: list[str] | None = None) -> int:
         window.show_for_environment()
     else:
         window = MainWindow()
-        window.show()
+        if _gui.get("window_maximized") is True:
+            window.showMaximized()
+        else:
+            window.show()
     # A session where the user deliberately toggles modes a few times must not
     # look like a relaunch loop to deck_launch's depth guard.
     QTimer.singleShot(5000, clear_relaunch_depth)

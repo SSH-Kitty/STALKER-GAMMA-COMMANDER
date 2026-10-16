@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import coop
 from ..achievements import ACHIEVEMENTS, unlocked_count
 from ..cli_runner import run_sync
 from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
@@ -61,6 +61,7 @@ from .common import (
 )
 from .deck_icon import deck_icon
 from .deck_switch import switch_mode
+from .dialogs import MessageBox as QMessageBox
 from .mod_manager_page import _QUERY_TIMEOUT, _query_mo2_profiles
 
 #: Below this much free space the drive meter turns to the warning colour:
@@ -77,6 +78,10 @@ _SEGMENT_TOKENS = ("storage_a", "storage_b", "storage_c")
 
 def _token_color(token: str) -> QColor:
     return QColor(active_theme_tokens().get(token, "#7f8f78"))
+
+
+def _deck_mode_icon():
+    return deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")), 28)
 
 
 #: Height of a card's title row - the pill buttons' height (Deck Mode,
@@ -246,6 +251,11 @@ class DashboardPage(QWidget):
         self.refresh()
 
     # ----- profile card -----
+    def on_theme_changed(self) -> None:
+        button = self.findChild(QPushButton, "deckModeButton")
+        if button is not None:
+            button.setIcon(_deck_mode_icon())
+
     def refresh(self) -> None:
         self._refresh_generation += 1
         self.window.refresh_settings()
@@ -398,6 +408,22 @@ class DashboardPage(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(_card_title(tr("Profile overview")))
         header.addStretch(1)
+        # Co-op badge: the game's engine is not the stock one, worth seeing
+        # before pressing Play. Click it to manage co-op.
+        try:
+            coop_mode = coop.status(profile.anomaly) if coop.is_active(profile.anomaly) else None
+        except OSError:
+            coop_mode = None
+        if coop_mode is not None:
+            reverted = coop_mode == coop.REVERTED
+            badge = QPushButton(tr("Engine reverted") if reverted else tr("Co-op active"))
+            badge.setObjectName("verifyPill")
+            badge.setProperty("level", "attention" if reverted else "healthy")
+            badge.setFixedHeight(_TITLE_ROW_H)
+            badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            badge.setToolTip(tr("Open Multiplayer"))
+            badge.clicked.connect(lambda: self.window.set_page("multiplayer"))
+            header.addWidget(badge)
         manage = QPushButton(tr("Manage profiles"))
         manage.setObjectName("pillButton")
         manage.setFixedHeight(_TITLE_ROW_H)
@@ -533,9 +559,14 @@ class DashboardPage(QWidget):
         if active is not None and game_running(force=True):
             answer = QMessageBox.question(
                 self,
-                tr("Game Running"),
-                tr("Mod Organizer / the game appears to be running under the current active profile ('{active_name}').\n\nSwitching the active profile now will not stop it, but COMMANDER's other pages will stop reflecting its state.\n\nSwitch anyway?", active_name=active.profile_name),
+                tr("The game is still running"),
+                tr("Mod Organizer or the game is running on the profile '{active_name}'.", active_name=active.profile_name),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                points=(
+                    tr("Switching profiles won't close the game."),
+                    tr("COMMANDER will stop tracking it until you switch back."),
+                ),
+                labels={QMessageBox.StandardButton.Yes: tr("Switch anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
             if answer != QMessageBox.StandardButton.Yes:
                 self._sync_profile_combo(combo)
@@ -637,8 +668,8 @@ class DashboardPage(QWidget):
             # overwrite this change.
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer first - it would overwrite this change when it exits."),
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open and would undo this change when it closes. Close it, then try again."),
             )
             self._sync_mo2_profile_combo(combo)
             return
@@ -650,9 +681,10 @@ class DashboardPage(QWidget):
             timeout=_QUERY_TIMEOUT,
             parent=self,
         )
+        owner = profile.profile_name if profile is not None else None
         task.result.connect(
-            lambda res, name=name, generation=generation: self._on_mo2_profile_set(
-                name, generation, *res
+            lambda res, name=name, generation=generation, owner=owner: self._on_mo2_profile_set(
+                name, generation, *res, owner=owner
             )
         )
         task.error.connect(
@@ -664,9 +696,20 @@ class DashboardPage(QWidget):
         task.start()
 
     def _on_mo2_profile_set(
-        self, name: str, generation: int, rc: int, out: str
+        self, name: str, generation: int, rc: int, out: str, owner: str | None = None
     ) -> None:
         self._set_mo2_selected_task = None
+        if rc == 0:
+            # MO2's ini already changed: record it even when a refresh
+            # landed mid-call, or COMMANDER and MO2 disagree from now on.
+            # Saved on the profile the change was made for, not whichever
+            # is active now.
+            target = next(
+                (p for p in self.settings.profiles if p.profile_name == owner), None
+            ) if owner is not None else self.settings.active_profile
+            if target is not None and target.mo2_profile != name:
+                target.mo2_profile = name
+                self.settings.save()
         if generation != self._refresh_generation:
             return
         combo = getattr(self, "mo2_profile_combo", None)
@@ -675,16 +718,12 @@ class DashboardPage(QWidget):
                 combo.setEnabled(True)
                 self._sync_mo2_profile_combo(combo)
             QMessageBox.warning(
-                self, tr("Failed"), out.strip() or tr("Could not set selected profile")
+                self, tr("Couldn't change the MO2 profile"), out.strip() or tr("Mod Organizer didn't accept the change. Try again, or pick the profile in Mod Organizer itself.")
             )
             return
         # _render_profile() rebuilds this card from scratch on refresh() -
         # do not touch `combo` after this point (see the Profile combo's
         # own switch handler above for why).
-        profile = self.settings.active_profile
-        if profile is not None and profile.mo2_profile != name:
-            profile.mo2_profile = name
-            self.settings.save()
         self.refresh()
 
     def _on_mo2_profile_set_error(self, generation: int) -> None:
@@ -1170,9 +1209,7 @@ class DashboardPage(QWidget):
         # corner, was easy to miss and did not say what it opened.
         deck_button = QPushButton(" " + tr("Deck Mode"))
         deck_button.setObjectName("deckModeButton")
-        deck_button.setIcon(
-            deck_icon(QColor(active_theme_tokens().get("accent_strong", "#9fe96f")), 28)
-        )
+        deck_button.setIcon(_deck_mode_icon())
         deck_button.setIconSize(QSize(28, 28))
         deck_button.setFixedHeight(34)
         deck_button.setToolTip(tr("Switch to Steam Deck Mode"))
@@ -1188,7 +1225,7 @@ class DashboardPage(QWidget):
         # still be holding the deleted widget.
         self._play_button = None
         if profile is not None:
-            play = QPushButton(tr("Play GAMMA"))
+            play = QPushButton(tr("Play GAMMA Co-op") if coop.is_active(profile.anomaly) else tr("Play GAMMA"))
             play.setObjectName("primary")
             self._play_button = play
             install_hover_grow_text(play, "accent_text")
@@ -1293,5 +1330,5 @@ class DashboardPage(QWidget):
     def _open_folder(self, target: str) -> None:
         if not open_in_file_manager(target):
             self.window.statusBar().showMessage(
-                f"Could not open folder: {target}", 6000
+                tr("Could not open folder: {path}", path=target), 6000
             )

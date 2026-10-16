@@ -299,12 +299,17 @@ def list_backups(profile_name: str) -> list[BackupInfo]:
     return _backups_in(profile_backup_dir(profile_name))
 
 
-def _prune_folder(folder: Path, keep: int = KEEP_AUTOMATIC) -> list[Path]:
-    """Keep the newest *keep* automatic backups of each reason in *folder*."""
+def _prune_folder(
+    folder: Path, keep: int = KEEP_AUTOMATIC, *, protect: Path | None = None
+) -> list[Path]:
+    """Keep the newest *keep* automatic backups of each reason in *folder*.
+
+    *protect* is never removed: the backup a restore is about to read.
+    """
     removed: list[Path] = []
     by_reason: dict[str, list[BackupInfo]] = {}
     for info in _backups_in(folder):  # newest first
-        if info.reason != "manual":
+        if info.reason != "manual" and info.path != protect:
             by_reason.setdefault(info.reason, []).append(info)
     for infos in by_reason.values():
         for info in infos[keep:]:
@@ -434,7 +439,9 @@ def restore_backup(
             replaced.append((label, dest))
     if replaced:
         report(f"Keeping a copy of the {len(replaced)} files this restore replaces...")
-        create_backup_of_files(info.profile, replaced, report, folder=info.path.parent)
+        create_backup_of_files(
+            info.profile, replaced, report, folder=info.path.parent, protect=info.path
+        )
     written = 0
     with zipfile.ZipFile(info.path) as archive:
         for name, dest in plan:
@@ -458,6 +465,7 @@ def create_backup_of_files(
     report: Report,
     *,
     folder: Path | None = None,
+    protect: Path | None = None,
 ) -> BackupInfo | None:
     """A "before restore" backup of exactly the given files.
 
@@ -485,7 +493,7 @@ def create_backup_of_files(
         _write_zip(dest, files, manifest, report)
     except OSError as exc:
         raise BackupError(f"Could not keep a copy of the current files: {exc}") from exc
-    _prune_folder(folder)
+    _prune_folder(folder, protect=protect)
     return read_info(dest)
 
 
@@ -570,18 +578,26 @@ def apply_pending_settings_restore(profile) -> str | None:
         return None
     pending = dict(gui_settings.load_gui_settings().get(_PENDING_KEY) or {})
     entry = pending.pop(profile.profile_name, None)
+
+    def drop_entry() -> None:
+        gui_settings.save_gui_settings(**{_PENDING_KEY: pending})
+
     if not isinstance(entry, dict):
+        if entry is not None:
+            drop_entry()
         return None
-    gui_settings.save_gui_settings(**{_PENDING_KEY: pending})
     path = Path(str(entry.get("path", "")))
     root = backups_root().resolve()
     try:
         if root not in path.resolve().parents:
+            drop_entry()
             return None
     except OSError:
+        drop_entry()
         return None
     info = read_info(path)
     if info is None:
+        drop_entry()
         return f"Could not restore your user.ltx / MCM settings: backup not found ({path})."
     try:
         count = restore_backup(
@@ -593,8 +609,14 @@ def apply_pending_settings_restore(profile) -> str | None:
             user_ltx=bool(entry.get("user", True)),
             mcm=bool(entry.get("mcm", True)),
         )
-    except (BackupError, OSError, KeyError, zipfile.BadZipFile) as exc:
+    except (KeyError, zipfile.BadZipFile) as exc:
+        # The backup itself is broken: retrying after the next install can't help.
+        drop_entry()
         return f"Could not restore your user.ltx / MCM settings: {exc}"
+    except (BackupError, OSError) as exc:
+        # Kept pending: a disk or permission problem may be gone next time.
+        return f"Could not restore your user.ltx / MCM settings: {exc}"
+    drop_entry()
     return f"Restored your user.ltx / MCM settings from before the reset ({count} file(s))."
 
 

@@ -37,6 +37,7 @@ from ..game_stats import SaveStats
 from ..i18n import tr
 from .brand_icons import achievement_color, achievement_icon
 from .common import info_label, make_card, section_label
+from .dialogs import style_window
 
 _ROW_ICON = 32
 _DETAIL_ICON = 96
@@ -97,7 +98,7 @@ class AchievementsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
-        layout.addWidget(section_label(tr("Achievements"), level=2))
+        style_window(self, tr("Achievements"))
         summary = tr(
             "{count} of {total} unlocked",
             count=unlocked_count(save),

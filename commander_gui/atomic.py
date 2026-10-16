@@ -17,8 +17,12 @@ _WRITE_LOCK = threading.RLock()
 
 
 def write_text(path: Path, text: str) -> None:
-    """Write UTF-8 text through a unique sibling temporary file."""
-    _write(path, text.encode("utf-8"), lock=True)
+    """Write UTF-8 text through a unique sibling temporary file.
+
+    Text read with ``errors="surrogateescape"`` keeps its non-UTF-8 bytes
+    (a cp1251 name in an LTX/INI file) exactly as they were.
+    """
+    _write(path, text.encode("utf-8", errors="surrogateescape"), lock=True)
 
 
 def write_bytes(path: Path, data: bytes, *, lock: bool = True) -> None:

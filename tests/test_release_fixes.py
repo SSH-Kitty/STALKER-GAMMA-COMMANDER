@@ -329,6 +329,19 @@ def test_redaction_is_anchored_and_covers_wine_paths():
     assert r"C:\users\<user>\w" in text
 
 
+def test_redaction_covers_media_mounts_and_ignores_a_root_home():
+    from assistant import report
+
+    with (
+        patch.object(report.Path, "home", return_value=Path("/")),
+        patch("getpass.getuser", return_value="deck"),
+    ):
+        text = report._redact(r"/run/media/deck/sd/x Z:\run\media\deck\y /usr/lib")
+    assert "/run/media/<user>/sd/x" in text
+    assert r"Z:\run\media\<user>\y" in text
+    assert "/usr/lib" in text
+
+
 def test_xray_fatal_without_entries_does_not_hide_the_rest():
     from assistant.analyzers.xray import analyze_xray
 
@@ -354,3 +367,57 @@ def test_assistant_reads_every_log_size_commander_dumps():
     from commander_gui import log_dump
 
     assert dump.MAX_TEXT_BYTES >= log_dump.MAX_FILE_BYTES
+
+
+# --- Update apply bar shows overall progress, not per-archive -----------------
+
+
+def test_tableless_progress_bar_tracks_overall_not_current_archive():
+    """Update apply's ProgressArea has no table; its bar followed whichever
+    archive printed last, jumping back and forth between them."""
+    from PySide6.QtWidgets import QApplication
+
+    from commander_gui.ui.common import ProgressArea
+
+    QApplication.instance() or QApplication([])
+    area = ProgressArea(show_table=False, show_log=True)
+    area.on_line("[12:00:00] Stalker_GAMMA | Extract | 38% | [1/4]")
+    assert area.bar.value() == 17  # (0.5 + 0.38 * 0.5) / 4
+    area.on_line("[12:00:01] Tactical_Compass | Download | 90% | [2/4]")
+    assert area.bar.value() == 36  # (1 + 0.45) / 4
+    area.on_line("[12:00:02] Stalker_GAMMA | Extract | 40% | [1/4]")
+    assert area.bar.value() == 36  # never jumps back
+    assert area.status_label.text() == "1/4 done"
+
+
+def test_a_report_saved_over_an_existing_file_replaces_it(tmp_path):
+    from assistant.dump import DumpArchive
+    from assistant.report import export_report
+
+    dump_path = tmp_path / "dump.zip"
+    dump_path.write_bytes(b"")
+    existing = tmp_path / "mine.md"
+    existing.write_text("old report")
+    written = export_report(DumpArchive(path=dump_path, size=0), [], filename="mine.md")
+    assert written == existing
+    assert existing.read_text() != "old report"
+    assert not (tmp_path / "mine-2.md").exists()
+
+
+def test_an_oversized_skipped_entry_does_not_count_toward_the_text_cap(tmp_path):
+    import zipfile
+
+    from assistant import dump as dump_mod
+
+    zip_path = tmp_path / "dump.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("commander/huge.log", "x" * 200)
+        zf.writestr("commander/small.log", "y" * 100)
+    with (
+        patch.object(dump_mod, "MAX_TEXT_BYTES", 150),
+        patch.object(dump_mod, "MAX_TOTAL_TEXT_BYTES", 150),
+    ):
+        archive = dump_mod.DumpArchive.open(zip_path)
+    by_name = {f.arcname: f for f in archive.files}
+    assert by_name["commander/huge.log"].is_text is False
+    assert by_name["commander/small.log"].text == "y" * 100

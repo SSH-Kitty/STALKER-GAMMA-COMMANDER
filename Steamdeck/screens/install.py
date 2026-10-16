@@ -30,6 +30,7 @@ from commander_gui.game_backup import (
 from commander_gui.gui_settings import configured_wine_prefix
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
+from commander_gui.keep_state import capture, restore
 from commander_gui.launcher import LaunchError, find_extra_protons
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.proton_installer import (
@@ -51,7 +52,7 @@ from commander_gui.ui.common import (
     mo2_running,
 )
 from commander_gui.ui.install_page import _full_install_args, _resume_state_matches
-from commander_gui.ui.proton_manager import build_status
+from commander_gui.ui.proton_manager import build_status, release_installed
 from commander_gui.winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
@@ -502,6 +503,9 @@ class InstallScreen(DeckScreen):
             error = backup_settings_before(profile, "reinstall")
             if error:
                 self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
+            # Kept across failed and resumed runs, like the desktop page.
+            if getattr(self, "_kept", None) is None:
+                self._kept = capture(profile)
         args = _full_install_args(
             self.minimal_row.is_checked(),
             self.preserve_user_row.is_checked(),
@@ -687,6 +691,9 @@ class InstallScreen(DeckScreen):
                 self._save_resume_state()
             else:
                 _save_resume({}, self.window)
+                kept, self._kept = getattr(self, "_kept", None), None
+                if kept is not None:
+                    restore(kept)
                 profile = self.profile()
                 # A fresh install rewrote gamma/mods: Verify Integrity must
                 # not compare it against the old MD5 baseline.
@@ -789,9 +796,12 @@ class InstallScreen(DeckScreen):
         idle = not self.window.install_busy and self._proton_task is None
         # Cheap count only (runs on every busy change); the full list with
         # sizes and "in use" is built when the row is opened.
+        # One scan: it parses libraryfolders.vdf and lists every library,
+        # which can wake a sleeping SD card.
+        protons = find_extra_protons()
         builds = [
             label
-            for label, path in find_extra_protons()
+            for label, path in protons
             if Path(path).parent.parent.name == "compatibilitytools.d"
         ]
         self.proton_builds_row.set_value(
@@ -803,8 +813,9 @@ class InstallScreen(DeckScreen):
             self.proton_install_button.setText(tr("Install GE-Proton"))
             self.proton_install_button.setEnabled(False)
             return
-        installed = {label for label, _path in find_extra_protons()}
-        if any(version in label for label in installed):
+        # Exact tag match: "GE-Proton9-1" must not count as installed
+        # because "GE-Proton9-10" is.
+        if release_installed(version, {label for label, _path in protons}):
             self.proton_install_button.setText(tr("GE-Proton installed") + " ✓")
             self.proton_install_button.setEnabled(False)
         else:
@@ -865,8 +876,7 @@ class InstallScreen(DeckScreen):
         version = self._proton_version
         if not version or self.window.install_busy or self._proton_task is not None:
             return
-        installed = {label for label, _path in find_extra_protons()}
-        if any(version in label for label in installed):
+        if release_installed(version, {label for label, _path in find_extra_protons()}):
             return
         self.window.confirm(
             tr("Install GE-Proton"),

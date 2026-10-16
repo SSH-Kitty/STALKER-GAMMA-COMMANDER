@@ -30,7 +30,7 @@ package() {
   # to remain in the same directory (it's a self-contained .NET build that
   # resolves them next to its own executable path, not via PATH or cwd).
   install -d "$pkgdir/opt/$pkgname"
-  cp -a commander_gui assistant Steamdeck cli "$pkgdir/opt/$pkgname/"
+  cp -a commander_gui assistant Steamdeck cli licenses LICENSE "$pkgdir/opt/$pkgname/"
 
   install -Dm755 packaging/stalker-gamma-commander.sh \
     "$pkgdir/usr/bin/$pkgname"
@@ -44,4 +44,6 @@ package() {
   install -Dm644 cli/stalker-gamma.png \
     "$pkgdir/usr/share/icons/hicolor/256x256/apps/$pkgname.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # The bundled CLI, 7-Zip, libgit2 and curl-impersonate carry their own licenses.
+  cp -a licenses/. "$pkgdir/usr/share/licenses/$pkgname/"
 }

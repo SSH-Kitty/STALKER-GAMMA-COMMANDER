@@ -361,6 +361,47 @@ class ModInstallTests(unittest.TestCase):
                 (mods / installed / "gamedata/config.ltx").read_text(), "data"
             )
 
+    def test_install_archive_unpacks_a_tar_gz_fully(self):
+        import io
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "Tar Mod.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                data = b"data"
+                info = tarfile.TarInfo("gamedata/config.ltx")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+            mods = root / "mods"
+            installed = install_archive(archive, mods)
+            self.assertEqual((mods / installed / "gamedata/config.ltx").read_text(), "data")
+
+    def test_cancel_stops_the_inner_tar_unpack(self):
+        import os
+        import threading
+        import time
+
+        from commander_gui import mod_install
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "mod.tar").write_bytes(b"x")
+            slow = root / "7zz"
+            slow.write_text("#!/bin/sh\nexec sleep 30\n")
+            os.chmod(slow, 0o755)
+            cancel = threading.Event()
+            threading.Timer(0.3, cancel.set).start()
+            started = time.monotonic()
+            with (
+                patch.object(mod_install, "_validate_archive_entries"),
+                self.assertRaisesRegex(mod_install.ModInstallError, "cancelled"),
+            ):
+                mod_install._unwrap_tarball(slow, root / "mod.tar.gz", staging, cancel)
+            self.assertLess(time.monotonic() - started, 5)
+
     def _mock_listing_result(self, listing_body: str):
         from subprocess import CompletedProcess
 

@@ -41,6 +41,9 @@ except ImportError:  # pragma: no cover - non-POSIX
 _EVENT = struct.Struct("llHHi")
 
 EV_SYN = 0x00
+#: The kernel's event buffer overflowed and events were lost - a release
+#: among them would leave a direction held and auto-repeating forever.
+SYN_DROPPED = 3
 EV_KEY = 0x01
 EV_ABS = 0x03
 
@@ -464,6 +467,9 @@ class GamepadMonitor(QObject):
         ranges: dict[int, tuple[int, int]] | None = None,
     ) -> None:
         """Interpret one input event. Public so the tests can drive it."""
+        if etype == EV_SYN and code == SYN_DROPPED:
+            self._release_all()
+            return
         if etype == EV_KEY:
             if code in _DPAD_BUTTONS:
                 self._set_direction(_DPAD_BUTTONS[code], "dpad", value != 0)

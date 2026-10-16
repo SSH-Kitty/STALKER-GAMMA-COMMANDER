@@ -30,6 +30,7 @@ with no special-casing.
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -124,9 +125,10 @@ def read_shortcuts(path: Path) -> list[Entry]:
         return []
     try:
         entries, _pos = _parse_entries(buf, 0)
-    except (ValueError, IndexError) as exc:
+    except (ValueError, IndexError, RecursionError) as exc:
         # A truncated file runs a bytes.index()/slice off the end; an
-        # unknown type byte raises ValueError. Either way: do not guess.
+        # unknown type byte raises ValueError; absurdly deep nesting runs
+        # out of recursion. Either way: do not guess.
         raise ShortcutsFileError(
             f"{path} is not a shortcuts file this version understands ({exc})"
         ) from exc
@@ -276,7 +278,7 @@ def add_commander_shortcuts(
     root = read_shortcuts(vdf_path)
     if vdf_path.is_file():
         backup = vdf_path.with_name(vdf_path.name + ".gammagui.bak")
-        atomic.write_bytes(backup, vdf_path.read_bytes())
+        atomic.write_bytes(backup, vdf_path.read_bytes(), lock=False)
     else:
         vdf_path.parent.mkdir(parents=True, exist_ok=True)
     deck_options = f"{base_launch_options} --deck".strip()
@@ -374,12 +376,11 @@ def find_shortcuts_vdf() -> Path | None:
 _STEAM_ID64_BASE = 76561197960265728
 
 
-def _persona_name(steam_root: Path, account_id: str) -> str | None:
-    """The account's display name, read from that Steam root's loginusers.vdf.
+def _loginusers_field(steam_root: Path, account_id: str, field: str) -> str | None:
+    """One field of the account's entry in that Steam root's loginusers.vdf.
 
-    Best-effort only - a friendlier label than a bare numeric ID when it
-    works, never a reason to fail the actual lookup when it doesn't (a
-    missing/unreadable/unrecognised-shape file just falls back to the ID).
+    Best-effort only - a missing/unreadable/unrecognised-shape file is None,
+    never a reason to fail the actual lookup.
     """
     if not account_id.isdigit():
         return None
@@ -394,8 +395,44 @@ def _persona_name(steam_root: Path, account_id: str) -> str | None:
     )
     if block_match is None:
         return None
-    name_match = re.search(r'"PersonaName"\s+"([^"]*)"', block_match.group(1))
-    return name_match.group(1) if name_match else None
+    field_match = re.search(rf'"{field}"\s+"([^"]*)"', block_match.group(1))
+    return field_match.group(1) if field_match else None
+
+
+def _persona_name(steam_root: Path, account_id: str) -> str | None:
+    """The account's display name - a friendlier label than a bare ID."""
+    return _loginusers_field(steam_root, account_id, "PersonaName")
+
+
+#: Where Steam keeps its own registry (native, then Flatpak).
+REGISTRY_CANDIDATES = (
+    Path.home() / ".steam" / "registry.vdf",
+    Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".steam" / "registry.vdf",
+)
+
+
+def autologin_shortcuts_vdf(registries=REGISTRY_CANDIDATES) -> Path | None:
+    """shortcuts.vdf of the account Steam logs into on start, or None.
+
+    Steam's own registry names that account (``AutoLoginUser``, a login
+    name); loginusers.vdf maps it to the userdata folder. Unlike the
+    Timestamp/AutoLogin fields in loginusers.vdf (see find_shortcuts_vdf),
+    this is the value Steam itself acts on.
+    """
+    names = set()
+    for registry in registries:
+        try:
+            text = registry.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        names.update(re.findall(r'"AutoLoginUser"\s+"([^"]+)"', text))
+    if not names:
+        return None
+    for config_dir in find_userdata_config_dirs():
+        account = _loginusers_field(config_dir.parents[2], config_dir.parent.name, "AccountName")
+        if account in names:
+            return config_dir / "shortcuts.vdf"
+    return None
 
 
 def list_steam_accounts() -> list[tuple[str, Path]]:
@@ -447,6 +484,7 @@ def restart_steam(
     *,
     exit_timeout: float = 20.0,
     while_stopped: Callable[[], None] | None = None,
+    relaunch_args: tuple[str, ...] = (),
 ) -> None:
     """Cleanly quit Steam, optionally do something, then relaunch it.
 
@@ -460,6 +498,10 @@ def restart_steam(
     has not exited by ``exit_timeout`` nothing is written and ``OSError`` is
     raised. Meant to run off the GUI thread: ``-shutdown`` only requests the
     exit and returns immediately, and the wait can take several seconds.
+
+    ``relaunch_args`` ride along on the relaunch (e.g. a ``steam://`` link):
+    starting a second ``steam`` while this one is still coming up leaves
+    both stuck, never logged in.
     """
     launch_cmd = steam_launch_command(steam_root)
     try:
@@ -473,23 +515,49 @@ def restart_steam(
     except subprocess.TimeoutExpired as exc:
         # Promised as OSError to callers; TimeoutExpired is not one.
         raise OSError("Steam did not respond to the shutdown request.") from exc
-    if not _wait_for_steam_to_exit(exit_timeout):
+    if not _wait_for_steam_to_exit(exit_timeout) and not _stop_hung_steam():
         raise OSError("Steam did not close in time - nothing was changed.")
+    written = False
     try:
         if while_stopped is not None:
             while_stopped()
+        written = True
     finally:
         # Steam comes back even when the write failed: the user asked for a
         # shortcut, not to be left with Steam closed. The failure still
-        # reaches the caller once it has been restarted.
+        # reaches the caller once it has been restarted - without the
+        # relaunch args, which were meant for what was just written.
         subprocess.Popen(
-            launch_cmd,
+            [*launch_cmd, *(relaunch_args if written else ())],
             env=child_environment(),
             start_new_session=True,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+
+def _stop_hung_steam() -> bool:
+    """Stop a Steam that ignored ``-shutdown``; True once it is gone.
+
+    A hung client - often with no window at all, so it looks closed - never
+    answers the request, and swallows every ``steam://`` link handed to it.
+    The user already agreed to a restart, so it is terminated, then killed.
+    """
+    pkill = shutil.which("pkill")
+    if not pkill:
+        return False
+    for sig, wait in (("TERM", 10.0), ("KILL", 5.0)):
+        subprocess.run(
+            [pkill, f"-{sig}", "-x", "steam"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        if _wait_for_steam_to_exit(wait):
+            return True
+    return False
 
 
 def steam_is_running() -> bool:
@@ -609,3 +677,286 @@ def add_to_steam(vdf_path: Path, *, restart: bool) -> None:
         restart_steam(steam_root_for(vdf_path), while_stopped=write)
     else:
         write()
+
+
+# -- STALKER COMMANDER xrRAZOM shortcut ------------------------------------------
+# xrRazom's Steam sessions need Steamworks (overlay, friends-list join), which
+# only works when the Steam client itself starts the game through Proton.
+# So a Steam co-op launch goes through a dedicated non-Steam shortcut, forced
+# onto the same Proton build COMMANDER's prefix already uses.
+
+COOP_SHORTCUT_NAME = "STALKER COMMANDER xrRAZOM"
+#: Older builds' names; a rewrite renames that entry, keeping its collections.
+_LEGACY_COOP_NAMES = {"GAMMA Co-op", "STALKER CMNDR xrRAZOM"}
+
+#: Library artwork for the co-op shortcut, as (bundled file, grid file suffix).
+#: Steam reads ``userdata/<id>/config/grid/<appid><suffix>``.
+COOP_ARTWORK_DIR = Path(__file__).resolve().parent / "assets" / "coop_artwork"
+_COOP_ARTWORK = (
+    ("cover.jpg", "p.jpg"),
+    ("hero.jpg", "_hero.jpg"),
+    ("logo.png", "_logo.png"),
+    ("wide.png", ".png"),
+)
+
+
+def install_coop_artwork(vdf_path: Path, appid: int, source: Path = COOP_ARTWORK_DIR) -> None:
+    """Copy the co-op cover, background, logo and wide cover into Steam's
+    grid folder for ``appid``. Best effort: artwork never blocks a launch."""
+    grid = vdf_path.parent / "grid"
+    for name, suffix in _COOP_ARTWORK:
+        src = source / name
+        if not src.is_file():
+            continue
+        dest = grid / f"{appid}{suffix}"
+        try:
+            grid.mkdir(parents=True, exist_ok=True)
+            # Steam takes .png or .jpg; a leftover of the other kind could win.
+            other = ".jpg" if dest.suffix == ".png" else ".png"
+            dest.with_suffix(other).unlink(missing_ok=True)
+            atomic.write_bytes(dest, src.read_bytes(), lock=False)
+        except OSError:
+            pass
+
+
+def coop_launch_options(prefix: str, mo2_profile: str, target: str, appid: int) -> str:
+    """LaunchOptions for the co-op shortcut.
+
+    ``STEAM_COMPAT_DATA_PATH`` points Steam's Proton at COMMANDER's own
+    prefix, so MO2 runs with the dependencies already installed there
+    rather than in a fresh ``compatdata/<id>``. Steam gives a shortcut its
+    own SteamAppId, which steam_api prefers over steam_appid.txt, so it is
+    set back to the co-op appid (Call of Pripyat or Spacewar).
+
+    Steam runs LaunchOptions through ``sh -c``: every value is shell-quoted
+    so a ``"`` or ``$(...)`` in a path or profile name stays a literal.
+    """
+    q = shlex.quote
+    return (
+        f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command% "
+        f"-p {q(mo2_profile)} run -e {q(target)}"
+    )
+
+
+def compat_tool_name(proton_dir: str | Path) -> str:
+    """The internal name Steam knows a Proton build by.
+
+    A compatibilitytools.d build names itself in compatibilitytool.vdf.
+    Valve's own builds (steamapps/common/Proton ...) have no such file;
+    Steam knows them as ``proton_9`` for "Proton 9.0", ``proton_63`` for
+    "Proton 6.3", ``proton_experimental``, ``proton_hotfix``.
+    """
+    proton_dir = Path(proton_dir)
+    try:
+        text = (proton_dir / "compatibilitytool.vdf").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        valve = re.fullmatch(r"Proton (\d+)\.(\d+)", proton_dir.name)
+        if valve:
+            major, minor = valve.groups()
+            return f"proton_{major}" if minor == "0" else f"proton_{major}{minor}"
+        named = re.fullmatch(r"Proton(?: -)? (Experimental|Hotfix)", proton_dir.name)
+        return f"proton_{named.group(1).lower()}" if named else proton_dir.name
+    match = re.search(r'"compat_tools"\s*\{\s*"([^"]+)"', text, re.IGNORECASE)
+    return match.group(1) if match else proton_dir.name
+
+
+def unsigned_appid(exe: str) -> int:
+    """The co-op shortcut's appid as Steam keys it in config.vdf."""
+    return _shortcut_appid(f'"{exe}"', COOP_SHORTCUT_NAME) & 0xFFFFFFFF
+
+
+def rungameid(appid: int) -> str:
+    """The 64-bit game ID ``steam://rungameid/`` takes for a shortcut."""
+    return str((appid << 32) | 0x02000000)
+
+
+def _block(text: str, start: int) -> tuple[int, int]:
+    """(opening brace, closing brace) of the text-VDF block after ``start``."""
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return brace, index
+    raise ValueError("config.vdf has an unclosed block")
+
+
+def _mapping_span(text: str) -> tuple[int, int] | None:
+    match = re.search(r'"CompatToolMapping"\s*\{', text, re.IGNORECASE)
+    return _block(text, match.start()) if match else None
+
+
+def mapped_compat_tool(text: str, appid: int) -> str | None:
+    """The compat tool config.vdf assigns to ``appid``, or None."""
+    span = _mapping_span(text)
+    if span is None:
+        return None
+    match = re.search(
+        rf'"{appid}"\s*\{{[^{{}}]*?"name"\s*"([^"]*)"', text[span[0] : span[1]]
+    )
+    return match.group(1) if match else None
+
+
+def set_compat_tool(text: str, appid: int, name: str) -> str:
+    """Return config.vdf ``text`` with ``appid`` forced onto tool ``name``.
+
+    Only the one entry is replaced or added; everything else stays as it was.
+    Raises ValueError for a file without a recognisable Steam section rather
+    than guessing where the mapping belongs.
+    """
+    entry = f'"{appid}"\n\t\t\t\t\t{{\n\t\t\t\t\t\t"name"\t\t"{name}"\n\t\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t\t"priority"\t\t"250"\n\t\t\t\t\t}}'
+    span = _mapping_span(text)
+    if span is None:
+        valve = re.search(r'"Valve"\s*\{', text, re.IGNORECASE)
+        steam = valve and re.compile(r'"Steam"\s*\{', re.IGNORECASE).search(text, valve.end())
+        if not steam:
+            raise ValueError("config.vdf has no Steam section to add the compatibility tool to")
+        brace = steam.end() - 1
+        return f'{text[: brace + 1]}\n\t\t\t\t"CompatToolMapping"\n\t\t\t\t{{\n\t\t\t\t\t{entry}\n\t\t\t\t}}{text[brace + 1 :]}'
+    open_, close = span
+    body = text[open_ + 1 : close]
+    existing = re.search(rf'"{appid}"\s*\{{[^{{}}]*\}}', body)
+    if existing:
+        body = body[: existing.start()] + entry + body[existing.end() :]
+    else:
+        body = body.rstrip() + "\n\t\t\t\t\t" + entry + "\n\t\t\t\t"
+    return text[: open_ + 1] + body + text[close:]
+
+
+def _config_vdf(vdf_path: Path) -> Path:
+    return steam_root_for(vdf_path) / "config" / "config.vdf"
+
+
+def _coop_entry(shortcuts: list[Entry]) -> dict | None:
+    for _key, type_byte, value in shortcuts:
+        if type_byte == _TYPE_MAP:
+            fields = {k: v for k, _t, v in value}
+            if fields.get("appname") == COOP_SHORTCUT_NAME:
+                return fields
+    return None
+
+
+def coop_shortcut_current(
+    vdf_path: Path, *, exe: str, start_dir: str, launch_options: str, proton_name: str | None
+) -> bool:
+    """True when Steam already has this exact co-op shortcut (and, on Linux,
+    its compat tool), so launching needs no Steam restart."""
+    try:
+        entry = _coop_entry(get_shortcuts_map(read_shortcuts(vdf_path)))
+    except ShortcutsFileError:
+        return False
+    if entry is None or (entry.get("Exe"), entry.get("StartDir"), entry.get("LaunchOptions")) != (
+        f'"{exe}"', f'"{start_dir}"', launch_options
+    ):
+        return False
+    if proton_name is None:
+        return True
+    try:
+        text = _config_vdf(vdf_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return mapped_compat_tool(text, unsigned_appid(exe)) == proton_name
+
+
+def write_coop_shortcut(
+    vdf_path: Path, *, exe: str, start_dir: str, launch_options: str, proton_name: str | None
+) -> int:
+    """Add or update the co-op shortcut (and its compat tool); return its appid.
+
+    Steam must not be running (see ``restart_steam``). Both files are parsed
+    before either is written, and each gets a ``.gammagui.bak`` first.
+    """
+    root = read_shortcuts(vdf_path)
+    config = _config_vdf(vdf_path)
+    appid = unsigned_appid(exe)
+    new_config = None
+    if proton_name is not None:
+        try:
+            old_config = config.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            old_config = '"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t}\n\t\t}\n\t}\n}\n'
+        new_config = set_compat_tool(old_config, appid, proton_name)
+
+    # One entry, found by name: a changed profile, target or install path
+    # updates it in place instead of piling up stale copies.
+    shortcuts, kept = [], False
+    for key, type_byte, value in get_shortcuts_map(root):
+        name = {k: v for k, _t, v in value}.get("appname") if type_byte == _TYPE_MAP else None
+        if name == COOP_SHORTCUT_NAME or name in _LEGACY_COOP_NAMES:
+            if kept:
+                continue
+            kept = True
+            value = [
+                (k, t, f'"{exe}"' if k == "Exe" else launch_options if k == "LaunchOptions" else v)
+                for k, t, v in value
+            ]
+        shortcuts.append((key, type_byte, value))
+    shortcuts = add_or_update_shortcut(
+        shortcuts, COOP_SHORTCUT_NAME, exe, start_dir, launch_options=launch_options
+    )
+
+    if vdf_path.is_file():
+        atomic.write_bytes(
+            vdf_path.with_name(vdf_path.name + ".gammagui.bak"), vdf_path.read_bytes(), lock=False
+        )
+    else:
+        vdf_path.parent.mkdir(parents=True, exist_ok=True)
+    write_shortcuts(vdf_path, set_shortcuts_map(root, shortcuts))
+    if new_config is not None:
+        if config.is_file():
+            atomic.write_bytes(
+                config.with_name(config.name + ".gammagui.bak"), config.read_bytes(), lock=False
+            )
+        else:
+            config.parent.mkdir(parents=True, exist_ok=True)
+        # No lock files left behind in Steam's own folders (see write_shortcuts).
+        atomic.write_bytes(config, new_config.encode("utf-8"), lock=False)
+    install_coop_artwork(vdf_path, appid)
+    return appid
+
+
+def coop_launch_url(exe: str) -> str:
+    return f"steam://rungameid/{rungameid(unsigned_appid(exe))}"
+
+
+def setup_coop_shortcut(vdf_path: Path, *, restart: bool, **fields) -> None:
+    """Write the co-op shortcut, then start it through Steam.
+
+    With ``restart`` (Steam is running) Steam is closed around the write and
+    started again with the launch link - one start, never two racing.
+    Blocking - run it on a worker thread. Both files are parsed before Steam
+    is shut down, so an unreadable one fails without closing Steam for nothing.
+    """
+    read_shortcuts(vdf_path)
+    if fields.get("proton_name") is not None:
+        try:
+            set_compat_tool(_config_vdf(vdf_path).read_text(encoding="utf-8"), 0, "check")
+        except FileNotFoundError:
+            pass
+    url = coop_launch_url(fields["exe"])
+
+    def write() -> None:
+        write_coop_shortcut(vdf_path, **fields)
+
+    if restart:
+        restart_steam(steam_root_for(vdf_path), while_stopped=write, relaunch_args=(url,))
+    else:
+        write()
+        open_in_steam(steam_root_for(vdf_path), url)
+
+
+def open_in_steam(steam_root: Path, url: str) -> None:
+    """Hand ``url`` (``steam://...``) to the Steam client matching this
+    install - native or Flatpak - starting Steam first if it is closed.
+    Raises OSError if Steam could not be started."""
+    subprocess.Popen(
+        [*steam_launch_command(steam_root), url],
+        env=child_environment(),
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )

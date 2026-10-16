@@ -28,16 +28,13 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -52,7 +49,7 @@ from PySide6.QtWidgets import (
 from .. import gui_settings
 from ..cli_runner import run_sync
 from ..config import logs_dir
-from ..fomod import apply_options, parse_config
+from ..fomod import apply_options, find_installer
 from ..integrity import _md5_file, invalidate_baseline
 from ..launcher import (
     LaunchError,
@@ -89,7 +86,6 @@ from ..modlist import (
     move_mod,
     read_lines,
     rename_category,
-    rename_mod,
     reorder_to_original,
     save_lines,
     seed_new_mo2_profile,
@@ -115,6 +111,9 @@ from .common import (
     section_label,
     tr,
 )
+from .dialogs import InputDialog as QInputDialog
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import add_buttons, add_close_button, style_window
 from .fomod_dialog import FomodWizardDialog
 
 #: Short timeout: these are metadata lookups, not installs.
@@ -134,6 +133,15 @@ def dropped_archives(mime) -> list[Path]:
         path for path in paths
         if path.suffix.lower() in MOD_ARCHIVE_SUFFIXES and path.is_file()
     ]
+
+
+#: Where a mod row keeps its real modlist.txt name; its text may be a
+#: COMMANDER-only nickname.
+MOD_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def _mod_name(item) -> str:
+    return item.data(0, MOD_NAME_ROLE) or item.text(0)
 
 
 class DragTree(QTreeWidget):
@@ -288,7 +296,7 @@ class DragTree(QTreeWidget):
                 pass  # the item/tree was rebuilt mid-drag
         if header is not None:
             self._hover_header_original_bg = header.background(0)
-            highlight = QColor(ACCENT)
+            highlight = QColor(ACCENT.name())
             highlight.setAlpha(60)
             header.setBackground(0, highlight)
             header.setBackground(1, highlight)
@@ -333,7 +341,7 @@ class DragTree(QTreeWidget):
             item = self.itemAt(event.position().toPoint())
             if item is not None:
                 if item.parent() is not None:
-                    self._drag_source_name = item.text(0)
+                    self._drag_source_name = _mod_name(item)
                 else:
                     category = item.data(0, Qt.ItemDataRole.UserRole)
                     # "Uncategorized" has no separator line to move by
@@ -431,7 +439,7 @@ class DragTree(QTreeWidget):
                 before = pos.y() < item_rect.center().y()
                 self.category_dropped.emit(source_category, target_category, before)
             else:
-                target_name = None if drop_item.parent() is None else drop_item.text(0)
+                target_name = None if drop_item.parent() is None else _mod_name(drop_item)
                 item_rect = self.visualItemRect(drop_item)
                 before = pos.y() < item_rect.center().y()
                 self.mod_dropped.emit(source, target_name, target_category, before)
@@ -528,7 +536,7 @@ class ModConflictsDialog(QDialog):
         self.setWindowTitle(tr("Conflicts - {name}", name=name))
         self.resize(760, 520)
         layout = QVBoxLayout(self)
-        layout.addWidget(section_label(name, level=2))
+        style_window(self, self.windowTitle())
         note = info_label(
             tr(
                 "Files this mod shares with other enabled mods. Where two mods "
@@ -554,9 +562,7 @@ class ModConflictsDialog(QDialog):
         if not overrides and overridden_by:
             self.tabs.setCurrentIndex(1)
         layout.addWidget(self.tabs, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        add_close_button(self, layout)
 
     @staticmethod
     def _tree(rows: dict[str, list[str]]) -> QTreeWidget:
@@ -606,7 +612,9 @@ class _ConflictsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.resize(760, 500)
+        self.setWindowTitle(tr("Mod conflicts"))
         layout = QVBoxLayout(self)
+        style_window(self, tr("Mod conflicts"))
         self._all_rows = rows
         self._custom_mods = custom_mods
         self._custom_rows = [
@@ -652,10 +660,7 @@ class _ConflictsDialog(QDialog):
         self.count_label.setObjectName("dim")
         layout.addWidget(self.count_label)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        layout.addWidget(buttons)
+        add_close_button(self, layout)
 
         self._refresh_view()
 
@@ -1047,7 +1052,7 @@ class ModManagerPage(QWidget):
         btn_row.addWidget(list_tools_label)
         self.conflicts_button = QPushButton(tr("Check for File Conflicts"))
         self.conflicts_button.setToolTip(
-            tr("Scan every currently-enabled mod's files for ones that appear in more than one mod - not full conflict resolution, just what the current load order is overriding.")
+            tr("Lists files that more than one enabled mod provides, and which mod wins.")
         )
         self.conflicts_button.clicked.connect(self._check_file_conflicts)
         btn_row.addWidget(self.conflicts_button)
@@ -1176,12 +1181,11 @@ class ModManagerPage(QWidget):
             return
         answer = QMessageBox.question(
             self,
-            tr("Fix load order"),
-            tr(
-                "Put the load order back the right way round? A backup of the "
-                "current modlist is saved first (Backups ▾ can restore it)."
-            ),
+            tr("Fix the load order?"),
+            tr("The mod load order is upside down. COMMANDER can flip it back the right way round."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            info=tr("A backup of the current mod list is saved first. The Backups button can restore it."),
+            labels={QMessageBox.StandardButton.Yes: tr("Fix load order"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1358,8 +1362,8 @@ class ModManagerPage(QWidget):
             self._update_guard()
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer before creating a backup."),
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open. Close it, then create the backup."),
             )
             return
         profile = self.profile_combo.currentText()
@@ -1372,9 +1376,9 @@ class ModManagerPage(QWidget):
             default_path = timestamped_backup_path(modlist)
             backup_name, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save modlist backup",
+                tr("Save modlist backup"),
                 str(default_path),
-                "Modlist backups (*.bak *.txt);;All files (*)",
+                tr("Modlist backups") + " (*.bak *.txt);;" + tr("All files") + " (*)",
             )
             if not backup_name:
                 return
@@ -1382,8 +1386,8 @@ class ModManagerPage(QWidget):
             if backup.exists():
                 QMessageBox.warning(
                     self,
-                    tr("Backup Already Exists"),
-                    tr("Choose a new timestamped filename so existing backups are not overwritten."),
+                    tr("That backup already exists"),
+                    tr("Pick a new file name, so the existing backup isn't replaced."),
                 )
                 return
             if self.window.install_busy or self._mo2_running():
@@ -1406,13 +1410,14 @@ class ModManagerPage(QWidget):
             # while this combo still lists its MO2 profiles) - the same
             # cases every other action here already reports instead of
             # letting the exception escape the slot.
-            QMessageBox.warning(self, tr("Backup Failed"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't create the backup"), str(exc))
 
     def _populate_tree(self) -> None:
         self._populating = True
         self.tree.blockSignals(True)
         self.tree.clear()
         priority = 0
+        nicknames = self._nicknames()
         self.tree.setColumnCount(2)
         self.tree.setHeaderLabels(["Mod", "Priority"])
         self.tree.header().setVisible(True)
@@ -1452,7 +1457,10 @@ class ModManagerPage(QWidget):
             self.tree.addTopLevelItem(header)
             for status, name, line_index in reversed(mods):
                 priority += 1
-                item = QTreeWidgetItem([name])
+                item = QTreeWidgetItem([nicknames.get(name, name)])
+                item.setData(0, MOD_NAME_ROLE, name)
+                if name in nicknames:
+                    item.setToolTip(0, tr("Real name: {name}", name=name))
                 item.setText(1, str(priority))
                 item.setToolTip(1, f"MO2 priority {priority}")
                 item.setFlags(
@@ -1503,7 +1511,7 @@ class ModManagerPage(QWidget):
             header = self.tree.topLevelItem(i)
             for j in range(header.childCount()):
                 item = header.child(j)
-                if item.text(0) != name:
+                if _mod_name(item) != name:
                     continue
                 if item.isHidden():
                     self.search.clear()
@@ -1531,7 +1539,7 @@ class ModManagerPage(QWidget):
             matches = 0
             for j in range(header.childCount()):
                 item = header.child(j)
-                hit = not needle or needle in item.text(0).lower()
+                hit = not needle or needle in item.text(0).lower() or needle in _mod_name(item).lower()
                 item.setHidden(not hit)
                 matches += int(hit)
             header.setHidden(matches == 0 and bool(needle))
@@ -1551,7 +1559,7 @@ class ModManagerPage(QWidget):
             header = self.tree.topLevelItem(i)
             for j in range(header.childCount()):
                 item = header.child(j)
-                name = item.text(0)
+                name = _mod_name(item)
                 if name in seen:
                     continue
                 seen.add(name)
@@ -1588,8 +1596,8 @@ class ModManagerPage(QWidget):
             if not quiet:
                 QMessageBox.warning(
                     self,
-                    tr("Mod Organizer is running"),
-                    tr("Close Mod Organizer first - it would overwrite your changes when it exits."),
+                    tr("Close Mod Organizer first"),
+                    tr("Mod Organizer is open and would undo this change when it closes. Close it, then try again."),
                 )
             return False
         mo2_profile = self.profile_combo.currentText()
@@ -1608,7 +1616,7 @@ class ModManagerPage(QWidget):
             return True
         except Exception as exc:  # noqa: BLE001
             if not quiet:
-                QMessageBox.warning(self, tr("Failed"), str(exc))
+                QMessageBox.warning(self, tr("Couldn't save the mod list"), str(exc))
             return False
 
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
@@ -1647,8 +1655,8 @@ class ModManagerPage(QWidget):
             self._update_guard()
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer before installing a mod."),
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open. Close it, then install the mod."),
             )
             return
         archive_name, _ = QFileDialog.getOpenFileName(
@@ -1692,8 +1700,8 @@ class ModManagerPage(QWidget):
             self._update_guard()
             QMessageBox.warning(
                 self,
-                tr("Cannot install now"),
-                tr("Close Mod Organizer and wait for any running install to finish, then drop the files again."),
+                tr("Can't install right now"),
+                tr("Close Mod Organizer and wait for any install to finish, then drop the files again."),
             )
             return
         self._drop_queue = list(archives)
@@ -1710,26 +1718,21 @@ class ModManagerPage(QWidget):
         try:
             default_name = default_mod_name(archive)
         except ModInstallError as exc:
-            QMessageBox.warning(self, tr("Invalid mod archive"), str(exc))
+            QMessageBox.warning(self, tr("This file can't be installed as a mod"), str(exc))
             return
         # Use a custom dialog for better text wrapping
         dialog = QDialog(self)
         dialog.setWindowTitle(tr("Name installed mod"))
-        dialog.resize(520, 130)
+        dialog.setFixedWidth(560)
         layout = QVBoxLayout(dialog)
-        label = QLabel(tr("MO2 mod name:"))
-        label.setWordWrap(True)
-        layout.addWidget(label)
+        layout.setSpacing(10)
+        style_window(dialog, tr("Name installed mod"), resizable=False)
+        layout.addWidget(info_label(tr("This is the mod's name in your mod list and in Mod Organizer.")))
         text_field = QLineEdit(default_name)
-        text_field.setMinimumWidth(300)
+        text_field.setMinimumHeight(34)
         text_field.selectAll()
         layout.addWidget(text_field)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        add_buttons(dialog, layout, tr("Install mod"))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name = text_field.text()
@@ -1738,7 +1741,7 @@ class ModManagerPage(QWidget):
         try:
             safe_name = sanitize_name(name)
         except ModInstallError as exc:
-            QMessageBox.warning(self, tr("Invalid mod name"), str(exc))
+            QMessageBox.warning(self, tr("That mod name won't work"), str(exc))
             return
         if not self._resolve_install_target(safe_name):
             return
@@ -1754,14 +1757,14 @@ class ModManagerPage(QWidget):
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
-            QMessageBox.warning(self, tr("Error"), str(exc))
+            QMessageBox.warning(self, tr("Can't install this mod"), str(exc))
             return False
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
             QMessageBox.warning(
                 self,
-                tr("Cannot install"),
-                tr("The GAMMA mods directory cannot be a symlink."),
+                tr("Can't install this mod"),
+                tr("The GAMMA mods folder is a link to another folder, which COMMANDER doesn't change for safety. Point the profile at the real folder instead."),
             )
             return False
         conflict = install_conflict(self._lines, mods_dir, name)
@@ -1770,15 +1773,17 @@ class ModManagerPage(QWidget):
         if conflict == "listed":
             QMessageBox.warning(
                 self,
-                tr("Mod already installed"),
-                tr("'{name}' is already in the modlist. Enable it in the list, or delete it from the list first if you want to reinstall it.", name=name),
+                tr("This mod is already installed"),
+                tr("'{name}' is already in your mod list. Tick it in the list to turn it on, or delete it first to install it again.", name=name),
             )
             return False
         answer = QMessageBox.question(
             self,
-            tr("Replace existing folder"),
-            tr("A leftover folder '{name}' exists in the mods folder but it is not in your modlist.\n\nReplace it with the new install? The old folder will be permanently deleted.", name=name),
+            tr("Replace the old folder?"),
+            tr("There's a leftover folder '{name}' in the mods folder that isn't in your mod list.", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            note=tr("The old folder is deleted for good."),
+            labels={QMessageBox.StandardButton.Yes: tr("Replace"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return False
@@ -1792,7 +1797,7 @@ class ModManagerPage(QWidget):
         try:
             shutil.rmtree(mods_dir / name)
         except OSError as exc:
-            QMessageBox.warning(self, tr("Cannot replace folder"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't replace the folder"), str(exc))
             return False
         return True
 
@@ -1854,27 +1859,26 @@ class ModManagerPage(QWidget):
         if archive is None:
             QMessageBox.information(
                 self,
-                tr("Can't reinstall from cache"),
+                tr("Can't reinstall from the cache"),
                 tr(
-                    "COMMANDER has no cached archive on file for '{name}' - "
-                    "this usually means the official GAMMA list has changed "
-                    "since it was installed, or it isn't tracked by the "
-                    "official modpack at all. Use the Reset or Uninstall "
-                    "tools on the Utilities page instead.",
+                    "There's no downloaded copy of '{name}' in the cache. The "
+                    "official GAMMA list may have changed since it was "
+                    "installed, or it isn't part of GAMMA.",
                     name=name,
                 ),
+                info=tr("Use the reset tools on the Utilities page instead."),
             )
             return
         answer = QMessageBox.question(
             self,
-            tr("Reinstall from Cache"),
-            tr(
-                "Reinstall '{name}' from its cached archive? Any existing "
-                "files for this mod are replaced - its enabled/disabled "
-                "state and position in the list are unaffected.",
-                name=name,
-            ),
+            tr("Reinstall this mod?"),
+            tr("'{name}' is installed again from its downloaded copy in the cache.", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=(
+                tr("Its files are replaced."),
+                tr("It stays on or off, in the same place in the list."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Reinstall"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1895,14 +1899,14 @@ class ModManagerPage(QWidget):
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
-            QMessageBox.warning(self, tr("Error"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't reinstall the mod"), str(exc))
             return
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
             QMessageBox.warning(
                 self,
-                tr("Cannot install"),
-                tr("The GAMMA mods directory cannot be a symlink."),
+                tr("Can't install this mod"),
+                tr("The GAMMA mods folder is a link to another folder, which COMMANDER doesn't change for safety. Point the profile at the real folder instead."),
             )
             return
         destination = mods_dir / name
@@ -1931,7 +1935,7 @@ class ModManagerPage(QWidget):
     def _on_reinstall_move_error(self, message: str) -> None:
         self._reinstall_move_task = None
         self.window.set_install_busy(False)
-        QMessageBox.warning(self, tr("Cannot reinstall"), message)
+        QMessageBox.warning(self, tr("Couldn't reinstall the mod"), message)
 
     def _on_reinstall_moved_aside(
         self, destination: Path, backup: Path, archive: Path, name: str, done_message: str
@@ -1967,8 +1971,8 @@ class ModManagerPage(QWidget):
         except OSError as exc:
             QMessageBox.warning(
                 self,
-                tr("Cannot reinstall"),
-                tr("Could not put the original mod folder back: {error}", error=str(exc)),
+                tr("Couldn't reinstall the mod"),
+                tr("The original mod folder couldn't be put back:\n{error}", error=str(exc)),
             )
 
     def _update_mod_from_archive(self, name: str) -> None:
@@ -1990,15 +1994,18 @@ class ModManagerPage(QWidget):
             return
         answer = QMessageBox.question(
             self,
-            tr("Update from Archive"),
+            tr("Update this mod?"),
             tr(
-                "Replace the files of '{name}' with {archive}? Its place in the "
-                "list and its enabled state stay the same. If the install fails, "
-                "the current files are put back.",
+                "The files of '{name}' are replaced with {archive}.",
                 name=name,
                 archive=Path(archive_name).name,
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=(
+                tr("It stays on or off, in the same place in the list."),
+                tr("If the update fails, the current files are put back."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Update"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -2072,19 +2079,14 @@ class ModManagerPage(QWidget):
             return
         staging = Path(staging_name)
         self._install_staging = staging
-        config_path = staging / "fomod" / "ModuleConfig.xml"
-        fomod_root = staging
-        if not config_path.is_file():
-            candidates = list(staging.glob("*/fomod/ModuleConfig.xml"))
-            if len(candidates) == 1:
-                config_path = candidates[0]
-                fomod_root = candidates[0].parent.parent
-        if config_path.is_file():
-            try:
-                config = parse_config(config_path)
-            except ModInstallError as exc:
-                self._on_install_error(str(exc), generation)
-                return
+        archive_name = self._install_source.name if self._install_source else ""
+        try:
+            installer = find_installer(staging, archive_name)
+        except ModInstallError as exc:
+            self._on_install_error(str(exc), generation)
+            return
+        if installer is not None:
+            config, fomod_root = installer
             dialog = FomodWizardDialog(config, fomod_root, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 self._on_install_error("Mod installation cancelled", generation)
@@ -2111,7 +2113,7 @@ class ModManagerPage(QWidget):
             self._on_install_error("The GAMMA mods directory cannot be a symlink.", generation)
             return
         name = self._install_name
-        self.install_progress.status_message(f"Installing {name}...")
+        self.install_progress.status_message(tr("Installing {name}...", name=name))
 
         installation_file = self._install_source.name if self._install_source else ""
 
@@ -2163,7 +2165,7 @@ class ModManagerPage(QWidget):
             # (which scrolls to a freshly-visible "Custom Mods" entry)
             # a reinstalled mod often sits somewhere already on screen,
             # so there's no other obvious sign anything happened.
-            QMessageBox.information(self, tr("Reinstalled"), done_message)
+            QMessageBox.information(self, tr("Mod reinstalled"), done_message)
             return
         try:
             new_lines = add_custom_mod(self._lines, destination.name, enabled=False)
@@ -2173,14 +2175,16 @@ class ModManagerPage(QWidget):
                 shutil.rmtree(destination)
             except OSError:
                 pass
-            QMessageBox.warning(self, tr("Mod installation failed"), str(exc))
+            QMessageBox.warning(self, tr("The mod couldn't be installed"), str(exc))
             self._finish_install()
             return
         if self._write_lines(new_lines, internal=True):
             self._just_installed_name = destination.name
             self.window.statusBar().showMessage(
-                f"Installed '{destination.name}' - added disabled to "
-                "Custom Mods, at the bottom of the list. Enable it below.",
+                tr(
+                    "Installed '{name}' - added disabled to Custom Mods, at the bottom of the list.",
+                    name=destination.name,
+                ),
                 8000,
             )
             # A new mod folder just appeared under gamma/mods - Verify
@@ -2198,15 +2202,16 @@ class ModManagerPage(QWidget):
             # they can remove the untracked folder by hand.
             QMessageBox.warning(
                 self,
-                tr("Mod installed but not listed"),
-                tr("modlist.txt could not be updated, and the copied files at\n{destination}\ncould not be removed automatically. Delete that folder manually to avoid an untracked mod.", destination=destination),
+                tr("The mod list couldn't be updated"),
+                tr("The mod's files were copied, but the mod list (modlist.txt) couldn't be updated, and the files couldn't be removed again:\n{destination}", destination=destination),
+                note=tr("Delete that folder yourself, so it doesn't sit there unused."),
             )
             self._finish_install()
             return
         QMessageBox.warning(
             self,
-            tr("Mod installed but not listed"),
-            tr("modlist.txt could not be updated; the copied files were removed."),
+            tr("The mod list couldn't be updated"),
+            tr("The mod list (modlist.txt) couldn't be updated, so the copied files were removed again. Try installing the mod again."),
         )
         self._finish_install()
 
@@ -2217,7 +2222,7 @@ class ModManagerPage(QWidget):
             self._install_task.cancel()
         if self._finalize_task is not None:
             self._finalize_task.cancel()
-        QMessageBox.warning(self, tr("Mod installation failed"), message)
+        QMessageBox.warning(self, tr("The mod couldn't be installed"), message)
         self._finish_install()
 
     def _cancel_install(self) -> None:
@@ -2259,8 +2264,11 @@ class ModManagerPage(QWidget):
                     backup.rename(destination)
                 except OSError:
                     self.window.statusBar().showMessage(
-                        f"Could not restore the previous '{destination.name}' "
-                        f"- it's saved at {backup}",
+                        tr(
+                            "Could not restore the previous '{name}' - it's saved at {path}",
+                            name=destination.name,
+                            path=str(backup),
+                        ),
                         8000,
                     )
         staging_root = (
@@ -2318,7 +2326,7 @@ class ModManagerPage(QWidget):
             header = self.tree.topLevelItem(i)
             for j in range(header.childCount()):
                 item = header.child(j)
-                if item.text(0) == name:
+                if _mod_name(item) == name:
                     self.tree.scrollToItem(
                         item, QAbstractItemView.ScrollHint.PositionAtCenter
                     )
@@ -2334,7 +2342,7 @@ class ModManagerPage(QWidget):
 
     def _selected_mod_names(self) -> list[str]:
         return [
-            item.text(0)
+            _mod_name(item)
             for item in self.tree.selectedItems()
             if item.parent() is not None
         ]
@@ -2346,10 +2354,10 @@ class ModManagerPage(QWidget):
             header = self.tree.topLevelItem(index)
             for child_index in range(header.childCount()):
                 item = header.child(child_index)
-                if item.text(0) in wanted:
+                if _mod_name(item) in wanted:
                     item.setSelected(True)
                     self.tree.scrollToItem(item)
-                    wanted.discard(item.text(0))
+                    wanted.discard(_mod_name(item))
         self._update_count()
 
     def _set_selected_mods(self, enabled: bool) -> None:
@@ -2375,13 +2383,13 @@ class ModManagerPage(QWidget):
         names = self._selected_mod_names()
 
         box = QMessageBox(self)
-        box.setWindowTitle(tr("Delete Mods"))
+        box.setWindowTitle(tr("Remove {arg} mod(s)?", arg=len(indexes)))
         box.setIcon(QMessageBox.Icon.Warning)
         box.setText(
-            tr("Remove {arg} mod(s) from the modlist?\n\nThis only edits the modlist; mod files are not deleted.", arg=len(indexes))
+            tr("They're taken out of the mod list. Their files stay on disk unless you tick the box below.")
         )
         delete_files = QCheckBox(
-            tr("Also delete the mod folder(s) on disk - cannot be undone")
+            tr("Also delete their folders from disk (can't be undone)")
         )
         box.setCheckBox(delete_files)
         confirm = box.addButton(tr("Delete"), QMessageBox.ButtonRole.DestructiveRole)
@@ -2401,14 +2409,14 @@ class ModManagerPage(QWidget):
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
-            QMessageBox.warning(self, tr("Error"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't delete the mods"), str(exc))
             return
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
             QMessageBox.warning(
                 self,
-                tr("Cannot delete folders"),
-                tr("The GAMMA mods directory cannot be a symlink."),
+                tr("Couldn't delete the folders"),
+                tr("The GAMMA mods folder is a link to another folder, which COMMANDER doesn't change for safety. Point the profile at the real folder instead."),
             )
             return
         if self._delete_task is not None:
@@ -2425,7 +2433,7 @@ class ModManagerPage(QWidget):
     def _on_mod_folders_delete_error(self, message: str) -> None:
         self._delete_task = None
         self.window.set_install_busy(False)
-        QMessageBox.warning(self, tr("Error"), message)
+        QMessageBox.warning(self, tr("Couldn't delete the mods"), message)
 
     def _on_mod_folders_deleted(
         self, failures: list[str], indexes: list[int]
@@ -2435,8 +2443,9 @@ class ModManagerPage(QWidget):
         if failures:
             QMessageBox.warning(
                 self,
-                tr("Some folders were not deleted"),
-                "\n".join(failures),
+                tr("Some folders couldn't be deleted"),
+                tr("Close anything that might be using them, then try again:"),
+                points=tuple(failures),
             )
             return
         # Actual files under gamma/mods just changed - Verify Integrity's
@@ -2455,6 +2464,20 @@ class ModManagerPage(QWidget):
             return
         self._load_mods()
 
+    def _confirm_reorder(self) -> bool:
+        """Warn once per session before the first manual load-order change."""
+        if self._reorder_warned:
+            return True
+        answer = QMessageBox.question(
+            self,
+            tr("Change the load order?"),
+            tr("Moving a mod changes the order mods load in. A wrong order can break your save or the game."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Move mod"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        self._reorder_warned = answer == QMessageBox.StandardButton.Yes
+        return self._reorder_warned
+
     def _move_selected(self, delta: int) -> None:
         if self.window.install_busy:
             self._update_guard()
@@ -2463,16 +2486,8 @@ class ModManagerPage(QWidget):
         if len(indexes) != 1:
             return
         selected_name = self._selected_mod_names()[0]
-        if not self._reorder_warned:
-            answer = QMessageBox.question(
-                self,
-                tr("Reorder Mods"),
-                tr("Moving a mod changes the load order. An incorrect load order can break your save or the game.\n\nContinue?"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self._reorder_warned = True
+        if not self._confirm_reorder():
+            return
         new_lines = move(self._lines, indexes[0], delta)
         if new_lines == self._lines:
             return
@@ -2499,8 +2514,14 @@ class ModManagerPage(QWidget):
         single = len(indexes) == 1
 
         menu = QMenu(self)
+        # A nickname only lives in COMMANDER's settings - modlist.txt and the
+        # mod's folder never change - so it stays available while MO2 runs.
         rename_action = menu.addAction(tr("Rename..."))
-        rename_action.setEnabled(single and not blocked)
+        rename_action.setEnabled(single)
+        reset_name_action = menu.addAction(tr("Reset Name"))
+        reset_name_action.setEnabled(
+            single and self._selected_mod_names()[0] in self._nicknames()
+        )
         menu.addSeparator()
         enable_action = menu.addAction(tr("Enable"))
         disable_action = menu.addAction(tr("Disable"))
@@ -2558,6 +2579,8 @@ class ModManagerPage(QWidget):
             return
         if chosen == rename_action:
             self._rename_selected_mod()
+        elif chosen == reset_name_action:
+            self._set_nickname(self._selected_mod_names()[0], "")
         elif chosen == enable_action:
             self._set_selected_mods(True)
         elif chosen == disable_action:
@@ -2587,35 +2610,52 @@ class ModManagerPage(QWidget):
         elif chosen == delete_action:
             self._delete_selected_mods()
 
-    def _rename_selected_mod(self) -> None:
-        if self.window.install_busy or self._mo2_running():
-            self._update_guard()
-            return
-        indexes = self._selected_mod_indexes()
-        if len(indexes) != 1:
-            return
-        old_name = self._selected_mod_names()[0]
-        new_name, accepted = QInputDialog.getText(
-            self,
-            tr("Rename Mod"),
-            tr("New display name in the modlist:"),
-            text=old_name,
-        )
-        if not accepted:
-            return
-        new_name = new_name.strip()
-        if not new_name or new_name == old_name:
-            return
+    # ----- nicknames -----
+    def _nickname_key(self) -> str:
+        # Keyed by GAMMA folder: every MO2 profile there shares the same mods.
         try:
-            new_lines = rename_mod(self._lines, old_name, new_name)
-        except ValueError as exc:
-            QMessageBox.warning(self, tr("Invalid Name"), str(exc))
+            return str(Path(self._active_profile().gamma))
+        except (AttributeError, RuntimeError):
+            return ""
+
+    def _nicknames(self) -> dict[str, str]:
+        """COMMANDER-only display names for this install's mods."""
+        stored = gui_settings.load_gui_settings().get("mod_nicknames", {})
+        return dict(stored.get(self._nickname_key(), {}))
+
+    def _set_nickname(self, name: str, nickname: str) -> None:
+        key = self._nickname_key()
+        if not key:
             return
-        if new_lines == self._lines:
+        stored = dict(gui_settings.load_gui_settings().get("mod_nicknames", {}))
+        names = dict(stored.get(key, {}))
+        nickname = nickname.strip()
+        if nickname and nickname != name:
+            names[name] = nickname
+        else:
+            names.pop(name, None)
+        if names:
+            stored[key] = names
+        else:
+            stored.pop(key, None)
+        gui_settings.save_gui_settings(mod_nicknames=stored)
+        self._populate_tree()
+        self._select_mod_names([name])
+
+    def _rename_selected_mod(self) -> None:
+        names = self._selected_mod_names()
+        if len(names) != 1:
             return
-        if self._write_lines(new_lines):
-            self._load_mods()
-            self._select_mod_names([new_name])
+        name = names[0]
+        nickname, accepted = QInputDialog.getText(
+            self,
+            tr("Rename mod"),
+            tr("The name COMMANDER shows for this mod. Mod Organizer and the mod's files keep its real name:\n{name}", name=name),
+            text=self._nicknames().get(name, name),
+            confirm=tr("Rename"),
+        )
+        if accepted:
+            self._set_nickname(name, nickname[:120])
 
     def _show_category_context_menu(self, item, pos) -> None:
         category = item.data(0, Qt.ItemDataRole.UserRole)
@@ -2673,7 +2713,7 @@ class ModManagerPage(QWidget):
                 self._lines, category, neighbor, before=delta < 0
             )
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Cannot Move Category"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't move the category"), str(exc))
             return
         if self._write_lines(new_lines):
             self._load_mods()
@@ -2691,12 +2731,11 @@ class ModManagerPage(QWidget):
             (category, []),
         )
         box = QMessageBox(self)
-        box.setWindowTitle(tr("Delete Category"))
+        box.setWindowTitle(tr('Delete the category "{category}"?', category=category))
         box.setIcon(QMessageBox.Icon.Warning)
         box.setText(
             tr(
-                'Delete the category "{category}"? Its {count} mod(s) are moved to Uncategorized, not deleted, unless you check the box below.',
-                category=category,
+                "Its {count} mod(s) move to Uncategorized. They're only removed if you tick the box below.",
                 count=len(mods),
             )
         )
@@ -2715,7 +2754,7 @@ class ModManagerPage(QWidget):
                 self._lines, category, delete_members=delete_mods_check.isChecked()
             )
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Cannot Delete Category"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't delete the category"), str(exc))
             return
         if self._write_lines(new_lines):
             self._remove_tracked_user_category(category)
@@ -2727,9 +2766,10 @@ class ModManagerPage(QWidget):
             return
         new_name, accepted = QInputDialog.getText(
             self,
-            "Rename Category",
-            "New category name:",
+            tr("Rename category"),
+            tr("New name for the category:"),
             text=old_category,
+            confirm=tr("Rename"),
         )
         if not accepted:
             return
@@ -2739,7 +2779,7 @@ class ModManagerPage(QWidget):
         try:
             new_lines = rename_category(self._lines, old_category, new_name)
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Invalid Name"), str(exc))
+            QMessageBox.warning(self, tr("That name won't work"), str(exc))
             return
         if new_lines == self._lines:
             return
@@ -2865,16 +2905,8 @@ class ModManagerPage(QWidget):
         names = self._selected_mod_names()
         if len(names) != 1:
             return
-        if not self._reorder_warned:
-            answer = QMessageBox.question(
-                self,
-                tr("Move Mod"),
-                tr("Moving a mod changes the load order. An incorrect load order can break your save or the game.\n\nContinue?"),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self._reorder_warned = True
+        if not self._confirm_reorder():
+            return
         new_lines = move_mod(self._lines, names[0], category=category)
         if new_lines == self._lines:
             return
@@ -2886,26 +2918,26 @@ class ModManagerPage(QWidget):
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
-            QMessageBox.warning(self, tr("Error"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't open the folder"), str(exc))
             return
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
             QMessageBox.warning(
                 self,
-                tr("Cannot open folder"),
-                tr("The GAMMA mods directory cannot be a symlink."),
+                tr("Couldn't open the folder"),
+                tr("The GAMMA mods folder is a link to another folder, which COMMANDER doesn't change for safety. Point the profile at the real folder instead."),
             )
             return
         folder = mods_dir / name
         if not folder.is_dir():
             QMessageBox.information(
                 self,
-                tr("No Mod Folder"),
-                tr("No folder '{name}' exists in {mods_dir}.\n\nRenaming only changes the modlist display name; it does not rename the folder on disk.", name=name, mods_dir=mods_dir),
+                tr("No folder for this mod"),
+                tr("There's no folder called '{name}' in:\n{mods_dir}", name=name, mods_dir=mods_dir),
             )
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
-            QMessageBox.warning(self, tr("Cannot open folder"), tr("Could not open:\n{folder}", folder=folder))
+            QMessageBox.warning(self, tr("Couldn't open the folder"), tr("This folder couldn't be opened:\n{folder}", folder=folder))
 
     def _set_selected(self) -> None:
         if self.window.install_busy:
@@ -2947,7 +2979,7 @@ class ModManagerPage(QWidget):
                 self.window.refresh_settings()
         else:
             QMessageBox.warning(
-                self, tr("Failed"), out.strip() or "Could not set selected profile"
+                self, tr("Couldn't change the MO2 profile"), out.strip() or tr("Mod Organizer didn't accept the change. Try again, or pick the profile in Mod Organizer itself.")
             )
 
     def _sync_selected_status(self, *_args) -> None:
@@ -2984,7 +3016,7 @@ class ModManagerPage(QWidget):
 
     def _on_set_selected_error(self, msg: str) -> None:
         self.set_selected_button.setEnabled(True)
-        QMessageBox.warning(self, tr("Error"), msg)
+        QMessageBox.warning(self, tr("Couldn't change the MO2 profile"), msg)
 
     # ----- MO2 profile management (New/Rename/Delete) -----
     def _existing_mo2_profile_names(self) -> list[str]:
@@ -3001,15 +3033,22 @@ class ModManagerPage(QWidget):
         empty_label = tr("(Empty profile)")
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(tr("New MO2 Profile"))
-        dialog.resize(420, 160)
+        dialog.setWindowTitle(tr("New MO2 profile"))
+        dialog.setFixedWidth(560)
         dlg_layout = QVBoxLayout(dialog)
-        dlg_layout.addWidget(QLabel(tr("Profile name:")))
+        dlg_layout.setSpacing(10)
+        style_window(dialog, tr("New MO2 profile"), resizable=False)
+        name_label = QLabel(tr("Profile name:"))
+        name_label.setObjectName("dim")
+        dlg_layout.addWidget(name_label)
         name_field = QLineEdit()
-        name_field.setMinimumWidth(280)
+        name_field.setMinimumHeight(34)
         dlg_layout.addWidget(name_field)
-        dlg_layout.addWidget(QLabel(tr("Copy modlist from:")))
+        source_label = QLabel(tr("Start with the mod list from:"))
+        source_label.setObjectName("dim")
+        dlg_layout.addWidget(source_label)
         source_combo = QComboBox()
+        source_combo.setMinimumHeight(34)
         source_combo.addItem(empty_label)
         source_combo.addItems(existing)
         if current:
@@ -3017,12 +3056,7 @@ class ModManagerPage(QWidget):
             if idx >= 0:
                 source_combo.setCurrentIndex(idx)
         dlg_layout.addWidget(source_combo)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        dlg_layout.addWidget(buttons)
+        add_buttons(dialog, dlg_layout, tr("Create profile"))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -3030,14 +3064,14 @@ class ModManagerPage(QWidget):
         if not _valid_name(name):
             QMessageBox.warning(
                 self,
-                tr("Invalid Name"),
-                tr("Profile names cannot be empty or contain path separators."),
+                tr("That name won't work"),
+                tr("Profile names can't be empty or contain / or \\."),
             )
             return
         if name in existing:
             QMessageBox.warning(
                 self,
-                tr("Profile Exists"),
+                tr("That name is taken"),
                 tr('A profile named "{name}" already exists.', name=name),
             )
             return
@@ -3059,7 +3093,7 @@ class ModManagerPage(QWidget):
                 # something to render.
                 save_lines(new_modlist, [])
         except OSError as exc:
-            QMessageBox.warning(self, tr("Could Not Create Profile"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't create the MO2 profile"), str(exc))
             return
 
         self._pending_profile_select = name
@@ -3075,9 +3109,10 @@ class ModManagerPage(QWidget):
         existing = self._existing_mo2_profile_names()
         new_name, accepted = QInputDialog.getText(
             self,
-            tr("Rename Profile"),
+            tr("Rename MO2 profile"),
             tr('New name for "{name}":', name=old_name),
             text=old_name,
+            confirm=tr("Rename"),
         )
         if not accepted:
             return
@@ -3087,14 +3122,14 @@ class ModManagerPage(QWidget):
         if not _valid_name(new_name):
             QMessageBox.warning(
                 self,
-                tr("Invalid Name"),
-                tr("Profile names cannot be empty or contain path separators."),
+                tr("That name won't work"),
+                tr("Profile names can't be empty or contain / or \\."),
             )
             return
         if new_name in existing:
             QMessageBox.warning(
                 self,
-                tr("Profile Exists"),
+                tr("That name is taken"),
                 tr('A profile named "{name}" already exists.', name=new_name),
             )
             return
@@ -3104,7 +3139,7 @@ class ModManagerPage(QWidget):
         try:
             (profiles_root / old_name).rename(profiles_root / new_name)
         except OSError as exc:
-            QMessageBox.warning(self, tr("Could Not Rename Profile"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't rename the MO2 profile"), str(exc))
             return
 
         def finish_rename() -> None:
@@ -3162,20 +3197,16 @@ class ModManagerPage(QWidget):
         if self.profile_combo.count() <= 1:
             QMessageBox.warning(
                 self,
-                tr("Cannot Delete Profile"),
-                tr("This is the only MO2 profile - nothing would be left to switch to."),
+                tr("Can't delete the last profile"),
+                tr("This is the only Mod Organizer profile, so there'd be nothing left to switch to."),
             )
             return
         box = QMessageBox(self)
-        box.setWindowTitle(tr("Delete Profile"))
+        box.setWindowTitle(tr('Delete the MO2 profile "{name}"?', name=name))
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(
-            tr(
-                'Permanently delete the MO2 profile "{name}" and everything in it '
-                "(modlist, saves, settings)? This cannot be undone.",
-                name=name,
-            )
-        )
+        box.setText(tr("The profile and everything in it are deleted:"))
+        box.points = (tr("Its mod list"), tr("Its saves"), tr("Its settings"))
+        box.note = tr("This can't be undone.")
         confirm = box.addButton(tr("Delete"), QMessageBox.ButtonRole.DestructiveRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
@@ -3195,26 +3226,28 @@ class ModManagerPage(QWidget):
         self.manage_profile_button.setEnabled(True)
         if rc != 0:
             QMessageBox.warning(
-                self, tr("Failed"), out.strip() or tr("Could not delete profile.")
+                self, tr("Couldn't delete the MO2 profile"), out.strip() or tr("The profile couldn't be deleted. Try again, or delete it in Mod Organizer.")
             )
             return
         self._load_profiles(self._profiles_generation)
 
     def _on_delete_profile_error(self, msg: str) -> None:
         self.manage_profile_button.setEnabled(True)
-        QMessageBox.warning(self, tr("Error"), msg)
+        QMessageBox.warning(self, tr("Couldn't delete the MO2 profile"), msg)
 
     def _create_category(self) -> None:
         if self.window.install_busy or self._mo2_running():
             self._update_guard()
             return
-        name, accepted = QInputDialog.getText(self, "New Category", "Category name:")
+        name, accepted = QInputDialog.getText(
+            self, tr("New category"), tr("Name for the new category:"), confirm=tr("Add category")
+        )
         if not accepted:
             return
         try:
             new_lines = add_category(self._lines, sanitize_name(name))
         except (ModInstallError, ValueError) as exc:
-            QMessageBox.warning(self, tr("Invalid Category"), str(exc))
+            QMessageBox.warning(self, tr("That category won't work"), str(exc))
             return
         if self._write_lines(new_lines):
             # add_category() always appends the new separator as the
@@ -3241,14 +3274,14 @@ class ModManagerPage(QWidget):
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
-            QMessageBox.warning(self, tr("Error"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't check for conflicts"), str(exc))
             return
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
             QMessageBox.warning(
                 self,
-                tr("Cannot scan for conflicts"),
-                tr("The GAMMA mods directory cannot be a symlink."),
+                tr("Couldn't check for conflicts"),
+                tr("The GAMMA mods folder is a link to another folder, which COMMANDER doesn't change for safety. Point the profile at the real folder instead."),
             )
             return
         lines = list(self._lines)
@@ -3267,8 +3300,8 @@ class ModManagerPage(QWidget):
         if not conflicts:
             QMessageBox.information(
                 self,
-                tr("No Conflicts Found"),
-                tr("No enabled mod shares a file with another enabled mod."),
+                tr("No conflicts found"),
+                tr("None of your turned-on mods change the same file."),
             )
             return
         _ConflictsDialog(
@@ -3287,7 +3320,7 @@ class ModManagerPage(QWidget):
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
-            QMessageBox.warning(self, tr("Error"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't check for conflicts"), str(exc))
             return
         mods_dir = Path(profile.gamma) / "mods"
         lines = list(self._lines)
@@ -3311,7 +3344,7 @@ class ModManagerPage(QWidget):
         def _failed(message: str) -> None:
             self._mod_conflicts_task = None
             self.window.statusBar().clearMessage()
-            QMessageBox.warning(self, tr("Scan Failed"), message)
+            QMessageBox.warning(self, tr("Couldn't check for conflicts"), message)
 
         task.result.connect(_done)
         task.error.connect(_failed)
@@ -3320,7 +3353,7 @@ class ModManagerPage(QWidget):
     def _on_conflicts_error(self, message: str) -> None:
         self.conflicts_button.setEnabled(True)
         self.conflicts_button.setText(tr("Check for File Conflicts"))
-        QMessageBox.warning(self, tr("Scan Failed"), message)
+        QMessageBox.warning(self, tr("Couldn't check for conflicts"), message)
 
     def _on_tree_drop(
         self,
@@ -3332,6 +3365,14 @@ class ModManagerPage(QWidget):
         """Persist a drag/drop reorder reported by the mod tree."""
         if self.window.install_busy or self._mo2_running():
             self._update_guard()
+            return
+        if not self._reorder_warned:
+            # Ask after the tree's mouse-release handling has finished,
+            # then come back here with the answer remembered.
+            args = (source_name, target_name, category, before)
+            QTimer.singleShot(
+                0, self, lambda: self._confirm_reorder() and self._on_tree_drop(*args)
+            )
             return
         # `before` from DragTree means "dropped above the target on
         # screen." move_mod()'s before/at_start are file-index semantics,
@@ -3373,7 +3414,7 @@ class ModManagerPage(QWidget):
                 self._lines, source_category, target_category, before=not before
             )
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Cannot Move Category"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't move the category"), str(exc))
             return
         if new_lines == self._lines:
             return
@@ -3398,30 +3439,30 @@ class ModManagerPage(QWidget):
             ensure_runner_prefix(runner)
             launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
         except (LaunchError, RuntimeError) as exc:
-            QMessageBox.warning(self, tr("Cannot launch MO2"), str(exc))
+            QMessageBox.warning(self, tr("Mod Organizer couldn't start"), str(exc))
 
     def _restore_backup(self) -> None:
         if self.window.install_busy or self._mo2_running():
             self._update_guard()
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer first - it would overwrite your changes when it exits."),
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open and would undo this change when it closes. Close it, then try again."),
             )
             return
         mo2_profile = self.profile_combo.currentText()
         try:
             path = self._modlist_path(mo2_profile)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, tr("Failed"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't restore the backup"), str(exc))
             return
         default_backup = self._backup_path(path)
         start_path = default_backup if default_backup.is_file() else path.parent
         backup_name, _ = QFileDialog.getOpenFileName(
             self,
-            "Open modlist backup",
+            tr("Open modlist backup"),
             str(start_path),
-            "Modlist backups (*.bak *.txt);;All files (*)",
+            tr("Modlist backups") + " (*.bak *.txt);;" + tr("All files") + " (*)",
         )
         if not backup_name:
             return
@@ -3434,7 +3475,7 @@ class ModManagerPage(QWidget):
             if bak.resolve() == path.resolve():
                 raise ValueError("The selected file is the current modlist.")
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, tr("Invalid Backup"), str(exc))
+            QMessageBox.warning(self, tr("This backup can't be used"), str(exc))
             return
         self._restore_backup_file(path, bak, "Restore Backup")
 
@@ -3458,22 +3499,28 @@ class ModManagerPage(QWidget):
                 raise FileNotFoundError("No original modlist backup exists yet.")
             original = read_lines(bak)
         except (OSError, RuntimeError, ValueError) as exc:
-            QMessageBox.warning(self, tr("Original Order Unavailable"), str(exc))
+            QMessageBox.warning(self, tr("The original order isn't available"), str(exc))
             self._update_guard()
             return
         new_lines = reorder_to_original(self._lines, original)
         if new_lines == self._lines:
             QMessageBox.information(
                 self,
-                tr("Original Order"),
+                tr("Already in order"),
                 tr("The GAMMA mods are already in their original order."),
             )
             return
         answer = QMessageBox.question(
             self,
-            tr("Restore Original Order"),
-            tr("Place the GAMMA mods back into their original default load order?\n\nYour installed mods, new categories, and enabled/disabled state will be kept."),
+            tr("Put GAMMA back in its original order?"),
+            tr("The GAMMA mods go back to their default load order."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=(
+                tr("Mods you installed yourself are kept."),
+                tr("Your categories are kept."),
+                tr("Mods stay on or off as they are."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Restore order"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -3486,8 +3533,10 @@ class ModManagerPage(QWidget):
         answer = QMessageBox.question(
             self,
             title,
-            tr("Restore the modlist from:\n{bak}\n\nCurrent edits will be lost.", bak=bak),
+            tr("Your mod list is replaced with this backup:\n{bak}", bak=bak),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            note=tr("Changes you made since then are lost."),
+            labels={QMessageBox.StandardButton.Yes: tr("Restore"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -3500,8 +3549,8 @@ class ModManagerPage(QWidget):
             self._update_guard()
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer first - it would overwrite your changes when it exits."),
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open and would undo this change when it closes. Close it, then try again."),
             )
             return
         current_backup = self._backup_path(path)
@@ -3515,7 +3564,7 @@ class ModManagerPage(QWidget):
             tmp.replace(path)
         except Exception as exc:  # noqa: BLE001
             tmp.unlink(missing_ok=True)
-            QMessageBox.warning(self, tr("Failed"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't restore the backup"), str(exc))
             return
         self._load_mods()
         self.backup_status.setText(tr("Restored from: {bak}", bak=bak))

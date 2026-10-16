@@ -10,6 +10,9 @@ from PySide6.QtCore import QTimer, qInstallMessageHandler
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from commander_gui.gui_settings import load_gui_settings
+from commander_gui.i18n import set_active_language
+
 from .ui.main_window import MainWindow
 from .ui.theme import apply_theme
 
@@ -64,6 +67,8 @@ def main() -> None:
         raise SystemExit(2)
 
     install_message_filter()
+    # Same language as COMMANDER: both read the shared gui-settings.json.
+    set_active_language(load_gui_settings().get("language") or "en")
     app = QApplication(sys.argv[:1])
     app.setApplicationName("COMMANDER Assistant")
     app.setWindowIcon(QIcon(str(Path(__file__).with_name("assistant-icon.png"))))

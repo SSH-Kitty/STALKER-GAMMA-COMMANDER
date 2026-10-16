@@ -163,12 +163,14 @@ def _corrupt_backup_path(path: Path) -> Path:
 
 
 def _reset_settings(path: Path, backup: Path) -> CliSettings:
+    settings = CliSettings()
+    settings.profiles = [CliProfile(active=True)]
     try:
         path.replace(backup)
     except OSError:
-        pass
-    settings = CliSettings()
-    settings.profiles = [CliProfile(active=True)]
+        # Couldn't set the corrupt file aside: don't save over it either,
+        # or the only copy of the user's profiles is gone.
+        return settings
     settings.save(path)
     return settings
 

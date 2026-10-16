@@ -17,10 +17,10 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -45,7 +45,6 @@ from ..parsers import (
 )
 from ..repair import expected_archive_md5s, fetch_modpack_records
 from .common import (
-    STATUS_RED,
     BackgroundTask,
     CommandRunner,
     OutputPane,
@@ -59,6 +58,9 @@ from .common import (
     section_label,
     tr,
 )
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import style_window
+from .multiplayer_page import confirm_singleplayer
 
 #: System directories that must never be handed to rmtree, whatever a
 #: profile says - a path is rejected if it equals one of these OR is nested
@@ -188,6 +190,9 @@ _CACHE_SUFFIXES = (
     ".7z", ".zip", ".rar", ".tar", ".gz", ".xz", ".zst", ".part",
     ".download", ".tmp", ".json", ".md5", ".txt",
 )
+#: ...but only these prove it is one: a notes folder of .txt/.json files
+#: passed the check above and could be wiped as a "cache".
+_ARCHIVE_SUFFIXES = (".7z", ".zip", ".rar", ".tar", ".gz", ".xz", ".zst", ".part")
 
 
 def _looks_like_install(label: str, folder: Path) -> bool:
@@ -215,11 +220,11 @@ def _looks_like_install(label: str, folder: Path) -> bool:
         if entry.is_file():
             if not entry.name.lower().endswith(_CACHE_SUFFIXES):
                 return False
-            has_archive = True
+            has_archive = has_archive or entry.name.lower().endswith(_ARCHIVE_SUFFIXES)
         elif entry.is_dir() and not has_archive:
             try:
                 has_archive = any(
-                    child.is_file() and child.name.lower().endswith(_CACHE_SUFFIXES)
+                    child.is_file() and child.name.lower().endswith(_ARCHIVE_SUFFIXES)
                     for child in entry.iterdir()
                 )
             except OSError:
@@ -503,19 +508,15 @@ def _move_folders(
     dest_parent = _validate_move_destination(dest_parent, sources)
 
     # Free-space preflight: fail before copying instead of mid-copy, where a
-    # full disk forces an expensive and risky rollback. The destination needs
-    # room for the copy; each source's own filesystem separately needs room
-    # for the safety backup taken there (as a sibling folder) before the
-    # original is removed - that backup does not land on the destination.
+    # full disk forces an expensive and risky rollback. Only the destination
+    # needs room: the source's safety backup is a rename next to it, which
+    # takes no space (see below).
     try:
         # Measured once, uncapped: a capped count under-reports a big
         # install and lets a move start that cannot finish.
-        sizes = {
-            src: dir_size(src, max_entries=None)
-            for _label, src in resolved_sources
-            if src.is_dir()
-        }
-        dest_needed = sum(sizes.values())
+        dest_needed = sum(
+            dir_size(src, max_entries=None) for _label, src in resolved_sources if src.is_dir()
+        )
         if dest_needed > 0:
             free = shutil.disk_usage(dest_parent).free
             if free < dest_needed:
@@ -524,25 +525,6 @@ def _move_folders(
                     f"Required (copy): {format_size(dest_needed)}\n"
                     f"Available: {format_size(free)}\n"
                     f"Destination: {dest_parent}"
-                )
-
-        source_needed: dict[int, int] = {}
-        source_sample: dict[int, Path] = {}
-        for _label, src in resolved_sources:
-            if not src.is_dir():
-                continue
-            device = src.stat().st_dev
-            source_needed[device] = source_needed.get(device, 0) + sizes[src]
-            source_sample.setdefault(device, src)
-        for device, needed in source_needed.items():
-            free = shutil.disk_usage(source_sample[device]).free
-            if free < needed:
-                raise ValueError(
-                    "Not enough free space on the source disk for the safety "
-                    "backup taken there before the original is removed.\n\n"
-                    f"Required: {format_size(needed)}\n"
-                    f"Available: {format_size(free)}\n"
-                    f"Source: {source_sample[device]}"
                 )
     except OSError:
         # A stat failure must not block the move; the copy itself will error.
@@ -587,23 +569,25 @@ def _move_folders(
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Move cancelled")
             backup = src.with_name(f".{src.name}.move-backup-{uuid.uuid4().hex}")
-            # Registered before copying so an interrupted/failed backup copy
-            # is cleaned up below instead of left orphaned on disk.
+            # Registered first so an interrupted/failed backup copy is
+            # cleaned up below instead of left orphaned on disk.
             backup_paths.append(backup)
-            shutil.copytree(src, backup, symlinks=True)
+            try:
+                # Same folder, so normally one atomic rename: no second copy
+                # of a 100+ GB install on the (often nearly full) source disk.
+                os.rename(src, backup)
+            except OSError:
+                # src is a mount point or similar: fall back to a real copy.
+                shutil.copytree(src, backup, symlinks=True)
+                shutil.rmtree(src)
             backups.append((src, backup))
             report(f"Original {label} staged for removal.")
 
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("Move cancelled")
-        for (label, src, _dst), (_original, _backup) in zip(
+        # Every original is now set aside and its copy verified.
+        for (label, src, _dst), (_original, backup) in zip(
             destinations, backups, strict=True
         ):
             report(f"Removing original {label}: {src}")
-            shutil.rmtree(src)
-
-        # Backups remain available until every original has been removed.
-        for _original, backup in backups:
             shutil.rmtree(backup, ignore_errors=True)
 
         return [(label, str(dst)) for label, _src, dst in destinations]
@@ -611,11 +595,13 @@ def _move_folders(
         for original, backup in reversed(backups):
             try:
                 if backup.exists():
-                    # copytree-with-dirs_exist_ok restores over a partially
-                    # deleted original; rmtree-first could leave nothing to
-                    # copy onto if the rmtree itself half-failed.
-                    shutil.copytree(backup, original, symlinks=True, dirs_exist_ok=True)
-                    shutil.rmtree(backup, ignore_errors=True)
+                    if not original.exists():
+                        os.rename(backup, original)
+                    else:
+                        # copytree-with-dirs_exist_ok restores over a partially
+                        # deleted original (the copy fallback above).
+                        shutil.copytree(backup, original, symlinks=True, dirs_exist_ok=True)
+                        shutil.rmtree(backup, ignore_errors=True)
             except OSError:
                 report(
                     f"Warning: could not restore {original} from {backup}; "
@@ -702,31 +688,30 @@ def _rewrite_mo2_ini_paths(
     return ini
 
 
-def _wipe_warning_html(headline: str, folders: list[str], extra_items: tuple[str, ...] = ()) -> str:
-    """The red "THIS DELETES" body shared by the reset and uninstall prompts."""
-    rows = "".join(f"&nbsp;&nbsp;&nbsp;&nbsp;{escape(folder)}<br>" for folder in folders)
+def _wipe_text(lead: str, folders: list[str], extra_items: tuple[str, ...] = ()) -> str:
+    """The "what gets deleted" body shared by the reset and uninstall prompts."""
     items = [
-        tr("ALL SAVES"),
-        tr("MO2 SETTINGS"),
-        tr("MCM SETTINGS"),
-        tr("ANY ADDITIONAL MODS YOU ADDED"),
+        tr("All your saves"),
+        tr("Mod Organizer settings"),
+        tr("MCM settings"),
+        tr("Mods you added yourself"),
         *extra_items,
     ]
-    bullets = "".join(f"&nbsp;&nbsp;• {item}<br>" for item in items)
     return (
-        "<html><body>"
-        f"<div style='font-weight: bold; font-size: 13px;'>{tr('WARNING')}</div><br>"
-        f"<div style='color: {STATUS_RED.name()}; text-align: center; font-weight: bold; font-size: 14px;'>"
-        f"{headline}"
-        "</div><br><br>"
-        + tr("This will permanently delete the following folders:")
-        + f"<br>{rows}<br>"
-        f"<strong>{tr('THIS DELETES:')}</strong><br>{bullets}<br>"
+        lead
+        + "\n\n"
+        + tr("These folders are deleted:")
+        + "\n\n"
+        + "\n".join(f"• {folder}" for folder in folders)
+        + "\n\n"
+        + tr("That also deletes:")
+        + "\n\n"
+        + "\n".join(f"• {item}" for item in items)
     )
 
 
 _BACKUP_NOTE = (
-    "Your saves, user.ltx and MCM settings are backed up automatically first "
+    "Your saves, user.ltx and MCM settings are backed up first "
     "(Utilities > Saves & Settings Backup). Mods you added yourself are not."
 )
 
@@ -749,8 +734,8 @@ class _MoveDialog(QDialog):
         if self._page._move_task is not None:
             QMessageBox.information(
                 self,
-                tr("Move In Progress"),
-                tr("Cancel the move first if you want to close this window."),
+                tr("A move is still running"),
+                tr("Stop the move first if you want to close this window."),
             )
             event.ignore()
             return
@@ -887,6 +872,15 @@ class UtilitiesPage(QWidget):
                 self._repair_prefix,
             ),
             (
+                tr("Use the default Wine prefix"),
+                tr(
+                    "Switch the selected runner back to its own default prefix "
+                    "if a custom prefix folder was set and no longer works. "
+                    "The custom folder itself is not deleted."
+                ),
+                self._reset_prefix,
+            ),
+            (
                 tr("Move Installation"),
                 tr("Move the Anomaly, GAMMA, and cache folders to another drive. Files are copied and checked before the originals are removed."),
                 self._open_move_dialog,
@@ -902,7 +896,15 @@ class UtilitiesPage(QWidget):
                 self._start_log_dump,
             ),
         ]
-        for title, description, slot in tools:
+        for index, (title, description, slot) in enumerate(tools):
+            if index:
+                # A line between tools, so a row's button is easy to match
+                # to its text on a wide window.
+                divider = QFrame()
+                divider.setObjectName("rowDivider")
+                divider.setFrameShape(QFrame.Shape.NoFrame)
+                divider.setFixedHeight(1)
+                rows.addWidget(divider)
             rows.addWidget(self._tool_row(title, description, slot))
         layout.addLayout(rows)
         return card
@@ -918,6 +920,52 @@ class UtilitiesPage(QWidget):
         # still using it here.
         dialog.deleteLater()
 
+    def _reset_prefix(self) -> None:
+        """Forget the custom prefix saved for the selected runner."""
+        from ..launcher import DEFAULT_PROTON_PREFIX, DEFAULT_UMU_PREFIX
+
+        if self.window.install_busy:
+            QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            return
+        if mo2_running(force=True):
+            QMessageBox.warning(
+                self,
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then try again."),
+            )
+            return
+        state = gui_settings.load_gui_settings()
+        kind = state.get("runner") or "auto"
+        default = str(DEFAULT_PROTON_PREFIX if kind.startswith("proton:") else DEFAULT_UMU_PREFIX)
+        saved = gui_settings.saved_prefix_for(kind, state)
+        if not saved or os.path.normpath(os.path.expanduser(saved)) == default:
+            QMessageBox.information(
+                self,
+                tr("Already using the default prefix"),
+                tr("The selected runner already uses its default prefix:\n{path}", path=default),
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Use the default prefix?"),
+            tr("The game will run in the default prefix again instead of:\n{path}", path=saved),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            info=tr("The custom folder is not deleted. If the default prefix is new, install the dependencies again on the Install page."),
+            labels={QMessageBox.StandardButton.Yes: tr("Use default"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        prefixes = dict(state.get("prefixes") or {})
+        # An empty entry, not a removed one: with no prefixes map at all the
+        # old single wine_prefix setting would be used again.
+        prefixes[kind] = ""
+        gui_settings.save_gui_settings(prefixes=prefixes, wine_prefix="")
+        QMessageBox.information(
+            self,
+            tr("Default prefix set"),
+            tr("The game now runs in:\n{path}", path=default),
+        )
+
     def _repair_prefix(self) -> None:
         """Undo another Wine's writes into the runner's prefix."""
         from ..gui_settings import configured_runner
@@ -927,26 +975,26 @@ class UtilitiesPage(QWidget):
         if self._repair_running:
             return
         if self.window.install_busy:
-            QMessageBox.warning(self, tr("Busy"), tr("An install is already running."))
+            QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
         if mo2_running(force=True):
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer and the game before repairing the prefix."),
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then repair the prefix."),
             )
             return
         try:
             runner = configured_runner()
         except LaunchError as exc:
-            QMessageBox.warning(self, tr("Repair Failed"), str(exc))
+            QMessageBox.warning(self, tr("Couldn't repair the prefix"), str(exc))
             return
         prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
         if not prefix:
             QMessageBox.information(
                 self,
                 tr("Nothing to repair"),
-                tr("The selected runner does not use a Proton prefix."),
+                tr("The selected runner doesn't use a Proton prefix, so there's nothing to repair."),
             )
             return
         self._repair_running = True
@@ -961,7 +1009,7 @@ class UtilitiesPage(QWidget):
 
     def _on_repair_error(self, message: str) -> None:
         self._repair_running = False
-        QMessageBox.warning(self, tr("Repair Failed"), message)
+        QMessageBox.warning(self, tr("Couldn't repair the prefix"), message)
 
     def _on_repair_scanned(self, foreign, prefix, runner) -> None:
         if not foreign:
@@ -969,26 +1017,29 @@ class UtilitiesPage(QWidget):
             QMessageBox.information(
                 self,
                 tr("Nothing to repair"),
-                tr("No files from another Wine were found in {prefix}.", prefix=prefix),
+                tr("No files from another Wine version were found in:\n{prefix}", prefix=prefix),
             )
             return
         names = sorted({item.name for item, _replacement in foreign})
         shown = ", ".join(names[:8]) + (tr(" and {count} more", count=len(names) - 8) if len(names) > 8 else "")
         reply = QMessageBox.question(
             self,
-            tr("Repair Wine prefix"),
+            tr("Repair the Wine prefix?"),
             tr(
-                "{count} DLLs in {prefix} were written by a different Wine build "
-                "({names}).\n\nThey will be restored to the runner's own versions. "
-                "Nothing else in the prefix is touched, but the runtimes "
-                "Install Dependencies had added were among them, so run it "
-                "again afterwards.\n\nRepair now?",
+                "{count} DLL file(s) in the game's Wine prefix came from a different "
+                "Wine version: {names}",
                 count=len(foreign),
-                prefix=prefix,
                 names=shown,
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
+            points=(
+                tr("They're put back to the versions that match your runner."),
+                tr("Nothing else in the prefix changes."),
+            ),
+            info=tr("Prefix: {prefix}", prefix=prefix),
+            note=tr("Afterwards, run Install Dependencies on the Install page again."),
+            labels={QMessageBox.StandardButton.Yes: tr("Repair"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if reply != QMessageBox.StandardButton.Yes:
             self._repair_running = False
@@ -997,14 +1048,14 @@ class UtilitiesPage(QWidget):
         # dialog was open.
         if self.window.install_busy:
             self._repair_running = False
-            QMessageBox.warning(self, tr("Busy"), tr("An install is already running."))
+            QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
         if mo2_running(force=True):
             self._repair_running = False
             QMessageBox.warning(
                 self,
-                tr("Mod Organizer is running"),
-                tr("Close Mod Organizer and the game before repairing the prefix."),
+                tr("Close the game first"),
+                tr("Mod Organizer or the game is still open. Close it, then repair the prefix."),
             )
             return
         from ..repair import repair_prefix_foreign_dlls
@@ -1022,12 +1073,9 @@ class UtilitiesPage(QWidget):
             self.output.append_line(f"  restored {name}")
         QMessageBox.information(
             self,
-            tr("Prefix Repaired"),
-            tr(
-                "{count} files were restored to the runner's own versions.\n\n"
-                "Now open the Install page and run Install Dependencies.",
-                count=len(repaired),
-            ),
+            tr("Prefix repaired"),
+            tr("{count} file(s) were put back to the versions that match your runner.", count=len(repaired)),
+            note=tr("Now run Install Dependencies on the Install page. Some of the files it installed were replaced."),
         )
 
     def _open_assistant(self) -> None:
@@ -1040,9 +1088,9 @@ class UtilitiesPage(QWidget):
             process = launch_assistant()
         except AssistantLaunchError as exc:
             title = (
-                tr("ASSISTANT Already Open")
+                tr("ASSISTANT is already open")
                 if "already running" in str(exc)
-                else tr("ASSISTANT Unavailable")
+                else tr("ASSISTANT couldn't open")
             )
             QMessageBox.information(self, title, str(exc))
             return
@@ -1072,8 +1120,8 @@ class UtilitiesPage(QWidget):
         if return_code != 0:
             QMessageBox.warning(
                 self,
-                tr("ASSISTANT failed to start"),
-                tr("ASSISTANT exited during startup with code {return_code}.", return_code=return_code),
+                tr("ASSISTANT couldn't start"),
+                tr("ASSISTANT closed while starting (code {return_code}). Try again, or create a log dump and share it when asking for help.", return_code=return_code),
             )
 
     def _tool_row(self, title: str, description: str, slot) -> QWidget:
@@ -1211,6 +1259,7 @@ class UtilitiesPage(QWidget):
         dialog = _MoveDialog(self, parent=self)
         dialog.setWindowTitle(tr("Move Installation"))
         layout = QVBoxLayout(dialog)
+        style_window(dialog, tr("Move Installation"))
         layout.addWidget(
             info_label(
                 tr("Move the Anomaly, GAMMA, and cache folders to another drive. Files are copied and checked before the originals are removed.")
@@ -1247,7 +1296,7 @@ class UtilitiesPage(QWidget):
         dest_row = QHBoxLayout()
         dest_row.setSpacing(10)
         self._move_dest_edit = QLineEdit()
-        self._move_dest_edit.setPlaceholderText("Select destination folder...")
+        self._move_dest_edit.setPlaceholderText(tr("Select destination folder..."))
         dest_btn = QPushButton(tr("Browse..."))
         dest_btn.clicked.connect(self._browse_move_dest)
         dest_row.addWidget(self._move_dest_edit, 1)
@@ -1304,13 +1353,13 @@ class UtilitiesPage(QWidget):
 
     def _start_move(self) -> None:
         if self._move_task is not None:
-            QMessageBox.information(self, tr("Busy"), tr("A move is already in progress."))
+            QMessageBox.information(self, tr("Please wait"), tr("A move is already running. Wait for it to finish."))
             return
         if self._runner is not None and self._runner.is_running():
-            QMessageBox.information(self, tr("Busy"), tr("Another task is running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("An install is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
         if not self._require_profile():
             return
@@ -1318,7 +1367,7 @@ class UtilitiesPage(QWidget):
         dest = self._move_dest_edit.text().strip()
         if not dest:
             QMessageBox.warning(
-                self, tr("No Destination"), tr("Select a destination folder first.")
+                self, tr("Pick where to move it"), tr("Choose a destination folder first.")
             )
             return
         sources = [
@@ -1330,7 +1379,7 @@ class UtilitiesPage(QWidget):
             dest_path = _validate_move_destination(dest, sources)
         except ValueError as exc:
             QMessageBox.warning(
-                self, tr("Invalid Destination"), str(exc)
+                self, tr("Can't move it there"), str(exc)
             )
             return
 
@@ -1339,28 +1388,22 @@ class UtilitiesPage(QWidget):
 
         answer = QMessageBox.question(
             self,
-            tr("Move installation"),
-            "<html><body>"
-            f"<div style='font-weight: bold; font-size: 13px;'>{tr('Move installation')}</div><br>"
-            + tr(
-                "This will copy the following folders to the destination and "
-                "then remove the originals:"
-            )
-            + "<br><br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;Anomaly: {escape(profile.anomaly)}<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;GAMMA: {escape(profile.gamma)}<br>"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;{tr('Cache')}: {escape(profile.cache)}<br><br>"
-            f"<strong>{tr('Destination')}:</strong> {escape(dest)}<br><br>"
-            + tr("Make sure the destination has enough free space.")
-            + "<br><br>"
-            + tr("Continue?"),
+            tr("Move the game?"),
+            tr("COMMANDER copies these folders to {dest}, then deletes the originals:", dest=dest),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=(
+                tr("Anomaly: {path}", path=profile.anomaly),
+                tr("GAMMA: {path}", path=profile.gamma),
+                tr("Cache: {path}", path=profile.cache),
+            ),
+            note=tr("Make sure the new location has enough free space."),
+            labels={QMessageBox.StandardButton.Yes: tr("Move"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         # install_busy may have flipped True while the dialog was open.
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("A task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         if not self._check_mo2_free():
             return
@@ -1399,7 +1442,7 @@ class UtilitiesPage(QWidget):
         self._move_task = None
         self._move_cancel_btn.hide()
         self._move_progress.on_finished(0, "")
-        self._move_progress.status_message("Move copied; verifying configuration")
+        self._move_progress.status_message(tr("Move copied; verifying configuration"))
         # Keep the busy lock until the INI rewrite, profile save, and
         # verification below have all finished; releasing it early lets the
         # user start a reset/second move against not-yet-updated paths.
@@ -1459,24 +1502,24 @@ class UtilitiesPage(QWidget):
         self._refresh_move_paths()
         if isinstance(moved, list) and moved:
             if consistency_error is None:
-                self._move_progress.status_message("Move complete")
-                message = (
-                    "Game folders moved successfully.\n"
-                    "Profile paths and ModOrganizer.ini have been verified."
+                self._move_progress.status_message(tr("Move complete"))
+                message = tr(
+                    "Your game folders are in the new place. The profile and "
+                    "ModOrganizer.ini were updated and checked."
                 )
             else:
-                self._move_progress.status_message("Move requires manual recovery")
-                message = (
-                    "Game folders were copied, but the move could not be made fully "
-                    "consistent:\n"
-                    f"{consistency_error}\n\n"
-                    "Manual recovery is required. Verify ModOrganizer.ini and the "
-                    "profile paths before deleting or reusing either location."
+                self._move_progress.status_message(tr("Move requires manual recovery"))
+                message = tr(
+                    "The folders were copied, but not everything could be updated:\n{error}",
+                    error=consistency_error,
                 )
             QMessageBox.information(
                 self,
-                "Move Complete" if consistency_error is None else "Move Recovery Required",
+                tr("Game moved") if consistency_error is None else tr("The move needs fixing by hand"),
                 message,
+                note="" if consistency_error is None else tr(
+                    "Check ModOrganizer.ini and the profile's folders before you delete or use either location."
+                ),
             )
             # Keep the interrupted-move marker until both configuration stores
             # have been successfully written and verified.
@@ -1504,16 +1547,16 @@ class UtilitiesPage(QWidget):
         self._move_sources = []
         self._move_cancel_btn.hide()
         self._move_progress.on_finished(1, "")
-        self._move_progress.status_message("Move failed")
+        self._move_progress.status_message(tr("Move failed"))
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
         self._refresh_move_paths()
-        QMessageBox.warning(self, tr("Move Failed"), tr("Move failed:\n{message}", message=message))
+        QMessageBox.warning(self, tr("Couldn't move the game"), message)
 
     def _cancel_move(self) -> None:
         if self._move_task is not None:
             self._move_task.cancel()
-            self._move_progress.status_message("Cancelling ...")
+            self._move_progress.status_message(tr("Cancelling ..."))
 
     # ----- console -----
     def _add_console(self, layout) -> None:
@@ -1595,18 +1638,19 @@ class UtilitiesPage(QWidget):
         if self.window.settings.active_profile is None:
             QMessageBox.warning(
                 self,
-                tr("No Profile"),
-                tr("Create or activate a profile first (Profiles page)."),
+                tr("No profile selected"),
+                tr("Create or pick a profile on the Profiles page first."),
             )
             return False
         return True
 
-    def _confirm(self, text: str, title: str = "Confirm") -> bool:
+    def _confirm(self, text: str, title: str, action: str) -> bool:
         answer = QMessageBox.question(
             self,
             title,
             text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: action, QMessageBox.StandardButton.No: tr("Cancel")},
         )
         return answer == QMessageBox.StandardButton.Yes
 
@@ -1616,8 +1660,8 @@ class UtilitiesPage(QWidget):
             return True
         QMessageBox.information(
             self,
-            tr("Game Running"),
-            tr("Mod Organizer / the game is currently running.\n\nClose it before running this action."),
+            tr("Close the game first"),
+            tr("Mod Organizer or the game is still open. Close it, then try again."),
         )
         return False
 
@@ -1627,19 +1671,20 @@ class UtilitiesPage(QWidget):
         *,
         handler=None,
         confirm: str | None = None,
-        confirm_title: str = "Confirm",
+        confirm_title: str = "",
+        confirm_action: str = "",
         on_finished=None,
         guard_mo2: bool = False,
     ) -> None:
         if self._runner is not None and self._runner.is_running():
-            QMessageBox.information(self, tr("Busy"), tr("A task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
-        if confirm is not None and not self._confirm(confirm, confirm_title):
+        if confirm is not None and not self._confirm(confirm, confirm_title, confirm_action):
             return
         if guard_mo2 and not self._check_mo2_free():
             return
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("Another install task is running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         self._show_console()
         self.summary.setText("")
@@ -1692,19 +1737,21 @@ class UtilitiesPage(QWidget):
 
     def _start_reset(self, *, include_anomaly: bool) -> None:
         if self._runner is not None and self._runner.is_running():
-            QMessageBox.information(self, tr("Busy"), tr("A task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         if self._wipe_task is not None:
             QMessageBox.information(
-                self, tr("Busy"), tr("A reset is already in progress.")
+                self, tr("Please wait"), tr("A reset is already running. Wait for it to finish.")
             )
             return
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("An install is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
         if not self._require_profile():
             return
         profile = self.window.settings.active_profile
+        if not include_anomaly and not confirm_singleplayer(self, profile, tr("resetting GAMMA")):
+            return
         self._reset_includes_anomaly = include_anomaly
         self._wipe_targets = (profile.anomaly, profile.gamma)
         wipe_paths = [("GAMMA", profile.gamma)]
@@ -1713,46 +1760,50 @@ class UtilitiesPage(QWidget):
         try:
             _validate_wipe_paths(wipe_paths)
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Unsafe Reset"), str(exc))
+            QMessageBox.warning(self, tr("That folder isn't safe to delete"), str(exc))
             return
         title = tr("Fresh Reset") if include_anomaly else tr("GAMMA Reset")
         self._wipe_title = title
         self._reset_preserve_user = False
         self._reset_preserve_mcm = False
         folders = "Anomaly and GAMMA" if include_anomaly else "GAMMA"
-        warning = escape(
-            tr("FRESH RESET WILL COMPLETELY WIPE & RE-INSTALL STALKER ANOMALY & GAMMA FOLDERS")
+        lead = (
+            tr("Anomaly and GAMMA are deleted, then installed again from scratch.")
             if include_anomaly
-            else tr("GAMMA RESET WILL WIPE & RE-INSTALL THE GAMMA FOLDER")
+            else tr("GAMMA is deleted, then installed again from scratch. Anomaly isn't touched.")
         )
         folders_shown = [profile.anomaly, profile.gamma] if include_anomaly else [profile.gamma]
-        message = (
-            _wipe_warning_html(warning, folders_shown)
-            + escape(tr(_BACKUP_NOTE), quote=False)
-            + "<br><br>"
-            + tr("Are you sure you want to run a {title}?", title=title)
-            + "</body></html>"
-        )
+        message = _wipe_text(lead, folders_shown)
+        heading = tr("Run a fresh reset?") if include_anomaly else tr("Run a GAMMA reset?")
         if include_anomaly:
             answer = QMessageBox.question(
                 self,
-                title,
+                heading,
                 message,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                info=tr(_BACKUP_NOTE),
+                note=tr("This can't be undone."),
+                labels={QMessageBox.StandardButton.Yes: tr("Reset"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
         else:
             dialog = QMessageBox(self)
-            dialog.setWindowTitle(title)
+            dialog.setWindowTitle(heading)
             dialog.setText(message)
+            dialog.setInformativeText(tr(_BACKUP_NOTE))
+            dialog.note = tr("This can't be undone.")
             preserve = QCheckBox(tr("Keep user.ltx and MCM settings"))
             preserve.setChecked(True)
             preserve.setToolTip(
-                tr("Preserve your game options, controls, keybindings, and MCM settings during the GAMMA reinstall.")
+                tr("Keep your game options, keybindings and MCM settings during the reinstall.")
             )
             dialog.setCheckBox(preserve)
             dialog.setStandardButtons(
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
+            dialog.set_labels({
+                QMessageBox.StandardButton.Yes: tr("Reset"),
+                QMessageBox.StandardButton.No: tr("Cancel"),
+            })
             answer = dialog.exec()
             if answer == QMessageBox.StandardButton.Yes:
                 self._reset_preserve_user = preserve.isChecked()
@@ -1761,7 +1812,7 @@ class UtilitiesPage(QWidget):
             return
         # install_busy may have flipped True while the dialog was open.
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("A task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         if not self._check_mo2_free():
             return
@@ -1815,8 +1866,9 @@ class UtilitiesPage(QWidget):
             answer = QMessageBox.warning(
                 self,
                 self._wipe_title,
-                tr("The current official archive list could not be loaded, so the number of redownloads cannot be predicted. Continue with the reset?"),
+                tr("The official GAMMA download list couldn't be loaded, so COMMANDER can't tell how much will need downloading again."),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                labels={QMessageBox.StandardButton.Yes: tr("Reset anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
         else:
             for line in result.lines():
@@ -1832,6 +1884,10 @@ class UtilitiesPage(QWidget):
             box.setStandardButtons(
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
+            box.set_labels({
+                QMessageBox.StandardButton.Yes: tr("Continue reset"),
+                QMessageBox.StandardButton.No: tr("Cancel"),
+            })
             answer = box.exec()
         if answer != QMessageBox.StandardButton.Yes:
             self.window.set_install_busy(False)
@@ -1845,7 +1901,7 @@ class UtilitiesPage(QWidget):
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
         self.summary.clear()
-        QMessageBox.warning(self, self._wipe_title, tr("Cache preflight failed: {message}", message=message))
+        QMessageBox.warning(self, self._wipe_title, tr("COMMANDER couldn't check the download cache:\n{message}", message=message))
 
     def _begin_reset_wipe(self) -> None:
         self.window.set_install_busy(
@@ -1879,7 +1935,7 @@ class UtilitiesPage(QWidget):
             QMessageBox.warning(
                 self,
                 self._wipe_title,
-                tr("No active profile. Reinstall aborted."),
+                tr("No profile is selected, so the reinstall was stopped."),
             )
             return
         if (
@@ -1890,7 +1946,7 @@ class UtilitiesPage(QWidget):
             QMessageBox.warning(
                 self,
                 self._wipe_title,
-                tr("The active profile's install folders changed during the wipe. Re-install aborted so nothing is installed to the wrong location."),
+                tr("The profile's install folders changed during the reset, so the reinstall was stopped to avoid installing to the wrong place."),
             )
             return
         if backup is not None and not self._reset_includes_anomaly:
@@ -1920,7 +1976,7 @@ class UtilitiesPage(QWidget):
             QMessageBox.warning(
                 self,
                 self._wipe_title,
-                tr("{wipe_title} could not be started (another task is running or no profile is active).", wipe_title=self._wipe_title),
+                tr("{wipe_title} couldn't start. Another task may be running, or no profile is selected.", wipe_title=self._wipe_title),
             )
 
     def _on_wipe_error(self, message: str) -> None:
@@ -1928,19 +1984,19 @@ class UtilitiesPage(QWidget):
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
         self.summary.setText("")
-        QMessageBox.warning(self, self._wipe_title, tr("Wipe failed: {message}", message=message))
+        QMessageBox.warning(self, self._wipe_title, tr("The reset couldn't delete everything:\n{message}", message=message))
 
     def _start_full_uninstall(self) -> None:
         if self._runner is not None and self._runner.is_running():
-            QMessageBox.information(self, tr("Busy"), tr("A task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         if self._wipe_task is not None:
             QMessageBox.information(
-                self, tr("Busy"), tr("A removal task is already in progress.")
+                self, tr("Please wait"), tr("An uninstall is already running. Wait for it to finish.")
             )
             return
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("An install is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
         if not self._require_profile():
             return
@@ -1952,7 +2008,7 @@ class UtilitiesPage(QWidget):
         )
         if nothing_to_remove:
             QMessageBox.information(
-                self, tr("Not Installed"), tr("Nothing found to uninstall.")
+                self, tr("Nothing to uninstall"), tr("No Anomaly, GAMMA or cache folders were found for this profile.")
             )
             self._update_fresh_reset_enabled()
             return
@@ -1966,32 +2022,26 @@ class UtilitiesPage(QWidget):
         try:
             _validate_wipe_paths(uninstall_paths)
         except ValueError as exc:
-            QMessageBox.warning(self, tr("Unsafe Uninstall"), str(exc))
+            QMessageBox.warning(self, tr("That folder isn't safe to delete"), str(exc))
             return
         answer = QMessageBox.question(
             self,
-            tr("Full Uninstall"),
-            _wipe_warning_html(
-                escape(tr("FULL UNINSTALL WILL COMPLETELY REMOVE STALKER ANOMALY & GAMMA")),
+            tr("Uninstall Anomaly and GAMMA?"),
+            _wipe_text(
+                tr("Anomaly and GAMMA are removed from your computer completely."),
                 [profile.anomaly, profile.gamma, profile.cache],
-                (tr("DOWNLOAD CACHE"),),
-            )
-            + tr(
-                "The configured Wine/Proton prefix and its Winetricks configuration "
-                "will not be deleted."
-            )
-            + "<br><br>"
-            + escape(tr(_BACKUP_NOTE), quote=False)
-            + "<br><br>"
-            + tr("Are you sure you want to completely uninstall Anomaly and GAMMA?")
-            + "</body></html>",
+                (tr("The download cache"),),
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            info=tr("Your Wine/Proton prefix and its Winetricks setup are kept.") + "\n\n" + tr(_BACKUP_NOTE),
+            note=tr("This can't be undone."),
+            labels={QMessageBox.StandardButton.Yes: tr("Uninstall"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         # install_busy may have flipped True while the dialog was open.
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("A task is already running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         if not self._check_mo2_free():
             return
@@ -2046,15 +2096,16 @@ class UtilitiesPage(QWidget):
         self.window.set_install_busy(False)
         self._set_buttons_enabled(True)
         self.summary.setText("")
-        QMessageBox.warning(self, tr("Full Uninstall"), tr("Uninstall failed: {message}", message=message))
+        QMessageBox.warning(self, tr("Couldn't uninstall everything"), message)
 
     # ----- tasks -----
     def _purge_shader_cache(self) -> None:
         if self._require_profile():
             self._run(
                 ["anomaly", "purge-shader-cache"],
-                confirm="Delete the shader cache for the active Anomaly profile?",
-                confirm_title="Purge Shader Cache",
+                confirm=tr("The game rebuilds its shaders the next time it starts, so the first load is slower. This can fix graphics glitches."),
+                confirm_title=tr("Delete the shader cache?"),
+                confirm_action=tr("Delete cache"),
                 guard_mo2=True,
             )
 
@@ -2062,8 +2113,9 @@ class UtilitiesPage(QWidget):
         if self._require_profile():
             self._run(
                 ["anomaly", "delete-reshade"],
-                confirm="Delete all ReShade-related files from the Anomaly bin directory?",
-                confirm_title="Delete ReShade",
+                confirm=tr("All ReShade files are deleted from the Anomaly bin folder."),
+                confirm_title=tr("Remove ReShade?"),
+                confirm_action=tr("Remove ReShade"),
                 guard_mo2=True,
             )
 
@@ -2076,8 +2128,9 @@ class UtilitiesPage(QWidget):
             self._run(
                 ["cache", "prune", "apply"],
                 handler=self._prune_handler,
-                confirm="Permanently delete out-of-date addon archives from the cache?",
-                confirm_title="Prune Cache",
+                confirm=tr("Downloads in the cache that the current GAMMA no longer uses are deleted for good."),
+                confirm_title=tr("Delete old downloads?"),
+                confirm_action=tr("Delete old downloads"),
                 guard_mo2=True,
             )
 
@@ -2095,8 +2148,9 @@ class UtilitiesPage(QWidget):
         if self._require_profile():
             self._run(
                 ["gog", "fix-install"],
-                confirm="Fix the ModOrganizer.ini paths for a GOG-provided install?",
-                confirm_title="Fix GOG Install",
+                confirm=tr("The paths in ModOrganizer.ini are changed to work with Anomaly from GOG."),
+                confirm_title=tr("Fix a GOG install?"),
+                confirm_action=tr("Fix paths"),
                 guard_mo2=True,
             )
 
@@ -2105,7 +2159,7 @@ class UtilitiesPage(QWidget):
         if self._log_dump_task is not None:
             return
         if self.window.install_busy:
-            QMessageBox.information(self, tr("Busy"), tr("Another install task is running."))
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return
         self.window.set_install_busy(True)
         self._show_console()
@@ -2145,18 +2199,16 @@ class UtilitiesPage(QWidget):
             size_mb = values["bytes"] / (1024 * 1024)
             self.summary.setText(tr("Log Dump saved: {path}", path=path))
             dialog = QMessageBox(self)
-            dialog.setWindowTitle(tr("Log Dump Created"))
-            dialog.setText(
-                "Your log dump has been created:<br><br>"
-                f"{path}<br><br>"
-                f"Files archived: {files}"
-                + (f"<br>Skipped (too large): {skipped}" if skipped else "")
-                + f"<br>Archive size: {size_mb:.1f} MB<br><br>"
-                f"Open this archive in {assistant_token()} to check all the "
-                "errors and warnings."
+            dialog.setWindowTitle(tr("Log dump created"))
+            dialog.setText(tr("Saved to:\n{path}", path=path))
+            dialog.points = (
+                tr("Files: {count}", count=files),
+                *((tr("Skipped because too large: {count}", count=skipped),) if skipped else ()),
+                tr("Size: {size} MB", size=f"{size_mb:.1f}"),
             )
+            dialog.setInformativeText(tr("Attach this file when you ask for help, or open it in ASSISTANT to see what went wrong."))
             open_button = dialog.addButton(
-                "Open in ASSISTANT", QMessageBox.ButtonRole.AcceptRole
+                tr("Open in ASSISTANT"), QMessageBox.ButtonRole.AcceptRole
             )
             dialog.addButton(QMessageBox.StandardButton.Close)
             dialog.exec()
@@ -2166,15 +2218,15 @@ class UtilitiesPage(QWidget):
                     self._track_assistant(process)
                 except AssistantLaunchError as exc:
                     title = (
-                        tr("ASSISTANT Already Open")
+                        tr("ASSISTANT is already open")
                         if "already running" in str(exc)
-                        else tr("ASSISTANT Unavailable")
+                        else tr("ASSISTANT couldn't open")
                     )
                     QMessageBox.information(self, title, str(exc))
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             self.summary.setText("")
             QMessageBox.warning(
-                self, tr("Log Dump Failed"), tr("Could not create log dump:\n{exc}", exc=exc)
+                self, tr("Couldn't create the log dump"), str(exc)
             )
         finally:
             self.window.set_install_busy(False)
@@ -2186,5 +2238,5 @@ class UtilitiesPage(QWidget):
         self.summary.setText("")
         self.window.set_install_busy(False)
         QMessageBox.warning(
-            self, tr("Log Dump Failed"), tr("Could not create log dump:\n{message}", message=message)
+            self, tr("Couldn't create the log dump"), message
         )

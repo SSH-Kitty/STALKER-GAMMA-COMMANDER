@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import ClassVar
 
 from PySide6.QtCore import (
@@ -24,17 +25,17 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPen,
+    QPixmap,
     QRadialGradient,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
-    QProgressDialog,
     QPushButton,
     QStackedWidget,
     QTabBar,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, __version_label__, gui_settings
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
+from ..integrity import _format_duration as _short_duration
 from ..self_update import (
     commander_appimage_path,
     download_and_install_commander_update,
@@ -59,7 +61,12 @@ from ..themes import (
     build_stylesheet,
     set_active_theme,
 )
-from ..updates import check_commander_update, check_updates, effective_update_channel
+from ..updates import (
+    check_commander_update,
+    check_updates,
+    effective_update_channel,
+    fetch_latest_release_notes,
+)
 from .about_page import _DISCORD, AboutPage
 from .common import (
     OK_GREEN,
@@ -77,10 +84,13 @@ from .common import (
     shutdown_active_runners,
     tr,
 )
+from .credits_page import CreditsPage
 from .dashboard import DashboardPage
-from .help_page import HelpPage
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import ProgressDialog, UpdateDialog
 from .install_page import InstallPage, _resume_state_matches
 from .mod_manager_page import ModManagerPage
+from .multiplayer_page import MultiplayerPage
 from .play_page import PlayPage
 from .profiles_page import ProfilesPage
 from .settings_page import SettingsPage
@@ -101,12 +111,13 @@ NAV_ITEMS = [
     ("systemcheck", "System Check"),
     ("install", "Install"),
     ("play", "Play"),
+    ("multiplayer", "Multiplayer"),
     ("update", "Updates"),
     ("modmanager", "Mod Manager"),
     ("profiles", "Profiles"),
     ("utilities", "Utilities"),
-    ("help", "Help"),
-    ("about", "About"),
+    ("about", "Help"),
+    ("credits", "About"),
 ]
 
 #: Tab-bar position for each nav key, fixed by NAV_ITEMS order. Separate from
@@ -116,7 +127,8 @@ NAV_ITEMS = [
 _TAB_INDEX: dict[str, int] = {key: i for i, (key, _title) in enumerate(NAV_ITEMS)}
 
 # Indices after which a thin vertical separator is drawn in the tab bar.
-_SEPARATOR_AFTER = {1, 4, 7}
+_SEPARATOR_AFTER = {2, 5, 8}
+_RELEASES_URL = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
 
 
 #: Text grows to this fraction of its normal size while a tab is hovered.
@@ -292,6 +304,23 @@ def paint_backdrop(painter: QPainter, rect) -> None:
     painter.fillRect(rect, glow2)
 
 
+def _saved_elsewhere_note(path) -> str:
+    """Where the new AppImage went, when that isn't over the running one.
+
+    Only the default folder replaces the running AppImage; anywhere else,
+    shortcuts still start the old version.
+    """
+    running = commander_appimage_path()
+    if running is None or Path(path).resolve() == running.resolve():
+        return ""
+    shown = str(path).replace(str(Path.home()), "~", 1)
+    return tr(
+        "The new version was saved to {path}. Open that file from now on - "
+        "your shortcuts still start the old version.",
+        path=shown,
+    )
+
+
 class Backdrop(QWidget):
     """The central widget. Transparent: the main window paints the backdrop
     behind it (see paint_backdrop()); page roots stay semi-transparent and
@@ -328,6 +357,10 @@ class MainWindow(QMainWindow):
         self._settings_open = False
         self._last_tab_key = "dashboard"
         self._nav_refresh_serial = 0
+        #: Newer COMMANDER release tag, and (label, path) of one installed
+        #: but not restarted into yet - both drive the update banner.
+        self._commander_update_tag: str | None = None
+        self._ready_update: tuple[str, Path] | None = None
 
         # Built before _build_ui(): constructing pages there (e.g. the
         # Dashboard) can trigger refresh_settings() -> _refresh_status_bar()
@@ -638,11 +671,19 @@ class MainWindow(QMainWindow):
         self._stack_fade.setStartValue(0.9)
         self._stack_fade.setEndValue(1.0)
         self._stack_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        # Enabled only while the fade runs: a live effect renders the whole
+        # stack offscreen on every repaint of anything inside it, which made
+        # every hover, scroll and animation in every page pay for it.
+        self._stack_opacity.setEnabled(False)
+        self._stack_fade.finished.connect(
+            lambda: self._stack_opacity.setEnabled(False)
+        )
         self.stack.currentChanged.connect(self._on_stack_page_changed)
 
         self.tabs.currentChanged.connect(self._on_nav)
         self.tabs.tabBarClicked.connect(self._on_tab_clicked)
         layout.addWidget(topbar)
+        layout.addWidget(self._build_update_banner())
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(central)
         for widget in (
@@ -856,49 +897,132 @@ class MainWindow(QMainWindow):
             self._commander_update_tag = tag
             self.commander_update_found.emit(tag)
             self._notify_commander_update(tag)
-            button.setText(tr("COMMANDER update available"))
+            button.setText(tr("Click here to update COMMANDER"))
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setEnabled(True)
             if commander_appimage_path() is not None:
-                # Running as an AppImage - offer to download and swap it in
-                # place instead of just sending the user to the browser. A
-                # source checkout or the AUR package (pacman-tracked, see
-                # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
-                # through to the plain "open the releases page" behavior.
                 button.setToolTip(tr("Download and install {tag} now", tag=tag))
-                self._update_status_handler = lambda: self._offer_commander_self_update(tag)
-                button.clicked.connect(self._update_status_handler)
             else:
                 button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
-                self._update_status_handler = lambda: open_url(
-                    "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
-                )
-                button.clicked.connect(self._update_status_handler)
+            self._update_status_handler = lambda: self._start_commander_update(tag)
+            button.clicked.connect(self._update_status_handler)
         else:
+            self._commander_update_tag = None
             button.setText(tr("COMMANDER is up to date"))
             button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
             button.setEnabled(False)
+        self._refresh_update_banner()
+
+    def _start_commander_update(self, tag: str) -> None:
+        """The status bar's and the banner's Update button."""
+        if commander_appimage_path() is not None:
+            # Running as an AppImage - offer to download and swap it in
+            # place instead of just sending the user to the browser. A
+            # source checkout or the AUR package (pacman-tracked, see
+            # packaging/aur/PKGBUILD) never sets APPIMAGE, so they fall
+            # through to the plain "open the releases page" behavior.
+            self._offer_commander_self_update(tag)
+        else:
+            open_url(_RELEASES_URL)
+
+    def _build_update_banner(self) -> QFrame:
+        """The "new COMMANDER version" strip under the nav tabs.
+
+        Rebuilt with the rest of the UI on a language switch;
+        _refresh_update_banner() decides whether it shows.
+        """
+        banner = QFrame()
+        banner.setObjectName("updateBanner")
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(16, 6, 8, 6)
+        row.setSpacing(10)
+        self._update_banner_text = QLabel()
+        self._update_banner_text.setObjectName("updateBannerText")
+        row.addWidget(self._update_banner_text, 1)
+        self._update_banner_notes = QPushButton(tr("See what's new"))
+        self._update_banner_notes.setMinimumHeight(30)
+        self._update_banner_notes.clicked.connect(
+            lambda: self._start_commander_update(self._commander_update_tag)
+        )
+        row.addWidget(self._update_banner_notes)
+        self._update_banner_action = QPushButton()
+        self._update_banner_action.setObjectName("primary")
+        self._update_banner_action.setMinimumSize(110, 30)
+        self._update_banner_action.clicked.connect(self._on_update_banner_action)
+        row.addWidget(self._update_banner_action)
+        close = QPushButton("\u2715")
+        close.setObjectName("updateBannerClose")
+        close.setToolTip(tr("Hide until the next version"))
+        close.setFixedSize(30, 30)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.clicked.connect(self._dismiss_update_banner)
+        row.addWidget(close)
+        self._update_banner = banner
+        self._refresh_update_banner()
+        return banner
+
+    def _refresh_update_banner(self) -> None:
+        banner = getattr(self, "_update_banner", None)
+        if banner is None:
+            return
+        ready = getattr(self, "_ready_update", None)
+        tag = getattr(self, "_commander_update_tag", None)
+        if ready is not None:
+            text = (
+                tr("COMMANDER {tag} is ready. Restart to finish updating.", tag=ready[0])
+                if ready[0]
+                else tr("The new version is ready. Restart to finish updating.")
+            )
+            note = _saved_elsewhere_note(ready[1])
+            self._update_banner_text.setText(f"{text} {note}" if note else text)
+            self._update_banner_notes.hide()
+            self._update_banner_action.setText(tr("Restart now"))
+            banner.show()
+        elif tag and gui_settings.load_gui_settings().get("dismissed_update_tag") != tag:
+            self._update_banner_text.setText(
+                "\u2b06  " + tr("COMMANDER {tag} is out.", tag=tag)
+            )
+            self._update_banner_notes.show()
+            self._update_banner_action.setText(tr("Update"))
+            banner.show()
+        else:
+            banner.hide()
+
+    def _on_update_banner_action(self) -> None:
+        ready = getattr(self, "_ready_update", None)
+        if ready is not None:
+            self._restart_into_update(ready[1])
+        elif self._commander_update_tag:
+            self._start_commander_update(self._commander_update_tag)
+
+    def _dismiss_update_banner(self) -> None:
+        if getattr(self, "_ready_update", None) is None and self._commander_update_tag:
+            gui_settings.save_gui_settings(dismissed_update_tag=self._commander_update_tag)
+        self._update_banner.hide()
 
     def _offer_commander_self_update(self, tag: str) -> None:
-        """Confirm, then download and swap in the new AppImage, then restart."""
-        answer = QMessageBox.question(
-            self,
-            tr("Update COMMANDER"),
-            tr(
-                "Download and install COMMANDER {tag} now? "
-                "The app will restart when it's done.",
-                tag=tag,
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        """Show the patch notes and save folder, then download and install."""
+        running = commander_appimage_path()
+        channel = effective_update_channel(
+            gui_settings.load_gui_settings().get("update_channel"), __version__
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        dialog = UpdateDialog(
+            __version__, tag, channel, str(running.parent) if running is not None else "", self
+        )
+        task = BackgroundTask(fetch_latest_release_notes, channel, parent=dialog)
+        task.result.connect(lambda result: dialog.set_notes(result, _RELEASES_URL))
+        task.error.connect(lambda _m: dialog.set_notes(None, _RELEASES_URL))
+        task.start()
+        if not dialog.exec():
             return
+        folder = dialog.folder
         self._run_commander_download(
             tr("Downloading COMMANDER {tag}...", tag=tag),
             lambda cancel, progress: download_and_install_commander_update(
-                tag, cancel_event=cancel, progress_cb=progress
+                tag, cancel_event=cancel, progress_cb=progress, dest_dir=Path(folder)
             ),
+            ready_tag=tag,
         )
 
     def switch_commander_build(self, target: str) -> None:
@@ -908,26 +1032,34 @@ class MainWindow(QMainWindow):
         this AppImage and restarts - going back a version when reverting.
         """
         if target == "unstable":
-            title = tr("Try the unstable build")
+            title = tr("Try the unstable build?")
             question = tr(
-                "Download and install the latest unstable COMMANDER build? "
-                "Unstable builds get new features sooner but are less tested.\n\n"
-                "COMMANDER restarts when it's done, and you can revert to the "
-                "stable build from Settings at any time."
+                "Unstable builds get new features sooner, but they're less tested "
+                "and may have bugs."
             )
+            points = (
+                tr("COMMANDER downloads the build and restarts."),
+                tr("You can go back to the stable build from Settings at any time."),
+            )
+            install = tr("Install unstable build")
         else:
-            title = tr("Go back to the stable build")
+            title = tr("Go back to the stable build?")
             question = tr(
-                "Download and install the latest stable COMMANDER build?\n\n"
-                "It may be older than the unstable build you're running now. "
-                "Settings changed by the newer build may not all carry back.\n\n"
-                "COMMANDER restarts when it's done."
+                "The stable build may be older than the unstable one you're "
+                "using now."
             )
+            points = (
+                tr("COMMANDER downloads the build and restarts."),
+                tr("Some settings changed by the newer build may not carry over."),
+            )
+            install = tr("Install stable build")
         answer = QMessageBox.question(
             self,
             title,
             question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=points,
+            labels={QMessageBox.StandardButton.Yes: install, QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -950,7 +1082,9 @@ class MainWindow(QMainWindow):
             on_installed=switched,
         )
 
-    def _run_commander_download(self, label: str, work, on_installed=None) -> None:
+    def _run_commander_download(
+        self, label: str, work, on_installed=None, ready_tag: str = ""
+    ) -> None:
         """Run ``work(cancel_event, progress_cb) -> AppImage path`` with a
         progress dialog, then restart into the installed AppImage.
 
@@ -960,33 +1094,37 @@ class MainWindow(QMainWindow):
         """
         # The restart at the end quits through closeEvent, which asks about a
         # running install - answering "No" there left two instances running.
-        if self.install_busy:
-            QMessageBox.warning(
-                self,
-                tr("Busy"),
-                tr(
-                    "An install, update or dependency download is still running. "
-                    "Wait for it to finish before updating COMMANDER."
-                ),
-            )
+        if self._refuse_restart_while_busy():
             return
-        progress = QProgressDialog(label, tr("Cancel"), 0, 100, self)
+        progress = ProgressDialog(tr("Updating COMMANDER"), label, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setValue(0)
 
         bridge = _CommanderUpdateProgressBridge(parent=self)
-        bridge.updated.connect(progress.setValue)
+        bridge.updated.connect(lambda pct, _text: progress.setValue(pct))
         bridge.updated.connect(
             lambda _pct, text: progress.setLabelText(text)
         )
 
+        started = time.monotonic()
+
         def _progress(downloaded: int, total: int) -> None:
-            pct = int(downloaded * 100 / total) if total > 0 else 0
-            text = label + " " + tr(
-                "{done}/{total}", done=human_size(downloaded), total=human_size(total)
+            # total is 1 when the server sent no size (see self_update).
+            if total <= 1:
+                bridge.updated.emit(0, label + "\n" + human_size(downloaded))
+                return
+            pct = int(downloaded * 100 / total)
+            if downloaded >= total:
+                # Verify and install run next, with no progress of their own.
+                bridge.updated.emit(100, tr("Checking and installing the new version..."))
+                return
+            elapsed = max(time.monotonic() - started, 0.001)
+            speed = downloaded / elapsed
+            text = label + "\n" + tr(
+                "{done} / {total} \u00b7 {speed}/s \u00b7 about {eta} left",
+                done=human_size(downloaded),
+                total=human_size(total),
+                speed=human_size(int(speed)),
+                eta=_short_duration((total - downloaded) / speed),
             )
             bridge.updated.emit(pct, text)
 
@@ -997,14 +1135,22 @@ class MainWindow(QMainWindow):
             progress.close()
             if on_installed is not None:
                 on_installed()
-            from ..main import release_instance_lock
-
-            # release_instance_lock must run in this (still-running)
-            # process before the new one starts - see relaunch_commander()'s
-            # own docstring for why a lock held past this point makes the
-            # new COMMANDER exit immediately with no window.
-            relaunch_commander(path, release_lock=release_instance_lock)
-            QApplication.quit()
+            restart = QMessageBox.question(
+                self,
+                tr("{tag} is ready", tag=ready_tag) if ready_tag else tr("The new version is ready"),
+                tr("Restart COMMANDER now to start using it?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                labels={
+                    QMessageBox.StandardButton.Yes: tr("Restart now"),
+                    QMessageBox.StandardButton.No: tr("Later"),
+                },
+                note=_saved_elsewhere_note(path),
+            )
+            if restart == QMessageBox.StandardButton.Yes:
+                self._restart_into_update(path)
+                return
+            self._ready_update = (ready_tag, path)
+            self._refresh_update_banner()
 
         def on_error(message: str) -> None:
             progress.close()
@@ -1015,18 +1161,47 @@ class MainWindow(QMainWindow):
         task.start()
         progress.show()
 
+    def _refuse_restart_while_busy(self) -> bool:
+        if not self.install_busy:
+            return False
+        QMessageBox.warning(
+            self,
+            tr("Please wait"),
+            tr(
+                "An install, update or download is still running. "
+                "Wait for it to finish, then update COMMANDER."
+            ),
+        )
+        return True
+
+    def _restart_into_update(self, path) -> None:
+        from ..main import release_instance_lock
+
+        # "Later" on a ready update, then an install, then "Restart now":
+        # the new instance would start beside a still-running install.
+        if self._refuse_restart_while_busy():
+            return
+
+        # release_instance_lock must run in this (still-running)
+        # process before the new one starts - see relaunch_commander()'s
+        # own docstring for why a lock held past this point makes the
+        # new COMMANDER exit immediately with no window.
+        relaunch_commander(path, release_lock=release_instance_lock)
+        QApplication.quit()
+
     def _show_commander_self_update_error(self, message: str) -> None:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(tr("Update failed"))
+        box.setWindowTitle(tr("COMMANDER couldn't update"))
         box.setText(message)
+        box.setInformativeText(tr("You can download the new version yourself from the releases page."))
         box.addButton(QMessageBox.StandardButton.Close)
         open_releases = box.addButton(
-            tr("Open Releases Page"), QMessageBox.ButtonRole.ActionRole
+            tr("Open releases page"), QMessageBox.ButtonRole.ActionRole
         )
         box.exec()
         if box.clickedButton() == open_releases:
-            open_url("https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases")
+            open_url(_RELEASES_URL)
 
     def _refresh_status_bar(self) -> None:
         """Re-render status bar text and re-select the combos' current items.
@@ -1088,6 +1263,7 @@ class MainWindow(QMainWindow):
     #: by main_window.py special-casing its key.
     _PAGE_CLASSES: ClassVar[dict[str, type[QWidget]]] = {
         "play": PlayPage,
+        "multiplayer": MultiplayerPage,
         "dashboard": DashboardPage,
         "install": InstallPage,
         "systemcheck": SystemCheckPage,
@@ -1095,8 +1271,8 @@ class MainWindow(QMainWindow):
         "modmanager": ModManagerPage,
         "profiles": ProfilesPage,
         "utilities": UtilitiesPage,
-        "help": HelpPage,
         "about": AboutPage,
+        "credits": CreditsPage,
         "settings": SettingsPage,
     }
 
@@ -1139,6 +1315,7 @@ class MainWindow(QMainWindow):
 
     def _on_stack_page_changed(self, _index: int) -> None:
         self._stack_fade.stop()
+        self._stack_opacity.setEnabled(True)
         self._stack_fade.start()
 
     def _on_nav(self, index: int) -> None:
@@ -1253,14 +1430,12 @@ class MainWindow(QMainWindow):
         behavior consistent and predictable for the user.
         """
         if self.install_busy:
-            QMessageBox.warning(self, tr("Busy"), busy_message)
+            QMessageBox.warning(self, tr("Please wait"), busy_message)
         elif mo2_running():
             QMessageBox.warning(
                 self,
-                tr("Busy"),
-                tr(
-                    "Mod Organizer / the game is currently running.\n\nClose it before running this action."
-                ),
+                tr("Please wait"),
+                tr("Mod Organizer or the game is still open. Close it, then try again."),
             )
         else:
             return False
@@ -1275,7 +1450,7 @@ class MainWindow(QMainWindow):
     def apply_theme(self, name: str) -> None:
         if self._reject_language_or_theme_change(
             tr(
-                "Cannot change the theme while a background task is running. Wait for it to finish, then try again."
+                "The theme can't change while a task is running. Wait for it to finish, then try again."
             )
         ):
             return
@@ -1303,7 +1478,7 @@ class MainWindow(QMainWindow):
         """
         if self._reject_language_or_theme_change(
             tr(
-                "Cannot change the language while a background task is running. Wait for it to finish, then try again."
+                "The language can't change while a task is running. Wait for it to finish, then try again."
             )
         ):
             return
@@ -1331,8 +1506,9 @@ class MainWindow(QMainWindow):
         # rebuild finishes, so a signal that arrives mid-teardown cannot
         # touch a widget that is about to be destroyed. install_busy being
         # False (checked by the caller) means nothing CLI-driving is
-        # running, so this only ever cancels quick, safe-to-abandon lookups.
-        shutdown_active_runners(timeout_ms=2000)
+        # running, so this only ever cancels quick, safe-to-abandon lookups:
+        # detached at once (no wait), as the rebuilt pages start them again.
+        shutdown_active_runners(timeout_ms=0)
 
         old_central = self.takeCentralWidget()
         if old_central is not None:
@@ -1371,6 +1547,11 @@ class MainWindow(QMainWindow):
         self.tabs.update()
         self.backdrop.update()
         self.update()
+        # Icons painted in a theme colour don't follow the stylesheet.
+        for page in getattr(self, "_pages", {}).values():
+            notify = getattr(page, "on_theme_changed", None)
+            if callable(notify):
+                notify()
         # The status bar is built exactly once and never rebuilt, so its
         # Theme/Font/size combos do not pick up a change made from the
         # Settings page's own pickers by themselves. Left showing the old
@@ -1399,9 +1580,24 @@ class MainWindow(QMainWindow):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
+        # The backdrop's full-window gradients are slow to paint, and every
+        # repaint anywhere in the window repaints the backdrop under it, so
+        # they are drawn once per size/theme and blitted from then on.
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
+        if getattr(self, "_backdrop_key", None) != key:
+            pixmap = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(QColor(0, 0, 0))
+            cache_painter = QPainter(pixmap)
+            try:
+                paint_backdrop(cache_painter, self.rect())
+            finally:
+                cache_painter.end()
+            self._backdrop_key, self._backdrop_pixmap = key, pixmap
         painter = QPainter(self)
         try:
-            paint_backdrop(painter, self.rect())
+            painter.drawPixmap(0, 0, self._backdrop_pixmap)
         finally:
             painter.end()
 
@@ -1455,9 +1651,11 @@ class MainWindow(QMainWindow):
         if self.install_busy:
             answer = QMessageBox.question(
                 self,
-                tr("Install Running"),
-                tr("An installation, verification, update, or dependency download is currently running. Are you sure you want to close?\n\nThis will terminate the running process and may leave the prefix partially configured."),
+                tr("Close COMMANDER now?"),
+                tr("An install, check, update or download is still running. Closing now stops it partway."),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                note=tr("The game's Wine prefix may be left half set up. Running the same task again usually fixes it."),
+                labels={QMessageBox.StandardButton.Yes: tr("Close anyway"), QMessageBox.StandardButton.No: tr("Keep running")},
             )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
@@ -1465,6 +1663,7 @@ class MainWindow(QMainWindow):
         gui_settings.save_gui_settings(
             window_width=self.normalGeometry().width(),
             window_height=self.normalGeometry().height(),
+            window_maximized=self.isMaximized(),
         )
         event.accept()
 
@@ -1504,7 +1703,7 @@ class MainWindow(QMainWindow):
             )
             if incomplete:
                 tooltip += "\n" + tr(
-                    "The last install attempt failed - this modpack may be incomplete. Resume the install on the Install page to finish it."
+                    "The last install failed - resume it on the Install page."
                 )
             self.mod_counter_label.setToolTip(tooltip)
         else:

@@ -19,10 +19,15 @@ simply becomes the "real" function those inner ``patch()`` calls save
 and restore around, so it changes nothing for them.
 """
 
+import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+# No real windows: same as CI, and nothing pops up on the desktop mid-run.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def _network_disabled_in_tests(*_args, **_kwargs):
@@ -43,19 +48,102 @@ def _block_real_network_calls():
         yield
 
 
+def _import_every_ui_module():
+    import importlib
+    import pkgutil
+
+    import commander_gui.ui
+    import Steamdeck
+    import Steamdeck.screens
+
+    for package in (commander_gui.ui, Steamdeck, Steamdeck.screens):
+        for info in pkgutil.iter_modules(package.__path__, package.__name__ + "."):
+            importlib.import_module(info.name)
+
+
+@pytest.fixture(autouse=True)
+def _never_run_the_real_cli():
+    """CLI commands fail at spawn instead of running the bundled binary.
+
+    Building a MainWindow or Dashboard starts background CLI queries. The
+    real ``stalker-gamma`` writes its log under ``$XDG_CONFIG_HOME``, and
+    tests that point that at their own ``TemporaryDirectory`` delete it at
+    the end of the test body - before ``_stop_background_work_after_each_test``
+    has waited for those queries. A CLI process still running then wrote its
+    log mid-delete: ``OSError: Directory not empty`` in a random one of ~30
+    tests. Only ``cli_runner``'s own lookup is replaced: ``mod_install``
+    still finds the bundled 7zz next to it. Tests that need CLI output patch
+    ``run_sync``/``CommandRunner`` themselves, as before.
+    """
+    with patch(
+        "commander_gui.cli_runner.cli_binary_path",
+        return_value=Path("/nonexistent/stalker-gamma-disabled-in-tests"),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _ignore_the_real_game_and_mo2():
+    """Answer "not running" wherever the UI asks about MO2 or the game.
+
+    Those checks look at the real machine: with GAMMA running on it (a
+    developer playing while the suite runs), the UI refused the action in a
+    modal box, which never closes offscreen - the suite hung for good. Every
+    module is imported first so none keeps the real check. ``common``'s own
+    copies stay real for their own tests, which fake ``subprocess.run``.
+    Tests that need "running" still patch these themselves, on top.
+    """
+    from commander_gui.ui import common
+
+    _import_every_ui_module()
+    real = {common.mo2_running, common.game_running}
+    patches = [
+        patch.object(module, name, return_value=False)
+        for module_name, module in list(sys.modules.items())
+        if module_name.startswith(("commander_gui.", "Steamdeck"))
+        and module is not common
+        for name in ("mo2_running", "game_running")
+        if getattr(module, name, None) in real
+    ]
+    for p in patches:
+        p.start()
+    yield
+    for p in reversed(patches):
+        p.stop()
+
+
 @pytest.fixture(autouse=True)
 def _stop_background_work_after_each_test():
     """Join every BackgroundTask/CommandRunner a test left running, with
     result delivery suppressed, then re-arm it - the same teardown a live
     language switch uses. Otherwise a task finishes during a *later* test's
     processEvents() and its handler touches a page that is already gone,
-    segfaulting the suite (seen intermittently in CI)."""
+    segfaulting the suite (seen intermittently in CI).
+
+    Then delete every top-level widget the test created. Tests build pages
+    and windows and drop them; left alive, hundreds piled up and a later
+    test's processEvents() fired a timer on one whose C++ side was already
+    half gone - a segfault ~30% into a serial run. Widgets from setUpClass
+    exist before this fixture starts, so class-shared windows survive."""
+    qtwidgets = sys.modules.get("PySide6.QtWidgets")
+    app = qtwidgets.QApplication.instance() if qtwidgets else None
+    before = set(map(id, app.topLevelWidgets())) if app else set()
     yield
     common = sys.modules.get("commander_gui.ui.common")
-    if common is None:  # test never touched the Qt UI
+    if common is not None:
+        common.shutdown_active_runners(timeout_ms=10000)
+        common.resume_after_shutdown()
+    qtwidgets = sys.modules.get("PySide6.QtWidgets")
+    app = qtwidgets.QApplication.instance() if qtwidgets else None
+    if app is None:  # test never touched Qt
         return
-    common.shutdown_active_runners(timeout_ms=10000)
-    common.resume_after_shutdown()
+    from PySide6.QtCore import QEvent
+
+    for widget in app.topLevelWidgets():
+        if id(widget) not in before:
+            widget.hide()
+            widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +156,23 @@ def _private_data_home(tmp_path, monkeypatch):
     # (an install's resume point, window size...) otherwise wrote it into
     # the developer's real ~/.config/stalker-gamma.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+
+@pytest.fixture(autouse=True)
+def _no_unmocked_popups():
+    """A themed pop-up (commander_gui.ui.dialogs) that a test forgot to
+    mock would wait for a click forever; fail the test instead."""
+    from PySide6.QtWidgets import QDialog
+
+    real_exec = QDialog.exec
+
+    def guarded(dialog):
+        if dialog.objectName() == "messageDialog":
+            raise AssertionError(f"unmocked pop-up: {dialog.windowTitle()!r}")
+        return real_exec(dialog)
+
+    with patch.object(QDialog, "exec", guarded):
+        yield
 
 
 def pytest_collection_modifyitems(items):

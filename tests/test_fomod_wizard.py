@@ -10,6 +10,7 @@ from commander_gui.fomod import (
     RECOMMENDED,
     FomodWizard,
     apply_options,
+    find_installer,
     parse_config,
 )
 
@@ -268,6 +269,42 @@ class ReadOnlyArchiveTest(unittest.TestCase):
             self.assertTrue(os.access(directory, os.W_OK), directory)
             for name in files:
                 self.assertTrue(os.access(Path(directory) / name, os.W_OK))
+
+
+class BundleInstallerTest(unittest.TestCase):
+    """A main mod and its add-ons side by side, no fomod folder
+    (Anomaly_Popup_Messages.2.3.zip): each folder becomes an option."""
+
+    def test_bundle_parts_become_options_and_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp) / "staging"
+            for part, script in (
+                ("Anomaly Popup Messages", "main.script"),
+                ("APM - Kill Feed", "kill.script"),
+            ):
+                folder = staging / part / "gamedata" / "scripts"
+                folder.mkdir(parents=True)
+                (folder / script).write_text("x")
+            config, root = find_installer(staging, "Anomaly_Popup_Messages.2.3.zip")
+            options = config.steps[0].groups[0].options
+            self.assertEqual(options[0].name, "Anomaly Popup Messages")
+            self.assertEqual(options[0].default_type, RECOMMENDED)
+            wizard = FomodWizard(config)
+            wizard.enter(0)
+            self.assertEqual(wizard.selected, {(0, 0): [0]})
+            wizard.toggle(0, 0, 1)
+            out = Path(tmp) / "out"
+            apply_options(config, root, out, wizard.selections())
+            self.assertEqual(
+                sorted(p.name for p in (out / "gamedata" / "scripts").iterdir()),
+                ["kill.script", "main.script"],
+            )
+
+    def test_plain_mod_is_not_a_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp) / "staging"
+            (staging / "Mod" / "gamedata").mkdir(parents=True)
+            self.assertIsNone(find_installer(staging, "Mod.zip"))
 
 
 if __name__ == "__main__":
