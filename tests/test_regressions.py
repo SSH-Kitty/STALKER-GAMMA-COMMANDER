@@ -6411,7 +6411,7 @@ class ModCounterTests(unittest.TestCase):
                 ),
             ):
                 page._on_launch_button_clicked()
-            mock_abort.assert_called_once_with("Game closed by user.")
+            mock_abort.assert_called_once_with("Game closed by user.", error=False)
 
     def test_launch_button_click_while_idle_still_launches_normally(self):
         from PySide6.QtWidgets import QApplication
@@ -11364,7 +11364,7 @@ class UserModsTrackerTests(unittest.TestCase):
         page._render(
             UpdateStatus(diffs=[UpdateDiff(status="Modified", text="SomeAddon")])
         )
-        self.assertFalse(page.filter_combo.isHidden())
+        self.assertFalse(page.filter_row.isHidden())
         self.assertFalse(page.count_summary.isHidden())
 
         with patch("commander_gui.ui.update_page.invalidate_baseline"):
@@ -11372,7 +11372,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
         self.assertEqual(page._diffs, [])
         self.assertTrue(page.table.isHidden())
-        self.assertTrue(page.filter_combo.isHidden())
+        self.assertTrue(page.filter_row.isHidden())
         self.assertTrue(page.count_summary.isHidden())
 
     def test_stale_update_check_result_starts_a_replacement_check(self):
@@ -11567,6 +11567,17 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertNotIn("Older notes here.", body0)
         self.assertEqual(title1, "S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes")
         self.assertIn("Older notes here.", body1)
+
+    def test_new_releases_marks_only_releases_after_the_seen_version(self):
+        from commander_gui.updates import new_releases
+
+        titles = ["GAMMA 0.9.5", "GAMMA 0.9.4", "GAMMA 0.9.3.1"]
+        self.assertEqual(new_releases(titles, "0.9.4", True), [True, False, False])
+        self.assertEqual(new_releases(titles, "0.9.3", True), [True, True, True])
+        # Unknown seen version: only the newest release is new.
+        self.assertEqual(new_releases(titles, None, True), [True, False, False])
+        # Up to date: nothing is new.
+        self.assertEqual(new_releases(titles, "0.9.3", False), [False, False, False])
 
     def test_parse_patchnotes_sections_handles_no_heading_at_all(self):
         from commander_gui.updates import parse_patchnotes_sections

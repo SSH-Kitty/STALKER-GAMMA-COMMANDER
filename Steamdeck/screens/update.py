@@ -32,6 +32,7 @@ from commander_gui.ui.common import (
 from commander_gui.updates import (
     check_updates,
     parse_patchnotes_sections,
+    release_title,
     status_summary,
 )
 
@@ -64,20 +65,6 @@ def _plain_notes(body: str) -> str:
     return "\n".join(lines).strip()
 
 
-_LONG_NAME = re.compile(r"S\.?T\.?A\.?L\.?K\.?E\.?R\.?\s+G\.?A\.?M\.?M\.?A\.?", re.IGNORECASE)
-_PATCH_NOTES = re.compile(r"\s*[-–:]?\s*patch\s*notes\s*$", re.IGNORECASE)
-
-
-def _release_title(title: str) -> str:
-    """"S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes" -> "GAMMA 0.9.4".
-
-    The heading wording has drifted between releases; shortened this way
-    they read as one list and fit a row.
-    """
-    short = _PATCH_NOTES.sub("", _LONG_NAME.sub("GAMMA", title)).strip(" -–:")
-    return short or title
-
-
 class _ReleaseNotes(QWidget):
     """One release: a header row that opens and closes its notes."""
 
@@ -86,7 +73,7 @@ class _ReleaseNotes(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(8))
-        self.header = DeckRow(_release_title(title), tr("Show") + "  ▾", chevron=False)
+        self.header = DeckRow(release_title(title), tr("Show") + "  ▾", chevron=False)
         self.header.activated.connect(self.toggle)
         layout.addWidget(self.header)
         self.panel = DeckTextPanel(_plain_notes(body) or tr("No patch notes."), min_height=160, max_height=420)
@@ -215,7 +202,8 @@ class UpdateScreen(DeckScreen):
         self.action_button.setEnabled(not self.window.install_busy)
 
         text, kind = status_summary(status)
-        self.summary_label.setText(text)
+        note = getattr(status, "note", None)
+        self.summary_label.setText(f"{text}\n\n{note}" if note else text)
         # kind is "accent" or "warn", matching desktop's own #accent/#warn
         # object names for this exact text (see update_page.py's
         # _set_status()).

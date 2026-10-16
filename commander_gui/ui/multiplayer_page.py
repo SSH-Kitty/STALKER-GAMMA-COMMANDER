@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from .. import coop
 from .common import (
+    notice,
     BackgroundTask,
     PlainSpinBox,
     game_running,
@@ -1116,7 +1117,7 @@ class MultiplayerPage(QWidget):
     def _say(self, text: str) -> None:
         self._say_clear.stop()
         _unfade(self.op_label)
-        self.op_label.setText(text)
+        self.op_label.setText(notice(text))
         self.op_label.setVisible(bool(text))
 
     def on_busy_changed(self, busy: bool) -> None:

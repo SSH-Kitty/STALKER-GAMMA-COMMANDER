@@ -49,6 +49,16 @@ from .dialogs import InputDialog as QInputDialog
 from .dialogs import MessageBox as QMessageBox
 
 
+def notice(text: str) -> str:
+    """A short status notice reads as a label, not a sentence: no closing full stop.
+
+    Leaves "..." and multi-line messages (log tails) alone.
+    """
+    if "\n" not in text and text.endswith(".") and not text.endswith(".."):
+        return text[:-1]
+    return text
+
+
 class _ThemeColor:
     """A colour read from the active theme each time it is used.
 
@@ -2381,7 +2391,7 @@ class ProgressArea(QWidget):
                     self.table.finish_stale_by_concurrency(_HEAVY_ARCHIVE_NAMES)
 
     def status_message(self, text: str) -> None:
-        self.status_label.setText(text)
+        self.status_label.setText(notice(text))
 
     def on_started(self) -> None:
         self.cancel_button.show()

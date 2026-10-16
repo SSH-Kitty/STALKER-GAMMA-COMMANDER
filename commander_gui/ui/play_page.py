@@ -90,6 +90,7 @@ from ..steam_shortcuts import (
     steam_root_for,
 )
 from .common import (
+    notice,
     ACCENT,
     WARN,
     BackgroundTask,
@@ -943,7 +944,7 @@ class PlayPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Quit game"), QMessageBox.StandardButton.No: tr("Keep playing")},
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self._abort_launch(tr("Game closed by user."))
+            self._abort_launch(tr("Game closed by user."), error=False)  # the user's choice, not a fault
             self._launch_status_clear_timer.start(5000)
 
     def _confirm_load_order(self) -> bool:
@@ -1489,7 +1490,7 @@ class PlayPage(QWidget):
             note=tr("Now run Install Dependencies on the Install page. Some of the files it installed were replaced."),
         )
 
-    def _abort_launch(self, message: str) -> None:
+    def _abort_launch(self, message: str, *, error: bool = True) -> None:
         """Kill any spawned wrapper, release the launch lock, and report."""
         proc = self._proc
         self._proc = None
@@ -1519,7 +1520,7 @@ class PlayPage(QWidget):
         self._launch_wrapper_pid = None
         self._monitoring_mo2 = False
         self._stop_launch_timer()
-        self._set_result(message, error=True)
+        self._set_result(message, error=error)
         self._set_launch_button_state(False)
         # Recompute real availability instead of blindly re-enabling: the
         # install this launched target depended on may have been broken by
@@ -2016,7 +2017,7 @@ class PlayPage(QWidget):
         color = WARN.name() if error else ACCENT.name()
         self._launch_status_clear_timer.stop()
         self.launch_live_status.setStyleSheet(f"color: {color};")
-        self.launch_live_status.setText(text)
+        self.launch_live_status.setText(notice(text))
         self.launch_status_changed.emit()
 
     def _clear_launch_status(self) -> None:

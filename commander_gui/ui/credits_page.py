@@ -106,7 +106,9 @@ class CreditsPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.viewport().setStyleSheet("background: transparent;")
+        # Scoped: a bare rule would cascade to every button inside.
+        scroll.viewport().setObjectName("scrollViewport")
+        scroll.viewport().setStyleSheet("#scrollViewport { background: transparent; }")
         outer.addWidget(scroll)
 
         content = QWidget()

@@ -52,6 +52,7 @@ from ..profile_bundle import (
 from ..settings import CliProfile, cli_ok, run_config_command
 from ..themes import active_theme_tokens
 from .common import (
+    notice,
     GAMMA_MARKERS,
     GAMMA_PROFILE,
     BackgroundTask,
@@ -1627,7 +1628,7 @@ class ProfilesPage(QWidget):
         self._update_busy_state()
 
     def _show_status(self, text: str) -> None:
-        self.status_label.setText(text)
+        self.status_label.setText(notice(text))
         self.status_label.setVisible(bool(text))
         if text:
             self._status_timer.start(_STATUS_TIMEOUT_MS)

@@ -22,11 +22,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .atomic import write_text
 from .i18n import tr
+from .integrity import GAMMA_MARKERS
 from .network import read_response_bytes
 from .network import urlopen_with_retry as urlopen
 from .parsers import UpdateDiff
-from .repair import USER_AGENT, ModPackRecord, parse_modpack_records
+from .repair import USER_AGENT, ModPackRecord, _name_only, parse_modpack_records
 
 VERSION_FILENAME = "G.A.M.M.A_definition_version.txt"
 PATCHNOTES_FILENAME = "Patchnotes.md"
@@ -61,6 +63,12 @@ class UpdateStatus:
     patchnotes: str | None = None
     diffs: list[UpdateDiff] = field(default_factory=list)
     error: str | None = None
+    #: The install has a modpack list but no gamma/version.txt (a GOG or
+    #: hand-made install). One ``update apply`` syncs the GAMMA repos and
+    #: writes it, so this counts as an update even with no addon changes.
+    version_unknown: bool = False
+    #: One-off explanation for the Updates page (the list was rebuilt).
+    note: str | None = None
 
     @property
     def update_available(self) -> bool:
@@ -80,7 +88,7 @@ class UpdateStatus:
             return True
         if self.error:
             return False
-        return bool(self.diffs)
+        return bool(self.diffs) or self.version_unknown
 
 
 def format_version(
@@ -111,6 +119,11 @@ def status_summary(status: UpdateStatus) -> tuple[str, str]:
     """
     if status.error and not status.update_available:
         return status.error, "warn"
+    if status.version_unknown:
+        text = tr("GAMMA version unknown. Install updates once to sync it.")
+        if status.diffs:
+            text += " " + tr("- {count} change(s)", count=len(status.diffs))
+        return text, "warn"
     if status.installed is None:
         return tr("GAMMA is not installed yet - run a full install first."), "warn"
     if status.update_available:
@@ -256,6 +269,43 @@ def parse_patchnotes_sections(text: str) -> list[tuple[str, str]]:
         body = text[start:end].strip()
         sections.append((title, body))
     return sections
+
+
+_LONG_NAME_RE = re.compile(
+    r"S\.?T\.?A\.?L\.?K\.?E\.?R\.?\s+G\.?A\.?M\.?M\.?A\.?", re.IGNORECASE
+)
+_PATCH_NOTES_RE = re.compile(r"\s*[-–:]?\s*patch\s*notes\s*$", re.IGNORECASE)
+_TITLE_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
+
+
+def release_title(title: str) -> str:
+    """"S.T.A.L.K.E.R. G.A.M.M.A. 0.9.4 Patch Notes" -> "GAMMA 0.9.4".
+
+    The heading wording has drifted between releases; shortened this way
+    they read as one list and fit a row.
+    """
+    short = _PATCH_NOTES_RE.sub("", _LONG_NAME_RE.sub("GAMMA", title)).strip(" -–:")
+    return short or title
+
+
+def new_releases(titles: list[str], seen: str | None, update_available: bool) -> list[bool]:
+    """Which releases (latest first) the player hasn't installed yet.
+
+    ``seen`` is the last GAMMA version this profile was up to date on. The
+    installed build number can't be mapped to a release heading, so without
+    it only the newest release counts as new.
+    """
+    if not update_available:
+        return [False] * len(titles)
+    seen_version = _numeric_version_tuple(seen) if seen else None
+    if seen_version is None:
+        return [index == 0 for index in range(len(titles))]
+    flags = []
+    for title in titles:
+        match = _TITLE_VERSION_RE.search(title)
+        version = _numeric_version_tuple(match.group(0)) if match else None
+        flags.append(version is not None and version > seen_version)
+    return flags
 
 
 def latest_version_human(profile) -> str | None:
@@ -596,6 +646,119 @@ def _read_modpack_list(profile_dir: Path) -> dict[str, ModPackRecord] | None:
     return None
 
 
+def _meta_installation_file(mod_dir: Path) -> str:
+    """The archive name MO2's meta.ini says this mod was installed from."""
+    try:
+        text = (mod_dir / "meta.ini").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "installationfile":
+            value = value.strip().strip('"')
+            # Can be a full Windows or POSIX path; only the name matters.
+            return value.replace("\\", "/").rsplit("/", 1)[-1]
+    return ""
+
+
+def _cli_json_record(line: str) -> dict:
+    """One TSV line as the CLI's ``ModPackMakerRecord`` JSON (camelCase).
+
+    Mirrors stalker-gamma-cli's serializer so ``update apply`` can read it:
+    instructions is a list split on ":" (``"0"`` is an empty list), patch
+    drops its leading ``"- "`` (the CLI adds it back when reading), and a
+    field missing from the line is null.
+    """
+    parts = [part.strip() for part in line.split("\t")]
+
+    def field_at(index: int) -> str | None:
+        return parts[index] if index < len(parts) else None
+
+    instructions = field_at(1)
+    patch = field_at(2)
+    if patch is not None:
+        while patch.startswith("- "):
+            patch = patch[2:]
+    return {
+        "dlLink": parts[0],
+        "instructions": None
+        if instructions is None
+        else ([] if instructions == "0" else instructions.split(":")),
+        "patch": patch,
+        "addonName": field_at(3),
+        "modDbUrl": field_at(4),
+        "zipName": field_at(5),
+        "md5ModDb": field_at(6),
+    }
+
+
+def rebuild_modpack_list(
+    gamma_dir: str, mo2_profile: str, remote_text: str
+) -> int | None:
+    """Write the missing modpack list from what is really in ``gamma/mods``.
+
+    A GOG (or hand-made) GAMMA install never ran ``full-install``, so the
+    profile has no modpack_maker_list and neither Updates nor the CLI's
+    ``update apply`` can work. Copying the official list would claim every
+    addon is current; instead each official line is checked against disk:
+
+    * mod folder missing: the line is left out, so it shows as Added;
+    * folder present and its meta.ini names the current archive: kept;
+    * folder present without that proof: the MD5 is blanked, so it shows as
+      Modified and the update re-downloads it.
+
+    Returns how many addons could not be confirmed (missing or unproven),
+    or None if nothing was written.
+    Never overwrites an existing list.
+    """
+    profile_dir = Path(gamma_dir, "profiles", mo2_profile)
+    if not profile_dir.is_dir() or any(
+        (profile_dir / name).exists() for name in _MODPACK_LIST_FILES
+    ):
+        return None
+    folders: dict[str, Path] = {}
+    try:
+        for entry in Path(gamma_dir, "mods").iterdir():
+            if entry.is_dir():
+                folders.setdefault(_name_only(entry.name), entry)
+    except OSError:
+        return None
+
+    lines: list[str] = []
+    unconfirmed = 0
+    for line in remote_text.splitlines():
+        if not line.strip():
+            continue
+        parsed = parse_modpack_records(line)
+        record = next(iter(parsed.values()), None)
+        if record is None:
+            lines.append(line)  # a category header
+            continue
+        folder = folders.get(_name_only(record.folder_name))
+        archives = [name.lower() for name in record.archive_names()]
+        if folder is not None and _meta_installation_file(folder).lower() in archives:
+            lines.append(line)
+            continue
+        unconfirmed += 1
+        if folder is None:
+            continue
+        parts = line.split("\t")
+        if len(parts) > 6 and parts[6].strip():
+            parts[6] = ""
+            lines.append("\t".join(parts))
+        # No MD5 to blank: leaving the line out (Added) is what forces it.
+
+    try:
+        write_text(profile_dir / "modpack_maker_list.txt", "\n".join(lines) + "\n")
+        write_text(
+            profile_dir / "modpack_maker_list.json",
+            json.dumps([_cli_json_record(line) for line in lines], indent=2),
+        )
+    except OSError:
+        return None
+    return unconfirmed
+
+
 def diff_records(
     local: dict[str, ModPackRecord],
     remote: dict[str, ModPackRecord],
@@ -658,15 +821,19 @@ def check_updates(profile) -> UpdateStatus:
 
     status.installed = installed_version(gamma_dir)
 
+    no_list = tr(
+        "No modpack list found in this profile. Run a full install so the "
+        "installer can generate the installed-addon list."
+    )
     local = local_modpack_records(gamma_dir, mo2_profile)
-    if local is None:
-        status.error = tr(
-            "No modpack list found in this profile. Run a full install so the "
-            "installer can generate the installed-addon list."
-        )
+    # A GOG or hand-made install has MO2 but never got the list: it is
+    # rebuilt below from the mods folder once the official list is in.
+    if local is None and not all(Path(gamma_dir, m).is_file() for m in GAMMA_MARKERS):
+        status.error = no_list
         return status
 
     remote: dict[str, ModPackRecord] = {}
+    remote_text = ""
     mod_pack_url = getattr(profile, "mod_pack_maker_url", "") or ""
     list_failed = False
     if mod_pack_url:
@@ -675,17 +842,33 @@ def check_updates(profile) -> UpdateStatus:
                 mod_pack_url, headers={"User-Agent": USER_AGENT}
             )
             with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-                remote = parse_modpack_records(
-                    read_response_bytes(resp, _MAX_MODPACK_BYTES).decode(
-                        "utf-8", errors="replace"
-                    )
+                remote_text = read_response_bytes(resp, _MAX_MODPACK_BYTES).decode(
+                    "utf-8", errors="replace"
                 )
+                remote = parse_modpack_records(remote_text)
         except (OSError, ValueError, UnicodeError) as exc:
             status.error = tr("Could not reach the official mod list: {exc}", exc=exc)
             list_failed = True
     else:
         status.error = tr("The profile has no modpack maker URL configured.")
         list_failed = True
+
+    if local is None:
+        unconfirmed = (
+            rebuild_modpack_list(gamma_dir, mo2_profile, remote_text) if remote else None
+        )
+        if unconfirmed is not None:
+            local = local_modpack_records(gamma_dir, mo2_profile)
+        if local is None:
+            status.error = no_list if not status.error else f"{no_list}\n{status.error}"
+            return status
+        status.note = tr(
+            "COMMANDER built the installed-mod list from your mods folder (GOG or "
+            "manual install). {count} mod(s) could not be confirmed and are "
+            "reinstalled with the next update.",
+            count=unconfirmed,
+        )
+    status.version_unknown = status.installed is None
 
     # If the remote list is empty but local addons exist, treat as a fetch
     # failure rather than reporting every local addon as "Removed".

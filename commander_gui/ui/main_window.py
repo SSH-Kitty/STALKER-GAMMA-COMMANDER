@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QStackedWidget,
+    QStatusBar,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -69,6 +70,7 @@ from ..updates import (
 )
 from .about_page import _DISCORD, AboutPage
 from .common import (
+    notice,
     OK_GREEN,
     STATUS_GREY,
     WARN,
@@ -340,12 +342,20 @@ class _CommanderUpdateProgressBridge(QObject):
     updated = Signal(int, str)
 
 
+class _NoticeStatusBar(QStatusBar):
+    """Every page's status-bar notice goes through notice()."""
+
+    def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt override
+        super().showMessage(notice(text), timeout)
+
+
 class MainWindow(QMainWindow):
     #: A newer COMMANDER release tag, from the one shared update check.
     commander_update_found = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
+        self.setStatusBar(_NoticeStatusBar(self))
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
         self.settings = load_settings()

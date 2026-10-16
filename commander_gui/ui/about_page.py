@@ -310,7 +310,9 @@ class AboutPage(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.scroll.viewport().setStyleSheet("background: transparent;")
+        # Scoped: a bare rule would cascade to every button inside.
+        self.scroll.viewport().setObjectName("scrollViewport")
+        self.scroll.viewport().setStyleSheet("#scrollViewport { background: transparent; }")
         outer.addWidget(self.scroll, 1)
 
         self.empty = QWidget()
@@ -446,6 +448,7 @@ class AboutPage(QWidget):
         sections = []
         for heading, blocks in topic["sections"]:
             section_body = QWidget()
+            section_body.setObjectName("panelTransparent")
             section_layout = QVBoxLayout(section_body)
             section_layout.setContentsMargins(0, 4, 0, 0)
             section_layout.setSpacing(10)
