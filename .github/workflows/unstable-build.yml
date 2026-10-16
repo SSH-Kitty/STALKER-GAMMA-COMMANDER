@@ -37,6 +37,8 @@ jobs:
       - name: Build the AppImage
         env:
           QT_QPA_PLATFORM: offscreen
+          # Fresh checkout: the version stamp above is the only change.
+          ALLOW_DIRTY: "1"
         run: ./build-appimage.sh dist
       - name: Publish the pre-release
         env:
