@@ -6,4 +6,4 @@
 __version__ = "1.4.0"
 #: What the interface shows after "COMMANDER" - e.g. "COMMANDER 1.3.0" (a
 #: pre-release build adds a suffix such as "1.3.0 dev").
-__version_label__ = "1.4.0"
+__version_label__ = "1.4.0 dev"

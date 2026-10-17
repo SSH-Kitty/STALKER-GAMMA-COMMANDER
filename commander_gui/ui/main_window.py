@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, __version_label__, gui_settings
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
-from ..integrity import _format_duration as _short_duration
 from ..self_update import (
     commander_appimage_path,
     download_and_install_commander_update,
@@ -1035,7 +1034,7 @@ class MainWindow(QMainWindow):
             ready_tag=tag,
         )
 
-    def switch_commander_build(self, target: str) -> None:
+    def switch_commander_build(self, target: str, tag: str | None = None) -> None:
         """Settings' "Switch to Unstable" / "Revert to Stable".
 
         Installs the newest build of ``target`` ("unstable" or "stable") over
@@ -1043,14 +1042,9 @@ class MainWindow(QMainWindow):
         """
         if target == "unstable":
             title = tr("Try the unstable build?")
-            question = tr(
-                "Unstable builds get new features sooner, but they're less tested "
-                "and may have bugs."
-            )
-            points = (
-                tr("COMMANDER downloads the build and restarts."),
-                tr("You can go back to the stable build from Settings at any time."),
-            )
+            question = tr("New features arrive here first, but they may have bugs.")
+            points = ()
+            info = tr("COMMANDER restarts when it's done. You can switch back in Settings.")
             install = tr("Install unstable build")
         else:
             title = tr("Go back to the stable build?")
@@ -1062,6 +1056,7 @@ class MainWindow(QMainWindow):
                 tr("COMMANDER downloads the build and restarts."),
                 tr("Some settings changed by the newer build may not carry over."),
             )
+            info = ""
             install = tr("Install stable build")
         answer = QMessageBox.question(
             self,
@@ -1069,6 +1064,7 @@ class MainWindow(QMainWindow):
             question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             points=points,
+            info=info,
             labels={QMessageBox.StandardButton.Yes: install, QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -1085,7 +1081,7 @@ class MainWindow(QMainWindow):
             gui_settings.save_gui_settings(update_channel=target)
 
         self._run_commander_download(
-            tr("Downloading the unstable build...")
+            (tr("Downloading unstable build {tag}", tag=tag) if tag else tr("Downloading the unstable build..."))
             if target == "unstable"
             else tr("Downloading the stable build..."),
             work,
@@ -1115,8 +1111,6 @@ class MainWindow(QMainWindow):
             lambda _pct, text: progress.setLabelText(text)
         )
 
-        started = time.monotonic()
-
         def _progress(downloaded: int, total: int) -> None:
             # total is 1 when the server sent no size (see self_update).
             if total <= 1:
@@ -1127,15 +1121,8 @@ class MainWindow(QMainWindow):
                 # Verify and install run next, with no progress of their own.
                 bridge.updated.emit(100, tr("Checking and installing the new version..."))
                 return
-            elapsed = max(time.monotonic() - started, 0.001)
-            speed = downloaded / elapsed
-            text = label + "\n" + tr(
-                "{done} / {total} \u00b7 {speed}/s \u00b7 about {eta} left",
-                done=human_size(downloaded),
-                total=human_size(total),
-                speed=human_size(int(speed)),
-                eta=_short_duration((total - downloaded) / speed),
-            )
+            # The bar shows the percentage; the label only needs the size.
+            text = label + "\n" + f"{human_size(downloaded)} / {human_size(total)}"
             bridge.updated.emit(pct, text)
 
         task = BackgroundTask(lambda: work(task.cancel_event, _progress), parent=self)

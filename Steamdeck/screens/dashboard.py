@@ -26,6 +26,7 @@ from commander_gui import gui_settings
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.i18n import tr
 from commander_gui.ui.common import (
+    notice,
     BackgroundTask,
     anomaly_installed,
     count_active_mods,
@@ -54,6 +55,7 @@ from ..widgets import (
     side_by_side,
 )
 from .base import DeckScreen
+from .play import play_label
 
 #: Directory sizes mean walking the whole install tree, which on a Deck's SD
 #: card is slow enough to notice. The desktop Dashboard caches for the same
@@ -303,11 +305,11 @@ class DashboardScreen(DeckScreen):
                 title, detail, action, target = (
                     tr("Ready to play"),
                     tr("Everything is installed."),
-                    "\u25b6   " + tr("Play GAMMA"),
+                    "\u25b6   " + play_label(profile),
                     "play",
                 )
         self.banner_title.setText(title)
-        self.banner_detail.setText(detail)
+        self.banner_detail.setText(notice(detail))
         self.banner_button.setText(action)
         self.banner_button.setObjectName("deckDanger" if target == "quit" else "deckPrimary")
         repolish(self.banner_button)

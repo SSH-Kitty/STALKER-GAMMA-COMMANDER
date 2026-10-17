@@ -13,6 +13,9 @@ The xrRazom zip has two halves:
   the highest priority and enabled/disabled together with the engine files.
 
 Co-op settings are the mod's console variables in ``appdata/user.ltx``.
+The single-player engine drops console variables it doesn't know when it
+saves user.ltx, so a copy is kept in the state file and put back on the
+next switch to co-op.
 """
 
 from __future__ import annotations
@@ -248,7 +251,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None) ->
         shutil.rmtree(root / "files", ignore_errors=True)
         os.replace(staging / "files", root / "files")
         state = {"version": info.get("version", ""), "release": info, "files": files,
-                 "originals": [], "active": False}
+                 "originals": [], "active": False,
+                 "slots_lifted": bool((previous or {}).get("slots_lifted"))}
         _save_state(anomaly, state)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -349,6 +353,11 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
     state["active"] = True
     _save_state(anomaly, state)
     _set_mod_enabled(gamma, mo2_profile, True)
+    # A solo session since the last switch may have wiped the xrr_* lines.
+    values, present = read_settings(anomaly)
+    missing = {key: values[key] for key in state.get("settings", {}) if key not in present}
+    if missing:
+        write_settings(anomaly, missing)
 
 
 def _restore(anomaly: Path, root: Path, rels, originals) -> None:
@@ -377,6 +386,8 @@ def switch_to_singleplayer(anomaly, gamma, mo2_profile) -> None:
         if (t := _resolve_ci(anomaly, rel)).is_file() and _sha256(t) == digest
     ]
     _restore(anomaly, state_dir(anomaly), ours, originals)
+    values, present = read_settings(anomaly)
+    state["settings"] = {**state.get("settings", {}), **{key: _format(key, values[key]) for key in present}}
     state["active"] = False
     _save_state(anomaly, state)
     _set_mod_enabled(gamma, mo2_profile, False)
@@ -478,9 +489,51 @@ SETTINGS: dict[str, tuple[str, object]] = {
 }
 
 
+def _parse(key: str, raw: str):
+    """A user.ltx value as its Python value; ValueError when unreadable."""
+    kind = SETTINGS[key][0]
+    raw = str(raw).strip()
+    if kind == "bool":
+        return raw.lower() in ("on", "1", "true")
+    if kind == "num":
+        try:
+            return int(float(raw))
+        except OverflowError as exc:
+            raise ValueError(raw) from exc
+    return raw
+
+
 def read_settings(anomaly) -> tuple[dict, set[str]]:
-    """(values, keys actually present in user.ltx)."""
+    """(values, keys actually present in user.ltx).
+
+    A key missing from user.ltx falls back to the copy kept in the state
+    file, then to the engine default.
+    """
+    _lift_slot_default(anomaly)
+    return _read_settings(anomaly)
+
+
+def _lift_slot_default(anomaly) -> None:
+    """Once per install, raise the engine's default of 3 friends to 4, the
+    most xrRazom takes (host + 4). A value picked after that stays."""
+    state = load_state(anomaly)
+    if state is None or state.get("slots_lifted"):
+        return
+    if _read_settings(anomaly)[0]["xrr_max_players"] == 3:
+        write_settings(anomaly, {"xrr_max_players": 4})
+        state = load_state(anomaly)
+    state["slots_lifted"] = True
+    _save_state(anomaly, state)
+
+
+def _read_settings(anomaly) -> tuple[dict, set[str]]:
     values = {key: fallback for key, (_kind, fallback) in SETTINGS.items()}
+    for key, raw in ((load_state(anomaly) or {}).get("settings") or {}).items():
+        if key in SETTINGS:
+            try:
+                values[key] = _parse(key, raw)
+            except ValueError:
+                pass
     present: set[str] = set()
     try:
         lines = user_ltx_path(anomaly).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -490,17 +543,10 @@ def read_settings(anomaly) -> tuple[dict, set[str]]:
         key, _, raw = line.strip().partition(" ")
         if key not in SETTINGS:
             continue
-        kind = SETTINGS[key][0]
-        raw = raw.strip()
-        if kind == "bool":
-            values[key] = raw.lower() in ("on", "1", "true")
-        elif kind == "num":
-            try:
-                values[key] = int(float(raw))
-            except (ValueError, OverflowError):
-                continue
-        else:
-            values[key] = raw
+        try:
+            values[key] = _parse(key, raw)
+        except ValueError:
+            continue
         present.add(key)
     return values, present
 
@@ -532,6 +578,11 @@ def write_settings(anomaly, changes: dict) -> None:
             out.append(line)
     out += [f"{key} {_format(key, value)}" for key, value in pending.items()]
     atomic.write_text(path, "\n".join(out) + "\n")
+    state = load_state(anomaly)
+    if state is not None:
+        saved = {k: _format(k, v) for k, v in changes.items() if k in SETTINGS}
+        state["settings"] = {**(state.get("settings") or {}), **saved}
+        _save_state(anomaly, state)
 
 
 # -- join address (axr_options.ltx) ----------------------------------------------

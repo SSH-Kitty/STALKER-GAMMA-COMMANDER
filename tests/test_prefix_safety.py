@@ -108,8 +108,18 @@ class WinetricksStatusTests(unittest.TestCase):
     def test_full_status_spawns_nothing_either(self):
         with patch.object(subprocess, "run", side_effect=AssertionError):
             status = check_winetricks_full_status(str(self.tmp))
-        for tool in ("wine", "protontricks", "umu"):
+        for tool in ("protontricks", "umu"):
             self.assertIn(tool, status)
+
+    def test_wine_only_counts_without_umu(self):
+        # Bazzite: umu-run present, wine absent and not installable. Wine
+        # must not show up as a missing dependency.
+        with patch("commander_gui.winetricks.umu_binary", return_value="/usr/bin/umu-run"):
+            status = check_winetricks_full_status(str(self.tmp))
+        self.assertNotIn("wine", status)
+        with patch("commander_gui.winetricks.umu_binary", return_value=""):
+            status = check_winetricks_full_status(str(self.tmp))
+        self.assertIn("wine", status)
 
 
 # =====================================================================

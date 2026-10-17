@@ -9,7 +9,7 @@ from pathlib import Path
 
 from commander_gui.launcher import Runner, build_command
 from commander_gui.steam_shortcuts import coop_launch_options
-from commander_gui.ui.game_splash import SPLASH_FLAG, engine_started, is_launcher, wants_splash
+from commander_gui.ui.game_splash import SPLASH_FLAG, engine_started, is_launcher, mo2_error, wants_splash
 
 
 class GameSplashTests(unittest.TestCase):
@@ -48,6 +48,23 @@ class GameSplashTests(unittest.TestCase):
         self.assertFalse(engine_started([self.tmp], since))
         log.write_bytes(b"Initializing Engine...\nStarting engine...\n")
         self.assertEqual(engine_started([self.tmp, self.tmp / "missing"], since), log)
+
+    def test_a_load_crash_closes_the_splash_too(self):
+        log = self.tmp / "xray_steamuser.log"
+        log.write_bytes(b"Initializing Engine...\nFATAL ERROR\n")
+        self.assertEqual(engine_started([self.tmp], time.time() - 1), log)
+        log.write_bytes(b"Initializing Engine...\nstack trace:\n")
+        self.assertEqual(engine_started([self.tmp], time.time() - 1), log)
+
+    def test_only_a_new_mo2_error_counts(self):
+        log = self.tmp / "mo_interface.log"
+        since = time.time() - 1
+        stamp = lambda t, level: time.strftime(f"[%Y-%m-%d %H:%M:%S.421 {level}] x", time.localtime(t))
+        log.write_text(stamp(since - 600, "E") + "\n" + stamp(since + 1, "W") + "\n")
+        self.assertFalse(mo2_error(log, since))  # old error, new warning
+        log.write_text(stamp(since + 1, "E") + " Failed to run 'Anomaly (DX11-AVX)'.\n")
+        self.assertTrue(mo2_error(log, since))
+        self.assertFalse(mo2_error(self.tmp / "missing.log", since))
 
     def test_only_the_game_exes_get_a_splash(self):
         self.assertTrue(wants_splash("Z:/games/anomaly/bin/AnomalyDX11AVX.exe"))

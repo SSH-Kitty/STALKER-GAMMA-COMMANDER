@@ -27,6 +27,7 @@ from commander_gui.launcher import Mo2Executable, set_mo2_selected_title
 from commander_gui.log_dump import create_log_dump
 from commander_gui.modlist import looks_flipped, modlist_path_for, read_lines, unflip
 from commander_gui.ui.common import (
+    notice,
     BackgroundTask,
     format_last_played,
     format_playtime,
@@ -51,6 +52,16 @@ from ..widgets import (
     side_by_side,
 )
 from .base import DeckScreen
+
+
+def play_label(profile) -> str:
+    """What a Play button says: with co-op on, every launch is a co-op one.
+
+    Shared by the Play screen, the Dashboard banner and the quick menu.
+    """
+    if profile is not None and coop.is_active(profile.anomaly):
+        return tr("Play GAMMA Co-op")
+    return tr("Play GAMMA")
 
 
 class PlayScreen(DeckScreen):
@@ -231,10 +242,7 @@ class PlayScreen(DeckScreen):
 
     # -- actions ----------------------------------------------------------
     def _play_text(self) -> str:
-        profile = self.profile()
-        if profile is not None and coop.is_active(profile.anomaly):
-            return tr("Play GAMMA Co-op")
-        return tr("Play GAMMA")
+        return play_label(self.profile())
 
     def play(self) -> None:
         """Launch, if the Play button itself could be pressed right now."""
@@ -267,7 +275,23 @@ class PlayScreen(DeckScreen):
         if looks_flipped(lines):
             self._confirm_flipped(profile, target, path, lines)
             return
-        self.controller.launch(profile, target=target)
+        self._launch(profile, target)
+
+    def _launch(self, profile, target: str) -> None:
+        """Start ``target`` in the installed mode: co-op on means a co-op
+        launch, which the Multiplayer screen finishes (player name, and
+        Steam for a Steam session)."""
+        coop_on = coop.is_active(profile.anomaly)
+        reason = coop.launch_block_reason(profile.anomaly, coop_launch=coop_on)
+        if reason:
+            from .multiplayer import refuse_launch
+
+            refuse_launch(self.window, reason)
+            return
+        if coop_on:
+            self.window._ensure_page("multiplayer").start_coop(profile, target)
+        else:
+            self.controller.launch(profile, target=target)
 
     def _confirm_flipped(self, profile, target: str, path, lines: list[str]) -> None:
         """A reversed load order (the old Flip Priority button) crashes GAMMA
@@ -281,11 +305,11 @@ class PlayScreen(DeckScreen):
                 self.window.notify(str(exc), 6000)
                 return
             self.window.notify(tr("Load order fixed."), 4000)
-            self.controller.launch(profile, target=target)
+            self._launch(profile, target)
 
         def _anyway() -> None:
             self.window.dismiss_overlay()
-            self.controller.launch(profile, target=target)
+            self._launch(profile, target)
 
         self.window.show_overlay(
             DeckOverlay(
@@ -530,7 +554,7 @@ class PlayScreen(DeckScreen):
         live/good state), plain dim caption only for "no profile"/"not
         installed" - matching play_page.py's own ACCENT-for-success rule.
         """
-        self.status_caption.setText(text)
+        self.status_caption.setText(notice(text))
         self.status_caption.setObjectName(
             "deckCaptionAccent" if accent else "deckCaption"
         )

@@ -119,7 +119,7 @@ from .common import (
 )
 from .dialogs import MessageBox as QMessageBox
 from . import game_splash
-from .game_splash import SPLASH_FLAG, is_launcher, wants_splash
+from .game_splash import is_launcher
 from .install_page import _PathEdit, _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
 
@@ -156,6 +156,47 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
     the debuggers of unrelated Wine games.
     """
     kill_stray_debuggers(runner_env)
+
+
+def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = "") -> dict:
+    """What the co-op Steam shortcut has to run (see steam_shortcuts).
+
+    Shared by the Play page and Deck Mode's Multiplayer screen.
+    """
+    exe = Path(profile.gamma) / "ModOrganizer.exe"
+    if not exe.is_file():
+        raise LaunchError(f"ModOrganizer.exe not found in {profile.gamma}")
+    prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
+    if runner.kind not in ("umu", "proton") or not prefix:
+        raise LaunchError(
+            "Steam co-op sessions run through Proton. Pick a Proton runner on the Play page first."
+        )
+    pfx = Path(prefix) / "pfx"
+    if not pfx.exists():
+        # Steam's Proton looks for <compat data>/pfx; a umu prefix is
+        # the pfx itself, and umu links it the same way.
+        pfx.symlink_to(".")
+    # The build this prefix already runs on, so Steam never upgrades or
+    # downgrades it: umu names it in PROTONPATH, a Proton runner runs
+    # its proton script directly (gamemoderun may come first).
+    proton_script = next((w for w in runner.wrapper if Path(w).name == "proton"), "")
+    proton_dir = (
+        runner.env.get("PROTONPATH")
+        or (str(Path(proton_script).parent) if proton_script else "")
+        or _pick_umu_proton()
+    )
+    if not proton_dir:
+        raise LaunchError(
+            "Steam co-op sessions need a GE-Proton build. Install one from the Play page first."
+        )
+    return {
+        "exe": str(exe),
+        "start_dir": str(profile.gamma),
+        "launch_options": coop_launch_options(
+            prefix, mo2_profile, target, coop.steam_appid(profile.anomaly), arguments,
+        ),
+        "proton_name": compat_tool_name(proton_dir),
+    }
 
 
 class PlayPage(QWidget):
@@ -367,7 +408,7 @@ class PlayPage(QWidget):
         options_layout.addWidget(section_label(tr("Launch options"), level=2))
         options_layout.addWidget(
             info_label(
-                tr("Extra settings for every launch, written like Steam's launch options. Put %command% before anything that goes after the game.")
+                tr("Extra settings for every launch, written like Steam's launch options.")
             )
         )
         self.custom_options_edit = QLineEdit()
@@ -1033,42 +1074,10 @@ class PlayPage(QWidget):
 
     def _coop_shortcut_fields(self, profile) -> dict:
         """What the co-op Steam shortcut has to run (see steam_shortcuts)."""
-        exe = Path(profile.gamma) / "ModOrganizer.exe"
-        if not exe.is_file():
-            raise LaunchError(f"ModOrganizer.exe not found in {profile.gamma}")
-        runner = self._runner()
-        prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
-        if runner.kind not in ("umu", "proton") or not prefix:
-            raise LaunchError(
-                "Steam co-op sessions run through Proton. Pick a Proton runner on the Play page first."
-            )
-        pfx = Path(prefix) / "pfx"
-        if not pfx.exists():
-            # Steam's Proton looks for <compat data>/pfx; a umu prefix is
-            # the pfx itself, and umu links it the same way.
-            pfx.symlink_to(".")
-        # The build this prefix already runs on, so Steam never upgrades or
-        # downgrades it: umu names it in PROTONPATH, a Proton runner runs
-        # its proton script directly (gamemoderun may come first).
-        proton_script = next((w for w in runner.wrapper if Path(w).name == "proton"), "")
-        proton_dir = (
-            runner.env.get("PROTONPATH")
-            or (str(Path(proton_script).parent) if proton_script else "")
-            or _pick_umu_proton()
+        return coop_shortcut_fields(
+            profile, self._runner(), self._active_profile_name(),
+            self._selected_target(), self._splash_arguments(True) or "",
         )
-        if not proton_dir:
-            raise LaunchError(
-                "Steam co-op sessions need a GE-Proton build. Install one from the Play page first."
-            )
-        return {
-            "exe": str(exe),
-            "start_dir": str(profile.gamma),
-            "launch_options": coop_launch_options(
-                prefix, self._active_profile_name(), self._selected_target(),
-                coop.steam_appid(profile.anomaly), self._splash_arguments(True) or "",
-            ),
-            "proton_name": compat_tool_name(proton_dir),
-        }
 
     def _launch_coop_steam(self) -> None:
         """Start co-op through the co-op Steam shortcut, adding it first
@@ -2079,12 +2088,11 @@ class PlayPage(QWidget):
         engine's splash off, for a co-op game launch. Only xrRazom's engine
         has that switch; single-player keeps the engine's own splash."""
         profile = self.window.settings.active_profile
-        exe = self._target_exe()
-        if profile is None or exe is None or not wants_splash(exe.binary):
+        if profile is None:
             return None
         if not (coop.is_active(profile.anomaly) if coop_launch is None else coop_launch):
             return None
-        return f"{exe.arguments} {SPLASH_FLAG}".strip()
+        return game_splash.splash_arguments(self._target_exe())
 
     def _show_splash(self, coop_launch: bool | None) -> None:
         """COMMANDER's splash in place of the engine's (co-op launches)."""

@@ -36,7 +36,7 @@ from commander_gui.mod_install import (
     write_basic_meta_ini,
 )
 from commander_gui.modlist import add_custom_mod, install_conflict, read_lines
-from commander_gui.ui.common import BackgroundTask, StreamTask, mo2_running
+from commander_gui.ui.common import BackgroundTask, StreamTask, mo2_running, notice
 
 from . import gamepad as pad
 from .folder_picker import candidate_roots, list_subfolders
@@ -411,7 +411,7 @@ class DeckModInstaller(QObject):
     def _set_status(self, text: str) -> None:
         if self._status is not None:
             try:
-                self._status.setText(text)
+                self._status.setText(notice(text))
             except RuntimeError:  # the overlay is already gone
                 self._status = None
 

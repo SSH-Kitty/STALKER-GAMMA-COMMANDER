@@ -268,13 +268,17 @@ def check_winetricks_full_status(
     verbs: tuple[str, ...] = WINETRICKS_VERBS,
     timeout: int = 30,
 ) -> dict[str, bool]:
-    """Return {name: installed} for verbs *and* tool availability (wine, protontricks, umu-run).
+    """Return {name: installed} for verbs *and* tool availability (umu-run, protontricks, wine).
 
     Combines the ``winetricks.log`` read with instant ``shutil.which()``
-    checks for wine, protontricks, and umu-run. Starts no process.
+    checks for umu-run, protontricks, and wine (wine only when umu-run is
+    missing). Starts no process.
     """
     status = check_winetricks_status(prefix, verbs, timeout)
-    status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
-    status["protontricks"] = bool(protontricks_binary())
     status["umu"] = bool(umu_binary())
+    # umu-run launches through Proton, so system Wine is only a dependency
+    # without it (immutable distros like Bazzite cannot install it anyway).
+    if not status["umu"]:
+        status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
+    status["protontricks"] = bool(protontricks_binary())
     return status

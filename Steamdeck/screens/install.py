@@ -82,6 +82,7 @@ from ..widgets import (
     side_by_side,
 )
 from .base import DeckScreen
+from .multiplayer import confirm_singleplayer
 
 
 class _ProtonProgressBridge(QObject):
@@ -417,7 +418,9 @@ class InstallScreen(DeckScreen):
         self.window.confirm(
             tr("Install Anomaly"),
             message,
-            self._start_anomaly_install,
+            lambda: confirm_singleplayer(
+                self.window, profile, tr("installing Anomaly"), self._start_anomaly_install
+            ),
             confirm_text=tr("Install"),
         )
 
@@ -462,7 +465,10 @@ class InstallScreen(DeckScreen):
         self.window.confirm(
             tr("Install GAMMA"),
             message,
-            lambda: self._confirmed(self._start_install),
+            lambda: confirm_singleplayer(
+                self.window, profile, tr("installing GAMMA"),
+                lambda: self._confirmed(self._start_install),
+            ),
             confirm_text=tr("Install"),
         )
 

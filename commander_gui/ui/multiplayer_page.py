@@ -485,7 +485,7 @@ class MultiplayerPage(QWidget):
         # -- not installed: three step tiles, then one big install button -----
         self.install_box, setup = _panel()
         setup.setSpacing(14)
-        setup.addWidget(info_label(tr("Play GAMMA with up to 3 friends. You can switch back to singleplayer any time.")))
+        setup.addWidget(info_label(tr("Play GAMMA with up to 4 friends. You can switch back to singleplayer any time.")))
         self.download_button = QPushButton(tr("Download from moddb"))
         self.download_button.setObjectName("secondary")
         self.download_button.clicked.connect(lambda: open_url(coop.MODDB_PAGE))
@@ -941,7 +941,7 @@ class MultiplayerPage(QWidget):
         works, right = _section("How it works")
         _facts(right, (
             ("The host keeps the world", "Everything is created and saved on the host's PC. Everyone else mirrors it."),
-            ("Join any time", "Up to 4 players, the host included. Friends can join at any point in the game and leave whenever they like."),
+            ("Join any time", "Up to 5 players, the host included. Friends can join at any point in the game and leave whenever they like."),
             ("Your name is your profile", "Change it and the host sees a new player with a fresh character."),
             ("The host sets the rules", "Session rules on the Hosting tab apply to everyone."),
             ("Call of Pripyat or Spacewar", "Everyone picks the same one. Call of Pripyat must be owned. Spacewar is free."),

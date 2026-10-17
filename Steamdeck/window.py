@@ -511,6 +511,7 @@ class DeckWindow(QMainWindow):
         from .screens.dashboard import DashboardScreen
         from .screens.install import InstallScreen
         from .screens.mods import ModsScreen
+        from .screens.multiplayer import MultiplayerScreen
         from .screens.play import PlayScreen
         from .screens.settings import SettingsScreen
         from .screens.setup import SetupScreen
@@ -521,6 +522,7 @@ class DeckWindow(QMainWindow):
         classes = {
             "dashboard": DashboardScreen,
             "play": PlayScreen,
+            "multiplayer": MultiplayerScreen,
             "install": InstallScreen,
             "update": UpdateScreen,
             "mods": ModsScreen,
@@ -993,7 +995,9 @@ class DeckWindow(QMainWindow):
         )
         buttons = []
         if self._fatal is None and self.settings.active_profile is not None:
-            buttons.append(("\u25b6  " + tr("Play GAMMA"), self._quick_play, "primary"))
+            from .screens.play import play_label
+
+            buttons.append(("\u25b6  " + play_label(self.settings.active_profile), self._quick_play, "primary"))
         buttons += [
             (tr("Exit Deck Mode"), self.exit_deck_mode, "normal"),
             (tr("Quit COMMANDER"), self._quit, "danger"),

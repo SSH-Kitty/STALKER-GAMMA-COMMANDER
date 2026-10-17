@@ -213,6 +213,31 @@ class CoopTests(unittest.TestCase):
         text = (self.anomaly / "appdata" / "user.ltx").read_text().splitlines()
         self.assertEqual(text, ["rs_screenmode fullscreen", "xrr_player_name New Name", "xrr_friendly_fire on"])
 
+    def test_settings_survive_a_solo_session(self):
+        # The single-player engine rewrites user.ltx without the xrr_* lines.
+        self._install()
+        coop.write_settings(self.anomaly, {"xrr_friendly_fire": True})
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        user_ltx = self.anomaly / "appdata" / "user.ltx"
+        user_ltx.write_text("rs_screenmode windowed\n")
+        values, present = coop.read_settings(self.anomaly)
+        self.assertEqual((values["xrr_player_name"], values["xrr_friendly_fire"], present), ("Old", True, set()))
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        text = user_ltx.read_text().splitlines()
+        self.assertEqual(text[0], "rs_screenmode windowed")
+        self.assertEqual(sorted(text[1:]), ["xrr_friendly_fire on", "xrr_max_players 4", "xrr_player_name Old"])
+
+    def test_slot_default_lifted_once(self):
+        # The engine writes 3 friends; xrRazom takes 4. Lift it once, then
+        # leave whatever the player picks alone.
+        user_ltx = self.anomaly / "appdata" / "user.ltx"
+        user_ltx.write_text("xrr_max_players 3\n")
+        self._install()
+        self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_max_players"], 4)
+        self.assertEqual(user_ltx.read_text(), "xrr_max_players 4\n")
+        coop.write_settings(self.anomaly, {"xrr_max_players": 3})
+        self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_max_players"], 3)
+
     def test_last_ip_round_trip(self):
         coop.write_last_ip(self.gamma, "G.A.M.M.A", "1.2.3.4:5445")
         self.assertEqual(coop.read_last_ip(self.gamma, "G.A.M.M.A"), "1.2.3.4:5445")

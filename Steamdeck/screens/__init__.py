@@ -29,6 +29,7 @@ from __future__ import annotations
 SCREENS: list[tuple[str, str, str]] = [
     ("dashboard", "Dashboard", "⌂"),
     ("play", "Play", "▶"),
+    ("multiplayer", "Multiplayer", "⚇"),
     ("mods", "Mods", "☰"),
     ("update", "Update", "↻"),
     ("install", "Install", "↓"),

@@ -45,6 +45,7 @@ from commander_gui.parsers import parse_prune_archive, strip_ansi
 from commander_gui.repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
 from commander_gui.ui.backup_dialog import backup_summary, backup_title
 from commander_gui.ui.common import (
+    notice,
     BackgroundTask,
     CommandRunner,
     StreamTask,
@@ -87,11 +88,11 @@ class _StatusLabel(QLabel):
         self.hide()
 
     def setText(self, text: str) -> None:
-        super().setText(text)
+        super().setText(notice(text))
         self.setVisible(bool(text))
 
 
-def _tool_row(title, description, on_run, *, role="normal"):
+def _tool_row(title, description, on_run, *, role="normal", button_text=None):
     """A tool tile: title and wrapped description, with a small Run button.
 
     Not a DeckRow: descriptions here run long enough to need wrapping past
@@ -108,12 +109,14 @@ def _tool_row(title, description, on_run, *, role="normal"):
     text.addWidget(deck_label(title, role="rowTitle"))
     text.addWidget(deck_label(description, role="caption", wrap=True))
     layout.addLayout(text, 1)
-    button = deck_button(tr("Run"), role=role, on_click=on_run)
+    button = deck_button(button_text or tr("Run"), role=role, on_click=on_run)
     # Small and the same whatever the role: a touch-sized pill beside the
     # text, not a slab under it - and a danger tile's button is no bigger
     # than anyone else's.
     button.setObjectName("deckRunButton" if role == "normal" else "deckRunDanger")
-    button.setFixedSize(px(104), px(MIN_TOUCH))
+    # At least Run's width; a longer label (Uninstall) widens it.
+    button.setFixedHeight(px(MIN_TOUCH))
+    button.setMinimumWidth(px(104))
     layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
     return box, button
 
@@ -1054,7 +1057,15 @@ class UtilitiesScreen(DeckScreen):
                 return
             self._begin_reset(include_anomaly, wipe_paths, profile, title)
 
-        self.window.confirm(title, message, _start, confirm_role="danger", confirm_text=title)
+        def _confirmed() -> None:
+            if include_anomaly:
+                _start()  # Anomaly goes too, co-op's engine with it
+            else:
+                from .multiplayer import confirm_singleplayer  # imports this module
+
+                confirm_singleplayer(self.window, profile, tr("resetting GAMMA"), _start)
+
+        self.window.confirm(title, message, _confirmed, confirm_role="danger", confirm_text=title)
 
     def _begin_reset(self, include_anomaly, wipe_paths, profile, title) -> None:
         self._reset_includes_anomaly = include_anomaly

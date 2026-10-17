@@ -14,6 +14,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -1163,7 +1164,7 @@ class DeckUtilitiesTests(DeckWindowFixture):
         ):
             utilities._on_move_done(moved)
         self.assertFalse(self.window.install_busy)
-        self.assertEqual(utilities.status.text(), "Move complete.")
+        self.assertEqual(utilities.status.text(), "Move complete")
 
         with (
             patch("Steamdeck.screens.utilities._rewrite_mo2_ini_paths"),
@@ -2759,7 +2760,7 @@ class DeckVersionTests(unittest.TestCase):
 
         self.assertEqual(Steamdeck.__version__, commander_gui.__version__)
         self.assertEqual(Steamdeck.__version_label__, commander_gui.__version_label__)
-        self.assertEqual(commander_gui.__version_label__, "1.4.0")
+        self.assertEqual(commander_gui.__version_label__, "1.4.0 dev")
 
 
 class DeckAuditTests(DeckWindowFixture):
@@ -3360,3 +3361,148 @@ class DeckGamepadStickTests(unittest.TestCase):
         self.monitor.feed(pad.EV_KEY, pad.BTN_DPAD_DOWN, 0)
         self.assertEqual(self.actions.count(pad.DOWN), pad.REPEAT_FAST_AFTER + 1)
 
+
+
+# =====================================================================
+# Multiplayer screen (xrRazom Co-op)
+# =====================================================================
+class DeckMultiplayerTests(DeckWindowFixture):
+    def setUp(self):
+        super().setUp()
+        for target, kwargs in (
+            ("commander_gui.coop.find_downloaded_zip", {"return_value": None}),
+            ("commander_gui.coop.public_ip", {"side_effect": OSError("offline")}),
+        ):
+            patcher = patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        (self.anomaly / "bin").mkdir(exist_ok=True)
+        (self.anomaly / "bin" / "anomalydx11.exe").write_bytes(b"MZgamma")
+        (self.anomaly / "appdata").mkdir(exist_ok=True)
+        (self.anomaly / "appdata" / "user.ltx").write_text("xrr_player_name Stalker\n")
+        self.zip = self.tmp / "xrRazom-1.4-Slim.zip"
+        with zipfile.ZipFile(self.zip, "w") as archive:
+            archive.writestr("xrRazom-release.txt", "xrRazom 1.4 - Slim\n")
+            archive.writestr("Anomaly/bin/AnomalyDX11.exe", b"MZcoop")
+            archive.writestr("Anomaly/bin/steam_appid.txt", "41700")
+            archive.writestr("gamedata/scripts/xrr_core.script", "-- core")
+
+    def _install(self):
+        from commander_gui import coop
+
+        coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A")
+
+    def test_not_installed_shows_the_install_steps(self):
+        screen = self.goto("multiplayer")
+        self.assertTrue(screen.install_box.isVisible())
+        self.assertFalse(screen.dash_box.isVisible())
+        self.assertFalse(screen.settings_box.isVisible())
+        # The hero never idles grey: it opens the zip browser.
+        self.assertTrue(screen.zip_button.isEnabled())
+        self.assertIs(screen.default_focus(), screen.zip_button)
+
+    def test_settings_are_written_to_user_ltx(self):
+        self._install()
+        screen = self.goto("multiplayer")
+        self.assertTrue(screen.dash_box.isVisible())
+        self.assertIn("Singleplayer", screen.status_chip.text())
+        screen._toggles["xrr_friendly_fire"].set_checked(True, notify=True)
+        screen._nudge("xrr_max_players", 1)
+        text = (self.anomaly / "appdata" / "user.ltx").read_text()
+        self.assertIn("xrr_friendly_fire on", text)
+        self.assertIn("xrr_max_players 4", text)
+        screen._nudge("xrr_max_players", 1)  # clamped at 4
+        self.assertIn("xrr_max_players 4", (self.anomaly / "appdata" / "user.ltx").read_text())
+
+    def test_joining_locks_the_hosting_tab(self):
+        self._install()
+        screen = self.goto("multiplayer")
+        screen.role_choice._choose(True)
+        self.assertTrue(screen.tab_choice.button(0).isEnabled())
+        self.assertEqual(screen.tab_choice.value(), 0)
+        screen.role_choice._choose(False)
+        self.assertFalse(screen.tab_choice.button(0).isEnabled())
+        self.assertEqual(screen.tab_choice.value(), 1)
+
+    def test_confirm_singleplayer_goes_straight_on_when_co_op_is_off(self):
+        from Steamdeck.screens.multiplayer import confirm_singleplayer
+
+        ran = []
+        confirm_singleplayer(self.window, self.window.settings.active_profile, "updating GAMMA", lambda: ran.append(1))
+        self.assertEqual(ran, [1])
+        self.assertIsNone(self.window.current_overlay())
+
+    def test_play_hands_a_co_op_launch_to_the_multiplayer_screen(self):
+        from commander_gui import coop
+
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        play = self.goto("play")
+        screen = self.window._ensure_page("multiplayer")
+        profile = self.window.settings.active_profile
+        with (
+            patch.object(screen, "start_coop") as start_coop,
+            patch.object(play.controller, "launch") as launch,
+        ):
+            play._launch(profile, "Anomaly")
+        start_coop.assert_called_once_with(profile, "Anomaly")
+        launch.assert_not_called()
+
+    def test_dpad_reaches_every_control_once_installed(self):
+        """The screen-wide D-pad walk runs before co-op is installed; this
+        one covers the installed screen, every tab, all four directions."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        from Steamdeck.focus import audit_focusables
+
+        self._install()
+        screen = self.goto("multiplayer")
+        for tab in range(5):
+            screen._show_tab(tab)
+            self.pump()
+            seen, queue = [], [screen.hero]
+            while queue:
+                widget = queue.pop(0)
+                if widget in seen:
+                    continue
+                seen.append(widget)
+                for key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_Left, Qt.Key.Key_Right):
+                    widget.setFocus(Qt.FocusReason.OtherFocusReason)
+                    self.pump(2)
+                    QTest.keyClick(self.window, key)
+                    self.pump(2)
+                    focused = self.app.focusWidget()
+                    if focused is not None and screen.isAncestorOf(focused):
+                        queue.append(focused)
+            missed = [w for w in audit_focusables(screen) if w not in seen]
+            self.assertEqual(missed, [], f"tab {tab}")
+
+    def test_play_buttons_say_co_op_when_co_op_is_on(self):
+        from commander_gui import coop
+
+        dashboard = self.goto("dashboard")
+        self.assertNotIn("Co-op", dashboard.banner_button.text())
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        dashboard = self.goto("dashboard")
+        self.assertEqual(dashboard._banner_target, "play")
+        self.assertIn("Play GAMMA Co-op", dashboard.banner_button.text())
+        self.assertIn("Play GAMMA Co-op", self.goto("play").hero.text())
+        self.window.show_quick_menu()
+        self.assertIn("Play GAMMA Co-op", self.window.current_overlay().buttons[0].text())
+        self.window.dismiss_overlay()
+
+    def test_overlay_buttons_are_never_cut_off(self):
+        """The quick menu's four buttons ("Play GAMMA Co-op" the longest)
+        were wider together than the panel's cap, so every label clipped."""
+        from commander_gui import coop
+
+        self._install()
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.goto("dashboard")
+        self.window.show_quick_menu()
+        self.pump(10)
+        for button in self.window.current_overlay().buttons:
+            self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
+        self.window.dismiss_overlay()

@@ -160,6 +160,7 @@ def load_gui_settings() -> dict:
     ] not in {
         "dashboard",
         "play",
+        "multiplayer",
         "install",
         "update",
         "mods",

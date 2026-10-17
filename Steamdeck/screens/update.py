@@ -24,6 +24,7 @@ from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
 from commander_gui.themes import active_theme_tokens
 from commander_gui.ui.common import (
+    notice,
     BackgroundTask,
     CommandRunner,
     aggregate_progress_value,
@@ -48,6 +49,7 @@ from ..widgets import (
     repolish,
 )
 from .base import DeckScreen
+from .multiplayer import confirm_singleplayer
 from .install import battery_warning
 
 #: Releases listed under Patch notes (Patchnotes.md holds the whole history).
@@ -203,6 +205,7 @@ class UpdateScreen(DeckScreen):
 
         text, kind = status_summary(status)
         note = getattr(status, "note", None)
+        text = notice(text)
         self.summary_label.setText(f"{text}\n\n{note}" if note else text)
         # kind is "accent" or "warn", matching desktop's own #accent/#warn
         # object names for this exact text (see update_page.py's
@@ -386,7 +389,9 @@ class UpdateScreen(DeckScreen):
                 "and MCM settings are preserved."
             )
             + battery_warning(),
-            self._apply_if_still_idle,
+            lambda: confirm_singleplayer(
+                self.window, self.profile(), tr("updating GAMMA"), self._apply_if_still_idle
+            ),
             confirm_text=tr("Apply"),
         )
 

@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from commander_gui.i18n import tr
 from commander_gui.themes import active_theme_tokens
+from commander_gui.ui.common import notice
 
 from .scale import px
 
@@ -876,6 +877,37 @@ class DeckOverlay(QWidget):
         outer.addLayout(row)
         outer.addStretch(1)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._fit_buttons()
+
+    def _fit_buttons(self) -> None:
+        """Widen the panel so the button row's labels are never cut off.
+
+        ``panel_width`` is a cap picked for typical labels; a longer one
+        ("Play GAMMA Co-op", a translation, a bigger text size) used to be
+        squeezed below its text. Measured here, once the stylesheet has
+        set the buttons' font. Capped at the window: past that the row
+        still clips (ponytail: stack the buttons if that ever happens).
+        """
+        if not self.buttons:
+            return
+        margins = self.panel.layout().contentsMargins()
+        need = (
+            sum(button.sizeHint().width() for button in self.buttons)
+            + px(12) * (len(self.buttons) - 1)
+            + margins.left()
+            + margins.right()
+            + self.panel.width() - self.panel.contentsRect().width()  # its border
+        )
+        room = self.width() - 2 * px(MARGIN_X)
+        if need > self.panel.minimumWidth():
+            # Both bounds: the side stretches would otherwise keep the
+            # panel at its old minimum.
+            width = min(need, room)
+            self.panel.setMaximumWidth(max(self.panel.maximumWidth(), width))
+            self.panel.setMinimumWidth(max(self.panel.minimumWidth(), width))
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         try:
@@ -961,7 +993,7 @@ class DeckToast(QLabel):
         self._timer.timeout.connect(self.hide)
 
     def show_message(self, text: str, msecs: int = 3000) -> None:
-        self.setText(text)
+        self.setText(notice(text))
         self.adjustSize()
         self.reposition()
         self.show()
@@ -975,8 +1007,12 @@ class DeckToast(QLabel):
         parent = self.parentWidget()
         if parent is None:
             return
-        width = min(parent.width() - 2 * px(MARGIN_X), px(900))
-        self.setFixedWidth(max(px(240), width))
+        # Hug the text; long messages wrap at the cap.
+        self.setWordWrap(False)
+        natural = self.sizeHint().width()
+        self.setWordWrap(True)
+        width = min(parent.width() - 2 * px(MARGIN_X), px(900), natural)
+        self.setFixedWidth(width)
         self.adjustSize()
         # Above the nav bar, not on it: a toast covering the tabs hides the
         # one thing that says where you are.
@@ -1108,7 +1144,7 @@ class DeckProgress(QWidget):
 
     # -- slots ------------------------------------------------------------
     def status_message(self, text: str) -> None:
-        self.status.setText(text)
+        self.status.setText(notice(text))
 
     def set_percent(self, value: int) -> None:
         if self.bar.maximum() == 0:

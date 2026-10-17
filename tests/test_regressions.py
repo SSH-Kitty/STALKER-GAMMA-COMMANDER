@@ -719,6 +719,56 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertIsNone(note)
 
+    def test_broken_github_archive_is_replaced_not_reused_forever(self):
+        """A cut-off GitHub download made every resume fail on the same zip:
+        the CLI reuses it without an MD5 check. It must be removed (or swapped
+        for the user's own download) so the next run can succeed."""
+        from commander_gui.ui.install_page import _broken_archive, _replace_broken_archive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = Path(tmp) / "gamma" / "downloads"
+            downloads.mkdir(parents=True)
+            broken = downloads / "Sights-and-Optics-retexture-by-Meowie.zip"
+            url = (
+                "https://github.com/andtheherois/Sights-and-Optics-retexture-by-Meowie"
+                "/releases/download/2.9.1/Sights.Optics-2.9.1.zip"
+            )
+            # Verbatim shape of the real captured failure.
+            output = (
+                "[03:03:26] Stalker Anomaly | Extract | 99.00% | [411/417]\n"
+                "Install failed! Error extracting github record\n"
+                "Name: Sights and Optics Retexture\n"
+                "Archive Name: Sights-and-Optics-retexture-by-Meowie.zip\n"
+                f"Url: {url}\n"
+                f"Download Path: {broken}\n"
+                "Exception Message: Error executing unzip\n"
+                "StdErr:   End-of-central-directory signature not found.  Either this file is not\n"
+                "Exit Code: 9\n"
+            )
+            found = _broken_archive(output)
+            self.assertEqual(found, (str(broken), url))
+            gamma = str(Path(tmp) / "gamma")
+
+            broken.write_bytes(b"cut off")
+            self.assertEqual(_replace_broken_archive(*found, gamma), "deleted")
+            self.assertFalse(broken.exists())
+
+            broken.write_bytes(b"cut off")
+            (downloads / "Sights.Optics-2.9.1.zip").write_bytes(b"good")
+            self.assertEqual(_replace_broken_archive(*found, gamma), "renamed")
+            self.assertEqual(broken.read_bytes(), b"good")
+
+            # Never touch anything outside this profile's downloads folder.
+            outside = Path(tmp) / "other.zip"
+            outside.write_bytes(b"x")
+            self.assertIsNone(_replace_broken_archive(str(outside), url, gamma))
+            self.assertTrue(outside.exists())
+
+        # A failure that isn't a broken archive (full disk) is left alone.
+        self.assertIsNone(
+            _broken_archive(output.replace("End-of-central-directory signature not found", "write error (disk full?)"))
+        )
+
     def test_looks_like_network_failure_matches_real_git_clone_failure(self):
         from commander_gui.ui.install_page import _looks_like_network_failure
 
@@ -3980,6 +4030,44 @@ class RegressionTests(unittest.TestCase):
             page._update_button_states()
             for cb in page.anomaly_checkboxes.values():
                 self.assertTrue(cb.isEnabled())
+
+    def test_install_gamma_stays_available_as_reinstall(self):
+        """Once GAMMA is installed the button turns into Reinstall instead of
+        greying out - it is the only way to re-unpack mods or apply
+        "Re-download GitHub addons"."""
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.settings import CliProfile
+        from commander_gui.ui.install_page import InstallPage
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            profile = CliProfile(
+                active=True,
+                profile_name="test",
+                anomaly=str(base / "anomaly"),
+                gamma=str(base / "gamma"),
+                cache=str(base / "cache"),
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                install_busy = False
+
+                def refresh_settings(self):
+                    pass
+
+            page = InstallPage(FakeWindow())
+            page._resume_state = None
+            with patch("commander_gui.ui.install_page.gamma_installed", return_value=True):
+                page._update_button_states()
+            self.assertTrue(page.install_button.isEnabled())
+            self.assertEqual(page.install_button.text(), "Reinstall GAMMA")
+            with patch("commander_gui.ui.install_page.gamma_installed", return_value=False):
+                page._update_button_states()
+            self.assertTrue(page.install_button.isEnabled())
+            self.assertEqual(page.install_button.text(), "Install GAMMA")
 
     def test_start_post_anomaly_verify_shows_the_cancel_button(self):
         """Regression test: on_finished() (just called for the Anomaly
@@ -13737,10 +13825,23 @@ class UnstableBuildTests(unittest.TestCase):
                 settings = CliSettings(profiles=[CliProfile(active=True, profile_name="T")])
                 switched: ClassVar[list] = []
 
-                def switch_commander_build(self, target):
+                def switch_commander_build(self, target, tag=None):
                     self.switched.append(target)
 
             window = FakeWindow()
+            # Built with a "dev" label (a test build): no switching offered.
+            with (
+                patch.object(settings_page, "__version_label__", "1.3.0 dev"),
+                patch.object(settings_page, "newer_unstable_tag", return_value=None),
+            ):
+                page = settings_page.SettingsPage(window)
+                self.assertEqual(page._build_label.text(), "Dev")
+                self.assertTrue(page._switch_build_button.isHidden())
+                self.assertIn("dev build", page._build_note.text())
+            # The rest of the test runs on a release label.
+            label = patch.object(settings_page, "__version_label__", "1.3.0")
+            label.start()
+            self.addCleanup(label.stop)
             with (
                 patch.object(settings_page, "__version__", "1.3.0"),
                 patch.object(settings_page, "newer_unstable_tag", return_value=None),

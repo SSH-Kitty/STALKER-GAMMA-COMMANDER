@@ -397,7 +397,11 @@ class ProgressDialog(QDialog):
         self._bar.setValue(int(value))
 
     def setLabelText(self, text: str) -> None:
+        if text == self._text.text():
+            return
         self._text.setText(text)
+        # A second line (the download size) would be clipped at the old height.
+        _fit(self.layout())
 
     def _on_cancel(self) -> None:
         if not self._cancel.isEnabled():

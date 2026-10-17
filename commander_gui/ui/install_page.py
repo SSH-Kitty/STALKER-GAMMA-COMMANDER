@@ -13,6 +13,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
@@ -731,6 +732,71 @@ def _looks_like_large_repo_failure(output: str) -> bool:
     return any(marker in text for marker in _LARGE_REPO_FAILURE_MARKERS)
 
 
+#: unzip's and 7z's own words for "this file is not a whole archive" - a
+#: download that was cut off. Other extract failures (full disk,
+#: permissions) never match, so a good archive is never deleted for them.
+_BROKEN_ARCHIVE_MARKERS = (
+    "end-of-central-directory signature not found",
+    "cannot find zipfile directory",
+    "can not open the file as archive",
+    "unexpected end of archive",
+)
+
+
+def _broken_archive(output: str) -> tuple[str, str] | None:
+    """(Download Path, Url) of the archive the CLI could not unpack because
+
+    the file itself is broken. The CLI reuses any archive already in
+    gamma/downloads without checking GitHub-hosted ones, so a cut-off
+    download fails the same way on every resume until it is removed.
+    """
+    text = output or ""
+    start = text.find("Install failed! Error extracting")
+    if start < 0:
+        return None
+    block = text[start:]
+    if not any(marker in block.lower() for marker in _BROKEN_ARCHIVE_MARKERS):
+        return None
+    path = re.search(r"^Download Path: (.+?)\s*$", block, re.MULTILINE)
+    url = re.search(r"^Url: (.+?)\s*$", block, re.MULTILINE)
+    if path is None:
+        return None
+    return path.group(1), url.group(1) if url else ""
+
+
+def _replace_broken_archive(download_path: str, url: str, gamma_dir: str) -> str | None:
+    """Get a broken archive out of the CLI's way so the next run fixes it.
+
+    Returns "renamed" when the user already saved the file under the name
+    in its download link (a manual GitHub download) - that copy takes the
+    broken one's place - "deleted" when the broken file was just removed
+    so the CLI downloads it again, or None when nothing was touched.
+    """
+    try:
+        downloads = (Path(gamma_dir) / "downloads").resolve()
+        archive = Path(download_path)
+        # Only ever touch a plain file directly inside this profile's downloads.
+        if archive.is_symlink() or archive.parent.resolve() != downloads:
+            return None
+        target = downloads / archive.name
+        if not target.is_file():
+            return None
+        link_name = Path(urlparse(url).path).name
+        manual = downloads / link_name
+        if (
+            link_name != archive.name
+            and manual.suffix.lower() in (".zip", ".7z", ".rar")
+            and manual.is_file()
+            and not manual.is_symlink()
+        ):
+            os.replace(manual, target)
+            return "renamed"
+        target.unlink()
+        return "deleted"
+    except OSError:
+        return None
+
+
 def _should_auto_retry(enabled: bool, attempt_count: int, output: str) -> bool:
     """Whether a failed full-install should auto-restart instead of showing
 
@@ -821,6 +887,9 @@ class InstallPage(QWidget):
         self._resume_state: dict[str, str] | None = None
         self._auto_cancelled = False
         self._auto_retry_count = 0
+        # Broken archives already replaced during this run of retries; a
+        # second failure on the same one stops and asks the user instead.
+        self._replaced_archives: set[str] = set()
         self._active_preserve_user = False
         self._active_preserve_mcm = False
         self._checked_archives: set[str] = set()
@@ -1225,14 +1294,25 @@ class InstallPage(QWidget):
         self.create_folders_button.setEnabled(not busy)
         profile = self.window.settings.active_profile
         resumable = profile is not None and self._resume_state is not None
-        self.install_button.setText(
-            tr(_RESUME_BUTTON_LABEL) if resumable else tr("Install GAMMA")
+        reinstall = (
+            not resumable
+            and profile is not None
+            and gamma_installed(profile.gamma, profile.mo2_profile)
         )
-        self.install_button.setToolTip(
-            tr("Resume the interrupted GAMMA installation using valid cached archives.")
-            if resumable
-            else tr("Install or update GAMMA. Anomaly is installed first if it is missing.")
-        )
+        if resumable:
+            label = tr(_RESUME_BUTTON_LABEL)
+            tooltip = tr("Resume the interrupted GAMMA installation using valid cached archives.")
+        elif reinstall:
+            label = tr("Reinstall GAMMA")
+            tooltip = tr(
+                "Unpack every GAMMA mod again over your install. Fixes broken "
+                "mods, and gets the latest GitHub addons if that option is ticked."
+            )
+        else:
+            label = tr("Install GAMMA")
+            tooltip = tr("Install or update GAMMA. Anomaly is installed first if it is missing.")
+        self.install_button.setText(label)
+        self.install_button.setToolTip(tooltip)
         if busy or profile is None:
             self.anomaly_button.setEnabled(False)
             self.install_button.setEnabled(False)
@@ -1249,9 +1329,9 @@ class InstallPage(QWidget):
             return
         anomaly = anomaly_installed(profile.anomaly)
         self.anomaly_button.setEnabled(not anomaly)
-        self.install_button.setEnabled(
-            resumable or not gamma_installed(profile.gamma, profile.mo2_profile)
-        )
+        # Stays available once installed, as Reinstall: it is the only way
+        # to re-unpack mods or apply "Re-download GitHub addons".
+        self.install_button.setEnabled(True)
         self.verify_button.setEnabled(not mo2_running() and not VERIFY_INTEGRITY_DISABLED)
         self.repair_button.setEnabled(not mo2_running())
         self.winetricks_button.setEnabled(
@@ -1493,6 +1573,7 @@ class InstallPage(QWidget):
             # Any fresh, user-initiated (or auto-chained-from-Anomaly) start
             # is not a continuation of a failure streak.
             self._auto_retry_count = 0
+            self._replaced_archives = set()
         profile = self.window.settings.active_profile
         if profile is None:
             QMessageBox.warning(
@@ -1527,10 +1608,19 @@ class InstallPage(QWidget):
                     free=human_size(free),
                     required=required_gb,
                 ))
+            reinstall = self._resume_state is None and gamma_installed(
+                profile.gamma, profile.mo2_profile
+            )
             answer = QMessageBox.question(
                 self,
-                tr("Install GAMMA?"),
-                tr("COMMANDER downloads and installs all GAMMA mods ({size_hint}), plus Anomaly if it isn't installed yet.", size_hint=size_hint),
+                tr("Reinstall GAMMA?") if reinstall else tr("Install GAMMA?"),
+                tr(
+                    "COMMANDER unpacks every GAMMA mod again over your install. "
+                    "Mods already in the download cache are reused, so only missing "
+                    "ones are downloaded."
+                )
+                if reinstall
+                else tr("COMMANDER downloads and installs all GAMMA mods ({size_hint}), plus Anomaly if it isn't installed yet.", size_hint=size_hint),
                 (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
                 points=tuple(points),
                 note="\n\n".join(warnings),
@@ -1666,6 +1756,34 @@ class InstallPage(QWidget):
         elif not cli_ok(rc, output, ""):
             self.full_progress.status_message(tr("Failed (exit code {rc})", rc=rc))
             self._save_resume_state()
+            broken = _broken_archive(output)
+            profile = self.window.settings.active_profile
+            if (
+                broken is not None
+                and profile is not None
+                and broken[0] not in self._replaced_archives
+            ):
+                action = _replace_broken_archive(*broken, profile.gamma)
+                if action is not None:
+                    self._replaced_archives.add(broken[0])
+                    name = Path(broken[0]).name
+                    if action == "renamed":
+                        note = tr(
+                            "Using the copy of {name} you downloaded - retrying...",
+                            name=name,
+                        )
+                    else:
+                        note = tr(
+                            "{name} was broken - downloading it again...", name=name
+                        )
+                    self.window.statusBar().showMessage(note, 8000)
+                    self._start_full_install(
+                        skip_confirm=True,
+                        preserve_user=self._active_preserve_user,
+                        preserve_mcm=self._active_preserve_mcm,
+                        _is_auto_retry=True,
+                    )
+                    return
             if _should_auto_retry(
                 self.checkboxes["auto_retry_large_files"].isChecked(),
                 self._auto_retry_count,
@@ -1702,6 +1820,16 @@ class InstallPage(QWidget):
                     )
                     + "\n\n"
                     + hint
+                )
+            if broken is not None and broken[0] in self._replaced_archives:
+                hint = tr(
+                    "{name} is still broken after downloading it again - GitHub may be "
+                    "cutting the download off. Download it yourself from {url} and save "
+                    "it as {path}, then click \"{button}\".",
+                    name=Path(broken[0]).name,
+                    url=broken[1],
+                    path=broken[0],
+                    button=tr(_RESUME_BUTTON_LABEL),
                 )
             self._show_error_popup(tr("The GAMMA install didn't finish"), rc, output, resume_hint=hint)
         else:

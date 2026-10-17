@@ -418,13 +418,18 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     # field above (which the runner-fallback loop just downgraded to
     # "optional" for Wine/umu-run when another runner covers for them).
     umu_script = umu_install_command()
-    extra_tools = [
+    umu_found = bool(by_label["umu-run"].get("detected"))
+    # Same scope as check_winetricks_full_status: Wine only counts when
+    # umu-run is missing, otherwise the game runs through Proton instead.
+    extra_tools = [] if umu_found else [
         (
             "wine",
             "Wine",
             bool(by_label["Wine"].get("detected")),
             by_label["Wine"].get("command", ""),
         ),
+    ]
+    extra_tools += [
         (
             "protontricks",
             "Protontricks",
@@ -434,7 +439,7 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
         (
             "umu",
             "umu-run",
-            bool(by_label["umu-run"].get("detected")),
+            umu_found,
             umu_script[-1] if umu_script else "",
         ),
     ]

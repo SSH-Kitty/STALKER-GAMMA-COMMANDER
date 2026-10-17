@@ -487,6 +487,16 @@ class SettingsPage(QWidget):
 
 
     def _render_build(self) -> None:
+        if "dev" in __version_label__.lower():
+            # A test build made before release: not one to switch from.
+            self._build_label.setText(tr("Dev"))
+            self._build_label.setStyleSheet(f"color: {WARN.name()}; font-weight: bold;")
+            self._switch_build_button.setVisible(False)
+            self._build_note.setText(tr(
+                "You're on a dev build: a test build that isn't released yet. "
+                "It can't switch builds itself."
+            ))
+            return
         unstable = is_unstable_version(__version__)
         kind = tr("Unstable") if unstable else tr("Stable")
         self._build_label.setText(kind)
@@ -550,7 +560,7 @@ class SettingsPage(QWidget):
         target = "stable" if is_unstable_version(__version__) else "unstable"
         switch = getattr(self.window, "switch_commander_build", None)
         if callable(switch):
-            switch(target)
+            switch(target, self._unstable_offer if target == "unstable" else None)
 
     # --------------------------------------------------------------- handlers
     def _on_reset_playtime(self) -> None:
