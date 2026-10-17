@@ -1,14 +1,14 @@
-# Publishes an unstable branch ("main-unstable", ...) as a GitHub
-# pre-release, only when started by hand - pushes alone publish nothing.
-# Runs in the STALKER-GAMMA-COMMANDER-Unstable repo, not the main one, so
-# the main repo's Releases page only lists stable builds:
-#   git push unstable main-unstable
-#   gh workflow run "Unstable build" --ref main-unstable -R SSH-Kitty/STALKER-GAMMA-COMMANDER-Unstable
-# (GitHub only offers "Run workflow" for workflows that exist on the
-# repo's default branch.) Settings' "Try the unstable build" button and the
-# unstable update channel read that repo's releases. Each run gets its own
-# tag, v<version>-unstable<run number>, so every build compares newer than
-# the one before it. Older unstable pre-releases are deleted afterwards.
+# Publishes an unstable branch ("1.4.0-Unstable", ...) as a GitHub
+# pre-release, only when started by hand - pushes alone publish nothing:
+#   gh workflow run "Unstable build" --ref 1.4.0-Unstable
+# (or "Run workflow" on the Actions page; GitHub only offers that for
+# workflows that also exist on the default branch). Pre-releases are what
+# Settings' "Try the unstable build" button and the unstable update channel
+# read: they only see releases, never branches. Each run gets its own tag,
+# v<version>-unstable<run number>, so every build compares newer than the
+# one before it. Older unstable pre-releases are deleted afterwards; leaving
+# them in place would push stable entries out of the release feed that the
+# app reads its patch notes from.
 name: Unstable build
 
 on:
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   release:
-    if: ${{ github.repository == 'SSH-Kitty/STALKER-GAMMA-COMMANDER-Unstable' && (endsWith(github.ref_name, '-Unstable') || endsWith(github.ref_name, '-unstable')) }}
+    if: ${{ endsWith(github.ref_name, '-Unstable') || endsWith(github.ref_name, '-unstable') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

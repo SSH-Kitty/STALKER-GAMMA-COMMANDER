@@ -13691,9 +13691,6 @@ class UnstableBuildTests(unittest.TestCase):
                 "/releases/download/v1.3.1-unstable/STALKER-GAMMA-COMMANDER-1.3.1-unstable-x86_64.AppImage"
             )
         )
-        # Unstable builds come from their own repo, stable ones from the main repo.
-        self.assertIn("STALKER-GAMMA-COMMANDER-Unstable/", commander_update_asset_url("v1.3.1-unstable"))
-        self.assertNotIn("-Unstable/", commander_update_asset_url("v1.3.1"))
 
     def test_switch_installs_the_right_tag_and_may_downgrade(self):
         from commander_gui import self_update, updates
@@ -13768,7 +13765,7 @@ class UnstableBuildTests(unittest.TestCase):
             with patch.dict(os.environ, {"APPIMAGE": ""}):
                 page._render_build()
                 self.assertFalse(page._switch_build_button.isEnabled())
-                self.assertIn("STALKER-GAMMA-COMMANDER-Unstable", page._build_note.text())
+                self.assertIn("git switch", page._build_note.text())
                 # From source the check must still run, or "Checking..." sticks.
                 page._unstable_checked = False
                 with (

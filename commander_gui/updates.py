@@ -342,9 +342,6 @@ def _version_from_patchnotes_or_readme(profile, patchnotes: str | None) -> str |
 
 
 _COMMANDER_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
-#: Unstable pre-releases live in their own repo, so the main repo's Releases
-#: page only lists stable builds.
-_UNSTABLE_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER-Unstable"
 #: Release tags look like "v1.2.9" or "v1.2.9H2" - the trailing "H<n>" is a
 #: hotfix counter on top of the same numeric version, not a separate
 #: release. Without capturing it, "1.2.9H1" and "1.2.9H2" both reduced to
@@ -418,15 +415,15 @@ def _latest_stable_tag() -> str | None:
     return urllib.parse.unquote(match.group(1)) if match else None
 
 
-def _feed_tags(repo: str = _COMMANDER_REPO) -> list[str]:
-    """Every release tag in *repo*'s Atom feed, pre-releases included.
+def _feed_tags() -> list[str]:
+    """Every release tag in the repository's Atom feed, pre-releases included.
 
     ``/releases.atom`` is a plain page like ``/releases/latest``, not the
     rate-limited REST API, and - unlike "latest" - it lists pre-releases.
     """
     try:
         req = urllib.request.Request(
-            f"{repo}/releases.atom", headers={"User-Agent": USER_AGENT}
+            f"{_COMMANDER_REPO}/releases.atom", headers={"User-Agent": USER_AGENT}
         )
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             text = read_response_bytes(resp, _MAX_FEED_BYTES).decode("utf-8", "replace")
@@ -444,15 +441,14 @@ def fetch_latest_release_notes(channel: str = "stable") -> tuple[str, str] | Non
     Read from the same ``/releases.atom`` feed as :func:`_feed_tags` - each
     entry carries the release body already rendered to HTML. "stable" picks
     the entry GitHub marks as latest (never a pre-release), "unstable" the
-    newest entry of the unstable repo's feed; either falls back to the
-    first entry. None when the feed can't be fetched or parsed.
+    newest entry of all; either falls back to the first entry. None when
+    the feed can't be fetched or parsed.
     """
     from . import safe_xml
 
-    repo = _UNSTABLE_REPO if channel == "unstable" else _COMMANDER_REPO
     try:
         req = urllib.request.Request(
-            f"{repo}/releases.atom", headers={"User-Agent": USER_AGENT}
+            f"{_COMMANDER_REPO}/releases.atom", headers={"User-Agent": USER_AGENT}
         )
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             data = read_response_bytes(resp, _MAX_FEED_BYTES)
@@ -461,8 +457,7 @@ def fetch_latest_release_notes(channel: str = "stable") -> tuple[str, str] | Non
     except (ValueError, *safe_xml.XML_ERRORS):
         return None
     if not entries:
-        # No unstable build published yet: show the stable notes.
-        return fetch_latest_release_notes("stable") if channel == "unstable" else None
+        return None
     chosen = entries[0]
     if channel != "unstable":
         stable = _latest_stable_tag()
@@ -483,9 +478,9 @@ def latest_stable_tag() -> str | None:
 
 
 def latest_unstable_tag() -> str | None:
-    """The newest "-unstable" pre-release tag in the unstable repo, or None."""
+    """The newest "-unstable" pre-release tag in the release feed, or None."""
     best: tuple[tuple[int, ...], str] | None = None
-    for tag in _feed_tags(_UNSTABLE_REPO):
+    for tag in _feed_tags():
         if not is_unstable_version(tag):
             continue
         version = _numeric_version_tuple(tag)
@@ -519,8 +514,8 @@ def check_commander_update(current_version: str, channel: str = "stable") -> str
 
     ``channel`` "stable" (the default) only ever looks at the release GitHub
     marks as latest, which is never a pre-release - stable users are not
-    moved onto an unstable build. "unstable" also considers the unstable
-    repo's builds and offers the highest version of all, falling back to the
+    moved onto an unstable build. "unstable" also considers pre-releases
+    and offers the highest version of all of them, falling back to the
     stable check when the feed can't be read.
 
     Deliberately avoids api.github.com/repos/.../releases/latest - like the
@@ -535,7 +530,7 @@ def check_commander_update(current_version: str, channel: str = "stable") -> str
         return None
     candidates: list[str] = []
     if channel == "unstable":
-        candidates = _feed_tags() + _feed_tags(_UNSTABLE_REPO)
+        candidates = _feed_tags()
     if not candidates:
         tag = _latest_stable_tag()
         candidates = [tag] if tag else []

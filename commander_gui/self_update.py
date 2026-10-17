@@ -40,7 +40,7 @@ from .config import child_environment
 from .network import urlopen_with_retry as urlopen
 from .proton_installer import SHA512_RE, sha512_file
 from .repair import USER_AGENT
-from .updates import _COMMANDER_REPO, _UNSTABLE_REPO, is_unstable_version
+from .updates import _COMMANDER_REPO
 
 #: Generous but bounded - the real AppImage is a few hundred MB.
 _MAX_APPIMAGE_BYTES = 2 * 1024**3
@@ -110,8 +110,7 @@ def commander_update_asset_url(tag: str) -> str:
         raise CommanderSelfUpdateError(f"Unexpected release tag: {tag!r}")
     version = tag.removeprefix("v")
     filename = f"STALKER-GAMMA-COMMANDER-{version}-x86_64.AppImage"
-    repo = _UNSTABLE_REPO if is_unstable_version(tag) else _COMMANDER_REPO
-    return f"{repo}/releases/download/{tag}/{filename}"
+    return f"{_COMMANDER_REPO}/releases/download/{tag}/{filename}"
 
 
 def download_commander_update(

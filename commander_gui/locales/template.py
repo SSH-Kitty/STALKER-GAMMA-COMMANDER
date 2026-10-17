@@ -999,7 +999,7 @@ TRANSLATIONS: dict[str, str] = {
     'Development build': "",
     "Couldn't check": "",
     'Unstable': "",
-    "Only the AppImage can switch builds itself. Running from source: clone STALKER-GAMMA-COMMANDER-Unstable for unstable builds, or STALKER-GAMMA-COMMANDER for stable. The AUR package is stable only.": "",
+    "Only the AppImage can switch builds itself. Running from source: use git switch to change to an unstable branch, or to main for stable. The AUR package is stable only.": "",
     'Downloading the unstable build...': "",
     'Downloading the stable build...': "",
     "You're on an unstable build: new features sooner, less tested. Going back installs the latest stable release.": "",
