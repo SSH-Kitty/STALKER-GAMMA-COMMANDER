@@ -261,6 +261,7 @@ TRANSLATIONS: dict[str, str] = {
     'List out-of-date addon archives in the cache with the total size that can be reclaimed.': 'Önbellekteki eski eklenti arşivlerini geri kazanılabilecek toplam boyutla birlikte listeler.',
     'List tools:': 'Liste araçları:',
     'Loading': 'Yükleniyor',
+    'Loading xrRAZOM': 'xrRAZOM yükleniyor',
     'Loading MO2 profiles...': 'MO2 profilleri yükleniyor...',
     'Log Dump Failed': 'Log dosyası oluşturma başarısız',
     'Log Dump saved: {path}': 'Log dosyası kaydedildi: {path}',

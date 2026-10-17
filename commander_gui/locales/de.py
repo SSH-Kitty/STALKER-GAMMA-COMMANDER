@@ -261,6 +261,7 @@ TRANSLATIONS: dict[str, str] = {
     'List out-of-date addon archives in the cache with the total size that can be reclaimed.': 'Listet veraltete Addon-Archive im Cache auf, zusammen mit dem gesamten freigebbaren Speicherplatz.',
     'List tools:': 'Listenwerkzeuge:',
     'Loading': 'Wird geladen',
+    'Loading xrRAZOM': 'xrRAZOM wird geladen',
     'Loading MO2 profiles...': 'MO2-Profile werden geladen...',
     'Log Dump Failed': 'Erstellen des Log-Archivs fehlgeschlagen',
     'Log Dump saved: {path}': 'Log-Archiv gespeichert: {path}',

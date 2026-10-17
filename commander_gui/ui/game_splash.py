@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .. import applog
@@ -161,7 +161,10 @@ def start(anomaly: str | Path, gamma: str | Path) -> subprocess.Popen:
         env["QT_QPA_PLATFORM"] = "xcb"
     accent = active_theme_tokens().get("accent", "#9fe96f")
     return subprocess.Popen(
-        [sys.executable, "-m", __name__, str(anomaly), str(gamma), accent, tr("Loading").upper()],
+        [
+            sys.executable, "-m", __name__, str(anomaly), str(gamma), accent,
+            tr("Loading").upper(), tr("Loading xrRAZOM"),
+        ],
         cwd=Path(__file__).resolve().parents[2],
         env=env,
         stdin=subprocess.DEVNULL,
@@ -171,7 +174,13 @@ def start(anomaly: str | Path, gamma: str | Path) -> subprocess.Popen:
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv[:1])
+    # COMMANDER's window class, desktop file and icon: the taskbar groups
+    # it with COMMANDER (StartupWMClass in its .desktop file).
+    app = QApplication(["stalker-gamma-commander"])
+    app.setApplicationName("stalker-gamma-commander")
+    app.setDesktopFileName("stalker-gamma-commander")
+    app.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[2] / "cli" / "stalker-gamma.png")))
     splash = GameSplash(*sys.argv[1:5])
+    splash.setWindowTitle(sys.argv[5])
     splash.show()
     sys.exit(app.exec())
