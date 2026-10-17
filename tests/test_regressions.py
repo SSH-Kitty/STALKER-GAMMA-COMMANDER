@@ -13768,7 +13768,7 @@ class UnstableBuildTests(unittest.TestCase):
             with patch.dict(os.environ, {"APPIMAGE": ""}):
                 page._render_build()
                 self.assertFalse(page._switch_build_button.isEnabled())
-                self.assertIn("git switch", page._build_note.text())
+                self.assertIn("STALKER-GAMMA-COMMANDER-Unstable", page._build_note.text())
                 # From source the check must still run, or "Checking..." sticks.
                 page._unstable_checked = False
                 with (

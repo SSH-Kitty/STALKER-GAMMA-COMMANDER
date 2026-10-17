@@ -1041,7 +1041,7 @@ TRANSLATIONS: dict[str, str] = {
     'Menu and View': 'Menu e Exibir',
     'Moving around': 'Navegação',
     'Next tab': 'Próxima aba',
-    "Only the AppImage can switch builds itself. Running from source: use 'git switch unstable' or 'git switch main'. The AUR package is stable only.": "Só o AppImage pode trocar de build sozinho. A partir do código-fonte: use 'git switch unstable' ou 'git switch main'. O pacote do AUR é apenas estável.",
+    "Only the AppImage can switch builds itself. Running from source: clone STALKER-GAMMA-COMMANDER-Unstable for unstable builds, or STALKER-GAMMA-COMMANDER for stable. The AUR package is stable only.": 'Só o AppImage pode trocar de build sozinho. A partir do código-fonte: clone STALKER-GAMMA-COMMANDER-Unstable para builds instáveis, ou STALKER-GAMMA-COMMANDER para a estável. O pacote do AUR é apenas estável.',
     'Open Releases': 'Abrir versões',
     'Opening {url}...': 'Abrindo {url}...',
     'Play Anomaly': 'Jogar Anomaly',

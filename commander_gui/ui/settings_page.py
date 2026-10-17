@@ -525,8 +525,8 @@ class SettingsPage(QWidget):
             self._switch_build_button.setEnabled(False)
             note += "\n" + tr(
                 "Only the AppImage can switch builds itself. Running from source: "
-                "use 'git switch unstable' or 'git switch main'. The AUR package "
-                "is stable only."
+                "clone STALKER-GAMMA-COMMANDER-Unstable for unstable builds, or "
+                "STALKER-GAMMA-COMMANDER for stable. The AUR package is stable only."
             )
         self._build_note.setText(note)
 

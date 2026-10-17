@@ -1,9 +1,9 @@
-# Publishes an unstable branch ("1.4.0-Unstable", ...) as a GitHub
+# Publishes an unstable branch ("main-unstable", ...) as a GitHub
 # pre-release, only when started by hand - pushes alone publish nothing.
 # Runs in the STALKER-GAMMA-COMMANDER-Unstable repo, not the main one, so
 # the main repo's Releases page only lists stable builds:
-#   git push unstable 1.4.0-Unstable
-#   gh workflow run "Unstable build" --ref 1.4.0-Unstable -R SSH-Kitty/STALKER-GAMMA-COMMANDER-Unstable
+#   git push unstable main-unstable
+#   gh workflow run "Unstable build" --ref main-unstable -R SSH-Kitty/STALKER-GAMMA-COMMANDER-Unstable
 # (GitHub only offers "Run workflow" for workflows that exist on the
 # repo's default branch.) Settings' "Try the unstable build" button and the
 # unstable update channel read that repo's releases. Each run gets its own
