@@ -14,6 +14,7 @@ from commander_gui.integrity import (
     build_findings,
     overall_verdict,
     scan_mods_md5,
+    verify_gamma,
 )
 from commander_gui.settings import CliProfile, CliSettings
 
@@ -46,6 +47,20 @@ class FindingsTests(unittest.TestCase):
         self.assertEqual(levels["GAMMA mods are missing or empty"], "problem")
         self.assertEqual(levels["Some of your own mods have no files"], "warn")
         self.assertEqual(findings[0].level, "problem")  # worst first
+
+    def test_an_entry_gamma_never_installs_is_not_reported_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp)
+            for marker in ("ModOrganizer.exe", "ModOrganizer.ini"):
+                (gamma / marker).write_text("")
+            (gamma / "mods").mkdir()
+            profile = gamma / "profiles" / "G.A.M.M.A"
+            profile.mkdir(parents=True)
+            typo = "DarkasleQif's and iTheon's Parts Condition Color Thresholds Changes"
+            (profile / "modlist.txt").write_text(f"+{typo}\n+12- Gone Mod\n")
+            result = verify_gamma(str(gamma), "G.A.M.M.A", official_mods={typo, "12- Gone Mod"})
+            self.assertEqual(result.missing, ["12- Gone Mod"])
+            self.assertEqual(result.official_missing, ["12- Gone Mod"])
 
     def test_a_snapshot_only_run_is_never_called_healthy(self):
         scan = Md5ScanResult(created=True, files_scanned=10)

@@ -25,6 +25,13 @@ from .network import read_response_bytes
 from .network import urlopen_with_retry as urlopen
 
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
+#: Entries GAMMA's modlist.txt enables but GAMMA never installs, so their
+#: folder can't exist. "DarkasleQif's" is a typo there: the addon GAMMA ships
+#: is "Darkasleif's and iTheon's Parts Condition Color Thresholds Changes".
+# ponytail: hand-kept list; derive from GAMMA's addon folders if more appear.
+NOT_SHIPPED_BY_GAMMA = frozenset({
+    "DarkasleQif's and iTheon's Parts Condition Color Thresholds Changes",
+})
 MANIFEST_FILENAME = "gamma-md5.txt"
 
 _ANOMALY_STATUS_RE = re.compile(r"\|\s*(OK|CORRUPT|NOT FOUND)\s*$")
@@ -292,6 +299,8 @@ def verify_gamma(
             on_progress(index, total, name)
         if name.endswith("_separator"):
             result.separators += 1
+            continue
+        if name in NOT_SHIPPED_BY_GAMMA:
             continue
         is_official = official_mods is not None and name in official_mods
         mod_path = mods_dir / name
