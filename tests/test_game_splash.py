@@ -1,0 +1,62 @@
+"""COMMANDER's game splash: the engine's splash switch and the engine-start check."""
+
+import os
+import shlex
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from commander_gui.launcher import Runner, build_command
+from commander_gui.steam_shortcuts import coop_launch_options
+from commander_gui.ui.game_splash import SPLASH_FLAG, engine_started, is_launcher, wants_splash
+
+
+class GameSplashTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def test_flag_rides_on_the_real_command_line_after_saved_arguments(self):
+        gamma = self.tmp / "gamma"
+        (gamma / "profiles" / "Default").mkdir(parents=True)
+        (gamma / "ModOrganizer.exe").write_bytes(b"")
+        runner = Runner("native", "test", [], {})
+        command, _env, _cwd = build_command(
+            str(gamma), runner, target="Anomaly (DX11)", profile="Default",
+            arguments=f"-smap2048 {SPLASH_FLAG}",
+        )
+        self.assertEqual(
+            command[-4:],
+            ["run", f"--arguments=-smap2048 {SPLASH_FLAG}", "-e", "Anomaly (DX11)"],
+        )
+        options = coop_launch_options("/p", "Default", "Anomaly", 480, f"-dbg {SPLASH_FLAG}")
+        words = shlex.split(options.replace("%command%", "CMD"))
+        self.assertEqual(words[-4:], ["run", f"--arguments=-dbg {SPLASH_FLAG}", "-e", "Anomaly"])
+        # No splash arguments: the old shortcut stays byte-for-byte the same.
+        self.assertTrue(coop_launch_options("/p", "D", "Anomaly", 480).endswith("run -e Anomaly"))
+
+    def test_only_a_fresh_log_with_the_marker_counts(self):
+        log = self.tmp / "xray_steamuser.log"
+        log.write_bytes(b"Initializing Engine...\nStarting engine...\n")
+        old = time.time() - 600
+        os.utime(log, (old, old))
+        since = time.time() - 1
+        self.assertFalse(engine_started([self.tmp], since))  # last session's log
+        log.write_bytes(b"Initializing Engine...\n")
+        self.assertFalse(engine_started([self.tmp], since))
+        log.write_bytes(b"Initializing Engine...\nStarting engine...\n")
+        self.assertEqual(engine_started([self.tmp, self.tmp / "missing"], since), log)
+
+    def test_only_the_game_exes_get_a_splash(self):
+        self.assertTrue(wants_splash("Z:/games/anomaly/bin/AnomalyDX11AVX.exe"))
+        self.assertTrue(wants_splash("C:\\Anomaly\\bin\\AnomalyDX9.exe"))
+        self.assertFalse(wants_splash("Z:/games/anomaly/AnomalyLauncher.exe"))
+        self.assertFalse(wants_splash(""))
+        self.assertTrue(is_launcher("Z:/games/anomaly/AnomalyLauncher.exe"))
+        self.assertFalse(is_launcher("Z:/games/anomaly/bin/AnomalyDX11AVX.exe"))
+
+
+if __name__ == "__main__":
+    unittest.main()

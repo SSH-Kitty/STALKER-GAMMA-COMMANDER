@@ -118,6 +118,8 @@ from .common import (
     tr,
 )
 from .dialogs import MessageBox as QMessageBox
+from . import game_splash
+from .game_splash import SPLASH_FLAG, is_launcher, wants_splash
 from .install_page import _PathEdit, _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
 
@@ -136,6 +138,8 @@ _LAUNCH_OPTION_TOGGLES = (
 # .mdmp after the wrapper/MO2 process is already gone (confirmed against
 # a real crash: 39s) - poll for it instead of checking once, immediately.
 _CRASH_POLL_INTERVAL_MS = 2000
+#: Every renderer's game exe (AnomalyDX11AVX.exe, ...), matched as a substring.
+_GAME_EXE_PREFIX = "AnomalyDX"
 _CRASH_POLL_MAX_ATTEMPTS = 45  # 90s total window
 #: While a game session runs without a Discord connection, retry this often.
 _DISCORD_RETRY_SECONDS = 15.0
@@ -156,6 +160,11 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
 
 class PlayPage(QWidget):
     launch_state_changed = Signal(bool)
+    #: The splash's own process (see game_splash.start).
+    _splash = None
+    #: Anomaly Launcher target: the game pids already running at launch;
+    #: the splash waits for a new one (Play pressed in the launcher).
+    _splash_after: set[int] | None = None
     #: The live launch status line or the playtime changed (Multiplayer mirrors both).
     launch_status_changed = Signal()
 
@@ -664,7 +673,7 @@ class PlayPage(QWidget):
                 runner.wrapper.insert(0, gamemoderun)
         return runner
 
-    def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None):
+    def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None):
         import re
 
         profile = self.window.settings.active_profile
@@ -685,6 +694,7 @@ class PlayPage(QWidget):
                 runner,
                 target=target,
                 profile=self._active_profile_name(),
+                arguments=None if open_mo2 else self._splash_arguments(coop_launch),
             )
         options_str = self.custom_options_edit.text().strip()
         if options_str:
@@ -1055,7 +1065,7 @@ class PlayPage(QWidget):
             "start_dir": str(profile.gamma),
             "launch_options": coop_launch_options(
                 prefix, self._active_profile_name(), self._selected_target(),
-                coop.steam_appid(profile.anomaly),
+                coop.steam_appid(profile.anomaly), self._splash_arguments(True) or "",
             ),
             "proton_name": compat_tool_name(proton_dir),
         }
@@ -1153,6 +1163,7 @@ class PlayPage(QWidget):
         self._launch_wrapper_pid = None
         self._arm_session("GAMMA", True, snapshot)
         self._steam_launch = True
+        self._show_splash(True)
         try:
             # Steam's Proton runs in the same prefix, so its winedbg
             # processes carry this runner's prefix too.
@@ -1267,7 +1278,7 @@ class PlayPage(QWidget):
             if runner is None:
                 runner = self._runner()
             command, env, cwd = self._resolve_command(
-                open_mo2=open_mo2, direct=direct, runner=runner
+                open_mo2=open_mo2, direct=direct, runner=runner, coop_launch=coop_launch
             )
             ensure_runner_prefix(runner)
             label = (
@@ -1277,6 +1288,8 @@ class PlayPage(QWidget):
             )
             monitoring_mo2 = not direct and os.name != "nt"
             snapshot = self._session_snapshot(monitoring_mo2, open_mo2)
+            if not open_mo2:
+                self._show_splash(coop_launch)
             self._proc = launch_detached(
                 command, env, cwd, log_path=log_path, registry=self._registry
             )
@@ -1779,6 +1792,7 @@ class PlayPage(QWidget):
                     self._check_for_crash()
                     self._finish_launch(tr("{name} closed normally.", name=label))
                     return
+                self._splash_on_game_start()
                 if self._game_exe_name:
                     # MO2 stays running after the game it launched closes,
                     # so wait for the game itself to exit rather than MO2
@@ -2056,8 +2070,64 @@ class PlayPage(QWidget):
             self, tr("Shortcut created"), tr("The shortcut is on your desktop:\n{path}", path=path)
         )
 
+    def _target_exe(self) -> Mo2Executable | None:
+        target = self._selected_target()
+        return next((e for e in self.executables if e.title == target), None)
+
+    def _splash_arguments(self, coop_launch: bool | None) -> str | None:
+        """The target's own arguments plus the switch that turns the
+        engine's splash off, for a co-op game launch. Only xrRazom's engine
+        has that switch; single-player keeps the engine's own splash."""
+        profile = self.window.settings.active_profile
+        exe = self._target_exe()
+        if profile is None or exe is None or not wants_splash(exe.binary):
+            return None
+        if not (coop.is_active(profile.anomaly) if coop_launch is None else coop_launch):
+            return None
+        return f"{exe.arguments} {SPLASH_FLAG}".strip()
+
+    def _show_splash(self, coop_launch: bool | None) -> None:
+        """COMMANDER's splash in place of the engine's (co-op launches)."""
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        self._close_splash()
+        exe = self._target_exe()
+        if exe is not None and is_launcher(exe.binary):
+            # The flag can't reach a game the launcher starts, so the
+            # engine's small splash opens too - under this larger one,
+            # which comes up after it and stays on top.
+            if coop.is_active(profile.anomaly) if coop_launch is None else coop_launch:
+                self._splash_after = exe_pids(_GAME_EXE_PREFIX)
+            return
+        if self._splash_arguments(coop_launch) is None:
+            return
+        self._start_splash()
+
+    def _start_splash(self) -> None:
+        profile = self.window.settings.active_profile
+        try:
+            self._splash = game_splash.start(profile.anomaly, profile.gamma)
+        except OSError:
+            self._splash = None  # cosmetic; the launch goes on without it
+
+    def _splash_on_game_start(self) -> None:
+        """Anomaly Launcher target: show the splash once the game starts."""
+        if self._splash_after is not None and exe_pids(_GAME_EXE_PREFIX) - self._splash_after:
+            self._splash_after = None
+            self._start_splash()
+
+    def _close_splash(self) -> None:
+        self._splash_after = None
+        if self._splash is not None:
+            if self._splash.poll() is None:
+                self._splash.terminate()
+            self._splash = None
+
     def _set_launch_button_state(self, launching: bool) -> None:
         self._launching = launching
+        if not launching:
+            self._close_splash()
         # Stays clickable while launching - it becomes "Quit Game" so the
         # user always has a way to force-close a launch (MO2, the game,
         # or a hung wrapper) instead of it running unbounded.

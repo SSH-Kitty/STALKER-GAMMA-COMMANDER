@@ -301,6 +301,12 @@ def add_commander_shortcuts(
     )
     root = set_shortcuts_map(root, shortcuts)
     write_shortcuts(vdf_path, root)
+    quoted_exe = f'"{exe}"'
+    for name, source in (
+        ("STALKER COMMANDER", COMMANDER_ARTWORK_DIR),
+        ("STALKER COMMANDER DECK", DECK_ARTWORK_DIR),
+    ):
+        install_artwork(vdf_path, _shortcut_appid(quoted_exe, name) & 0xFFFFFFFF, source)
 
 
 def find_userdata_config_dirs() -> list[Path]:
@@ -689,10 +695,13 @@ COOP_SHORTCUT_NAME = "STALKER COMMANDER xrRAZOM"
 #: Older builds' names; a rewrite renames that entry, keeping its collections.
 _LEGACY_COOP_NAMES = {"GAMMA Co-op", "STALKER CMNDR xrRAZOM"}
 
-#: Library artwork for the co-op shortcut, as (bundled file, grid file suffix).
+#: Library artwork for each shortcut, as (bundled file, grid file suffix).
 #: Steam reads ``userdata/<id>/config/grid/<appid><suffix>``.
-COOP_ARTWORK_DIR = Path(__file__).resolve().parent / "assets" / "coop_artwork"
-_COOP_ARTWORK = (
+_ASSETS = Path(__file__).resolve().parent / "assets"
+COOP_ARTWORK_DIR = _ASSETS / "coop_artwork"
+COMMANDER_ARTWORK_DIR = _ASSETS / "commander_artwork"
+DECK_ARTWORK_DIR = _ASSETS / "deck_artwork"
+_ARTWORK = (
     ("cover.jpg", "p.jpg"),
     ("hero.jpg", "_hero.jpg"),
     ("logo.png", "_logo.png"),
@@ -700,11 +709,11 @@ _COOP_ARTWORK = (
 )
 
 
-def install_coop_artwork(vdf_path: Path, appid: int, source: Path = COOP_ARTWORK_DIR) -> None:
-    """Copy the co-op cover, background, logo and wide cover into Steam's
+def install_artwork(vdf_path: Path, appid: int, source: Path) -> None:
+    """Copy a shortcut's cover, background, logo and wide cover into Steam's
     grid folder for ``appid``. Best effort: artwork never blocks a launch."""
     grid = vdf_path.parent / "grid"
-    for name, suffix in _COOP_ARTWORK:
+    for name, suffix in _ARTWORK:
         src = source / name
         if not src.is_file():
             continue
@@ -719,7 +728,9 @@ def install_coop_artwork(vdf_path: Path, appid: int, source: Path = COOP_ARTWORK
             pass
 
 
-def coop_launch_options(prefix: str, mo2_profile: str, target: str, appid: int) -> str:
+def coop_launch_options(
+    prefix: str, mo2_profile: str, target: str, appid: int, arguments: str = ""
+) -> str:
     """LaunchOptions for the co-op shortcut.
 
     ``STEAM_COMPAT_DATA_PATH`` points Steam's Proton at COMMANDER's own
@@ -732,9 +743,10 @@ def coop_launch_options(prefix: str, mo2_profile: str, target: str, appid: int) 
     so a ``"`` or ``$(...)`` in a path or profile name stays a literal.
     """
     q = shlex.quote
+    run = f"run {q('--arguments=' + arguments)} " if arguments else "run "
     return (
         f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command% "
-        f"-p {q(mo2_profile)} run -e {q(target)}"
+        f"-p {q(mo2_profile)} {run}-e {q(target)}"
     )
 
 
@@ -852,6 +864,9 @@ def coop_shortcut_current(
         f'"{exe}"', f'"{start_dir}"', launch_options
     ):
         return False
+    # Older builds wrote it with no icon; rewrite once to add one.
+    if not entry.get("icon") and bundled_icon().is_file():
+        return False
     if proton_name is None:
         return True
     try:
@@ -895,7 +910,12 @@ def write_coop_shortcut(
             ]
         shortcuts.append((key, type_byte, value))
     shortcuts = add_or_update_shortcut(
-        shortcuts, COOP_SHORTCUT_NAME, exe, start_dir, launch_options=launch_options
+        shortcuts,
+        COOP_SHORTCUT_NAME,
+        exe,
+        start_dir,
+        icon=install_icon(bundled_icon()),
+        launch_options=launch_options,
     )
 
     if vdf_path.is_file():
@@ -914,7 +934,7 @@ def write_coop_shortcut(
             config.parent.mkdir(parents=True, exist_ok=True)
         # No lock files left behind in Steam's own folders (see write_shortcuts).
         atomic.write_bytes(config, new_config.encode("utf-8"), lock=False)
-    install_coop_artwork(vdf_path, appid)
+    install_artwork(vdf_path, appid, COOP_ARTWORK_DIR)
     return appid
 
 

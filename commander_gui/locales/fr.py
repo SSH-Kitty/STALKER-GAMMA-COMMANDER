@@ -260,6 +260,7 @@ TRANSLATIONS: dict[str, str] = {
     'Links': 'Liens',
     'List out-of-date addon archives in the cache with the total size that can be reclaimed.': "Liste les archives d'addons obsolètes dans le cache et l'espace total récupérable.",
     'List tools:': 'Outils de liste :',
+    'Loading': 'Chargement',
     'Loading MO2 profiles...': 'Chargement des profils MO2...',
     'Log Dump Failed': "Échec de la création de l'archive de logs",
     'Log Dump saved: {path}': 'Archive de logs enregistrée : {path}',

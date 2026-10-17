@@ -260,6 +260,7 @@ TRANSLATIONS: dict[str, str] = {
     'Links': 'Legături',
     'List out-of-date addon archives in the cache with the total size that can be reclaimed.': 'Listează arhivele de addon-uri învechite din cache, cu spațiul total ce poate fi eliberat.',
     'List tools:': 'Unelte listă:',
+    'Loading': 'Se încarcă',
     'Loading MO2 profiles...': 'Se încarcă profilurile MO2...',
     'Log Dump Failed': 'Crearea arhivei de log-uri a eșuat',
     'Log Dump saved: {path}': 'Arhivă de log-uri salvată: {path}',

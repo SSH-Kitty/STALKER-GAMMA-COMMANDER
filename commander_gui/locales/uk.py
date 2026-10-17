@@ -260,6 +260,7 @@ TRANSLATIONS: dict[str, str] = {
     'Links': 'Посилання',
     'List out-of-date addon archives in the cache with the total size that can be reclaimed.': 'Показати застарілі архіви аддонів у кеші та загальний обсяг місця, який можна звільнити.',
     'List tools:': 'Інструменти списку:',
+    'Loading': 'Завантаження',
     'Loading MO2 profiles...': 'Завантаження профілів MO2...',
     'Log Dump Failed': 'Не вдалося створити архів логів',
     'Log Dump saved: {path}': 'Архів логів збережено: {path}',

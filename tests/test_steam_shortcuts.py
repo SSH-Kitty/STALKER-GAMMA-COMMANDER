@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from commander_gui.steam_shortcuts import (
+    _shortcut_appid,
     COOP_SHORTCUT_NAME,
     ShortcutsFileError,
     add_commander_shortcuts,
@@ -503,7 +504,14 @@ class AddToSteamTests(unittest.TestCase):
         )
         self.assertEqual(names, ["STALKER COMMANDER", "STALKER COMMANDER DECK"])
         # Atomic, lock-free write: nothing left behind in Steam's folder.
-        self.assertEqual(sorted(p.name for p in vdf.parent.iterdir()), ["shortcuts.vdf"])
+        self.assertEqual(sorted(p.name for p in vdf.parent.iterdir()), ["grid", "shortcuts.vdf"])
+        # Each shortcut gets its own four pieces of library artwork.
+        for name in names:
+            appid = _shortcut_appid('"/opt/commander"', name) & 0xFFFFFFFF
+            self.assertEqual(
+                sorted(p.name for p in (vdf.parent / "grid").glob(f"{appid}*")),
+                [f"{appid}.png", f"{appid}_hero.jpg", f"{appid}_logo.png", f"{appid}p.jpg"],
+            )
 
     def test_add_to_steam_with_restart_writes_while_stopped(self):
         vdf = self.tmp / "userdata" / "1" / "config" / "shortcuts.vdf"
@@ -531,6 +539,14 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def _coop_entry_icon(vdf: Path) -> str:
+    for _k, _t, value in get_shortcuts_map(read_shortcuts(vdf)):
+        fields = {k: v for k, _t, v in value}
+        if fields["appname"] == COOP_SHORTCUT_NAME:
+            return fields["icon"]
+    return ""
+
+
 class CoopShortcutTests(unittest.TestCase):
     """The co-op shortcut Steam co-op sessions launch through."""
 
@@ -540,6 +556,13 @@ class CoopShortcutTests(unittest.TestCase):
         '\t\t\t\t\t"0"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"proton_9"\n\t\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t\t"priority"\t\t"75"\n\t\t\t\t\t}\n'
         '\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n'
     )
+
+    def setUp(self):
+        # Keep the shortcut icon out of the real ~/.local/share/icons.
+        self.icon = "/icons/commander.png"
+        icon = patch("commander_gui.steam_shortcuts.install_icon", return_value=self.icon)
+        icon.start()
+        self.addCleanup(icon.stop)
 
     def _setup(self, tmp: str) -> Path:
         config_dir = Path(tmp) / "Steam" / "userdata" / "111" / "config"
@@ -577,6 +600,16 @@ class CoopShortcutTests(unittest.TestCase):
     def test_rungameid_is_the_64_bit_shortcut_id(self):
         self.assertEqual(rungameid(0x80000001), str((0x80000001 << 32) | 0x02000000))
 
+    def test_a_shortcut_without_an_icon_is_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            fields = self._fields()
+            with patch("commander_gui.steam_shortcuts.install_icon", return_value=""):
+                write_coop_shortcut(vdf, **fields)
+            self.assertFalse(coop_shortcut_current(vdf, **fields))
+            write_coop_shortcut(vdf, **fields)
+            self.assertTrue(coop_shortcut_current(vdf, **fields))
+
     def test_writes_shortcut_and_compat_tool_keeping_everything_else(self):
         with tempfile.TemporaryDirectory() as tmp:
             vdf = self._setup(tmp)
@@ -593,6 +626,7 @@ class CoopShortcutTests(unittest.TestCase):
             self.assertEqual(mapped_compat_tool(config, appid), "GE-Proton10-4")
             self.assertEqual(mapped_compat_tool(config, 0), "proton_9")
             self.assertEqual(appid, unsigned_appid(fields["exe"]))
+            self.assertEqual(_coop_entry_icon(vdf), self.icon)
             # Nothing of ours left behind in Steam's folders but the backups.
             for folder in (vdf.parent, vdf.parents[3] / "config"):
                 self.assertEqual(list(folder.glob(".*")), [], folder)

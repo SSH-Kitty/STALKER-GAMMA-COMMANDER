@@ -279,6 +279,7 @@ TRANSLATIONS: dict[str, str] = {
     'License': "",
     'Links': "",
     'List out-of-date addon archives in the cache with the total size that can be reclaimed.': "",
+    'Loading': "",
     'Loading MO2 profiles...': "",
     'Log Dump Failed': "",
     'Log Dump saved: {path}': "",

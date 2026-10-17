@@ -1079,8 +1079,13 @@ def build_command(
     *,
     target: str | None = None,
     profile: str | None = None,
+    arguments: str | None = None,
 ) -> tuple[list[str], dict[str, str], str]:
-    """Build (command, env, cwd) to open MO2 and optionally auto-launch ``target``."""
+    """Build (command, env, cwd) to open MO2 and optionally auto-launch ``target``.
+
+    ``arguments`` replaces the target's own arguments for this run; the
+    ``--name=value`` form keeps a value starting with "-" a value.
+    """
     mo2 = Path(gamma_dir) / "ModOrganizer.exe"
     if not mo2.is_file():
         raise LaunchError(f"ModOrganizer.exe not found in {gamma_dir}")
@@ -1091,7 +1096,7 @@ def build_command(
             raise LaunchError(f"MO2 profile not found: {profile}")
         args += ["-p", profile]
     if target:
-        args += ["run", "-e", target]
+        args += ["run", *([f"--arguments={arguments}"] if arguments else []), "-e", target]
     return [*runner.wrapper, *args], dict(runner.env), gamma_dir
 
 
