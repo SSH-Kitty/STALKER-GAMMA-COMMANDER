@@ -418,113 +418,6 @@ def check_umu() -> tuple[bool, str | None]:
     )
 
 
-def check_protontricks() -> tuple[bool, str | None]:
-    """Check for protontricks availability.
-
-    Returns ``(need_install, error_message)``:
-
-    * ``(False, None)`` — protontricks is already on PATH.
-    * ``(True, None)``  — missing but can be auto-installed via pipx or pip.
-    * ``(True, msg)``   — missing and no installer is available; *msg* tells
-      the user what to install first.
-    """
-    if configured_tool("protontricks") or shutil.which("protontricks"):
-        return False, None
-
-    # Can we install it automatically?
-    if shutil.which("pipx"):
-        return True, None
-    if _pip_usable():
-        return True, None
-
-    # pip exists but is externally managed (PEP 668) — recommend pipx instead.
-    # (checked the same way _pip_usable() detects "pip exists" - a standalone
-    # `pip` binary isn't the only way it's reachable, `python3 -m pip` counts
-    # too, and only checking the former showed the vaguer "neither is
-    # available" message on a system where pip was only reachable that way.)
-    if (shutil.which("pip") or _pip_module_available()) and _externally_managed():
-        cmd = _install_command("pipx")
-        return True, (
-            "protontricks is required but was not found.\n"
-            "pip is available but this system marks Python as externally "
-            "managed (PEP 668), so pip cannot install packages directly.\n\n"
-            f"Install pipx with your package manager:\n  {cmd}\n\n"
-            "Then try again — protontricks will be installed automatically."
-        )
-
-    # Neither pipx nor pip — tell the user what to install first.
-    cmd = _install_command("pipx")
-    return True, (
-        "protontricks is required but was not found, and neither pipx nor pip "
-        "is available to install it automatically.\n\n"
-        f"Install pipx with your package manager:\n  {cmd}\n\n"
-        "Then try again — protontricks will be installed automatically."
-    )
-
-
-def _pip_module_available() -> bool:
-    """Check if ``python3 -m pip`` is available without importing it."""
-    python = shutil.which("python3")
-    if not python:
-        return False
-    try:
-        result = subprocess.run(
-            [python, "-m", "pip", "--version"],
-            capture_output=True,
-            check=False,
-            timeout=5,
-            # System tools, not COMMANDER: no AppImage PYTHONPATH etc.
-            env=child_environment(),
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def _externally_managed() -> bool:
-    """Check if the system's python3 is marked as externally managed (PEP 668).
-
-    Distributions like Arch Linux, Fedora, and Debian-based systems place a
-    marker file (``EXTERNALLY-MANAGED``) in the stdlib path to prevent
-    ``pip install`` from modifying the system Python.
-
-    This must inspect the interpreter that ``protontricks_install_command()``
-    actually invokes (the ``python3`` resolved from PATH) rather than the
-    interpreter currently running this code via ``sysconfig``. They are the
-    same thing when running from a source checkout's venv, but the AppImage
-    runs a bundled, private Python that carries no distro-injected marker
-    file at all - checking it directly always reports "not managed" even on
-    a PEP 668 system, silently approving a pip install that the system
-    python3 that actually runs it then refuses to perform.
-    """
-    python = shutil.which("python3")
-    if not python:
-        return False
-    try:
-        result = subprocess.run(
-            [python, "-c", "import sysconfig; print(sysconfig.get_path('stdlib'))"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-            # System tools, not COMMANDER: no AppImage PYTHONPATH etc.
-            env=child_environment(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0:
-        return False
-    stdlib_path = result.stdout.strip()
-    return bool(stdlib_path) and (Path(stdlib_path) / "EXTERNALLY-MANAGED").is_file()
-
-
-def _pip_usable() -> bool:
-    """Return True if pip can install packages without PEP 668 errors."""
-    if not shutil.which("pip") and not _pip_module_available():
-        return False
-    return not _externally_managed()
-
-
 # ---------------------------------------------------------------------------
 # Combined check
 # ---------------------------------------------------------------------------
@@ -542,12 +435,11 @@ def check_all_dependencies() -> list[str]:
     if need_winetricks and wt_err:
         errors.append(wt_err)
 
-    wine_err = check_wine()
-    if wine_err:
-        errors.append(wine_err)
-
-    need_pt, pt_err = check_protontricks()
-    if need_pt and pt_err:
-        errors.append(pt_err)
+    # Only a bare "wine" runner launches through system Wine; "auto" falls
+    # back to umu-run + GE-Proton, which SteamOS and immutable distros use.
+    if gui_settings.load_gui_settings().get("runner") == "wine":
+        wine_err = check_wine()
+        if wine_err:
+            errors.append(wine_err)
 
     return errors

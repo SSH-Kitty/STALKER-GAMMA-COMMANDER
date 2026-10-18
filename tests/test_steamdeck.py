@@ -148,6 +148,9 @@ class DeckDetectionTests(unittest.TestCase):
         self.assertEqual(
             steam_deck_model(dmi_path=self._dmi("Galileo\n"), env={}), "oled"
         )
+        self.assertEqual(
+            steam_deck_model(dmi_path=self._dmi("Fremont"), env={}), "machine"
+        )
 
     def test_other_hardware(self):
         self.assertIsNone(
@@ -171,13 +174,21 @@ class DeckDetectionTests(unittest.TestCase):
             self.assertIsNone(steam_deck_model(dmi_path=path, env={}))
 
     def test_game_mode_needs_both_signals(self):
-        self.assertFalse(in_game_mode({"SteamDeck": "1"}))
-        self.assertFalse(in_game_mode({"XDG_CURRENT_DESKTOP": "gamescope"}))
+        missing = self.tmp / "nope"
+        gamescope = {"XDG_CURRENT_DESKTOP": "gamescope"}
+        self.assertFalse(in_game_mode({"SteamDeck": "1"}, dmi_path=missing))
+        self.assertFalse(in_game_mode(gamescope, dmi_path=missing))
         self.assertTrue(
-            in_game_mode(
-                {"SteamDeck": "1", "XDG_CURRENT_DESKTOP": "gamescope"}
-            )
+            in_game_mode({"SteamDeck": "1", **gamescope}, dmi_path=missing)
         )
+
+    def test_game_mode_on_steam_machine_without_env(self):
+        # The Steam Machine's Game Mode is not known to set SteamDeck=1.
+        machine = self._dmi("Fremont")
+        self.assertTrue(
+            in_game_mode({"XDG_CURRENT_DESKTOP": "gamescope"}, dmi_path=machine)
+        )
+        self.assertFalse(in_game_mode({}, dmi_path=machine))
 
 
 # =====================================================================

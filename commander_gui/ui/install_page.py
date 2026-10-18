@@ -77,8 +77,6 @@ from ..themes import active_theme_tokens
 from ..winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
-    protontricks_binary,
-    protontricks_install_command,
     umu_binary,
     umu_install_command,
     winetricks_binary,
@@ -212,12 +210,11 @@ def _winetricks_progress(line: str, stage: str, completed: set[str]) -> int | No
 
 # Overall-bar ranges for each dependency-install stage, mirroring the
 # determinate staged style used for Anomaly: the winetricks tool itself
-# first (if missing), then umu, then protontricks, then the winetricks
-# verbs fill the remainder.
+# first (if missing), then umu, then the winetricks verbs fill the
+# remainder.
 _WT_STAGE_RANGES = {
     "winetricks": (0, 10),
-    "umu": (10, 25),
-    "tools": (25, 40),
+    "umu": (10, 40),
     "verbs": (40, 100),
 }
 
@@ -3672,7 +3669,7 @@ class InstallPage(QWidget):
             return
         self._deps_checking = True
         # check_all_dependencies() chains several subprocess lookups (umu,
-        # protontricks, pip) with their own timeouts - worst case a several
+        # winetricks) with their own timeouts - worst case a several
         # -second stall, so it runs off the GUI thread like every other
         # dependency probe on this page.
         task = BackgroundTask(check_all_dependencies, parent=self)
@@ -3716,7 +3713,6 @@ class InstallPage(QWidget):
         prefix = self._wt_prefix()
         need_winetricks = not winetricks_binary()
         need_umu = not umu_binary()
-        need_protontricks = not protontricks_binary()
         message = tr(
             "This installs the Windows libraries Mod Organizer and the game need, into:\n{prefix}\n\n"
             "About 150 MB to download the first time.",
@@ -3727,7 +3723,6 @@ class InstallPage(QWidget):
             for tool, needed in (
                 ("winetricks", need_winetricks),
                 (tr("umu-run (the Proton launcher)"), need_umu),
-                ("protontricks", need_protontricks),
             )
             if needed
         ]
@@ -3759,8 +3754,6 @@ class InstallPage(QWidget):
             self._wt_stage = "winetricks"
         elif need_umu:
             self._wt_stage = "umu"
-        elif need_protontricks:
-            self._wt_stage = "tools"
         else:
             self._wt_stage = "verbs"
         self._wt_completed_verbs.clear()
@@ -3816,30 +3809,6 @@ class InstallPage(QWidget):
             self.wt_progress.log.append_line(
                 "== Installing umu-run (Proton launcher) =="
             )
-        elif self._wt_stage == "tools":
-            command = protontricks_install_command()
-            if not command:
-                from ..dependencies import _externally_managed, _install_command
-
-                msg = "protontricks could not be installed."
-                if _externally_managed():
-                    cmd = _install_command("pipx")
-                    msg += (
-                        "\n\nThis system marks Python as externally managed "
-                        "(PEP 668), so pip cannot install packages directly."
-                        f"\n\nInstall pipx first:\n  {cmd}\n\n"
-                        "Then try again — protontricks will be installed automatically."
-                    )
-                else:
-                    msg += "\n\nInstall pipx or pip, then try again."
-                self.wt_progress.on_finished(1, msg)
-                self._wt_runner = None
-                self._wt_status_failed(msg)
-                self.window.set_install_busy(False)
-                self._refresh_winetricks_status()
-                return
-            self.wt_progress.status_message(tr("Installing protontricks..."))
-            self.wt_progress.log.append_line("== Installing protontricks ==")
         else:
             # Through the game's own runner, never bare winetricks: bare
             # winetricks runs whatever wine is on PATH inside the Proton
@@ -3905,26 +3874,15 @@ class InstallPage(QWidget):
             self._refresh_winetricks_status()
             return
         if rc == 0 and self._wt_stage == "winetricks":
-            # winetricks tool installed — chain to umu, protontricks or verbs.
-            if not umu_binary():
-                self._wt_stage = "umu"
-            elif not protontricks_binary():
-                self._wt_stage = "tools"
-            else:
-                self._wt_stage = "verbs"
+            # winetricks tool installed — chain to umu or verbs.
+            self._wt_stage = "umu" if not umu_binary() else "verbs"
             self._wt_runner = None
             self._start_winetricks_stage()
             return
         if rc == 0 and self._wt_stage == "umu":
-            # UMU installed — chain to protontricks or verbs.
-            self._wt_stage = "tools" if not protontricks_binary() else "verbs"
-            self._wt_runner = None
-            self._start_winetricks_stage()
-            return
-        if self._wt_stage == "tools" and rc == 0:
+            # UMU installed — chain to the verbs.
             self._wt_stage = "verbs"
             self._wt_runner = None
-            # Do not call on_finished — the verbs stage continues directly.
             self._start_winetricks_stage()
             return
         self.wt_progress.on_finished(rc, output)

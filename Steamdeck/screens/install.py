@@ -62,8 +62,6 @@ from commander_gui.ui.proton_manager import build_status, release_installed
 from commander_gui.winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
-    protontricks_binary,
-    protontricks_install_command,
     umu_install_command,
     winetricks_binary,
     winetricks_install_command,
@@ -126,7 +124,7 @@ _ANOMALY_INSTALL_BYTES = 20 * 1024**3
 #: rather than pretending to a precision it does not have - but it does
 #: advance, which an indeterminate spinner over a ten-minute Winetricks run
 #: does not.
-_STAGE_START = {"winetricks": 0, "umu": 10, "tools": 25, "verbs": 45}
+_STAGE_START = {"winetricks": 0, "umu": 10, "verbs": 45}
 
 
 def _save_resume(state: dict, window) -> None:
@@ -640,7 +638,7 @@ class InstallScreen(DeckScreen):
         self.window.confirm(
             tr("Install Dependencies"),
             tr(
-                "Installs umu-run, protontricks and the Visual C++ / DirectX "
+                "Installs winetricks, umu-run and the Visual C++ / DirectX "
                 "runtimes Mod Organizer and the game need:\n\n{verbs}",
                 verbs=" ".join(WINETRICKS_VERBS),
             ),
@@ -656,7 +654,7 @@ class InstallScreen(DeckScreen):
         from commander_gui.gui_settings import configured_runner
 
         stage = self._stage
-        # curl / pipx stages touch no Wine and get no Wine env; the verbs
+        # curl stages touch no Wine and get no Wine env; the verbs
         # stage gets exactly the env winetricks_install_command() decides.
         env: dict[str, str] | None = None
         if stage == "winetricks":
@@ -667,10 +665,6 @@ class InstallScreen(DeckScreen):
             command = umu_install_command()
             failure = tr("umu-run could not be installed (curl is not available).")
             status = tr("Installing umu-run...")
-        elif stage == "tools":
-            command = protontricks_install_command()
-            failure = tr("protontricks could not be installed.")
-            status = tr("Installing protontricks...")
         else:
             # Through the game's own runner - bare winetricks would run the
             # host's wine inside the Proton prefix and corrupt it.
@@ -746,8 +740,7 @@ class InstallScreen(DeckScreen):
         self._runner = None
         ok = cli_ok(rc, output, "") if self._stage is None else rc == 0
 
-        # Dependency stages chain: umu -> protontricks (unless already
-        # present) -> the Winetricks verbs. install_busy stays held across
+        # Dependency stages chain: winetricks -> umu -> the Winetricks verbs. install_busy stays held across
         # the hand-off - dropping it between stages left a window in which
         # another screen could start a second job against the same prefix.
         if self._stage is not None and ok and not cancelled:
@@ -756,10 +749,6 @@ class InstallScreen(DeckScreen):
                 self._run_stage()
                 return
             if self._stage == "umu":
-                self._stage = "verbs" if protontricks_binary() else "tools"
-                self._run_stage()
-                return
-            if self._stage == "tools":
                 self._stage = "verbs"
                 self._run_stage()
                 return

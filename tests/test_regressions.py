@@ -10905,13 +10905,11 @@ class UserModsTrackerTests(unittest.TestCase):
     def test_dependencies_progress_maps_stages_onto_overall_bar(self):
         """Audit follow-up: determinate staged bar for Install Dependencies."""
         self.assertIsNone(_dependencies_progress("umu", None))
-        # Stage boundaries: winetricks 0-10, umu 10-25, tools 25-40, verbs 40-100.
+        # Stage boundaries: winetricks 0-10, umu 10-40, verbs 40-100.
         self.assertEqual(_dependencies_progress("winetricks", 0), 0)
         self.assertEqual(_dependencies_progress("winetricks", 100), 10)
         self.assertEqual(_dependencies_progress("umu", 0), 10)
-        self.assertEqual(_dependencies_progress("umu", 100), 25)
-        self.assertEqual(_dependencies_progress("tools", 0), 25)
-        self.assertEqual(_dependencies_progress("tools", 100), 40)
+        self.assertEqual(_dependencies_progress("umu", 100), 40)
         self.assertEqual(_dependencies_progress("verbs", 0), 40)
         self.assertEqual(_dependencies_progress("verbs", 50), 70)
         self.assertEqual(_dependencies_progress("verbs", 100), 100)

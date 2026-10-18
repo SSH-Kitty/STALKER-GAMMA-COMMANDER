@@ -208,7 +208,7 @@ TOPICS: list[dict] = [
                     ("steps", [
                         "Open System Check. Install anything shown as Missing with the copy-command button next to it, then press Refresh Checks. The minimum is a runner (umu-run is best), Vulkan including 32-bit, and unzip.",
                         "Open Install. Pick an empty base folder on a drive with about 150 GB free and press Create folders. COMMANDER makes anomaly, gamma and cache folders inside it and saves them to your profile.",
-                        "Press Install Dependencies. COMMANDER installs any missing tools first (umu-run, protontricks, winetricks), then installs the Windows runtime libraries into your runner's Wine prefix. This is about 150 MB and only needs doing once per prefix.",
+                        "Press Install Dependencies. COMMANDER installs any missing tools first (umu-run, winetricks), then installs the Windows runtime libraries into your runner's Wine prefix. This is about 150 MB and only needs doing once per prefix.",
                         "Press Install GAMMA. If Anomaly is not installed yet, it is installed first (stalker-gamma anomaly install), then GAMMA (stalker-gamma full-install). This downloads many gigabytes and can take a few hours. You can pause, cancel and resume.",
                         "When it finishes, COMMANDER takes you to Play. Keep the runner on Auto-detect. If you have no GE-Proton yet, press Manage GE-Proton and download the newest one.",
                         "Press Launch Game. The first start is slow while shaders are built.",
@@ -312,7 +312,7 @@ TOPICS: list[dict] = [
                 [
                     "A fresh Wine or Proton prefix does not contain Microsoft's DirectX and Visual C++ runtime libraries; Wine only provides stand-ins. MO2 refuses to start without the real Visual C++ runtime (the classic concrt140.dll error), and the game needs the DirectX ones. Install Dependencies installs these winetricks verbs, in order:",
                     ("code", "d3dcompiler_43 d3dcompiler_47 d3dx10 d3dx11_43 d3dx9 quartz dx8vb vcrun2022"),
-                    "Before that, it installs any missing tools: umu-run (a pinned, known-good release, version 1.4.4), protontricks (through pipx on distributions that block pip, otherwise pip --user), and winetricks (a pinned release, 20260125, checked against a known SHA-256 before use).",
+                    "Before that, it installs any missing tools: umu-run (a pinned, known-good release, version 1.4.4) and winetricks (a pinned release, 20260125, checked against a known SHA-256 before use).",
                     ("warn", "The verbs are always installed through your selected runner's own Wine: umu-run winetricks for GE-Proton, or that runner's own wine binary otherwise. Never the system wine or winetricks on your PATH. A different Wine build touching a Proton prefix overwrites its system DLLs and makes every launch crash. COMMANDER refuses to do it."),
                     "Checking which runtimes are installed is a plain file read of the prefix, never a winetricks command, for the same reason.",
                 ],
@@ -1036,6 +1036,88 @@ TOPICS: list[dict] = [
                         ("View", "Controls help"),
                     ]),
                     "On the on-screen keyboard, X is space and Y is backspace. Touch works everywhere: tap to select, drag to scroll.",
+                ],
+            ),
+        ],
+    },
+    {
+        "title": "Steam Machine",
+        "summary": "Installing and playing GAMMA on a Valve Steam Machine, from the first download to Game Mode.",
+        "page": None,
+        "sections": [
+            (
+                "Before you start",
+                [
+                    ("table", [
+                        ("Desktop Mode", "Do the setup there: Steam button > Power > Switch to Desktop. A keyboard and mouse help."),
+                        ("Internal SSD", "Install GAMMA there. It is a huge number of small files and loads much more slowly from a microSD card."),
+                        ("A few hours", "Mostly the GAMMA download. If it stops, Install offers to resume it next time."),
+                    ]),
+                ],
+            ),
+            (
+                "Get COMMANDER running",
+                [
+                    ("steps", [
+                        "Download the newest STALKER-GAMMA-COMMANDER AppImage from the Releases page on GitHub.",
+                        "In Dolphin, right-click it, choose Properties > Permissions and tick Is executable. Then double-click it.",
+                        "When COMMANDER asks, choose Deck Mode. It is the interface you use from the couch, and it keeps the machine awake during long downloads.",
+                        "Deck Mode asks where to install. Choose Internal storage. It creates the folders and opens the Install tab.",
+                    ]),
+                ],
+            ),
+            (
+                "Install GAMMA",
+                [
+                    ("steps", [
+                        "Choose Install GE-Proton.",
+                        "Choose Install Dependencies. The runtimes go into GE-Proton's Wine prefix, so do this after GE-Proton.",
+                        "Press X to install GAMMA. It installs Anomaly first, then every GAMMA addon.",
+                    ]),
+                    ("note", "You don't need system Wine or protontricks. COMMANDER installs everything it needs."),
+                ],
+            ),
+            (
+                "Play from Game Mode",
+                [
+                    ("steps", [
+                        "In Settings, choose Add COMMANDER to Steam. Steam restarts with two new shortcuts: STALKER COMMANDER and STALKER COMMANDER DECK.",
+                        "On Play, press X to test the game once. The first launch builds shaders and downloads Steam's Linux runtime, so give it a few minutes.",
+                        "Return to Gaming Mode. In your library, open Non-Steam and start STALKER COMMANDER DECK.",
+                    ]),
+                    ("warn", "Only use Add COMMANDER to Steam in Desktop Mode. It closes Steam, which would end a Game Mode session."),
+                ],
+            ),
+            (
+                "If something goes wrong",
+                [
+                    ("table", [
+                        ("Mod Organizer closes straight away", "GE-Proton's VR support (wineopenxr) can crash when no VR software is installed, and takes Mod Organizer with it. GAMMA doesn't use VR, so turn it off: close the game and run this in Konsole."),
+                    ]),
+                    ("code", "WINEPREFIX=~/Games/umu/umu-default PROTONPATH=~/.local/share/Steam/compatibilitytools.d/GE-Proton11-9-x86_64 ~/.local/bin/umu-run reg add 'HKCU\\Software\\Wine\\DllOverrides' /v wineopenxr /d '' /f"),
+                    ("note", "If your GE-Proton folder in ~/.local/share/Steam/compatibilitytools.d has another name, change GE-Proton11-9-x86_64 to match."),
+                    ("table", [
+                        ("A small window in Game Mode", "Start the STALKER COMMANDER DECK shortcut, not STALKER COMMANDER. If you added the AppImage by hand, set its launch options to --deck."),
+                        ("Crashes after running Wine yourself", "Another Wine damaged the game's prefix. Use Utilities > Repair Wine prefix, then Install Dependencies again."),
+                    ]),
+                ],
+            ),
+            (
+                "Removing everything",
+                [
+                    ("steps", [
+                        "Choose Utilities > Full Uninstall. It deletes Anomaly, GAMMA and the cache, after backing up your saves, user.ltx and MCM settings to ~/.local/share/stalker-gamma-commander/backups.",
+                        "Remove the two shortcuts from your Steam library and delete the AppImage.",
+                        "Quit COMMANDER and run this in Konsole to remove the rest:",
+                    ]),
+                    ("code", "rm -rf ~/Games/umu/umu-default ~/.local/share/umu ~/.cache/winetricks ~/.config/stalker-gamma\nrm -f ~/.local/bin/umu-run ~/.local/bin/winetricks\nrm -f ~/.local/share/applications/stalker-gamma-commander.desktop ~/.local/share/icons/stalker-gamma-commander.png ~/.config/autostart/stalker-gamma-commander.desktop\nrm -rf ~/.local/share/stalker-gamma-commander"),
+                    ("note", "The last line deletes your save backups, so skip it if you might come back. The Wine prefix is umu-run's default, so keep it if you run other games with umu-run."),
+                ],
+            ),
+            (
+                "Credits",
+                [
+                    "Based on the Steam Machine field guide by phiratio, the first tested GAMMA install on this hardware.",
                 ],
             ),
         ],

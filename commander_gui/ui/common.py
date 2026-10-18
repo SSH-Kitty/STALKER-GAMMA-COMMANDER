@@ -1539,7 +1539,7 @@ def paused_dependency_status() -> tuple[dict[str, bool], str]:
     the live check pauses and everything reads as installed until it closes.
     """
     paused = {verb: True for verb in WINETRICKS_VERBS}
-    paused.update(wine=True, protontricks=True, umu=True)
+    paused.update(wine=True, umu=True)
     total = len(paused)
     return paused, tr(
         "{total}/{total} dependencies installed (paused - game running)", total=total
@@ -1549,8 +1549,8 @@ def paused_dependency_status() -> tuple[dict[str, bool], str]:
 def winetricks_tooltip(status: dict[str, bool]) -> str:
     """Rich-text bullet list of tool availability and per-verb winetricks state."""
     rows: list[str] = []
-    # Tools section (wine, protontricks) — only shown when present in status.
-    tool_keys = [("wine", "Wine"), ("protontricks", "Protontricks"), ("umu", "umu-run")]
+    # Tools section (wine, umu-run) — only shown when present in status.
+    tool_keys = [("wine", "Wine"), ("umu", "umu-run")]
     tool_items = [
         (label, status.get(key, False)) for key, label in tool_keys if key in status
     ]

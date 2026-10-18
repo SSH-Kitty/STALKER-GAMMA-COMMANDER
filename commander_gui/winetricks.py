@@ -31,7 +31,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .dependencies import _externally_managed, configured_tool
+from .dependencies import configured_tool
 from .launcher import runner_build_dir
 
 #: Verbs installed by the "Install Dependencies" action, in order.
@@ -64,11 +64,6 @@ UMU_ZIPAPP_SHA256 = "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48
 def winetricks_binary() -> str:
     """Path to winetricks, or '' when it is not on PATH."""
     return configured_tool("winetricks") or shutil.which("winetricks") or ""
-
-
-def protontricks_binary() -> str:
-    """Path to protontricks, or '' when it is not on PATH."""
-    return configured_tool("protontricks") or shutil.which("protontricks") or ""
 
 
 def umu_binary() -> str:
@@ -134,19 +129,6 @@ def winetricks_install_command(
     if "WINEPREFIX" in runner.env:
         env["WINEPREFIX"] = runner.env["WINEPREFIX"]
     return [binary, "-q", *verbs], env
-
-
-def protontricks_install_command() -> list[str]:
-    """User-level install for protontricks (pipx first, then pip --user).
-
-    Returns an empty list when neither pipx nor a usable pip is available
-    (e.g. on systems with PEP 668 externally-managed Python).
-    """
-    if shutil.which("pipx"):
-        return ["pipx", "install", "protontricks"]
-    if _externally_managed():
-        return []
-    return ["python3", "-m", "pip", "install", "--user", "protontricks"]
 
 
 def umu_install_command() -> list[str]:
@@ -268,10 +250,10 @@ def check_winetricks_full_status(
     verbs: tuple[str, ...] = WINETRICKS_VERBS,
     timeout: int = 30,
 ) -> dict[str, bool]:
-    """Return {name: installed} for verbs *and* tool availability (umu-run, protontricks, wine).
+    """Return {name: installed} for verbs *and* tool availability (umu-run, wine).
 
     Combines the ``winetricks.log`` read with instant ``shutil.which()``
-    checks for umu-run, protontricks, and wine (wine only when umu-run is
+    checks for umu-run and wine (wine only when umu-run is
     missing). Starts no process.
     """
     status = check_winetricks_status(prefix, verbs, timeout)
@@ -280,5 +262,4 @@ def check_winetricks_full_status(
     # without it (immutable distros like Bazzite cannot install it anyway).
     if not status["umu"]:
         status["wine"] = bool(configured_tool("wine") or shutil.which("wine"))
-    status["protontricks"] = bool(protontricks_binary())
     return status
