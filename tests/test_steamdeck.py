@@ -926,6 +926,36 @@ class DeckLayoutTests(DeckWindowFixture):
         # and hang forever with nothing to click it.
         install._finish_run()
 
+    def test_offline_toggle_reaches_full_install_args(self):
+        from commander_gui import gui_settings
+
+        gui_settings.save_gui_settings(
+            offline_modpack_list="/x/modpack_maker_list.txt", offline_mod_list="/x/modlist.txt"
+        )
+        install = self.goto("install")
+        install.minimal_row.set_checked(True, notify=True)
+        install.offline_row.set_checked(True, notify=True)
+        self.assertFalse(install.minimal_row.is_checked())
+        self.assertIn("offline", install.install_button.text())
+        with (
+            patch("Steamdeck.screens.install.cli_command", return_value=["stub"]) as cli,
+            patch("Steamdeck.screens.install.CommandRunner"),
+        ):
+            install._start_install()
+        args = cli.call_args[0][0]
+        self.assertNotIn("--minimal", args)
+        self.assertEqual(
+            args[-5:],
+            [
+                "--offline",
+                "--mod-pack-maker-path",
+                "/x/modpack_maker_list.txt",
+                "--mod-list-path",
+                "/x/modlist.txt",
+            ],
+        )
+        install._finish_run()
+
     def test_interactive_widgets_are_touch_sized(self):
         from Steamdeck.focus import audit_focusables
         from Steamdeck.widgets import MIN_TOUCH
@@ -2760,7 +2790,9 @@ class DeckVersionTests(unittest.TestCase):
 
         self.assertEqual(Steamdeck.__version__, commander_gui.__version__)
         self.assertEqual(Steamdeck.__version_label__, commander_gui.__version_label__)
-        self.assertEqual(commander_gui.__version_label__, "1.4.0 dev")
+        self.assertNotIn("dev", commander_gui.__version_label__.lower())
+        if "-unstable" in commander_gui.__version__:
+            self.assertIn("Unstable", commander_gui.__version_label__)
 
 
 class DeckAuditTests(DeckWindowFixture):

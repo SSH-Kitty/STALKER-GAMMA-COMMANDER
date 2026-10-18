@@ -312,3 +312,23 @@ def cli_command(
     if progress_interval_ms is not None:
         cmd += ["--progress-update-interval-ms", str(progress_interval_ms)]
     return cmd
+
+
+def cli_resume_args(gamma: str | os.PathLike | None, command: str) -> list[str]:
+    """``["--resume"]`` when ``<gamma>/resume.txt`` was left by ``command``.
+
+    CLI 1.38+ keeps that file up to date while ``full-install`` or ``update
+    apply`` runs, and deletes it when the run succeeds. Passing ``--resume``
+    with a file written by the *other* command makes the CLI exit with an
+    error, so the file's ``# command:`` header must match.
+    """
+    if not gamma:
+        return []
+    try:
+        text = (Path(gamma).expanduser() / "resume.txt").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return []
+    header = f"# command: {command}"
+    return ["--resume"] if any(line.strip() == header for line in text.splitlines()) else []

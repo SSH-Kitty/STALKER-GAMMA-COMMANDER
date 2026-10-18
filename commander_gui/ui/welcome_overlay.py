@@ -35,6 +35,8 @@ from ..updates import (
     _numeric_version_tuple,
     effective_update_channel,
     fetch_latest_release_notes,
+    is_unstable_version,
+    newer_unstable_tag,
 )
 from .about_page import _DISCORD, _GITHUB, CREDITS
 from .brand_icons import brand_icon, icon_size
@@ -165,10 +167,21 @@ class _VersionBar(QFrame):
         text, kind = version_status(latest_title)
         color = {"ok": OK_GREEN.name(), "warn": WARN.name()}.get(kind)
         self.status.setText("\u25cf  " + text if color else text)
+        self.status.unsetCursor()
         self.status.setStyleSheet(f"color: {color}; font-weight: bold;" if color else "")
         self.status.setObjectName("" if color else "dim")
         self.status.style().unpolish(self.status)
         self.status.style().polish(self.status)
+
+    def offer_unstable(self) -> None:
+        """A stable build, up to date, with a newer unstable one published:
+        a link the overlay takes to Settings' COMMANDER build section."""
+        self.status.setText(
+            f'<a href="build" style="color: {OK_GREEN.name()}; text-decoration: none;">'
+            f'\u25cf  {tr("Unstable build available")}</a>'
+        )
+        # Only the offer is a link; the plain statuses aren't clickable.
+        self.status.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -233,6 +246,7 @@ class WelcomeOverlay(QWidget):
         title_row.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
         panel_layout.addLayout(title_row)
         self.version_bar = _VersionBar()
+        self.version_bar.status.linkActivated.connect(lambda _link: self._open_build_settings())
         panel_layout.addWidget(self.version_bar)
 
         body = QHBoxLayout()
@@ -438,6 +452,8 @@ class WelcomeOverlay(QWidget):
             title, body = result
             self._notes = (tr("Patch notes"), str(body), True)
             self.version_bar.set_latest(str(title))
+            if not is_unstable_version(__version__) and version_status(str(title))[1] == "ok":
+                self._check_unstable()
         if not self._showing_credits:
             self._render_notes()
 
@@ -457,6 +473,17 @@ class WelcomeOverlay(QWidget):
 
     def _open(self, url: str) -> None:
         open_url(url)
+
+    def _check_unstable(self) -> None:
+        task = BackgroundTask(newer_unstable_tag, __version__, parent=self)
+        self._unstable_task = task  # kept alive until it answers
+        task.result.connect(lambda tag: tag and self.version_bar.offer_unstable())
+        task.start()
+
+    def _open_build_settings(self) -> None:
+        self.close_overlay()
+        self.window.open_settings()
+        self.window._ensure_page("settings").show_build()
 
     def _show_credits(self) -> None:
         """Credits in the notes box; pressed again, back to the notes."""

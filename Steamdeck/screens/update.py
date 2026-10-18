@@ -15,7 +15,7 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
-from commander_gui.cli_runner import cli_command
+from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.game_backup import backup_settings_before
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
@@ -154,8 +154,15 @@ class UpdateScreen(DeckScreen):
         self.action_button.setEnabled(
             not self.window.install_busy and self._task is None
         )
+        if self._resume_args():
+            self.action_button.setText(tr("Resume update"))
         if self._status is None and self._task is None:
             self._check()
+
+    def _resume_args(self) -> list[str]:
+        """``["--resume"]`` while a failed or cancelled update apply can be resumed."""
+        profile = self.profile()
+        return cli_resume_args(profile.gamma if profile else None, "update apply")
 
     def forget_cached_checks(self) -> None:
         """A different profile is active: its updates aren't the old one's.
@@ -179,7 +186,7 @@ class UpdateScreen(DeckScreen):
         self.action_button.setEnabled(not busy and self._runner is None)
 
     def _on_action(self) -> None:
-        if self._status is not None and self._status.update_available:
+        if self._resume_args() or (self._status is not None and self._status.update_available):
             self._confirm_apply()
         else:
             self._check()
@@ -215,7 +222,9 @@ class UpdateScreen(DeckScreen):
         )
         repolish(self.summary_label)
         self.action_button.setText(
-            tr("Apply updates")
+            tr("Resume update")
+            if self._resume_args()
+            else tr("Apply updates")
             if getattr(status, "update_available", False)
             else tr("Check for updates")
         )
@@ -353,7 +362,10 @@ class UpdateScreen(DeckScreen):
         )
         hints = [("A", "Select")]
         if self.action_button.isEnabled() and self.action_button.isVisible():
-            hints.append(("X", "Apply updates" if available else "Check"))
+            hints.append((
+                "X",
+                "Resume update" if self._resume_args() else "Apply updates" if available else "Check",
+            ))
         # Y goes to the changes list, or the patch notes - only when there
         # is one of them to go to.
         if self.changes.isVisible():
@@ -384,9 +396,13 @@ class UpdateScreen(DeckScreen):
             return
         self.window.confirm(
             tr("Update GAMMA"),
-            tr(
-                "Downloads and applies every changed addon. Your user.ltx "
-                "and MCM settings are preserved."
+            (
+                tr("The last update didn't finish. COMMANDER picks it up where it stopped. Mods that are already done are skipped.")
+                if self._resume_args()
+                else tr(
+                    "Downloads and applies every changed addon. Your user.ltx "
+                    "and MCM settings are preserved."
+                )
             )
             + battery_warning(),
             lambda: confirm_singleplayer(
@@ -411,11 +427,14 @@ class UpdateScreen(DeckScreen):
             "apply",
             "--preserve-user-settings",
             "--preserve-mcm-settings",
+            *self._resume_args(),
         ]
         error = backup_settings_before(self.profile(), "update")
         if error:
             self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
-        self._kept = capture(self.profile())
+        # Kept across a failed run and its resume, like the desktop page.
+        if getattr(self, "_kept", None) is None:
+            self._kept = capture(self.profile())
         self._heavy = {}
         self.window.set_install_busy(True, "gamma")
         self.progress.reset()
@@ -453,12 +472,13 @@ class UpdateScreen(DeckScreen):
         cancelled = self._runner is not None and self._runner.was_cancelled
         self.progress.on_finished(rc, output)
         self._runner = None
-        kept, self._kept = getattr(self, "_kept", None), None
-        if kept is not None:
-            if not cancelled and cli_ok(rc, output, ""):
-                restore(kept)
-            else:
-                discard(kept)
+        kept = getattr(self, "_kept", None)
+        if kept is not None and not cancelled and cli_ok(rc, output, ""):
+            self._kept = None
+            restore(kept)
+        elif kept is not None and not self._resume_args():
+            self._kept = None
+            discard(kept)
         self.window.set_install_busy(False)
         self.progress.hide()
         self.action_button.show()
@@ -480,6 +500,8 @@ class UpdateScreen(DeckScreen):
             self.window.announce_finished(
                 tr("GAMMA update failed"), tr("Failed") + f" (exit {rc})", ok=False
             )
+        if self._resume_args():
+            self.action_button.setText(tr("Resume update"))
 
     def on_back(self) -> bool:
         if self._runner is not None:

@@ -70,6 +70,21 @@ class DesktopWelcomeOverlayTests(unittest.TestCase):
         overlay.close_overlay()
         self.assertIsNone(self._overlay())
 
+    def test_up_to_date_stable_build_offers_a_newer_unstable_one(self):
+        from commander_gui.ui import welcome_overlay
+
+        with patch.object(welcome_overlay, "__version__", "9.9"), patch.object(
+            welcome_overlay, "newer_unstable_tag", return_value="v9.9.1-unstable3"
+        ):
+            overlay = self._overlay()
+            for _ in range(50):
+                self.app.processEvents()
+                if "Unstable build available" in overlay.version_bar.status.text():
+                    break
+                time.sleep(0.02)
+        self.assertIn("Unstable build available", overlay.version_bar.status.text())
+        overlay.close_overlay()
+
     def test_version_status_compares_with_the_latest_release(self):
         from commander_gui.ui import welcome_overlay
 
@@ -80,6 +95,10 @@ class DesktopWelcomeOverlayTests(unittest.TestCase):
             self.assertEqual(status("COMMANDER 1.3.1"), ("Update available", "warn"))
             self.assertEqual(status("")[1], "dim")
             self.assertEqual(status(None)[1], "dim")
+        with patch.object(welcome_overlay, "__version__", "1.4.0-unstable2"):
+            # A hand-typed pre-release title, older than this build.
+            self.assertEqual(status("COMMANDER 1.4.0 Unstable"), ("Development build", "ok"))
+            self.assertEqual(status("COMMANDER 1.4.0"), ("Update available", "warn"))
         self.assertEqual(welcome_overlay.release_name("COMMANDER 1.2.9H3"), "1.2.9H3")
 
     def test_shows_again_after_an_update_despite_dont_show_again(self):

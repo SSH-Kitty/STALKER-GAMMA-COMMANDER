@@ -194,8 +194,17 @@ back to the stable build** installs the latest stable release, even when its ver
 ### Also in this build
 
 - The bundled [stalker-gamma-cli](https://github.com/FaithBeam/stalker-gamma-cli) has been updated from **1.36.1** to
-  **1.37.1**.
+  **1.38.0**.
+- **Resume picks up where it stopped**: *Resume GAMMA Installation* (and *Resume install* in Deck Mode) now uses the
+  CLI's `--resume`, so mods that were already installed are skipped instead of unpacked again. A failed or cancelled
+  update shows **Resume update** on the Updates page and in Deck Mode, which does the same for `update apply`.
+- Stopping an update, Verify Integrity, a mod install or a Proton download now asks first, so a stray click doesn't
+  throw away progress.
 - The AppImage now bundles Python 3.12.15.
+- **Offline install**: extract the offline cache archive into your cache folder, tick *Offline install (cache only)* on
+  the Install page (or in Deck Mode) and pick the `modlist.txt` and `modpack_maker_list.txt` published with the archive
+  to install GAMMA without downloading anything. See the CLI's
+  [Offline Install guide](https://github.com/FaithBeam/stalker-gamma-cli/wiki/Offline-Install).
 - The COMMANDER ASSISTANT log analyser has been revised throughout, with clearer findings for launcher, MO2, CLI and
   engine logs.
 - The Install, Play, Mod Manager, Profiles and Settings pages have been reworked, and the themes have been refined.

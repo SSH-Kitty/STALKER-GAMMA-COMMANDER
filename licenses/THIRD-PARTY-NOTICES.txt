@@ -30,10 +30,10 @@ runtime, and can be replaced: extract the AppImage with
 squashfs-root/AppRun.
 
 
-stalker-gamma-cli 1.37.1                     (cli/usr/bin/stalker-gamma)
+stalker-gamma-cli 1.38.0                     (cli/usr/bin/stalker-gamma)
   Copyright (C) FaithBeam and contributors.
   License: GPL-3.0 (texts/GPL-3.0-only.txt)
-  Source:  https://github.com/FaithBeam/stalker-gamma-cli/tree/1.37.1
+  Source:  https://github.com/FaithBeam/stalker-gamma-cli/tree/1.38.0
 
   The CLI is a .NET native (AOT) program and contains:
   - .NET runtime and libraries - Copyright (c) .NET Foundation and

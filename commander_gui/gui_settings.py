@@ -79,6 +79,8 @@ _DEFAULTS = {
     "welcome_seen_version": "",  # COMMANDER version the Welcome screen last showed for (always shown after an update)
     "update_channel": "stable",  # "stable" | "unstable" - COMMANDER self-update channel (unstable includes pre-releases)
     "pending_settings_restore": {},  # profile -> pre-reset backup to restore after the GAMMA reinstall (game_backup)
+    "offline_modpack_list": "",  # modpack_maker_list.txt for an offline install (desktop and Deck)
+    "offline_mod_list": "",  # modlist.txt for an offline install (desktop and Deck)
 }
 
 _cache: dict | None = None
@@ -120,7 +122,7 @@ def load_gui_settings() -> dict:
             data.update(stored)
     if not isinstance(data.get("runner"), str):
         data["runner"] = "auto"
-    for key in ("wine_prefix", "target", "custom_launch_options"):
+    for key in ("wine_prefix", "target", "custom_launch_options", "offline_modpack_list", "offline_mod_list"):
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
     if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:

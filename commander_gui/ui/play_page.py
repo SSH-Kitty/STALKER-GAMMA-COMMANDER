@@ -53,6 +53,7 @@ from ..launcher import (
     available_commands,
     build_command,
     build_direct_command,
+    mo2_profile_args,
     debugger_crash_loop,
     default_launch_target,
     ensure_runner_prefix,
@@ -189,6 +190,9 @@ def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = 
         raise LaunchError(
             "Steam co-op sessions need a GE-Proton build. Install one from the Play page first."
         )
+    # Empty when MO2 can't take this name through -p (see mo2_profile_args).
+    if not mo2_profile_args(profile.gamma, mo2_profile):
+        mo2_profile = ""
     return {
         "exe": str(exe),
         "start_dir": str(profile.gamma),

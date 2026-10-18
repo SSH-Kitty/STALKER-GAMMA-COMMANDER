@@ -315,6 +315,17 @@ class ProtonManagerDialog(QDialog):
         self.install_status.setText(text)
 
     def _cancel_install(self) -> None:
+        if self._cancel_event is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Stop the download?"),
+            tr("You can download it again later."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Stop download"), QMessageBox.StandardButton.No: tr("Keep downloading")},
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         if self._cancel_event is not None:
             self._cancel_event.set()
         self.cancel_button.setEnabled(False)

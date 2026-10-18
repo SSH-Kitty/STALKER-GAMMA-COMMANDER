@@ -741,12 +741,14 @@ def coop_launch_options(
 
     Steam runs LaunchOptions through ``sh -c``: every value is shell-quoted
     so a ``"`` or ``$(...)`` in a path or profile name stays a literal.
+    An empty *mo2_profile* leaves out ``-p``: MO2 opens its selected one.
     """
     q = shlex.quote
     run = f"run {q('--arguments=' + arguments)} " if arguments else "run "
+    profile = f"-p {q(mo2_profile)} " if mo2_profile else ""
     return (
         f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command% "
-        f"-p {q(mo2_profile)} {run}-e {q(target)}"
+        f"{profile}{run}-e {q(target)}"
     )
 
 

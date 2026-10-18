@@ -2227,6 +2227,16 @@ class ModManagerPage(QWidget):
 
     def _cancel_install(self) -> None:
         """Cancel only the currently active archive-install tasks."""
+        if self._install_task is not None or self._finalize_task is not None:
+            answer = QMessageBox.question(
+                self,
+                tr("Stop installing the mod?"),
+                tr("The mod isn't added. Your other mods aren't changed."),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                labels={QMessageBox.StandardButton.Yes: tr("Stop"), QMessageBox.StandardButton.No: tr("Keep installing")},
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         cancelled_any = False
         if self._install_task is not None:
             self._install_task.cancel()

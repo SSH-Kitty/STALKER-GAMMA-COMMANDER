@@ -349,10 +349,12 @@ _COMMANDER_REPO = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER"
 #: never looked newer than the one before it.
 #:
 #: Unstable builds (GitHub pre-releases) add "-unstable" and an optional
-#: counter: "1.3.1-unstable", "1.3.1-unstable2", ...
+#: counter: "1.3.1-unstable", "1.3.1-unstable2", ... A release *title* typed
+#: by hand ("COMMANDER 1.4.0 Unstable", which the Welcome screen compares
+#: against) has a space there instead; without it that read as stable 1.4.0.
 _VERSION_NUMERIC_RE = re.compile(
     r"(?P<base>[0-9]+(?:\.[0-9]+)*)(?:[Hh](?P<hotfix>[0-9]+))?"
-    r"(?:-unstable(?P<unstable>[0-9]*))?",
+    r"(?:[- ]unstable(?P<unstable>[0-9]*))?",
     re.IGNORECASE,
 )
 

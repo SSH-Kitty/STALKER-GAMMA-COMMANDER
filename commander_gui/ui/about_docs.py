@@ -262,6 +262,7 @@ TOPICS: list[dict] = [
                         ("Re-download GitHub addons", "Without this, COMMANDER passes --skip-github-downloads so archives hosted on GitHub are reused from the cache (they have no MD5 in GAMMA's list, so the CLI would otherwise download every one again). A missing archive is always downloaded."),
                         ("Auto-retry on large file pack failures", "GAMMA's large-files repository on GitHub sometimes fails part way. With this on, COMMANDER retries it up to 10 times by itself."),
                         ("Keep my current engine executables", "GAMMA puts its own engine exes into the Anomaly folder. Tick this only if you installed different (for example newer, modded) exes on purpose and want to keep them."),
+                        ('Offline install (--offline)', 'Installs from a cache archive you already extracted into the cache folder, passing --mod-pack-maker-path and --mod-list-path so nothing is downloaded. Pick the modlist.txt and modpack_maker_list.txt published with the archive. Minimal, Re-download GitHub addons and Auto-retry are turned off while it is on.'),
                     ]),
                     ("warn", "Install options are not remembered between runs. Check them every time."),
                 ],
@@ -451,7 +452,7 @@ TOPICS: list[dict] = [
                 "Playtime, Discord and shortcuts",
                 [
                     ("table", [
-                        ("Playtime", "Counted per profile, only while the game itself runs (not while only MO2 is open). Shown on the Dashboard; Settings > Reset Playtime sets it back to zero."),
+                        ("Playtime", "Counted per profile, only while the game itself runs (not while only MO2 is open). Shown on the Dashboard; Reset under Settings > Maintenance > Playtime sets it back to zero."),
                         ("Discord Rich Presence", "Off by default. When on, shows 'Playing S.T.A.L.K.E.R. GAMMA' on your Discord profile, optionally with your mod count and playtime. It talks only to the Discord app on your own computer, through its local socket; any failure is ignored and never affects the game."),
                         ("Desktop shortcut", "Add shortcut to desktop writes a .desktop launcher for the current target and runner, so you can start the game without opening COMMANDER."),
                         ("Quit Game", "While the game runs, Launch Game becomes Quit Game, which closes the game and Mod Organizer."),
@@ -804,7 +805,7 @@ TOPICS: list[dict] = [
                         ("Font and size", "Six font families (Exo 2 by default) and 9 to 22 px."),
                         ("Use COMMANDER's own title bar", "Draws COMMANDER's own title bar; turn it off to use your desktop's."),
                         ("Discord Rich Presence", "See Playing and launching. A custom Discord Application ID can be set for your own app."),
-                        ("Reset Playtime", "Sets the active profile's playtime to zero."),
+                        ("Playtime", "Sets the active profile's playtime to zero."),
                         ("Add COMMANDER to Steam", "See Steam integration."),
                         ("Export diagnostics", "See Logs and diagnostics."),
                     ]),

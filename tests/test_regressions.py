@@ -653,6 +653,69 @@ class RegressionTests(unittest.TestCase):
             ],
         )
 
+    def test_full_install_args_offline_passes_both_list_paths(self):
+        from commander_gui.ui.install_page import _full_install_args
+
+        args = _full_install_args(False, False, False, offline_lists=("a.txt", "b.txt"))
+        self.assertEqual(
+            args[-5:],
+            ["--offline", "--mod-pack-maker-path", "a.txt", "--mod-list-path", "b.txt"],
+        )
+        self.assertNotIn("--offline", _full_install_args(False, False, False))
+
+    def test_offline_checkbox_turns_off_minimal_and_requires_lists(self):
+        """Minimal deletes the cache an offline install depends on."""
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.install_page import InstallPage, offline_install_problem
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(
+                active=True,
+                profile_name="Test",
+                anomaly=str(Path(tmp) / "anomaly"),
+                gamma=str(Path(tmp) / "gamma"),
+                cache=str(Path(tmp) / "cache"),
+                mo2_profile="G.A.M.M.A",
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                install_busy = False
+                install_operation = None
+
+                def refresh_settings(self):
+                    pass
+
+                def set_install_busy(self, *a, **kw):
+                    pass
+
+                def statusBar(self):
+                    return Mock()
+
+            page = InstallPage(FakeWindow())
+            page.checkboxes["minimal"].setChecked(True)
+            page.checkboxes["offline"].setChecked(True)
+            self.assertFalse(page.checkboxes["minimal"].isChecked())
+            self.assertFalse(page.checkboxes["minimal"].isEnabled())
+            self.assertNotIn("--minimal", page._build_full_command())
+            self.assertIn("--offline", page._build_full_command())
+            self.assertEqual(page.install_button.text(), "Install GAMMA offline")
+            page.checkboxes["offline"].setChecked(False)
+            self.assertEqual(page.install_button.text(), "Install GAMMA")
+            page.checkboxes["offline"].setChecked(True)
+
+            lists = (str(Path(tmp) / "mpm.txt"), str(Path(tmp) / "modlist.txt"))
+            self.assertIsNotNone(offline_install_problem(lists, profile.cache))
+            for path in lists:
+                Path(path).write_text("x")
+            # Lists present, cache still empty.
+            self.assertIsNotNone(offline_install_problem(lists, profile.cache))
+            Path(profile.cache).mkdir()
+            (Path(profile.cache) / "addon.zip").write_bytes(b"")
+            self.assertIsNone(offline_install_problem(lists, profile.cache))
+
     def test_repair_install_args_always_preserve_user_content(self):
         """Verify & Repair must never touch user.ltx or MCM settings."""
         from commander_gui.ui.install_page import _repair_install_args
@@ -3671,6 +3734,7 @@ class RegressionTests(unittest.TestCase):
                 "preserve_mcm": Mock(isChecked=Mock(return_value=False)),
                 "redownload_github": Mock(isChecked=Mock(return_value=False)),
                 "keep_engine_exes": Mock(isChecked=Mock(return_value=False)),
+                "offline": Mock(isChecked=Mock(return_value=False)),
             }
             page._resume_state = None
             page.full_progress = Mock()
@@ -4122,7 +4186,8 @@ class RegressionTests(unittest.TestCase):
             )
         )
         page.checkboxes = {
-            "minimal": Mock(isChecked=Mock(return_value=False))
+            "minimal": Mock(isChecked=Mock(return_value=False)),
+            "offline": Mock(isChecked=Mock(return_value=False)),
         }
         page._resume_state = {"profile": "test"}
 
@@ -4133,7 +4198,7 @@ class RegressionTests(unittest.TestCase):
             page._start_full_install()
 
         points = " ".join(mock_question.call_args.kwargs["points"])
-        self.assertIn("picks up the install that stopped earlier", points)
+        self.assertIn("picks up the install where it stopped", points)
 
     def test_on_winetricks_line_suppresses_noise_from_visible_log(self):
         """A noise line must not reach the console, not just skip %-parsing."""
@@ -13829,16 +13894,6 @@ class UnstableBuildTests(unittest.TestCase):
                     self.switched.append(target)
 
             window = FakeWindow()
-            # Built with a "dev" label (a test build): no switching offered.
-            with (
-                patch.object(settings_page, "__version_label__", "1.3.0 dev"),
-                patch.object(settings_page, "newer_unstable_tag", return_value=None),
-            ):
-                page = settings_page.SettingsPage(window)
-                self.assertEqual(page._build_label.text(), "Dev")
-                self.assertTrue(page._switch_build_button.isHidden())
-                self.assertIn("dev build", page._build_note.text())
-            # The rest of the test runs on a release label.
             label = patch.object(settings_page, "__version_label__", "1.3.0")
             label.start()
             self.addCleanup(label.stop)

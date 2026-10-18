@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import gui_settings
-from ..cli_runner import cli_command
+from ..cli_runner import cli_command, cli_resume_args
 from ..game_backup import backup_settings_before
 from ..integrity import invalidate_baseline
 from ..keep_state import capture, discard, restore
@@ -297,7 +297,9 @@ class UpdatePage(QWidget):
         self.apply_button.setEnabled(False)
         # With nothing to install it stays green and checks again instead.
         self.apply_button.clicked.connect(
-            lambda: self._apply() if self._diffs or self._needs_sync else self._check()
+            lambda: self._apply()
+            if self._diffs or self._needs_sync or self._resume_args()
+            else self._check()
         )
         self.apply_button.clicked.connect(play_click_sound)
         layout.addWidget(self.apply_button)
@@ -494,6 +496,8 @@ class UpdatePage(QWidget):
             text = tr("Installing updates...")
         elif self._checking:
             text = tr("Checking for updates...")
+        elif self._resume_args():
+            text = tr("Resume update")
         elif self._diffs:
             text = tr("Install {count} update(s)", count=len(self._diffs))
         elif self._needs_sync:
@@ -513,6 +517,11 @@ class UpdatePage(QWidget):
                 self.undo_hint.setText(tr("Saved {when}", when=_format_relative_time(saved)))
             except OSError:
                 self.undo_hint.setText("")
+
+    def _resume_args(self) -> list[str]:
+        """``["--resume"]`` while a failed or cancelled update apply can be resumed."""
+        profile = self.window.settings.active_profile
+        return cli_resume_args(profile.gamma if profile else None, "update apply")
 
     def _pre_update_snapshot_path(self) -> Path | None:
         """Path to the modlist.txt snapshot taken right before the last
@@ -887,15 +896,20 @@ class UpdatePage(QWidget):
                 tr("Another install is still running. Wait for it to finish, then try again."),
             )
             return
-        if not self._diffs and not self._needs_sync:
+        resume = self._resume_args()
+        if not self._diffs and not self._needs_sync and not resume:
             QMessageBox.information(self, tr("You're up to date"), tr("There are no GAMMA updates to install right now."))
             return
         answer = QMessageBox.question(
             self,
-            tr("Install {arg} update(s)?", arg=len(self._diffs))
+            tr("Resume the update?")
+            if resume
+            else tr("Install {arg} update(s)?", arg=len(self._diffs))
             if self._diffs
             else tr("Install updates?"),
-            tr("COMMANDER downloads the updated mods and unpacks them into GAMMA."),
+            tr("The last update didn't finish. COMMANDER picks it up where it stopped. Mods that are already done are skipped.")
+            if resume
+            else tr("COMMANDER downloads the updated mods and unpacks them into GAMMA."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             labels={QMessageBox.StandardButton.Yes: tr("Update"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
@@ -931,11 +945,16 @@ class UpdatePage(QWidget):
 
         if not confirm_singleplayer(self, profile, tr("updating GAMMA")):
             return
-        self._snapshot_modlist_before_update()
+        # A resumed run keeps the snapshot and kept state from the run that
+        # stopped: that run may already have replaced the modlist, so taking
+        # them again would save GAMMA's list instead of the user's.
+        if not resume or self._pre_update_snapshot_path() is None:
+            self._snapshot_modlist_before_update()
         backup_error = backup_settings_before(profile, "update")
-        self._kept = capture(profile, keep_exes=self.keep_exes_cb.isChecked())
+        if getattr(self, "_kept", None) is None:
+            self._kept = capture(profile, keep_exes=self.keep_exes_cb.isChecked())
 
-        args = ["update", "apply"]
+        args = ["update", "apply", *resume]
         if self.minimal_cb.isChecked():
             args.append("--minimal")
         if self.preserve_user_cb.isChecked():
@@ -977,11 +996,14 @@ class UpdatePage(QWidget):
             tail = (output or "").strip().splitlines()
             for line in tail[-25:]:
                 self.apply_progress.log.append_line(line)
-        kept, self._kept = getattr(self, "_kept", None), None
+        kept = getattr(self, "_kept", None)
         if kept is not None and not cancelled and cli_ok(rc, output, ""):
+            self._kept = None
             for note in restore(kept):
                 self.apply_progress.log.append_line(note)
-        elif kept is not None:
+        elif kept is not None and not self._resume_args():
+            # Kept while "Resume update" can still finish this run.
+            self._kept = None
             discard(kept)
         if not cancelled and cli_ok(rc, output, ""):
             # Applied cleanly: the cached diff list is stale now. Through
@@ -1017,5 +1039,15 @@ class UpdatePage(QWidget):
         self._update_button_states()
 
     def _cancel_apply(self) -> None:
-        if self._apply_runner is not None:
+        if self._apply_runner is None or not self._apply_runner.is_running():
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Stop the update?"),
+            tr("You can pick it up again later with Resume update. Mods that are already done are skipped."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Stop update"), QMessageBox.StandardButton.No: tr("Keep updating")},
+        )
+        # The update may have finished while the dialog was open.
+        if answer == QMessageBox.StandardButton.Yes and self._apply_runner is not None:
             self._apply_runner.cancel()

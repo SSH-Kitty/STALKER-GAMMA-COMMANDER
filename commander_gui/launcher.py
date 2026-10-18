@@ -684,29 +684,73 @@ def set_mo2_selected_title(gamma_dir: str, title: str) -> bool:
     if title not in visible or mo2_selected_title(gamma_dir) == title:
         return False
     # Row 0 of the dropdown is "<Edit...>".
-    wanted = f"{MO2_SELECTED_KEY}={visible.index(title) + 1}"
+    _set_ini_value(ini, "Widgets", MO2_SELECTED_KEY, str(visible.index(title) + 1))
+    return True
+
+
+def _set_ini_value(ini: Path, section: str, key: str, value: str) -> None:
+    """Set ``key=value`` in ``[section]`` of *ini*, adding either if missing."""
+    wanted = f"{key}={value}"
+    header = f"[{section.lower()}]"
     text = ini.read_text(encoding="utf-8", errors="surrogateescape")
     newline = "\r\n" if "\r\n" in text else "\n"
     out: list[str] = []
-    section = ""
+    current = ""
     written = False
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("["):
-            if section == "[widgets]" and not written:
+            if current == header and not written:
                 out.append(wanted)
                 written = True
-            section = stripped.lower()
-        elif section == "[widgets]" and stripped.startswith(MO2_SELECTED_KEY + "="):
+            current = stripped.lower()
+        elif current == header and stripped.startswith(key + "="):
             line = wanted
             written = True
         out.append(line)
     if not written:
-        if section != "[widgets]":
-            out += ["", "[Widgets]"]
+        if current != header:
+            out += ["", f"[{section}]"]
         out.append(wanted)
     write_text(ini, newline.join(out) + newline)
-    return True
+
+
+def _qt_ini_bytes(value: str) -> str:
+    """*value* as Qt's QSettings writes a QByteArray to an ini file."""
+    out: list[str] = []
+    in_hex = False
+    for byte in value.encode("utf-8"):
+        char = chr(byte)
+        # A hex digit right after a \xNN escape would extend it, so Qt
+        # escapes it too.
+        if byte >= 0x80 or (in_hex and char in "0123456789abcdefABCDEF"):
+            out.append(f"\\x{byte:02x}")
+            in_hex = True
+            continue
+        out.append("\\" + char if char in '\\"' else char)
+        in_hex = False
+    text = f"@ByteArray({''.join(out)})"
+    return f'"{text}"' if any(c in text for c in ";,=") else text
+
+
+def mo2_profile_args(gamma_dir: str, profile: str) -> list[str]:
+    """The arguments that make MO2 open *profile*.
+
+    MO2 2.5 dies at startup, before writing a log line, when ``-p`` names
+    a profile with a non-ASCII character (CLIKRΔD). Such a profile goes
+    in as MO2's selected_profile instead, the way MO2's own dropdown
+    saves it. An MO2 already open keeps its own profile either way.
+    """
+    if profile.isascii():
+        return ["-p", profile]
+    try:
+        _set_ini_value(
+            Path(gamma_dir) / "ModOrganizer.ini", "General", "selected_profile",
+            _qt_ini_bytes(profile),
+        )
+    except OSError as exc:
+        raise LaunchError(f"Couldn't select MO2 profile {profile}: {exc}") from exc
+    return []
 
 
 def unblock_mo2_python(gamma_dir: str) -> bool:
@@ -1094,7 +1138,7 @@ def build_command(
         profile_path = Path(gamma_dir) / "profiles" / profile
         if not profile_path.is_dir():
             raise LaunchError(f"MO2 profile not found: {profile}")
-        args += ["-p", profile]
+        args += mo2_profile_args(gamma_dir, profile)
     if target:
         args += ["run", *([f"--arguments={arguments}"] if arguments else []), "-e", target]
     return [*runner.wrapper, *args], dict(runner.env), gamma_dir

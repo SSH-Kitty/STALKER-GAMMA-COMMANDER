@@ -21,7 +21,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout
 
 from commander_gui import gui_settings
-from commander_gui.cli_runner import cli_command
+from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.game_backup import (
     apply_pending_settings_restore,
@@ -51,7 +51,13 @@ from commander_gui.ui.common import (
     human_size,
     mo2_running,
 )
-from commander_gui.ui.install_page import _full_install_args, _resume_state_matches
+from commander_gui.ui.install_page import (
+    OFFLINE_GUIDE_URL,
+    _full_install_args,
+    _resume_state_matches,
+    offline_install_problem,
+    offline_list_paths,
+)
 from commander_gui.ui.proton_manager import build_status, release_installed
 from commander_gui.winetricks import (
     WINETRICKS_VERBS,
@@ -81,6 +87,8 @@ from ..widgets import (
     picker_overlay,
     side_by_side,
 )
+from ..folder_picker import show_folder_picker
+from ..welcome import open_url
 from .base import DeckScreen
 from .multiplayer import confirm_singleplayer
 
@@ -246,7 +254,23 @@ class InstallScreen(DeckScreen):
         self.minimal_row = DeckToggleRow(tr("Minimal (~100 GB)"), False)
         self.preserve_user_row = DeckToggleRow(tr("Preserve user.ltx settings"), True)
         self.preserve_mcm_row = DeckToggleRow(tr("Preserve MCM settings"), True)
-        for row in (self.minimal_row, self.preserve_user_row, self.preserve_mcm_row):
+        self.offline_row = DeckToggleRow(tr("Offline install (cache only)"), False)
+        self.offline_row.toggled.connect(lambda _on: self._update_buttons())
+        # Deck has only a folder picker: pick the folder holding both lists.
+        self.offline_lists_row = DeckRow(tr("Offline list folder"))
+        self.offline_lists_row.activated.connect(self._pick_offline_lists)
+        self.offline_guide_row = DeckRow(tr("Where to download the offline cache"))
+        self.offline_guide_row.activated.connect(
+            lambda: open_url(self.window, OFFLINE_GUIDE_URL)
+        )
+        for row in (
+            self.minimal_row,
+            self.preserve_user_row,
+            self.preserve_mcm_row,
+            self.offline_row,
+            self.offline_lists_row,
+            self.offline_guide_row,
+        ):
             options_card.body.addWidget(row)
         options_card.body.addStretch(1)
         self.body.addLayout(side_by_side(proton_card, options_card))
@@ -292,16 +316,12 @@ class InstallScreen(DeckScreen):
             self.install_button.setText(tr("Resume install"))
             self.resume_note.setText(
                 tr(
-                    "The last GAMMA install did not finish. Resume it - "
-                    "most of what already downloaded is reused, but some "
-                    "large files from GAMMA's GitHub repos download again."
+                    "The last GAMMA install did not finish. Resume it to pick "
+                    "up where it stopped. Mods that are already installed are skipped."
                 )
             )
             self.resume_note.show()
         else:
-            self.install_button.setText(
-                tr("Reinstall GAMMA") if self._gamma_installed else tr("Install GAMMA")
-            )
             self.resume_note.hide()
         self._update_buttons()
         self._start_dependency_check()
@@ -321,8 +341,28 @@ class InstallScreen(DeckScreen):
         )
         self.install_button.setEnabled(idle and has_profile)
         self.deps_button.setEnabled(idle and has_profile)
-        for row in (self.minimal_row, self.preserve_user_row, self.preserve_mcm_row):
+        offline = self.offline_row.is_checked()
+        if not getattr(self, "_resuming", False):
+            if getattr(self, "_gamma_installed", False):
+                label = tr("Reinstall GAMMA offline") if offline else tr("Reinstall GAMMA")
+            else:
+                label = tr("Install GAMMA offline") if offline else tr("Install GAMMA")
+            self.install_button.setText(label)
+        if offline:
+            # Minimal deletes the cache an offline install depends on.
+            self.minimal_row.set_checked(False)
+        for row in (self.preserve_user_row, self.preserve_mcm_row, self.offline_row):
             row.setEnabled(idle)
+        self.minimal_row.setEnabled(idle and not offline)
+        self.offline_lists_row.setEnabled(idle and offline)
+        self.offline_lists_row.setVisible(offline)
+        self.offline_guide_row.setVisible(offline)
+        profile = self.profile()
+        if profile is not None:
+            lists = offline_list_paths()
+            self.offline_lists_row.set_value(
+                str(Path(lists[0]).parent) if all(lists) else tr("Not set")
+            )
         self._update_proton_button()
         self.update_hints()
 
@@ -440,6 +480,29 @@ class InstallScreen(DeckScreen):
             status=tr("Installing Anomaly..."),
         )
 
+    def _pick_offline_lists(self) -> None:
+        def _chosen(folder: Path) -> None:
+            lists = (folder / "modpack_maker_list.txt", folder / "modlist.txt")
+            if not all(path.is_file() for path in lists):
+                self.window.notify(
+                    tr("That folder needs both modpack_maker_list.txt and modlist.txt."), 6000
+                )
+                return
+            gui_settings.save_gui_settings(
+                offline_modpack_list=str(lists[0]), offline_mod_list=str(lists[1])
+            )
+            self._update_buttons()
+
+        show_folder_picker(
+            self.window, title=tr("Offline list folder"), start=None, on_choose=_chosen
+        )
+
+    def _offline_lists(self) -> tuple[str, str] | None:
+        profile = self.profile()
+        if profile is None or not self.offline_row.is_checked():
+            return None
+        return offline_list_paths()
+
     # -- GAMMA install ----------------------------------------------------
     def _confirm_install(self) -> None:
         profile = self.profile()
@@ -449,12 +512,23 @@ class InstallScreen(DeckScreen):
             self.window.notify(tr("Mod Organizer is running"))
             return
 
+        offline_lists = self._offline_lists()
+        if offline_lists is not None:
+            problem = offline_install_problem(offline_lists, profile.cache)
+            if problem:
+                self.window.notify(problem, 6000)
+                return
         minimal = self.minimal_row.is_checked()
-        needed = _MINIMAL_INSTALL_BYTES if minimal else _FULL_INSTALL_BYTES
-        message = tr(
-            "This installs Anomaly (if missing) and every GAMMA addon. "
-            "Expect about {size} of downloads.",
-            size=human_size(needed),
+        # Offline: the cache is already on disk, only the install remains.
+        needed = _MINIMAL_INSTALL_BYTES if minimal or offline_lists else _FULL_INSTALL_BYTES
+        message = (
+            tr("COMMANDER installs GAMMA from your local cache. Nothing is downloaded.")
+            if offline_lists is not None
+            else tr(
+                "This installs Anomaly (if missing) and every GAMMA addon. "
+                "Expect about {size} of downloads.",
+                size=human_size(needed),
+            )
         )
         free = free_space_bytes(profile.gamma or profile.anomaly)
         if free is not None and free < needed:
@@ -517,7 +591,10 @@ class InstallScreen(DeckScreen):
             self.preserve_user_row.is_checked(),
             self.preserve_mcm_row.is_checked(),
             skip_extract,
+            offline_lists=self._offline_lists(),
         )
+        if self._resuming:
+            args += cli_resume_args(profile.gamma, "full-install")
         self._begin_run(
             cli_command(args, progress_interval_ms=200),
             operation="gamma",

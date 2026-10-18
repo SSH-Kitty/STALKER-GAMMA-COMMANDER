@@ -760,6 +760,38 @@ QPushButton#tertiary:disabled {
 QPushButton#tertiary:hover {
     color: $text_tertiary_hover;
 }
+/* Settings rows: the setting's name over a dim line, and a compact
+   action on the right that lights up in the accent on hover. */
+QLabel#settingTitle {
+    color: $text_bright;
+    font-weight: 600;
+}
+QPushButton#settingAction, QPushButton#settingDanger {
+    background-color: $btn;
+    border: 1px solid $border_secondary;
+    border-radius: 6px;
+    padding: 5px 16px;
+    color: $text_btn_hover;
+    font-weight: 600;
+}
+QPushButton#settingAction:hover, QPushButton#settingAction:checked {
+    background-color: $chip;
+    border-color: $accent_strong;
+    color: $accent_strong;
+}
+QPushButton#settingDanger:hover {
+    background-color: $danger_bg;
+    border-color: $danger_border;
+    color: $danger_text;
+}
+QPushButton#settingAction:pressed, QPushButton#settingDanger:pressed {
+    background-color: $btn_pressed;
+}
+QPushButton#settingAction:disabled, QPushButton#settingDanger:disabled {
+    color: $text_disabled;
+    background-color: $btn_disabled;
+    border-color: $btn_disabled;
+}
 #chip {
     background-color: $chip;
     border: 1px solid $border_input;
