@@ -334,8 +334,13 @@ class InstallScreen(DeckScreen):
         has_profile = self.profile() is not None
         # Disabled once installed, matching desktop's own anomaly_button -
         # there's nothing a second "Install Anomaly" click should do.
+        # `anomaly install` has no offline mode: the offline full install
+        # unpacks Anomaly from the cache along with GAMMA.
         self.anomaly_button.setEnabled(
-            idle and has_profile and not self._anomaly_installed
+            idle
+            and has_profile
+            and not self._anomaly_installed
+            and not self.offline_row.is_checked()
         )
         self.install_button.setEnabled(idle and has_profile)
         self.deps_button.setEnabled(idle and has_profile)
@@ -357,7 +362,7 @@ class InstallScreen(DeckScreen):
         self.offline_guide_row.setVisible(offline)
         profile = self.profile()
         if profile is not None:
-            lists = offline_list_paths()
+            lists = offline_list_paths(profile.cache)
             self.offline_lists_row.set_value(
                 str(Path(lists[0]).parent) if all(lists) else tr("Not set")
             )
@@ -499,7 +504,7 @@ class InstallScreen(DeckScreen):
         profile = self.profile()
         if profile is None or not self.offline_row.is_checked():
             return None
-        return offline_list_paths()
+        return offline_list_paths(profile.cache)
 
     # -- GAMMA install ----------------------------------------------------
     def _confirm_install(self) -> None:

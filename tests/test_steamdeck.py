@@ -940,8 +940,16 @@ class DeckLayoutTests(DeckWindowFixture):
     def test_offline_toggle_reaches_full_install_args(self):
         from commander_gui import gui_settings
 
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        modpack_list = Path(tmp.name) / "modpack_maker_list.txt"
+        mod_list = Path(tmp.name) / "modlist.txt"
+        modpack_list.write_text("x")
+        mod_list.write_text("x")
         gui_settings.save_gui_settings(
-            offline_modpack_list="/x/modpack_maker_list.txt", offline_mod_list="/x/modlist.txt"
+            offline_modpack_list=str(modpack_list), offline_mod_list=str(mod_list)
         )
         install = self.goto("install")
         install.minimal_row.set_checked(True, notify=True)
@@ -960,9 +968,9 @@ class DeckLayoutTests(DeckWindowFixture):
             [
                 "--offline",
                 "--mod-pack-maker-path",
-                "/x/modpack_maker_list.txt",
+                str(modpack_list),
                 "--mod-list-path",
-                "/x/modlist.txt",
+                str(mod_list),
             ],
         )
         install._finish_run()

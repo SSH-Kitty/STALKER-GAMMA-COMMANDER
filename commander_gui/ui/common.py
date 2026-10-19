@@ -1517,7 +1517,7 @@ def populate_runner_combo(
     """
     combo.blockSignals(True)
     combo.clear()
-    combo.addItem(tr("Auto-detect (latest GE-Proton)"), "auto")
+    combo.addItem(tr("Auto-detect (installed GE-Proton)"), "auto")
     if protons:
         combo.insertSeparator(combo.count())
         for label, path in protons:

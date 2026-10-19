@@ -262,7 +262,7 @@ TOPICS: list[dict] = [
                         ("Re-download GitHub addons", "Without this, COMMANDER passes --skip-github-downloads so archives hosted on GitHub are reused from the cache (they have no MD5 in GAMMA's list, so the CLI would otherwise download every one again). A missing archive is always downloaded."),
                         ("Auto-retry on large file pack failures", "GAMMA's large-files repository on GitHub sometimes fails part way. With this on, COMMANDER retries it up to 10 times by itself."),
                         ("Keep my current engine executables", "GAMMA puts its own engine exes into the Anomaly folder. Tick this only if you installed different (for example newer, modded) exes on purpose and want to keep them."),
-                        ('Offline install (--offline)', 'Installs from a cache archive you already extracted into the cache folder, passing --mod-pack-maker-path and --mod-list-path so nothing is downloaded. Pick the modlist.txt and modpack_maker_list.txt published with the archive. Minimal, Re-download GitHub addons and Auto-retry are turned off while it is on.'),
+                        ('Offline install (--offline)', 'Installs from the offline cache archive, passing --mod-pack-maker-path and --mod-list-path so nothing is downloaded. Extract the archive into the folder that contains your cache folder: the modlist.txt and modpack_maker_list.txt it holds are found automatically, or you can choose them yourself. Minimal, Re-download GitHub addons and Auto-retry are turned off while it is on.'),
                     ]),
                     ("warn", "Install options are not remembered between runs. Check them every time."),
                 ],

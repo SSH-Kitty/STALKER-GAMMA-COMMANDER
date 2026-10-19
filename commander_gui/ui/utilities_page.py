@@ -217,6 +217,10 @@ def _looks_like_install(label: str, folder: Path) -> bool:
     # at least one archive somewhere in the first two levels.
     has_archive = False
     for entry in entries:
+        # macOS metadata (._name AppleDouble files, .DS_Store) rides along in
+        # offline packs zipped on a Mac; it says nothing about the folder.
+        if entry.name.startswith("._") or entry.name == ".DS_Store":
+            continue
         if entry.is_file():
             if not entry.name.lower().endswith(_CACHE_SUFFIXES):
                 return False

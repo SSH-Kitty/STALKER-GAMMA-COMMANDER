@@ -180,6 +180,10 @@ class ProtonBuildTests(unittest.TestCase):
         for target in (
             patch("commander_gui.launcher.find_extra_protons", return_value=found),
             patch("commander_gui.proton_installer.steam_compat_tool_names", return_value=set()),
+            patch(
+                "commander_gui.gui_settings.gui_settings_path",
+                return_value=Path(self._tmp.name) / "gui-settings.json",
+            ),
         ):
             target.start()
             self.addCleanup(target.stop)
@@ -192,6 +196,24 @@ class ProtonBuildTests(unittest.TestCase):
         self.assertTrue(builds[0].in_use and builds[0].newest)
         self.assertFalse(builds[1].in_use)
         self.assertGreaterEqual(build_size(builds[1].path), 1000)
+
+    def test_auto_stays_on_its_build_when_a_newer_one_is_installed(self) -> None:
+        from commander_gui.launcher import _pick_umu_proton
+
+        old = self.builds["GE-Proton10-1"]
+        newest = self.builds["GE-Proton11-5-x86_64"]
+        self.assertEqual(_pick_umu_proton(), str(newest.resolve()))
+        # A newer build gets installed: Auto keeps the pin.
+        newer = self.tools / "GE-Proton12-1"
+        newer.mkdir()
+        (newer / "toolmanifest.vdf").write_text("")
+        found = [(n, str((b / "proton").resolve())) for n, b in self.builds.items()]
+        found.append(("GE-Proton12-1", str(newer / "proton")))
+        with patch("commander_gui.launcher.find_extra_protons", return_value=found):
+            self.assertEqual(_pick_umu_proton(), str(newest.resolve()))
+            # Once the pinned build is gone it moves on to the newest left.
+            found.pop(1)
+            self.assertEqual(_pick_umu_proton(), str(newer))
 
     def test_removes_an_unused_build_but_never_the_one_in_use(self) -> None:
         from commander_gui.proton_installer import remove_build

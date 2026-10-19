@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from commander_gui.i18n import tr
+from commander_gui.launcher import PTRACE_FIX_COMMAND
 
 from .. import knowledge
 from ..findings import CATEGORY_INFO, CATEGORY_MO2, Finding, FindingCollector, Severity
@@ -15,6 +16,9 @@ _VFS_PROBLEM_RE = re.compile(r"(failed|error|could not inject|cannot attach)", r
 #: usvfs logs "failed to hook X: No Error" for optional hooks that were
 #: intentionally skipped — not a problem at all.
 _BENIGN_HOOK_MISS_RE = re.compile(r"failed to hook .*:\s*no error\s*$", re.IGNORECASE)
+#: Wine may not write into the game process: kernel.yama.ptrace_scope is 2
+#: or 3. MO2 then fails with "Error 87" and the game never starts.
+_PTRACE_BLOCKED_RE = re.compile(r"failed to write control data to target process.*access denied", re.IGNORECASE)
 
 
 def analyze_mo2_interface(arcname: str, where: str, lines: list[str]) -> list[Finding]:
@@ -92,6 +96,26 @@ def analyze_usvfs(arcname: str, where: str, lines: list[str]) -> list[Finding]:
         version_match = _USVFS_VERSION_RE.search(line)
         if version_match:
             version = version_match.group(1)
+        if _PTRACE_BLOCKED_RE.search(line):
+            findings.append(
+                factory.make(
+                    Severity.ERROR,
+                    CATEGORY_MO2,
+                    tr("A Linux setting is blocking GAMMA"),
+                    index + 1,
+                    detail=tr(
+                        "The kernel.yama.ptrace_scope security setting is 2 or 3. That stops "
+                        "Mod Organizer from loading GAMMA's mods into the game, so MO2 shows "
+                        "\"Error 87\" and the game doesn't start."
+                    ),
+                    suggestion=tr(
+                        "Open a terminal and run: {command}\nThen restart your computer.",
+                        command=PTRACE_FIX_COMMAND,
+                    ),
+                    excerpt_text=excerpt(lines, index),
+                )
+            )
+            continue
         if _VFS_PROBLEM_RE.search(line) and not _BENIGN_HOOK_MISS_RE.search(line):
             if problem is not None:
                 problem.count += 1

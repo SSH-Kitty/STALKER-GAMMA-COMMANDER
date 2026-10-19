@@ -702,8 +702,18 @@ class RegressionTests(unittest.TestCase):
             self.assertNotIn("--minimal", page._build_full_command())
             self.assertIn("--offline", page._build_full_command())
             self.assertEqual(page.install_button.text(), "Install GAMMA offline")
+            # `anomaly install` can't run offline: no auto-chain, no Anomaly button.
+            auto = page.anomaly_checkboxes["auto_continue_gamma"]
+            self.assertFalse(auto.isChecked())
+            self.assertFalse(auto.isEnabled())
+            self.assertFalse(page.anomaly_button.isEnabled())
             page.checkboxes["offline"].setChecked(False)
             self.assertEqual(page.install_button.text(), "Install GAMMA")
+            # The options switched off for offline come back as they were.
+            self.assertTrue(auto.isChecked())
+            self.assertTrue(auto.isEnabled())
+            self.assertTrue(page.checkboxes["auto_retry_large_files"].isChecked())
+            self.assertTrue(page.anomaly_button.isEnabled())
             page.checkboxes["offline"].setChecked(True)
 
             lists = (str(Path(tmp) / "mpm.txt"), str(Path(tmp) / "modlist.txt"))
@@ -715,6 +725,31 @@ class RegressionTests(unittest.TestCase):
             Path(profile.cache).mkdir()
             (Path(profile.cache) / "addon.zip").write_bytes(b"")
             self.assertIsNone(offline_install_problem(lists, profile.cache))
+
+    def test_offline_lists_found_beside_cache_folder_and_nested_extract_flagged(self):
+        """The archive holds cache/ plus both lists, so they sit beside the cache folder."""
+        from commander_gui.ui.install_page import offline_install_problem, offline_list_paths
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "commander_gui.ui.install_page.gui_settings.load_gui_settings",
+            return_value={"offline_modpack_list": "", "offline_mod_list": ""},
+        ):
+            base = Path(tmp)
+            cache = base / "cache"
+            (cache / "cache").mkdir(parents=True)
+            (cache / "cache" / "addon.zip").write_bytes(b"")
+            self.assertEqual(offline_list_paths(str(cache)), ("", ""))
+            for name in ("modpack_maker_list.txt", "modlist.txt"):
+                (base / name).write_text("x")
+            lists = offline_list_paths(str(cache))
+            self.assertEqual(
+                lists, (str(base / "modpack_maker_list.txt"), str(base / "modlist.txt"))
+            )
+            # Extracted one level too deep: say where the archives are.
+            problem = offline_install_problem(lists, str(cache))
+            self.assertIn(str(cache / "cache"), problem)
+            (cache / "cache" / "addon.zip").rename(cache / "addon.zip")
+            self.assertIsNone(offline_install_problem(lists, str(cache)))
 
     def test_repair_install_args_always_preserve_user_content(self):
         """Verify & Repair must never touch user.ltx or MCM settings."""
@@ -4028,6 +4063,7 @@ class RegressionTests(unittest.TestCase):
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
+            page.checkboxes = {"offline": Mock(isChecked=Mock(return_value=False))}
             with (
                 patch("commander_gui.ui.install_page.CommandRunner"),
                 patch.object(page, "_update_install_status"),
@@ -4037,6 +4073,21 @@ class RegressionTests(unittest.TestCase):
                 with patch.object(page, "_start_full_install") as mock_start_full:
                     page._on_anomaly_finished(0, "Anomaly install complete!")
             mock_start_full.assert_called_once_with(skip_confirm=True)
+
+    def test_reset_with_offline_skips_the_online_anomaly_install(self):
+        """`anomaly install` has no offline mode: Offline goes straight to the
+        offline full install, which unpacks Anomaly from the cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            page.checkboxes = {"offline": Mock(isChecked=Mock(return_value=True))}
+            with (
+                patch.object(page, "_start_anomaly_install") as mock_anomaly,
+                patch.object(page, "_start_full_install") as mock_full,
+            ):
+                self.assertTrue(page.start_auto_install(include_anomaly=True))
+            mock_anomaly.assert_not_called()
+            mock_full.assert_called_once_with(skip_confirm=True)
+            self.assertFalse(page._auto_chain)
 
     def test_post_anomaly_verify_finished_resumes_the_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -13133,6 +13184,11 @@ class AuditFixTests(unittest.TestCase):
             cache.mkdir()
             (cache / "mod.7z").write_bytes(b"7z")
             self.assertEqual(len(_validate_wipe_paths([("Anomaly", str(anomaly)), ("Cache", str(cache))])), 2)
+            # An offline pack zipped on a Mac carries ._ AppleDouble files.
+            (cache / "Stalker_GAMMA.git").mkdir()
+            (cache / "._Stalker_GAMMA.git").write_bytes(b"x")
+            (cache / ".DS_Store").write_bytes(b"x")
+            self.assertEqual(len(_validate_wipe_paths([("Cache", str(cache))])), 1)
 
     def test_wipe_refuses_a_notes_folder_as_the_cache(self):
         from commander_gui.ui.utilities_page import _validate_wipe_paths

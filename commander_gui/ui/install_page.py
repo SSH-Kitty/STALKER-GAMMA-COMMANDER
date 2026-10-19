@@ -275,14 +275,30 @@ def _full_install_args(
     return args
 
 
-def offline_list_paths() -> tuple[str, str]:
-    """The saved (modpack_maker_list.txt, modlist.txt) for an offline install.
+def offline_list_paths(cache: str) -> tuple[str, str]:
+    """The (modpack_maker_list.txt, modlist.txt) for an offline install.
 
-    No fallback to the profile's own copies: the lists must match the cache
-    snapshot, so they come from the files published next to the archive.
+    The cache archive holds a ``cache/`` folder with both lists beside it, so
+    extracting it into the cache folder's parent leaves them there. A saved
+    choice that still exists wins; otherwise they are looked for beside (or
+    in) the cache folder. No fallback to the profile's own copies: the lists
+    must match the cache snapshot. Empty string where nothing is found.
     """
     saved = gui_settings.load_gui_settings()
-    return (saved["offline_modpack_list"], saved["offline_mod_list"])
+    cache_dir = Path(cache).expanduser() if cache else None
+    result = []
+    for key, name in (
+        ("offline_modpack_list", "modpack_maker_list.txt"),
+        ("offline_mod_list", "modlist.txt"),
+    ):
+        found = saved[key] if Path(saved[key]).is_file() else ""
+        if not found and cache_dir is not None:
+            found = next(
+                (str(c) for c in (cache_dir.parent / name, cache_dir / name) if c.is_file()),
+                "",
+            )
+        result.append(found)
+    return (result[0], result[1])
 
 
 def offline_install_problem(lists: tuple[str, str], cache: str) -> str | None:
@@ -290,7 +306,21 @@ def offline_install_problem(lists: tuple[str, str], cache: str) -> str | None:
     if not all(Path(path).is_file() for path in lists):
         return tr("Pick both list files for the offline install: modpack_maker_list.txt and modlist.txt.")
     if count_cached_archives(cache) == 0:
-        return tr("No archives found in {cache}. Extract the offline cache archive there first.", cache=cache)
+        nested = str(Path(cache).expanduser() / "cache")
+        if count_cached_archives(nested):
+            # The archive has its own top-level cache/ folder: extracted
+            # into the cache folder itself, it ends up one level too deep.
+            return tr(
+                "The archives ended up in {nested}. Move them up into {cache}, or extract the archive into {parent} instead.",
+                nested=nested,
+                cache=cache,
+                parent=str(Path(cache).expanduser().parent),
+            )
+        return tr(
+            "No archives found in {cache}. Extract the offline cache archive into {parent} first.",
+            cache=cache,
+            parent=str(Path(cache).expanduser().parent),
+        )
     return None
 
 
@@ -965,6 +995,8 @@ class InstallPage(QWidget):
         self._wt_installed: bool | None = None
         self._wt_stage = "verbs"
         self._wt_completed_verbs: set[str] = set()
+        self._wt_force = False
+        self._wt_partial = False
         self._wt_last_pct = -1
         self._winetricks_status_enabled = False
         self._persisting = False
@@ -1165,15 +1197,15 @@ class InstallPage(QWidget):
         grid.addLayout(self.cache_folder_row, 5, 2)
 
         # Offline install: the two list files, shown only while ticked.
+        # Checkbox states to put back when Offline is unticked again.
+        self._offline_saved: dict[str, bool] = {}
         self.offline_box = QWidget()
         self.offline_box.setObjectName("panelTransparent")
         offline_layout = QGridLayout(self.offline_box)
         offline_layout.setContentsMargins(0, 4, 0, 0)
         offline_layout.setVerticalSpacing(8)
-        offline_layout.addWidget(
-            info_label(tr("Extract the cache archive into the cache folder above, then choose the two list files that came with it.")),
-            0, 0, 1, 2,
-        )
+        self.offline_hint = info_label("")
+        offline_layout.addWidget(self.offline_hint, 0, 0, 1, 2)
         self.offline_edits = []
         for row, (label, key, placeholder) in enumerate(
             (
@@ -1330,8 +1362,7 @@ class InstallPage(QWidget):
             self.anomaly_edit.setText(profile.anomaly)
             self.gamma_edit.setText(profile.gamma)
             self.cache_edit.setText(profile.cache)
-            for edit, path in zip(self.offline_edits, offline_list_paths()):
-                edit.setText(path)
+            self._fill_offline_lists(profile)
             if not self.window.install_busy:
                 # Anomaly's installed/not-installed state is already shown
                 # by anomaly_status above - the shared progress console
@@ -1404,23 +1435,37 @@ class InstallPage(QWidget):
                 cb.setEnabled(False)
             return
         anomaly = anomaly_installed(profile.anomaly)
-        self.anomaly_button.setEnabled(not anomaly)
+        offline = self.checkboxes["offline"].isChecked()
+        # `anomaly install` has no offline mode; the offline full install
+        # unpacks Anomaly from the cache together with GAMMA.
+        self.anomaly_button.setEnabled(not anomaly and not offline)
+        self.anomaly_button.setToolTip(
+            tr("Offline install unpacks Anomaly from the cache together with GAMMA. Use the install button on the right.")
+            if offline and not anomaly
+            else ""
+        )
         # Stays available once installed, as Reinstall: it is the only way
         # to re-unpack mods or apply "Re-download GitHub addons".
         self.install_button.setEnabled(True)
         self.verify_button.setEnabled(not mo2_running() and not VERIFY_INTEGRITY_DISABLED)
         self.repair_button.setEnabled(not mo2_running())
+        # Offered whenever the status is known: "Install" when something is
+        # missing, "Reinstall" (winetricks --force) when it is there or half there.
+        self.winetricks_button.setText(
+            tr("Install Dependencies") if self._wt_installed is not True and not self._wt_partial
+            else tr("Reinstall Dependencies")
+        )
         self.winetricks_button.setEnabled(
-            self._wt_installed is False and not mo2_running()
+            self._wt_installed is not None and not mo2_running()
         )
         self.anomaly_edit.setEnabled(True)
         self.gamma_edit.setEnabled(True)
         self.cache_edit.setEnabled(True)
         for cb in self.checkboxes.values():
             cb.setEnabled(True)
-        self._on_offline_toggled(self.checkboxes["offline"].isChecked())
         for cb in self.anomaly_checkboxes.values():
             cb.setEnabled(True)
+        self._on_offline_toggled(self.checkboxes["offline"].isChecked())
 
     def _update_install_status(self):
         profile = self.window.settings.active_profile
@@ -1546,12 +1591,34 @@ class InstallPage(QWidget):
         edit.setText(path)
         gui_settings.save_gui_settings(**changes)
 
+    def _fill_offline_lists(self, profile) -> None:
+        for edit, path in zip(self.offline_edits, offline_list_paths(profile.cache)):
+            edit.setText(path)
+        self.offline_hint.setText(
+            tr(
+                "Extract the downloaded cache archive into {parent}. COMMANDER finds the two list files it unpacks there. If they are somewhere else, choose them below.",
+                parent=str(Path(profile.cache).expanduser().parent),
+            )
+        )
+
     def _on_offline_toggled(self, offline: bool):
         self.offline_box.setVisible(offline)
-        for key in _OFFLINE_DISABLES:
-            if offline:
-                self.checkboxes[key].setChecked(False)
-            self.checkboxes[key].setEnabled(not offline and self.checkboxes["offline"].isEnabled())
+        profile = self.window.settings.active_profile
+        if offline and profile is not None:
+            # Re-detect: the archive may have been extracted since the page loaded.
+            self._fill_offline_lists(profile)
+        # Options that only matter for a download, or that chain into the
+        # online `anomaly install`: off (and put back later) while offline.
+        boxes = {key: self.checkboxes[key] for key in _OFFLINE_DISABLES}
+        boxes["auto_continue_gamma"] = self.anomaly_checkboxes["auto_continue_gamma"]
+        usable = self.checkboxes["offline"].isEnabled() and not offline
+        for key, cb in boxes.items():
+            if offline and key not in self._offline_saved:
+                self._offline_saved[key] = cb.isChecked()
+                cb.setChecked(False)
+            elif not offline and key in self._offline_saved:
+                cb.setChecked(self._offline_saved.pop(key))
+            cb.setEnabled(usable)
 
     def _offline_lists(self) -> tuple[str, str] | None:
         if not self.checkboxes["offline"].isChecked():
@@ -1700,6 +1767,9 @@ class InstallPage(QWidget):
             problem = offline_install_problem(offline_lists, profile.cache)
             if problem:
                 QMessageBox.warning(self, tr("Offline install"), problem)
+                # A chained or retried start finds install_busy already set.
+                self.window.set_install_busy(False)
+                self._update_button_states()
                 return
         minimal = self.checkboxes["minimal"].isChecked()
         size_hint = "~100 GB" if minimal else "~150 GB"
@@ -2178,9 +2248,14 @@ class InstallPage(QWidget):
             return False
         if self.window.settings.active_profile is None:
             return False
-        self._auto_chain = include_anomaly
+        offline = self.checkboxes["offline"].isChecked()
+        # Offline: `anomaly install` would download, so skip it - the offline
+        # full install unpacks Anomaly from the cache along with GAMMA.
+        self._auto_chain = include_anomaly and not offline
         self._auto_cancelled = False
-        if include_anomaly:
+        if include_anomaly and offline:
+            self._start_full_install(skip_confirm=True)
+        elif include_anomaly:
             self._start_anomaly_install(skip_confirm=True, respect_options=False)
         else:
             self._start_full_install(
@@ -3632,6 +3707,7 @@ class InstallPage(QWidget):
         # not "everything installed".
         all_done = total > 0 and installed == total
         self._wt_installed = all_done
+        self._wt_partial = 0 < installed < total
         self.wt_status.set_state(all_done)
         # Nothing to show once everything is in place.
         self.wt_progress.status_label.setText(
@@ -3727,14 +3803,15 @@ class InstallPage(QWidget):
             if needed
         ]
         details = tr("Libraries: {verbs}", verbs=", ".join(WINETRICKS_VERBS))
+        self._wt_force = self._wt_installed is True or self._wt_partial
         answer = QMessageBox.question(
             self,
-            tr("Install the dependencies?"),
+            tr("Reinstall the dependencies?") if self._wt_force else tr("Install the dependencies?"),
             message,
             (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
             points=tuple(missing),
             info=details,
-            labels={QMessageBox.StandardButton.Yes: tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
+            labels={QMessageBox.StandardButton.Yes: tr("Reinstall now") if self._wt_force else tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -3833,6 +3910,9 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._refresh_winetricks_status()
                 return
+            if self._wt_force:
+                # winetricks skips verbs already in winetricks.log without this.
+                command.insert(len(command) - len(WINETRICKS_VERBS), "--force")
             self.wt_progress.status_message(tr("Installing runtimes..."))
             self.wt_progress.log.append_line(
                 "== Winetricks via " + runner.label + ": " + " ".join(WINETRICKS_VERBS) + " =="

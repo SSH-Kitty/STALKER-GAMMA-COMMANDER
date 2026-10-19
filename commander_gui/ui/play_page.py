@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -45,6 +46,7 @@ from ..launcher import (
     DEFAULT_PROTON_PREFIX,
     DEFAULT_UMU_PREFIX,
     ForeignPrefixError,
+    PTRACE_FIX_COMMAND,
     LaunchError,
     Mo2Executable,
     ProcessGroupRegistry,
@@ -62,11 +64,13 @@ from ..launcher import (
     launch_detached,
     parse_mo2_executables,
     prefix_foreign_dlls,
+    ptrace_scope,
     read_log_tail,
     resolve_runner,
     runner_crash_loop,
     runner_graphics_error,
     runner_prefix_error,
+    runner_unsupported_error,
     set_mo2_selected_title,
     steam_shortcut_appid,
     unblock_mo2_python,
@@ -123,6 +127,43 @@ from . import game_splash
 from .game_splash import is_launcher
 from .install_page import _PathEdit, _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
+
+
+def ptrace_blocks_mo2(parent: QWidget) -> bool:
+    """Explain how to fix a ptrace_scope that stops MO2 hooking the game.
+
+    True means the launch must not go ahead (see launcher.ptrace_scope).
+    """
+    scope = ptrace_scope()
+    if scope < 2:
+        return False
+    box = QMessageBox(
+        QMessageBox.Icon.Warning,
+        tr("A Linux setting is blocking GAMMA"),
+        tr(
+            "A security setting on your computer (ptrace_scope = {scope}) stops Mod Organizer "
+            "from loading GAMMA's mods, so the game can't start. Setting it to 1 fixes this.",
+            scope=scope,
+        ),
+        parent=parent,
+    )
+    box.points = (
+        tr("Press Copy command."),
+        tr("Open a terminal, paste the command and press Enter. Type your password if asked."),
+        tr("Restart your computer, then launch GAMMA again."),
+    )
+    box.setInformativeText(
+        PTRACE_FIX_COMMAND
+        + "\n\n"
+        + tr("1 is the normal setting on most Linux systems.")
+    )
+    copy = box.addButton(tr("Copy command"), QMessageBox.ButtonRole.AcceptRole)
+    box.addButton(QMessageBox.StandardButton.Close)
+    box.exec()
+    if box.clickedButton() is copy:
+        QGuiApplication.clipboard().setText(PTRACE_FIX_COMMAND)
+    return True
+
 
 _HIDDEN_LAUNCH_TARGETS = {"dx8", "dx8-avx"}
 
@@ -510,11 +551,16 @@ class PlayPage(QWidget):
         # closed, and the thread must outlive the window.
         dialog = getattr(self, "_proton_manager", None)
         if dialog is None:
-            dialog = ProtonManagerDialog(self.window, self, on_changed=self._reload_runners)
+            dialog = ProtonManagerDialog(self.window, self, on_changed=self._reload_runners, on_select=self._select_runner)
             self._proton_manager = dialog
         else:
             dialog.reload()
         dialog.exec()
+
+    def _select_runner(self, kind: str) -> None:
+        index = self.runner_combo.findData(kind)
+        if index >= 0:
+            self.runner_combo.setCurrentIndex(index)
 
     def _reload_runners(self) -> None:
         current = self.runner_combo.currentData()
@@ -1207,6 +1253,8 @@ class PlayPage(QWidget):
                 info=tr("Is the list empty? Check that your profile points to a GAMMA install with a set-up ModOrganizer.ini."),
             )
             return
+        if ptrace_blocks_mo2(self):
+            return
         if not self._confirm_load_order():
             return
         profile = self.window.settings.active_profile
@@ -1243,7 +1291,7 @@ class PlayPage(QWidget):
             QMessageBox.warning(self, tr("The game couldn't start"), str(exc))
 
     def _open_mo2(self) -> None:
-        if self._launching or self._install_busy:
+        if self._launching or self._install_busy or ptrace_blocks_mo2(self):
             return
         self._set_launch_button_state(True)
         self._run(open_mo2=True, direct=False)
@@ -1907,6 +1955,29 @@ class PlayPage(QWidget):
                             tr("Install the right Vulkan driver for your graphics card."),
                             tr("Refresh System Check."),
                             tr("Remove PROTON_USE_WINED3D=1 from the launch options, if it's there."),
+                        ),
+                    )
+                elif runner_unsupported_error(detail):
+                    QMessageBox.warning(
+                        self,
+                        tr("This runner can't run the game"),
+                        tr(
+                            "The selected runner ({runner}) is missing something the "
+                            "game needs, so it stopped right away. This often happens "
+                            "with a very new or half-installed runner.",
+                            runner=self._runner().label,
+                        ),
+                        points=(
+                            tr("Pick an older GE-Proton on the Play page and try again."),
+                            tr("Or open Manage GE-Proton and reinstall this runner."),
+                        ),
+                        info=(
+                            tr(
+                                "The GameMode lines in the log are only a warning. "
+                                "Install lib32-gamemode, or turn off Always use GameMode."
+                            )
+                            if "libgamemode" in detail.lower()
+                            else ""
                         ),
                     )
                 elif runner_prefix_error(detail):

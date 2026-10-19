@@ -17,6 +17,7 @@ from pathlib import Path
 from . import __version_label__
 from .atomic import write_bytes
 from .config import cli_binary_path, gui_settings_path, logs_dir, settings_path
+from .launcher import ptrace_scope
 
 _MAX_DIAGNOSTIC_FILE_BYTES = 1_000_000
 _SENSITIVE_VALUE_RE = re.compile(
@@ -74,6 +75,7 @@ def _system_info() -> str:
         f"WAYLAND_DISPLAY: {os.environ.get('WAYLAND_DISPLAY', '(unset)')}",
         f"XDG_CURRENT_DESKTOP: {os.environ.get('XDG_CURRENT_DESKTOP', '(unset)')}",
         f"XDG_SESSION_TYPE: {os.environ.get('XDG_SESSION_TYPE', '(unset)')}",
+        f"ptrace_scope: {ptrace_scope()}",
     ]
     try:
         from PySide6 import QtCore, QtWidgets

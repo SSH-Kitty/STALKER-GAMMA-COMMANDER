@@ -201,9 +201,9 @@ back to the stable build** installs the latest stable release, even when its ver
 - Stopping an update, Verify Integrity, a mod install or a Proton download now asks first, so a stray click doesn't
   throw away progress.
 - The AppImage now bundles Python 3.12.15.
-- **Offline install**: extract the offline cache archive into your cache folder, tick *Offline install (cache only)* on
-  the Install page (or in Deck Mode) and pick the `modlist.txt` and `modpack_maker_list.txt` published with the archive
-  to install GAMMA without downloading anything. See the CLI's
+- **Offline install**: download the offline cache archive, extract it into the folder that contains your cache folder,
+  then tick *Offline install (cache only)* on the Install page (or in Deck Mode). The `modlist.txt` and
+  `modpack_maker_list.txt` inside the archive are found automatically. This installs GAMMA without downloading anything. See the CLI's
   [Offline Install guide](https://github.com/FaithBeam/stalker-gamma-cli/wiki/Offline-Install).
 - The COMMANDER ASSISTANT log analyser has been revised throughout, with clearer findings for launcher, MO2, CLI and
   engine logs.

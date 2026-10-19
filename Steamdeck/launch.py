@@ -23,6 +23,7 @@ from commander_gui import coop, gui_settings
 from commander_gui.config import logs_dir
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
+    PTRACE_FIX_COMMAND,
     ProcessGroupRegistry,
     build_command,
     build_direct_command,
@@ -32,6 +33,7 @@ from commander_gui.launcher import (
     kill_stray_debuggers,
     launch_detached,
     parse_mo2_executables,
+    ptrace_scope,
     read_log_tail,
     resolve_runner,
     runner_crash_loop,
@@ -62,7 +64,7 @@ def runner_options() -> list[tuple[str, str]]:
     a choice made in either interface means the same thing in the other.
     """
     options: list[tuple[str, str]] = [
-        (tr("Auto-detect (latest GE-Proton)"), "auto")
+        (tr("Auto-detect (installed GE-Proton)"), "auto")
     ]
     for label, path in find_extra_protons():
         options.append((tr("{label} (Installed)", label=label), f"umup:{path}"))
@@ -222,6 +224,21 @@ class DeckLaunchController(QObject):
         )
         if reason:
             self.failed.emit(tr("Launch Failed"), tr(reason))
+            return
+        scope = ptrace_scope()
+        if direct is None and scope >= 2:
+            self.failed.emit(
+                tr("A Linux setting is blocking GAMMA"),
+                tr(
+                    "A security setting on your computer (ptrace_scope = {scope}) stops Mod Organizer "
+                    "from loading GAMMA's mods, so the game can't start. Setting it to 1 fixes this.",
+                    scope=scope,
+                )
+                + "\n\n"
+                + tr("Open a terminal, run this command, then restart your computer:")
+                + "\n"
+                + PTRACE_FIX_COMMAND,
+            )
             return
         self._crash_timer.stop()
         self._steam_launch = False

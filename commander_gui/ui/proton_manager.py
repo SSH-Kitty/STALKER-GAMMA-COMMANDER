@@ -100,10 +100,11 @@ class _ProgressBridge(QObject):
 
 
 class ProtonManagerDialog(QDialog):
-    def __init__(self, window, parent=None, *, on_changed=None) -> None:
+    def __init__(self, window, parent=None, *, on_changed=None, on_select=None) -> None:
         super().__init__(parent)
         self.window = window
         self._on_changed = on_changed
+        self._on_select = on_select
         self._task: BackgroundTask | None = None
         self._size_task: BackgroundTask | None = None
         self._install_task: BackgroundTask | None = None
@@ -161,6 +162,8 @@ class ProtonManagerDialog(QDialog):
                     "Each build takes about 1.5 GB. The build COMMANDER launches the "
                     "game with cannot be removed; pick another runner first."
                 )
+                + " "
+                + tr("Double-click a build to use it as the runner.")
             )
         )
         self.table = QTableWidget(0, 3)
@@ -178,6 +181,7 @@ class ProtonManagerDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.table.itemDoubleClicked.connect(self._use_build)
         layout.addWidget(self.table, 1)
         self.status = info_label("")
         self.status.setObjectName("dim")
@@ -389,6 +393,13 @@ class ProtonManagerDialog(QDialog):
         self._sizes.update(sizes if isinstance(sizes, dict) else {})
         if self._task is None:
             self.reload()
+
+    def _use_build(self, item) -> None:
+        build = self.table.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
+        if self._on_select is None or build.in_use or self._busy():
+            return
+        self._on_select(f"umup:{build.path / 'proton'}")
+        self.reload()
 
     def _selected(self) -> list[ProtonBuild]:
         builds = (

@@ -30,6 +30,7 @@ _allowed_themes = {key for key, _label, _description, _swatches in THEME_INFO}
 
 _DEFAULTS = {
     "runner": "auto",  # "auto" | "umu" | "wine" | "proton:<path-to-proton>"
+    "auto_proton": "",  # GE-Proton build dir Auto-detect is pinned to
     "wine_prefix": "",  # WINEPREFIX (Wine) or STEAM_COMPAT_DATA_PATH (Proton)
     "prefixes": {},  # per-runner prefix, keyed by the runner data value
     "target": "",  # last selected launch target title

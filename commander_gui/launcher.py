@@ -73,6 +73,25 @@ _RUNNER_ENV_NAMES = {
 }
 
 
+#: Sorts after other sysctl.d files, so it wins over a hardening preset.
+PTRACE_FIX_COMMAND = (
+    "echo 'kernel.yama.ptrace_scope = 1' | sudo tee /etc/sysctl.d/99-zz-stalker-gamma.conf"
+)
+
+
+def ptrace_scope() -> int:
+    """``kernel.yama.ptrace_scope``, or 0 when Yama is absent (or on Windows).
+
+    At 2 or 3 the wineserver may not write into another process, so MO2's
+    usvfs can't hook the game and MO2 fails with "Error 87". 3 is locked
+    until the next reboot.
+    """
+    try:
+        return int(Path("/proc/sys/kernel/yama/ptrace_scope").read_text())
+    except (OSError, ValueError):
+        return 0
+
+
 def steam_shortcut_appid(environ: dict[str, str] | None = None) -> int | None:
     """The Steam app ID COMMANDER itself was launched under, or None.
 
@@ -158,6 +177,10 @@ RUNNER_GRAPHICS_ERROR_MARKERS = (
     "d3d11_swapchain_setcolorspace",
 )
 
+#: Wine prints this when the runner lacks a Windows function the game needs:
+#: the runner is too new, too old, or unpacked badly.
+RUNNER_UNSUPPORTED_MARKER = "to unimplemented function"
+
 
 #: Wine prints this once per crashed process. A launch that manages to start
 #: MO2 prints it zero times; a launch into a prefix with a foreign ntdll prints
@@ -212,6 +235,11 @@ def runner_graphics_error(log_text: str) -> bool:
     """Return whether output indicates WineD3D/DXVK/Vulkan failure."""
     text = log_text.lower()
     return any(marker in text for marker in RUNNER_GRAPHICS_ERROR_MARKERS)
+
+
+def runner_unsupported_error(log_text: str) -> bool:
+    """Return whether the runner is missing a Windows function it was asked for."""
+    return RUNNER_UNSUPPORTED_MARKER in log_text.lower()
 
 
 def wine_prefix_for(kind: str, prefix: str) -> str:
@@ -978,7 +1006,10 @@ def _proton_runner(proton_script: str, prefix: str = "") -> Runner:
 
 
 def _pick_umu_proton() -> str:
-    """Pick the latest GE-Proton directory for umu, or ''.
+    """Pick the GE-Proton directory for umu's Auto-detect, or ''.
+
+    The newest installed build the first time, then that same build until
+    it is removed.
 
     Only GE-Proton builds are considered.  Directories without a
     ``toolmanifest.vdf`` are skipped since ``umu-run`` validates
@@ -994,8 +1025,18 @@ def _pick_umu_proton() -> str:
         candidates.append((version_key(label), str(build_dir)))
     if not candidates:
         return ""
+    # Stick to the build Auto-detect settled on: a newly installed GE-Proton
+    # must not silently replace it. It moves on only once that build is gone.
+    pinned = gui_settings.load_gui_settings().get("auto_proton")
+    if isinstance(pinned, str) and any(path == pinned for _key, path in candidates):
+        return pinned
     candidates.sort(reverse=True)
-    return candidates[0][1]
+    best = candidates[0][1]
+    try:
+        gui_settings.save_gui_settings(auto_proton=best)
+    except OSError:
+        pass  # unpinned this once; the newest build is still a fine answer
+    return best
 
 
 def _umu_proton_runner(proton_script: str, prefix: str = "") -> Runner:

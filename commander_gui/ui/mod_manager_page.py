@@ -3437,6 +3437,10 @@ class ModManagerPage(QWidget):
         )
 
     def _open_mo2(self) -> None:
+        from .play_page import ptrace_blocks_mo2  # deferred: play_page is heavy
+
+        if ptrace_blocks_mo2(self):
+            return
         mo2_profile = self.profile_combo.currentText()
         try:
             profile = self._active_profile()
