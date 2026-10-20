@@ -108,7 +108,9 @@ def commander_update_asset_url(tag: str) -> str:
     # plain version-like tag, never "/" or ".." that could point elsewhere.
     if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag) or ".." in tag:
         raise CommanderSelfUpdateError(f"Unexpected release tag: {tag!r}")
-    version = tag.removeprefix("v")
+    # build-appimage.sh names the file from the lowercase __version__, while
+    # the release tag may be cased "v1.4.0-Unstable2".
+    version = tag.removeprefix("v").lower()
     filename = f"STALKER-GAMMA-COMMANDER-{version}-x86_64.AppImage"
     return f"{_COMMANDER_REPO}/releases/download/{tag}/{filename}"
 
@@ -127,6 +129,13 @@ def download_commander_update(
     exist (a 404), ``CommanderSelfUpdateError`` for every other failure.
     """
     url = commander_update_asset_url(tag)
+    # Asked for first: a release without a checksum is refused anyway, and
+    # that should not cost the user the whole download.
+    expected = _published_sha512(url)
+    if expected is None:
+        raise CommanderUpdateAssetNotFoundError(
+            f"The update has no published checksum ({url}) - nothing was changed."
+        )
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urlopen(req, timeout=600) as resp:
@@ -208,13 +217,6 @@ def download_commander_update(
                 " - nothing was changed. Try again."
             )
         verify_appimage_file(tmp_path)
-        expected = _published_sha512(url)
-        if expected is None:
-            # Every release since checksums began publishes one; a missing
-            # file means a broken or tampered release, not an old one.
-            raise CommanderSelfUpdateError(
-                "The update has no published checksum - nothing was changed."
-            )
         if sha512_file(tmp_path) != expected:
             raise CommanderSelfUpdateError(
                 "The update does not match its published checksum - nothing was changed."

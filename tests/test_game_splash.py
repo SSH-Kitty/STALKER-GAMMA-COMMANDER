@@ -9,7 +9,13 @@ from pathlib import Path
 
 from commander_gui.launcher import Runner, build_command
 from commander_gui.steam_shortcuts import coop_launch_options
-from commander_gui.ui.game_splash import SPLASH_FLAG, engine_started, is_launcher, mo2_error, wants_splash
+from commander_gui.ui.game_splash import (
+    SPLASH_FLAG,
+    engine_started,
+    is_launcher,
+    mo2_error,
+    wants_splash,
+)
 
 
 class GameSplashTests(unittest.TestCase):

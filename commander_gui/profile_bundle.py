@@ -188,7 +188,7 @@ def read_profile_bundle(bundle_path: Path) -> ImportedProfileBundle:
         raise ProfileBundleError(f"Could not read {bundle_path.name}: {exc}") from exc
     try:
         manifest = json.loads(manifest_raw.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, UnicodeError) as exc:
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as exc:  # deep nesting
         raise ProfileBundleError(f"{bundle_path.name} is corrupted: {exc}") from exc
     if not isinstance(manifest, dict):
         raise ProfileBundleError(f"{bundle_path.name} is corrupted: no settings found.")

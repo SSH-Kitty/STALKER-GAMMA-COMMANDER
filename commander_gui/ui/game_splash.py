@@ -153,7 +153,7 @@ class GameSplash(QWidget):
             applog.get_logger().info("splash: MO2 reported an error")
             self.close()
 
-    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+    def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -195,7 +195,7 @@ class GameSplash(QWidget):
             self._label,
         )
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+    def closeEvent(self, event) -> None:
         self._poll.stop()
         self._frame.stop()
         super().closeEvent(event)

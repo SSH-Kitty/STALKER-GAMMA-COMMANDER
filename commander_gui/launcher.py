@@ -5,7 +5,7 @@ CLI wiki recommends running ``gamma/ModOrganizer.exe`` inside a Proton/Wine
 prefix. This module detects the most common setups:
 
 * Steam/UMU: ``umu-run`` with the default ``~/Games/umu/umu-default`` prefix,
-  optionally wrapped in ``gamemoderun`` (the recommended path).
+  wrapped in ``gamemoderun`` only when Always use GameMode is on.
 * Steam Proton: any Proton version installed via Steam is discovered
   (``steamapps/common/Proton*``) and launched with ``proton run <exe>``.
 * Plain Wine: ``wine`` with an optional explicit ``WINEPREFIX``.
@@ -16,6 +16,7 @@ file system is active and all GAMMA mods are loaded.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gui_settings
-from .atomic import write_bytes, write_text
+from .atomic import split_lines, write_bytes, write_text
 from .config import child_environment
 from .dependencies import configured_tool
 from .proton_installer import version_key
@@ -593,7 +594,7 @@ def build_runner_tool_command(
 
 def mo2_path_to_host(value: str) -> str:
     """Translate an MO2 ini path (``Z:/...``) to a host path."""
-    if value.startswith("Z:"):
+    if value[:2].upper() == "Z:":
         rest = value[2:].replace("\\", "/")
         if not rest.startswith("/"):
             rest = "/" + rest
@@ -641,7 +642,7 @@ def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
         return []
     entries: dict[int, Mo2Executable] = {}
     try:
-        lines = ini.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = split_lines(ini.read_text(encoding="utf-8", errors="replace"))
     except (OSError, UnicodeError):
         return []
     section = ""
@@ -696,7 +697,7 @@ def mo2_selected_title(gamma_dir: str) -> str:
         return ""
     row = None
     section = ""
-    for line in text.splitlines():
+    for line in split_lines(text):
         stripped = line.strip()
         if stripped.startswith("["):
             section = stripped.lower()
@@ -735,7 +736,7 @@ def _set_ini_value(ini: Path, section: str, key: str, value: str) -> None:
     out: list[str] = []
     current = ""
     written = False
-    for line in text.splitlines():
+    for line in split_lines(text):
         stripped = line.strip()
         if stripped.startswith("["):
             if current == header and not written:
@@ -771,6 +772,51 @@ def _qt_ini_bytes(value: str) -> str:
     return f'"{text}"' if any(c in text for c in ";,=") else text
 
 
+def qt_ini_text(value: str) -> str:
+    """Undo _qt_ini_bytes' escapes: ``CLIKR\\xce\\x94\\x44`` -> ``CLIKRΔD``.
+
+    The CLI's ``mo2 config get selected-profile`` prints them as stored.
+    """
+    if "\\" not in value:
+        return value
+    out = bytearray()
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and value[i + 1 : i + 2] == "x" and len(value) >= i + 4:
+            try:
+                out.append(int(value[i + 2 : i + 4], 16))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        if value[i] == "\\" and i + 1 < len(value):
+            i += 1
+        out += value[i].encode("utf-8")
+        i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def set_mo2_selected_profile(gamma_dir: str, profile: str) -> None:
+    """Make MO2 open *profile* next time, as its own dropdown saves it.
+
+    Not the CLI's ``mo2 config set selected-profile``: it writes a non-ASCII
+    name (CLIKRΔD) as raw UTF-8, which Qt reads back as Latin-1, so MO2
+    looks for a profile that doesn't exist.
+    """
+    _set_ini_value(
+        Path(gamma_dir) / "ModOrganizer.ini", "General", "selected_profile", _qt_ini_bytes(profile)
+    )
+
+
+def select_mo2_profile(gamma_dir: str, profile: str) -> tuple[int, str]:
+    """set_mo2_selected_profile as ``(returncode, output)``, like run_sync."""
+    try:
+        set_mo2_selected_profile(gamma_dir, profile)
+    except OSError as exc:
+        return 1, str(exc)
+    return 0, ""
+
+
 def mo2_profile_args(gamma_dir: str, profile: str) -> list[str]:
     """The arguments that make MO2 open *profile*.
 
@@ -782,10 +828,7 @@ def mo2_profile_args(gamma_dir: str, profile: str) -> list[str]:
     if profile.isascii():
         return ["-p", profile]
     try:
-        _set_ini_value(
-            Path(gamma_dir) / "ModOrganizer.ini", "General", "selected_profile",
-            _qt_ini_bytes(profile),
-        )
+        set_mo2_selected_profile(gamma_dir, profile)
     except OSError as exc:
         raise LaunchError(f"Couldn't select MO2 profile {profile}: {exc}") from exc
     return []
@@ -809,7 +852,7 @@ def unblock_mo2_python(gamma_dir: str) -> bool:
     names: list[str] = []
     section = ""
     start = -1
-    for line in text.splitlines():
+    for line in split_lines(text):
         stripped = line.strip()
         if stripped.startswith("["):
             section = stripped.lower()
@@ -1070,10 +1113,8 @@ def _umu_proton_runner(proton_script: str, prefix: str = "") -> Runner:
             "umu-run not found on PATH. Install umu-run (or launch via Steam) "
             "and try again."
         )
-    wrapper = []
-    if avail.get("gamemoderun"):
-        wrapper.append(avail["gamemoderun"])
-    wrapper.append(avail["umu"])
+    # GameMode only when the player asks for it (Play page's Always use GameMode).
+    wrapper = [avail["umu"]]
     env = {"PROTONPATH": str(build_dir)}
     env["PROTON_USE_WINED3D"] = "0"
     # Always resolve to the same default (DEFAULT_UMU_PREFIX) that
@@ -1119,10 +1160,7 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
     avail = available_commands()
     if kind in ("auto", "umu"):
         if avail.get("umu"):
-            wrapper = []
-            if avail.get("gamemoderun"):
-                wrapper.append(avail["gamemoderun"])
-            wrapper.append(avail["umu"])
+            wrapper = [avail["umu"]]
             # Always resolve to the same default Winetricks assumes
             # (wine_prefix_for) rather than leaving umu-run to pick its own.
             env = {"WINEPREFIX": wine_prefix or str(DEFAULT_UMU_PREFIX)}
@@ -1208,7 +1246,8 @@ def build_direct_command(
         # MO2 stores the argument string as the user typed it, so quoted
         # arguments containing spaces must survive splitting intact.
         try:
-            args += shlex.split(exe.arguments)
+            # Backslashes are Windows path separators here, not escapes.
+            args += shlex.split(exe.arguments.replace("\\", "\\\\"))
         except ValueError:
             args += exe.arguments.split()
     return [*runner.wrapper, *args], dict(runner.env), cwd
@@ -1235,7 +1274,12 @@ def desktop_dir() -> Path:
 def shortcut_slug(title: str) -> str:
     """Return a filename-safe slug for a launch target title."""
     slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower()
-    return slug or "stalker-gamma"
+    # A title with no ASCII letters (Cyrillic, CJK) would otherwise share one
+    # slug, and so one desktop file, with every other such title.
+    return slug or "stalker-gamma" + (
+        "-" + hashlib.sha1(title.encode(), usedforsecurity=False).hexdigest()[:6]
+        if any(c.isalnum() for c in title) else ""
+    )
 
 
 def _desktop_quote(value: str) -> str:

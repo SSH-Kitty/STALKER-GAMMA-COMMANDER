@@ -66,8 +66,6 @@ def _manual_command(
         return install_command("steam")
     if tool in {"Wine", "Winetricks"}:
         return install_command(tool.lower())
-    if tool == "Protontricks":
-        return install_command("pipx") + " && pipx install protontricks"
     if tool == "Vulkan":
         return vulkan_driver_command(manager, vendors or [])
     if tool == "Vulkan32":
@@ -138,8 +136,6 @@ _TOOL_WHY: dict[str, str] = {
     "through Proton.",
     "Winetricks": "installs the Visual C++/DirectX runtimes Mod Organizer "
     "and the game need.",
-    "Protontricks": "runs Winetricks against a Steam Proton prefix "
-    "specifically.",
     "Vulkan": "confirms your graphics driver supports Vulkan, which DXVK/"
     "vkd3d (DirectX-over-Vulkan) needs to run the game.",
 }
@@ -215,9 +211,9 @@ def _winetricks_checks(
     (Dashboard, Install page) gives the per-item breakdown on hover.
 
     ``extra_tools`` is ``(tooltip_key, display_label, installed, manual_command)``
-    for Wine, Protontricks and umu-run - folded into this row's count and
+    for Wine and umu-run - folded into this row's count and
     copy-paste command so it reports the same "X/Y dependencies installed"
-    total as the Dashboard, even though each of the three also has its own
+    total as the Dashboard, even though each of the two also has its own
     row further up this page.
     """
     if not binary:
@@ -241,7 +237,7 @@ def _winetricks_checks(
         tr(_VERB_LABELS.get(verb, verb)) for verb in missing_verbs
     ] + missing_tools
     # Winetricks verbs are idempotent, so that line is always offered; the
-    # Wine/Protontricks/umu-run install commands can need sudo or overwrite
+    # Wine/umu-run install commands can need sudo or overwrite
     # an existing binary, so only add those lines when actually missing.
     commands = [f"{binary} -q {' '.join(WINETRICKS_VERBS)}"]
     commands.extend(cmd for _key, _label, ok, cmd in extra_tools if not ok and cmd)
@@ -358,7 +354,6 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             _check_tool("Wine", "wine", manager),
             _check_tool("umu-run", "umu-run", manager),
             _check_tool("Winetricks", "winetricks", manager),
-            _check_tool("Protontricks", "protontricks", manager),
             _check_tool("Vulkan", "vulkaninfo", manager, vendors),
             _check_vulkan32(manager, vendors),
         ]
@@ -431,12 +426,6 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
     ]
     extra_tools += [
         (
-            "protontricks",
-            "Protontricks",
-            bool(by_label["Protontricks"].get("detected")),
-            by_label["Protontricks"].get("command", ""),
-        ),
-        (
             "umu",
             "umu-run",
             umu_found,
@@ -481,9 +470,6 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             "builds": ge_builds,
         }
     )
-    protontricks = by_label["Protontricks"]
-    if protontricks["state"] != "ready":
-        protontricks["state"] = "optional"
     gamemode_found = configured_tool("gamemoderun") or shutil.which("gamemoderun")
     checks.append(
         {
@@ -528,7 +514,7 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
                     "GE-Proton override path is invalid: {path}", path=dir_path
                 )
                 check["command"] = ""
-        # File overrides (umu-run, winetricks, protontricks, vulkaninfo)
+        # File overrides (umu-run, winetricks, vulkaninfo)
         if (
             key in saved_overrides
             and saved_overrides[key]
@@ -572,7 +558,6 @@ CHECK_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Wine",
             "umu-run",
             "Winetricks",
-            "Protontricks",
             "Vulkan",
             "32-bit Vulkan",
         ),
@@ -688,7 +673,6 @@ class SystemCheckPage(QWidget):
             ("steam", "Steam executable", False),
             ("umu-run", "umu-run executable", False),
             ("winetricks", "Winetricks executable", False),
-            ("protontricks", "Protontricks executable", False),
             ("vulkaninfo", "Vulkan info executable", False),
             ("umu_proton", "GE-Proton build", True),
         ):

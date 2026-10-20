@@ -92,6 +92,56 @@ class CoopTests(unittest.TestCase):
         coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
         self.assertEqual(exe.read_bytes(), b"MZcoop")
 
+    def test_user_ltx_and_mcm_are_kept_apart_per_mode(self):
+        mcm = self.gamma / "overwrite" / "gamedata" / "configs" / "axr_options.ltx"
+        mcm.parent.mkdir(parents=True, exist_ok=True)
+        ltx = coop.user_ltx_path(self.anomaly)
+        ltx.parent.mkdir(parents=True, exist_ok=True)
+        ltx.write_text("rs_vis_dist 1\n")
+        mcm.write_text("solo mcm\n")
+        self._install()  # solo files carry into co-op the first time
+        self.assertIn("rs_vis_dist 1", ltx.read_text())
+        ltx.write_text("rs_vis_dist 2\nxrr_player_name Bob\n")
+        mcm.write_text("coop mcm\n")
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(ltx.read_text(), "rs_vis_dist 1\n")
+        self.assertEqual(mcm.read_text(), "solo mcm\n")
+        ltx.write_text("rs_vis_dist 3\n")
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertIn("rs_vis_dist 2", ltx.read_text())
+        self.assertIn("xrr_player_name Bob", ltx.read_text())
+        self.assertEqual(mcm.read_text(), "coop mcm\n")
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(ltx.read_text(), "rs_vis_dist 3\n")
+
+    def test_uninstall_from_singleplayer_keeps_later_solo_settings(self):
+        mcm = self.gamma / "overwrite" / "gamedata" / "configs" / "axr_options.ltx"
+        mcm.parent.mkdir(parents=True)
+        mcm.write_text("solo v1\n")
+        ltx = coop.user_ltx_path(self.anomaly)
+        ltx.write_text("bind v1\n")
+        self._install()
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        ltx.write_text("bind v2\n")  # changed while playing solo
+        mcm.write_text("solo v2\n")
+        coop.uninstall(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(ltx.read_text(), "bind v2\n")
+        self.assertEqual(mcm.read_text(), "solo v2\n")
+
+    def test_mcm_file_made_in_coop_stays_out_of_singleplayer(self):
+        self._install()
+        mcm = self.gamma / "overwrite" / "gamedata" / "configs" / "axr_options.ltx"
+        mcm.parent.mkdir(parents=True)
+        mcm.write_text("made in coop\n")
+        shipped = self.gamma / "mods" / "Some Mod" / "gamedata" / "configs" / "axr_options.ltx"
+        shipped.parent.mkdir(parents=True)
+        shipped.write_text("shipped\n")  # a mod's own file is never removed
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertFalse(mcm.exists())
+        self.assertEqual(shipped.read_text(), "shipped\n")
+        coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(mcm.read_text(), "made in coop\n")
+
     def test_steam_appid_also_lands_where_the_game_looks_for_it(self):
         """steam_api reads steam_appid.txt from the working directory - the
         Anomaly folder - not bin/; without it Steam init failed."""
@@ -225,8 +275,11 @@ class CoopTests(unittest.TestCase):
         self.assertEqual((values["xrr_player_name"], values["xrr_friendly_fire"], present), ("Old", True, set()))
         coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
         text = user_ltx.read_text().splitlines()
-        self.assertEqual(text[0], "rs_screenmode windowed")
+        # Co-op gets its own copy back, not the solo "windowed" one.
+        self.assertEqual(text[0], "rs_screenmode fullscreen")
         self.assertEqual(sorted(text[1:]), ["xrr_friendly_fire on", "xrr_host_session on", "xrr_max_players 4", "xrr_player_name Old"])
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(user_ltx.read_text(), "rs_screenmode windowed\n")
 
     def test_slot_default_lifted_once(self):
         # The engine writes 3 friends; xrRazom takes 4. Lift it once, then
@@ -253,6 +306,53 @@ class CoopTests(unittest.TestCase):
         coop.write_last_ip(self.anomaly, self.gamma, "G.A.M.M.A", "5.6.7.8:1")
         self.assertEqual(coop.read_last_ip(self.anomaly, self.gamma, "G.A.M.M.A"), "5.6.7.8:1")
 
+    def test_export_survives_uninstall_and_imports_back(self):
+        from unittest.mock import patch
+
+        root = Path(self._tmp.name)
+        save = self.anomaly / "appdata" / "savedgames" / "coop.scop"
+        mcm = self.gamma / "overwrite" / "gamedata" / "configs" / "axr_options.ltx"
+        mcm.parent.mkdir(parents=True)
+        mcm.write_text("[xrrazom]\nlast_ip = 1.2.3.4:5445\n")
+        self._install()
+        save.parent.mkdir(parents=True)
+        save.write_bytes(b"save")
+        mo2_save = self.gamma / "overwrite" / "appdata" / "savedgames" / "mo2.scop"
+        mo2_save.parent.mkdir(parents=True)
+        mo2_save.write_bytes(b"mo2")
+        coop.write_settings(self.anomaly, {"xrr_player_name": "Bob", "xrr_max_players": 2})
+        coop.set_steam_appid(self.anomaly, coop.SPACEWAR_APPID)
+        dest = coop.export_session(self.anomaly, self.gamma, "G.A.M.M.A", root / "out" / "my coop")
+        self.assertEqual(dest.name, "my coop.zip")
+        self.assertEqual(coop.read_export(dest)["saves"], 2)
+
+        coop.uninstall(self.anomaly, self.gamma, "G.A.M.M.A")
+        save.write_bytes(b"changed")
+        mo2_save.unlink()
+        mcm.write_text("solo\n")
+        self._install()
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(root / "data")}):
+            coop.import_session(self.anomaly, self.gamma, "G.A.M.M.A", "P", dest)
+            backups = list((root / "data").rglob("*restore*.zip"))
+        self.assertEqual(save.read_bytes(), b"save")
+        self.assertEqual(mo2_save.read_bytes(), b"mo2")
+        values, _ = coop.read_settings(self.anomaly)
+        self.assertEqual((values["xrr_player_name"], values["xrr_max_players"]), ("Bob", 2))
+        self.assertEqual(coop.steam_appid(self.anomaly), coop.SPACEWAR_APPID)
+        self.assertEqual(coop.read_last_ip(self.anomaly, self.gamma, "G.A.M.M.A"), "1.2.3.4:5445")
+        self.assertEqual(len(backups), 1)  # the overwritten save and MCM were kept
+
+    def test_import_rejects_other_zips(self):
+        for members in ({"manifest.json": "{}"}, {"manifest.json": '{"type": "commander-coop"}', "../x": ""}):
+            path = Path(self._tmp.name) / "bad.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                for name, text in members.items():
+                    archive.writestr(name, text)
+            with self.assertRaises(coop.CoopError):
+                coop.read_export(path)
+        with self.assertRaises(coop.CoopError):
+            coop.read_export(self.zip)
+
 
 class PlainAnomalyCoopTests(unittest.TestCase):
     """Co-op on Anomaly alone: no MO2, so the gamedata half goes loose."""
@@ -275,6 +375,17 @@ class PlainAnomalyCoopTests(unittest.TestCase):
     def tearDown(self):
         os.chdir(self._cwd)
         self._tmp.cleanup()
+
+    def test_user_ltx_and_mcm_are_kept_apart_per_mode(self):
+        mcm = self.anomaly / "gamedata" / "configs" / "axr_options.ltx"
+        mcm.parent.mkdir(parents=True, exist_ok=True)
+        mcm.write_text("solo mcm\n")
+        self._install()
+        mcm.write_text("coop mcm\n")
+        coop.switch_to_singleplayer(self.anomaly, "", "")
+        self.assertEqual(mcm.read_text(), "solo mcm\n")
+        coop.switch_to_coop(self.anomaly, "", "")
+        self.assertEqual(mcm.read_text(), "coop mcm\n")
 
     def _install(self):
         coop.install(self.zip, self.anomaly, "", "", kind=coop.KIND_ANOMALY)
@@ -312,7 +423,7 @@ class PlainAnomalyCoopTests(unittest.TestCase):
         block = coop.launch_block_reason
         self._install()
         self.assertIsNone(block(self.anomaly, coop_launch=True, direct=True))
-        self.assertIn("plain Anomaly", block(self.anomaly, coop_launch=True))
+        self.assertIn("Anomaly", block(self.anomaly, coop_launch=True))
         self.assertIsNotNone(block(self.anomaly, coop_launch=False, direct=True))
         coop.switch_to_singleplayer(self.anomaly, "", "")
         self.assertIsNone(block(self.anomaly, coop_launch=False))
@@ -458,6 +569,33 @@ class MultiplayerPageTests(unittest.TestCase):
         (self.anomaly / "AnomalyLauncher.cfg").write_text("DX11\nAVX\n0\n")
         self.assertEqual(plain_game_exe(self.anomaly).name, "AnomalyDX11AVX.exe")
         self.assertTrue(coop_launch_options("/p", "", "t", 41700, "-nosplashwindow", mo2=False).endswith("%command% -nosplashwindow"))
+
+    def test_plain_game_exe_follows_the_cpu_without_a_saved_choice(self):
+        from commander_gui.ui.play_page import cpu_has_avx, plain_game_exe
+
+        (self.anomaly / "bin").mkdir(exist_ok=True)
+        for name in ("AnomalyDX11AVX.exe", "AnomalyDX11.exe"):
+            (self.anomaly / "bin" / name).write_bytes(b"MZ")
+        self.assertEqual(plain_game_exe(self.anomaly, avx=False).name, "AnomalyDX11.exe")
+        self.assertEqual(plain_game_exe(self.anomaly, avx=True).name, "AnomalyDX11AVX.exe")
+        info = self.anomaly / "cpuinfo"
+        info.write_text("processor\t: 0\nflags\t\t: fpu sse4_2 avx2\n")
+        self.assertFalse(cpu_has_avx(str(info)))  # avx2 alone is not the "avx" flag
+        info.write_text("processor\t: 0\nflags\t\t: fpu avx avx2\n")
+        self.assertTrue(cpu_has_avx(str(info)))
+
+    def test_plain_coop_lan_launch_runs_the_game_without_its_splash(self):
+        from commander_gui.launcher import Mo2Executable
+        from commander_gui.ui.play_page import plain_coop_exe
+
+        (self.anomaly / "bin").mkdir(exist_ok=True)
+        (self.anomaly / "bin" / "AnomalyDX11AVX.exe").write_bytes(b"MZ")
+        launcher = Mo2Executable(title="Anomaly", binary=str(self.anomaly / "AnomalyLauncher.exe"))
+        exe = plain_coop_exe(launcher, self.anomaly)
+        self.assertEqual((Path(exe.binary).name, exe.arguments), ("AnomalyDX11AVX.exe", "-nosplashwindow"))
+        # A GAMMA folder's own target keeps its renderer and arguments.
+        dx9 = Mo2Executable(title="Anomaly (DX9)", binary="C:/a/bin/AnomalyDX9.exe", arguments="-smap2048")
+        self.assertEqual(plain_coop_exe(dx9, self.anomaly).arguments, "-smap2048 -nosplashwindow")
 
     def test_copied_files_keep_their_mode(self):
         src = self.anomaly / "src.bin"
@@ -613,3 +751,36 @@ class Mo2BlacklistTests(unittest.TestCase):
             self.assertNotIn("plugin_python", text)
             self.assertIn("[Settings]\nx=1", text)
             self.assertFalse(unblock_mo2_python(tmp))
+
+
+class CoopHardeningTests(unittest.TestCase):
+    def test_swap_dir_keeps_old_when_move_fails(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "mods" / "x"
+            dest.mkdir(parents=True)
+            (dest / "keep").write_text("old")
+            new = Path(tmp) / "new"
+            new.mkdir()
+            with mock.patch.object(coop.shutil, "move", side_effect=OSError("disk")):
+                with self.assertRaises(OSError):
+                    coop._swap_dir(new, dest)
+            self.assertEqual((dest / "keep").read_text(), "old")
+            self.assertFalse(dest.with_name("x.old").exists())
+
+    def test_oversized_zip_refused(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = _make_zip(Path(tmp) / "a.zip")
+            with mock.patch.object(coop, "_MAX_UNPACKED", 10):
+                with self.assertRaises(coop.CoopError):
+                    coop.inspect_zip(zip_path)
+
+    def test_extract_rejects_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / "a.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("../evil", "x")
+            with zipfile.ZipFile(zip_path) as archive:
+                with self.assertRaises(coop.CoopError):
+                    coop._extract(archive, "../evil", Path(tmp) / "out" / "evil")

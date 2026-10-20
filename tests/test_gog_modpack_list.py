@@ -22,7 +22,7 @@ from commander_gui.updates import (
 )
 
 # DlLink, Instructions, Patch, AddonName, ModDbUrl, ZipName, Md5ModDb
-REMOTE = "\n".join(
+REMOTE = "\n".join(  # noqa: FLY002 - one row per line reads better
     [
         "Audio",
         "https://x/start/1\t0\t- alice\tProven Mod\thttps://m/1\tproven_2.zip\taaaa",

@@ -14,7 +14,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
 from commander_gui import assistant_launcher, autostart, gui_settings, network
 from commander_gui.assistant_launcher import assistant_command, launch_assistant
@@ -728,7 +728,10 @@ class RegressionTests(unittest.TestCase):
 
     def test_offline_lists_found_beside_cache_folder_and_nested_extract_flagged(self):
         """The archive holds cache/ plus both lists, so they sit beside the cache folder."""
-        from commander_gui.ui.install_page import offline_install_problem, offline_list_paths
+        from commander_gui.ui.install_page import (
+            offline_install_problem,
+            offline_list_paths,
+        )
 
         with tempfile.TemporaryDirectory() as tmp, patch(
             "commander_gui.ui.install_page.gui_settings.load_gui_settings",
@@ -821,7 +824,10 @@ class RegressionTests(unittest.TestCase):
         """A cut-off GitHub download made every resume fail on the same zip:
         the CLI reuses it without an MD5 check. It must be removed (or swapped
         for the user's own download) so the next run can succeed."""
-        from commander_gui.ui.install_page import _broken_archive, _replace_broken_archive
+        from commander_gui.ui.install_page import (
+            _broken_archive,
+            _replace_broken_archive,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             downloads = Path(tmp) / "gamma" / "downloads"
@@ -3598,8 +3604,24 @@ class RegressionTests(unittest.TestCase):
         warning.assert_called_once()
         result = page._set_result.call_args.args[0]
         self.assertIn("closed with an error (code 1)", result)
-        self.assertIn("boom", result)
+        # The log goes in the dialog's details, not the Play page's status.
+        self.assertIn("boom", warning.call_args.kwargs["details"])
         page._launch_status_clear_timer.start.assert_called_once_with(3000)
+
+    def test_game_quit_from_its_menu_is_not_an_error(self):
+        from commander_gui.ui.play_page import engine_closed_cleanly, readable_log_tail
+
+        noise = "gamemodeauto: dlopen failed - libgamemode.so: cannot open shared object file"
+        self.assertEqual(readable_log_tail("\n".join([noise] * 20 + ["a", "b", "b", "b"])), "a\nb  (x3)")
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / "appdata" / "logs"
+            logs.mkdir(parents=True)
+            log = logs / "xray_player.log"
+            log.write_text("Destroying Direct3D...\n[xrLogger] InternalCloseLog called, terminating thread\n")
+            self.assertTrue(engine_closed_cleanly(tmp, time.time() - 60))
+            self.assertFalse(engine_closed_cleanly(tmp, time.time() + 60))  # an older run's log
+            log.write_text("FATAL ERROR\n[xrLogger] InternalCloseLog called, terminating thread\n")
+            self.assertFalse(engine_closed_cleanly(tmp, time.time() - 60))
 
     def test_abort_launch_cleans_spawned_process_group(self):
         page = self._make_play_page_stub()
@@ -9758,33 +9780,21 @@ class UserModsTrackerTests(unittest.TestCase):
                     "commander_gui.ui.mod_manager_page.QInputDialog.getText",
                     return_value=("Renamed", True),
                 ),
-                patch("commander_gui.ui.mod_manager_page.run_sync") as mock_run_sync,
+                patch(
+                    "commander_gui.ui.mod_manager_page.select_mo2_profile", return_value=(0, "")
+                ) as mock_select,
                 patch.object(page, "_load_profiles"),
             ):
                 page._rename_mo2_profile()
-                # The MO2 CLI call now runs on a BackgroundTask (real
-                # QThread) instead of blocking the caller.
-                # Only the selected-profile write counts: pumping events also
-                # lets earlier tests' leftover pages run their own (patched)
-                # "mo2 profiles list" queries here.
+                # The ini write runs on a BackgroundTask (real QThread).
                 app = QApplication.instance()
-
-                def set_calls():
-                    return [
-                        c for c in mock_run_sync.call_args_list
-                        if c.args and c.args[0][:3] == ["mo2", "config", "set"]
-                    ]
-
                 deadline = time.monotonic() + 5
-                while not set_calls() and time.monotonic() < deadline:
+                while not mock_select.called and time.monotonic() < deadline:
                     app.processEvents()
                     time.sleep(0.01)
                 for _ in range(20):
                     app.processEvents()
-            self.assertEqual(
-                set_calls(),
-                [call(["mo2", "config", "set", "selected-profile", "Renamed"], timeout=30)],
-            )
+            mock_select.assert_called_once_with(page._active_profile().gamma, "Renamed")
 
     def test_delete_mo2_profile_calls_the_cli_after_confirmation(self):
         from commander_gui.ui.dialogs import MessageBox as QMessageBox

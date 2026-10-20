@@ -22,6 +22,11 @@ from .config import cli_binary_path
 INSTALLING_MARKER = ".commander-installing"
 
 
+#: One ``Key = value`` line of ``7zz l -slt`` output.
+_LISTING_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 ]* =( |$)")
+_MAX_ENTRIES = 500_000
+
+
 class ModInstallError(RuntimeError):
     """Raised when an archive cannot be safely installed."""
 
@@ -86,7 +91,7 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
         result = subprocess.run(
             # -p with no password: an encrypted archive fails instead of
             # waiting for a password on a terminal nobody is looking at.
-            [str(archiver), "l", "-slt", "-p", str(archive)],
+            [str(archiver), "l", "-slt", "-p", "--", str(archive)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -124,6 +129,13 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
             continue
         path = None
         for line in block.splitlines():
+            if line.strip() and not _LISTING_LINE_RE.match(line):
+                # A name holding a line break (or a blank line) would split
+                # its own entry across blocks and hide the tail from the
+                # path checks below.
+                raise ModInstallError("Archive contains an entry name with a line break")
+            if line.startswith("Hard Link = ") and line.strip() != "Hard Link =":
+                raise ModInstallError("Archive contains an unsupported link")
             if line.startswith("Path = ") and path is None:
                 path = line[len("Path = ") :]
             elif (
@@ -142,6 +154,8 @@ def _list_archive_paths(archiver: Path, archive: Path) -> list[str]:
                 raise ModInstallError("Archive contains an unsupported symlink")
         if path is not None:
             paths.append(path)
+            if len(paths) > _MAX_ENTRIES:
+                raise ModInstallError("Archive has too many entries")
     return paths
 
 
@@ -180,7 +194,7 @@ def extract_archive(
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
     staging.mkdir(parents=True, exist_ok=False)
-    command = [str(archiver), "x", str(archive), f"-o{staging}", "-y", "-p", "-bsp1"]
+    command = [str(archiver), "x", f"-o{staging}", "-y", "-p", "-bsp1", "--", str(archive)]
     try:
         process = subprocess.Popen(
             command,
@@ -298,7 +312,7 @@ def _unwrap_tarball(
         raise ModInstallError("Mod installation cancelled")
     try:
         process = subprocess.Popen(
-            [str(archiver), "x", str(inner), f"-o{staging}", "-y", "-p"],
+            [str(archiver), "x", f"-o{staging}", "-y", "-p", "--", str(inner)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -387,7 +401,10 @@ def move_payload(
     payload = payload_root(staging)
     if not any(payload.iterdir()):
         raise ModInstallError("The archive contains no installable files")
-    destination.mkdir()
+    try:
+        destination.mkdir()
+    except FileExistsError as exc:  # created since the check above
+        raise ModInstallError(f"Mod directory already exists: {destination.name}") from exc
     (destination / INSTALLING_MARKER).touch()
     try:
         for child in list(payload.iterdir()):

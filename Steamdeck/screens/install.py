@@ -69,8 +69,10 @@ from commander_gui.winetricks import (
 )
 
 from .. import gamepad as pad
+from ..folder_picker import show_folder_picker
 from ..power import on_battery
 from ..scale import px
+from ..welcome import open_url
 from ..widgets import (
     DeckCard,
     DeckPicker,
@@ -85,8 +87,6 @@ from ..widgets import (
     picker_overlay,
     side_by_side,
 )
-from ..folder_picker import show_folder_picker
-from ..welcome import open_url
 from .base import DeckScreen
 from .multiplayer import confirm_singleplayer
 

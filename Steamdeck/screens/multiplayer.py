@@ -15,6 +15,7 @@ back.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -46,18 +47,19 @@ from commander_gui.steam_shortcuts import (
     steam_is_running,
     steam_root_for,
 )
+from commander_gui.ui import game_splash
 from commander_gui.ui.common import (
-    notice,
     BackgroundTask,
-    gamma_installed,
     game_running,
+    gamma_installed,
     mo2_running,
+    notice,
     play_click_sound,
 )
-from commander_gui.ui import game_splash
-from commander_gui.ui.play_page import coop_shortcut_fields
+from commander_gui.ui.play_page import coop_shortcut_fields, plain_game_exe
 
 from .. import gamepad as pad
+from ..folder_picker import show_folder_picker
 from ..mod_installer import DeckArchivePicker
 from ..scale import px
 from ..welcome import open_url
@@ -553,6 +555,16 @@ class MultiplayerScreen(DeckScreen):
             lambda: open_url(self.window, coop.MODDB_PAGE), button_text=tr("Open"),
         )
         layout.addWidget(tile)
+        tile, self.export_button = _tool_row(
+            tr("Export co-op"), tr("Save your co-op settings, keybinds, MCM values and all your saves to a zip."),
+            lambda: self._export(), button_text=tr("Export"),
+        )
+        layout.addWidget(tile)
+        tile, self.import_button = _tool_row(
+            tr("Import co-op"), tr("Bring back an exported zip. Files it replaces are backed up first."),
+            self._import, button_text=tr("Import"),
+        )
+        layout.addWidget(tile)
         tile, self.uninstall_button = _tool_row(
             tr("Remove co-op"), tr("Puts your original files back and deletes the mod. Co-op saves are kept."),
             self._uninstall, role="danger", button_text=tr("Uninstall"),
@@ -702,7 +714,7 @@ class MultiplayerScreen(DeckScreen):
         if found:
             self.found_label.setText(tr("Found {name} in {folder}.", name=self._found.name, folder=self._found.parent.name))
         self.zip_button.setText(tr("Install {name}", name=self._found.name) if found else tr("Install from zip…"))
-        for button in (self.zip_button, self.other_zip_button, self.update_button, self.uninstall_button):
+        for button in (self.zip_button, self.other_zip_button, self.update_button, self.export_button, self.import_button, self.uninstall_button):
             button.setEnabled(idle)
 
         controller = self._play().controller
@@ -1034,31 +1046,122 @@ class MultiplayerScreen(DeckScreen):
         profile = self._ready()
         if profile is None:
             return
-        self.window.confirm(
-            tr("Uninstall co-op?"),
-            tr("This removes xrRazom Co-op and puts your original game files back.")
-            + "\n\n• " + tr("Your co-op saves are kept.")
-            + "\n• " + tr("You can install co-op again at any time."),
-            lambda: self._start(
+
+        def _uninstall() -> None:
+            self._start(
                 tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile,
                 done=tr("xrRazom Co-op uninstalled"),
+            )
+
+        def _export_first() -> None:
+            self.window.dismiss_overlay(refocus=False)
+            self._export(then=_uninstall)  # uninstalls only once the zip is written
+
+        def _now() -> None:
+            self.window.dismiss_overlay()
+            _uninstall()
+
+        body = deck_label(
+            tr("This removes xrRazom Co-op and puts your original game files back.")
+            + "\n\n• " + tr("Your co-op saves are kept.")
+            + "\n• " + tr("Export first to keep your co-op settings and saves in a zip.")
+            + "\n• " + tr("You can install co-op again at any time."),
+            role="body", wrap=True,
+        )
+        self.window.show_overlay(DeckOverlay(
+            tr("Uninstall co-op?"),
+            body,
+            [
+                (tr("Export first"), _export_first, "primary"),
+                (tr("Uninstall"), _now, "danger"),
+                (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+            ],
+            default_index=2,
+        ))
+
+    def _export(self, then=None) -> None:
+        if self._ready() is None:
+            return
+        name_edit = QLineEdit(self)  # typed into by the on-screen keyboard; never shown
+        name_edit.setText(f"xrRazom co-op {time.strftime('%Y-%m-%d')}")
+
+        def _named(folder: Path, name: str) -> None:
+            profile = self._ready()
+            if profile is None:
+                return
+            name = " ".join(name.split()).strip(". ") or name_edit.placeholderText()
+            dest = folder / (name if name.lower().endswith(".zip") else name + ".zip")
+            self.window.confirm(
+                tr("Export co-op?"),
+                tr("Saves your co-op settings and all your saves to:\n{path}", path=str(dest)),
+                lambda: self._start(
+                    tr("Exporting…"), coop.export_session, profile.anomaly, profile.gamma, profile.mo2_profile, dest,
+                    done=tr("Exported to {path}", path=str(dest)), on_done=then,
+                ),
+                confirm_text=tr("Export"),
+            )
+
+        name_edit.setPlaceholderText(name_edit.text())
+        show_folder_picker(
+            self.window, title=tr("Export co-op: choose a folder"), start=Path.home(),
+            on_choose=lambda folder: self.window.open_keyboard(
+                name_edit, title=tr("Name the zip"), on_done=lambda name: _named(folder, name),
             ),
-            confirm_text=tr("Uninstall"),
-            confirm_role="danger",
         )
 
-    def _start(self, label: str, fn, *args, done: str | None = None, announce: bool = False) -> None:
+    def _import(self) -> None:
+        if self._ready() is None:
+            return
+
+        def _chosen(path: Path) -> None:
+            self.window.dismiss_overlay(refocus=False)
+            profile = self._ready()
+            if profile is None:
+                return
+            try:
+                manifest = coop.read_export(path)
+            except coop.CoopError as exc:
+                self.window.notify(tr(str(exc)), 6000)
+                return
+            game = "Spacewar" if manifest.get("appid") == coop.SPACEWAR_APPID else "Call of Pripyat"
+            self.window.confirm(
+                tr("Import co-op?"),
+                tr("This puts back the co-op setup from {name}.", name=path.name)
+                + "\n\n• " + tr("{count} saves", count=int(manifest.get("saves") or 0))
+                + "\n• " + tr("Co-op settings, keybinds and MCM values")
+                + "\n• " + tr("Steam game: {game}", game=game)
+                + "\n• " + tr("Files it replaces are backed up first."),
+                lambda: self._start(
+                    tr("Importing…"), coop.import_session, profile.anomaly, profile.gamma, profile.mo2_profile,
+                    profile.profile_name, path, done=tr("Co-op imported"),
+                ),
+                confirm_text=tr("Import"),
+            )
+
+        body = DeckArchivePicker(Path.home(), _chosen)
+        overlay = DeckOverlay(
+            tr("Import co-op"),
+            body,
+            [(tr("Cancel"), self.window.dismiss_overlay, "normal")],
+            panel_width=1100,
+        )
+        overlay.default_button = body.picker.list
+        overlay.back_handler = body.back
+        overlay.hints = (("A", "Open"), ("B", "Back"))
+        self.window.show_overlay(overlay)
+
+    def _start(self, label: str, fn, *args, done: str | None = None, announce: bool = False, on_done=None) -> None:
         self._busy = True
         self.window.set_install_busy(True, "coop")
         self._say(label)
         self._sync()
         task = BackgroundTask(fn, *args, parent=self)
         self._task = task
-        task.result.connect(lambda _r: self._finish(None, label, done, announce))
+        task.result.connect(lambda _r: self._finish(None, label, done, announce, on_done))
         task.error.connect(lambda message: self._finish(message, label, done, announce))
         task.start()
 
-    def _finish(self, error: str | None, label: str, done: str | None, announce: bool) -> None:
+    def _finish(self, error: str | None, label: str, done: str | None, announce: bool, on_done=None) -> None:
         self._task = None
         self._busy = False
         self.window.set_install_busy(False)
@@ -1073,6 +1176,8 @@ class MultiplayerScreen(DeckScreen):
             if announce:
                 self.window.announce_finished(done or label, done or tr("Done"))
         self.refresh()
+        if error is None and on_done is not None:
+            on_done()
 
     def _say(self, text: str) -> None:
         self._say_clear.stop()
@@ -1096,12 +1201,13 @@ class MultiplayerScreen(DeckScreen):
             if os.name != "nt" and steam:
                 self._launch_steam(profile, target)
             elif coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY:
-                anomaly = Path(profile.anomaly)
-                launcher = Mo2Executable(
-                    title="Anomaly", binary=str(anomaly / "AnomalyLauncher.exe"),
-                    working_directory=str(anomaly),
+                # The game itself, as the Steam shortcut runs it: the
+                # launcher can't pass the switch that hides the engine's splash.
+                game = Mo2Executable(
+                    title="Anomaly", binary=str(plain_game_exe(profile.anomaly)),
+                    arguments=game_splash.SPLASH_FLAG, working_directory=str(profile.anomaly),
                 )
-                self._play().controller.launch(profile, target=None, direct=launcher)
+                self._play().controller.launch(profile, target=None, direct=game)
             else:
                 self._play().controller.launch(profile, target=target)
 

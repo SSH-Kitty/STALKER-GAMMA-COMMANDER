@@ -1119,7 +1119,7 @@ def restore_gamma_overlay(
             continue
         try:
             # Keeps the replaced file's permissions (an executable stays one).
-            write_bytes(root / name, data, lock=False)
+            write_bytes(root / name.replace("\\", "/"), data, lock=False)
         except OSError:
             result.failed.append(name)
             continue

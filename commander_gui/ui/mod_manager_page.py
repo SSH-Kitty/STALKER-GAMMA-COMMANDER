@@ -56,6 +56,8 @@ from ..launcher import (
     build_command,
     ensure_runner_prefix,
     launch_detached,
+    qt_ini_text,
+    select_mo2_profile,
 )
 from ..mod_install import (
     ModInstallError,
@@ -757,7 +759,7 @@ def _query_mo2_profiles() -> tuple[list[str], str]:
     )
     # The name is the first line: anything after it is stderr run_sync
     # appends, which is never part of a profile name.
-    selected = next((line.strip() for line in out.splitlines() if line.strip()), "")
+    selected = qt_ini_text(next((line.strip() for line in out.splitlines() if line.strip()), ""))
     return names, selected if rc == 0 else ""
 
 
@@ -1795,7 +1797,11 @@ class ModManagerPage(QWidget):
             self._update_guard()
             return False
         try:
-            shutil.rmtree(mods_dir / name)
+            target = mods_dir / name
+            if target.is_symlink():
+                target.unlink()  # never follow a link out of mods/
+            else:
+                shutil.rmtree(target)
         except OSError as exc:
             QMessageBox.warning(self, tr("Couldn't replace the folder"), str(exc))
             return False
@@ -2961,13 +2967,13 @@ class ModManagerPage(QWidget):
         profile = self.profile_combo.currentText()
         if not profile:
             return
+        try:
+            gamma = self._active_profile().gamma
+        except RuntimeError as exc:
+            QMessageBox.warning(self, tr("Couldn't change the MO2 profile"), str(exc))
+            return
         self.set_selected_button.setEnabled(False)
-        task = BackgroundTask(
-            run_sync,
-            ["mo2", "config", "set", "selected-profile", profile],
-            timeout=_QUERY_TIMEOUT,
-            parent=self,
-        )
+        task = BackgroundTask(select_mo2_profile, gamma, profile, parent=self)
         task.result.connect(lambda res: self._on_set_selected_done(profile, *res))
         task.error.connect(lambda msg: self._on_set_selected_error(msg))
         task.start()
@@ -3178,12 +3184,7 @@ class ModManagerPage(QWidget):
             finish_rename()
             return
         self.manage_profile_button.setEnabled(False)
-        task = BackgroundTask(
-            run_sync,
-            ["mo2", "config", "set", "selected-profile", new_name],
-            timeout=_QUERY_TIMEOUT,
-            parent=self,
-        )
+        task = BackgroundTask(select_mo2_profile, gamma, new_name, parent=self)
 
         def done(_result: object) -> None:
             self.manage_profile_button.setEnabled(True)

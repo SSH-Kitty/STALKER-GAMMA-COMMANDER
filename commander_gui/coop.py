@@ -18,6 +18,11 @@ Co-op settings are the mod's console variables in ``appdata/user.ltx``.
 The single-player engine drops console variables it doesn't know when it
 saves user.ltx, so a copy is kept in the state file and put back on the
 next switch to co-op.
+
+user.ltx and the MCM files (axr_options.ltx) are kept apart for singleplayer
+and co-op: each switch saves the side being left under ``modes/`` in the
+state folder and puts the other side's copy back. A side never saved yet
+inherits the current files.
 """
 
 from __future__ import annotations
@@ -30,11 +35,22 @@ import re
 import shutil
 import socket
 import tempfile
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
 from . import atomic, modlist, network
-from .game_backup import _safe_member, mcm_files, user_ltx_path
+from .game_backup import (
+    MANIFEST,
+    MCM_FILE,
+    BackupError,
+    _safe_member,
+    _write_zip,
+    create_backup_of_files,
+    mcm_files,
+    user_ltx_path,
+)
+from .game_stats import save_folders
 from .mod_install import write_basic_meta_ini
 
 MOD_NAME = "xrRazom Co-op"
@@ -42,6 +58,7 @@ MODDB_PAGE = "https://www.moddb.com/mods/stalker-anomaly/addons/xrrazom-stalker-
 MODDB_MOD_PAGE = "https://www.moddb.com/mods/xrrazom-stalker-anomaly-co-op"
 DISCORD_URL = "https://discord.gg/mpXUXjTQu8"
 RELEASE_FILE = "xrRazom-release.txt"
+_MAX_UNPACKED = 16 << 30  # a zip claiming more than this is a bomb, not a mod
 _ENGINE_ROOT = "Anomaly/"
 _MOD_ROOTS = ("gamedata/", "fomod/")
 
@@ -148,10 +165,34 @@ def parse_release(text: str) -> dict:
     return info
 
 
+def _check_unpacked_size(archive: zipfile.ZipFile) -> None:
+    if sum(i.file_size for i in archive.infolist()) > _MAX_UNPACKED:
+        raise CoopError("This archive unpacks to an unreasonable size.")
+
+
+def _swap_dir(new: Path, dest: Path) -> None:
+    """Put ``new`` at ``dest``; the old ``dest`` comes back if the move fails."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    old = dest.with_name(dest.name + ".old")
+    shutil.rmtree(old, ignore_errors=True)
+    had_old = dest.exists()
+    if had_old:
+        os.replace(dest, old)
+    try:
+        shutil.move(str(new), dest)  # may cross filesystems
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)
+        if had_old:
+            os.replace(old, dest)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+
+
 def inspect_zip(path: str | Path) -> dict:
     """Validate an xrRazom zip and return its release info."""
     try:
         with zipfile.ZipFile(path) as archive:
+            _check_unpacked_size(archive)
             names = [n for n in archive.namelist() if not n.endswith("/")]
             bad = [n for n in names if _safe_member(n) is None]
             if bad:
@@ -226,6 +267,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
     which a plain Anomaly profile may leave empty.
     """
     info = inspect_zip(zip_path)
+    if kind == KIND_GAMMA and not str(gamma).strip():
+        raise CoopError("Pick a GAMMA folder first.")
     root = state_dir(anomaly)
     root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".coop-", dir=root))
@@ -237,6 +280,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
             members = [m for m in archive.infolist() if not m.is_dir()]
             for count, member in enumerate(members, 1):
                 name = member.filename
+                if _safe_member(name) is None:
+                    raise CoopError(f"Unsafe path in archive: {name}")
                 if name.startswith(_ENGINE_ROOT):
                     rel = name[len(_ENGINE_ROOT):]
                     target = staging / "files" / rel
@@ -264,10 +309,7 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
             switch_to_singleplayer(anomaly, gamma, mo2_profile)
         if kind == KIND_GAMMA:
             write_basic_meta_ini(staging / "mod", Path(zip_path).name)
-            mod_dir = Path(gamma).expanduser() / "mods" / MOD_NAME
-            shutil.rmtree(mod_dir, ignore_errors=True)
-            mod_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(staging / "mod"), mod_dir)  # may cross filesystems
+            _swap_dir(staging / "mod", Path(gamma).expanduser() / "mods" / MOD_NAME)
         elif previous and previous.get("kind", KIND_GAMMA) == KIND_GAMMA:
             _remove_mod(gamma, mo2_profile)  # reinstalled for plain Anomaly
         shutil.rmtree(root / "files", ignore_errors=True)
@@ -356,6 +398,8 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
         raise CoopError("xrRazom Co-op is not installed.")
     anomaly = Path(anomaly).expanduser()
     root = state_dir(anomaly)
+    if not state.get("active"):
+        _save_mode(anomaly, gamma, "solo")
     _add_root_appid(state, root)
     originals = set(state.get("originals", []))
     done: list[str] = []
@@ -385,11 +429,68 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
     _save_state(anomaly, state)
     if state.get("kind", KIND_GAMMA) == KIND_GAMMA:
         _set_mod_enabled(gamma, mo2_profile, True)
-    # A solo session since the last switch may have wiped the xrr_* lines.
+    _load_mode(anomaly, gamma, "coop")
+    # The first switch has no co-op copy yet, and a solo session may have
+    # wiped the xrr_* lines.
     values, present = read_settings(anomaly)
     missing = {key: values[key] for key in state.get("settings", {}) if key not in present}
     if missing:
         write_settings(anomaly, missing)
+
+
+def _mode_files(anomaly, gamma) -> dict[str, Path]:
+    """The per-mode settings files by snapshot name: user.ltx and every MCM file."""
+    files = {"user.ltx": user_ltx_path(anomaly)}
+    if install_kind(anomaly) == KIND_ANOMALY:  # plain Anomaly: no MO2, one MCM file
+        files["anomaly/" + MCM_FILE] = Path(anomaly).expanduser() / "gamedata" / "configs" / MCM_FILE
+    if str(gamma).strip():
+        files.update({"mcm/" + rel: path for rel, path in mcm_files(gamma)})
+    return files
+
+
+def _created_by_game(name: str) -> bool:
+    """An MCM file the game or MO2 writes on first use, not one a mod ships:
+    missing from a side's snapshot means that side never had it."""
+    return name == "anomaly/" + MCM_FILE or name.startswith("mcm/overwrite/")
+
+
+def _save_mode(anomaly, gamma, mode: str) -> None:
+    dest = state_dir(anomaly) / "modes" / mode
+    dest.mkdir(parents=True, exist_ok=True)  # an empty snapshot still says "none of these"
+    for name, path in _mode_files(anomaly, gamma).items():
+        if path.is_file():
+            _copy_atomic(path, dest / name)
+        elif _created_by_game(name):
+            (dest / name).unlink(missing_ok=True)
+
+
+def _load_mode(anomaly, gamma, mode: str) -> None:
+    src = state_dir(anomaly) / "modes" / mode
+    if not src.is_dir():
+        return
+    # A file the other side created (MO2 writes a new MCM file to overwrite/)
+    # would carry its values over; the side being left already saved it.
+    for name, path in _mode_files(anomaly, gamma).items():
+        if _created_by_game(name) and not (src / name).is_file():
+            path.unlink(missing_ok=True)
+    root = Path(gamma).expanduser() if str(gamma).strip() else None
+    for saved in src.rglob("*"):
+        name = saved.relative_to(src).as_posix()
+        if not saved.is_file():
+            continue
+        if name == "user.ltx":
+            target = user_ltx_path(anomaly)
+        elif name == "anomaly/" + MCM_FILE:
+            target = Path(anomaly).expanduser() / "gamedata" / "configs" / MCM_FILE
+            if not target.parent.is_dir():
+                continue
+        elif root is not None and name.startswith("mcm/"):
+            target = root / name[len("mcm/"):]
+            if not target.parent.is_dir():
+                continue  # the mod was removed since; don't recreate it
+        else:
+            continue
+        _copy_atomic(saved, target)
 
 
 def _restore(anomaly: Path, root: Path, rels, originals) -> None:
@@ -412,6 +513,11 @@ def switch_to_singleplayer(anomaly, gamma, mo2_profile) -> None:
     if state is None:
         return
     anomaly = Path(anomaly).expanduser()
+    # Already off (uninstall from singleplayer): the live user.ltx and MCM
+    # files are the singleplayer side, newer than the copy under modes/.
+    leaving_coop = bool(state.get("active"))
+    if leaving_coop:
+        _save_mode(anomaly, gamma, "coop")
     originals = set(state.get("originals", []))
     ours = [
         rel for rel, digest in state["files"].items()
@@ -422,6 +528,8 @@ def switch_to_singleplayer(anomaly, gamma, mo2_profile) -> None:
     state["settings"] = {**state.get("settings", {}), **{key: _format(key, values[key]) for key in present}}
     state["active"] = False
     _save_state(anomaly, state)
+    if leaving_coop:
+        _load_mode(anomaly, gamma, "solo")
     if state.get("kind", KIND_GAMMA) == KIND_GAMMA:
         _set_mod_enabled(gamma, mo2_profile, False)
 
@@ -447,7 +555,7 @@ def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
         moved = ["gamedata/" + f.relative_to(source).as_posix() for f in sorted(source.rglob("*")) if f.is_file()]
         if any(rel in state["files"] for rel in moved):
             # Switching back would take the engine half's copy with it.
-            raise CoopError("This xrRazom edition can't be switched. Install the zip again for plain Anomaly.")
+            raise CoopError("This xrRazom edition can't be switched. Install the zip again for Anomaly.")
         for rel in moved:
             _copy_atomic(source / rel[len("gamedata/"):], root / "files" / rel)
             state["files"][rel] = _sha256(root / "files" / rel)
@@ -463,9 +571,7 @@ def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
             for rel in moved:
                 _copy_atomic(root / "files" / rel, staging / rel)
             write_basic_meta_ini(staging, (state.get("release") or {}).get("title") or MOD_NAME)
-            shutil.rmtree(mod_dir, ignore_errors=True)
-            mod_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(staging), mod_dir)  # may cross filesystems
+            _swap_dir(staging, mod_dir)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         for rel in moved:
@@ -486,6 +592,8 @@ def _remove_mod(gamma, mo2_profile) -> None:
 
 
 def uninstall(anomaly, gamma, mo2_profile) -> None:
+    if not str(anomaly).strip():
+        raise CoopError("Pick an Anomaly folder first.")  # Path("") is the cwd
     was = install_kind(anomaly)
     switch_to_singleplayer(anomaly, gamma, mo2_profile)
     if was == KIND_GAMMA:
@@ -537,7 +645,7 @@ def launch_block_reason(anomaly, *, coop_launch: bool, direct: bool = False) -> 
 
     The engine files on disk decide what actually runs, so a "solo" launch with
     co-op applied would start the co-op engine. ``direct`` is a launch without
-    MO2: GAMMA's co-op needs MO2 for the mod's gamedata, plain Anomaly's has
+    MO2: GAMMA's co-op needs MO2 for the mod's gamedata, Anomaly's has
     it loose and must not run under GAMMA's mods.
     """
     try:
@@ -548,7 +656,7 @@ def launch_block_reason(anomaly, *, coop_launch: bool, direct: bool = False) -> 
         return "A GAMMA update or Anomaly repair put the original game files back over co-op. Open the Multiplayer page to re-apply co-op or switch to singleplayer."
     if mode == COOP and install_kind(anomaly) == KIND_ANOMALY:
         if not direct:
-            return "Co-op is set up for plain Anomaly. Switch co-op off on the Multiplayer page to play GAMMA."
+            return "Co-op is set up for Anomaly. Switch co-op off on the Multiplayer page to play GAMMA."
     elif mode == COOP and direct:
         return "Co-op is on, and co-op only works through Mod Organizer 2. Use Launch Co-op instead."
     if mode == COOP and not coop_launch:
@@ -740,6 +848,141 @@ def write_last_ip(anomaly, gamma, mo2_profile, address: str) -> None:
             body = line + "\n" + body
         text = text[: section.start(1)] + body + text[section.end(1):]
     atomic.write_text(path, text)
+
+
+# -- export / import -------------------------------------------------------------
+#: ``manifest.json`` "type" of a co-op export, so a game backup or an
+#: xrRazom zip is never mistaken for one.
+EXPORT_TYPE = "commander-coop"
+
+
+def _save_roots(anomaly, gamma, mo2_profile) -> dict[str, Path]:
+    """Zip folder -> every place a save can be (game_stats.save_folders):
+    the Anomaly folder, MO2's per-profile local saves, and MO2's overwrite."""
+    names = ("saves", "mo2-saves", "overwrite-saves") if str(gamma).strip() else ("saves",)
+    return dict(zip(names, save_folders(anomaly, gamma if str(gamma).strip() else None, mo2_profile)))
+
+
+def _coop_files(anomaly, gamma) -> dict[str, Path]:
+    """The co-op side of user.ltx and the MCM files, by snapshot name: live
+    while co-op is on, else the copy the last switch put under ``modes/``."""
+    if is_active(anomaly):
+        return {name: path for name, path in _mode_files(anomaly, gamma).items() if path.is_file()}
+    src = state_dir(anomaly) / "modes" / "coop"
+    return {f.relative_to(src).as_posix(): f for f in sorted(src.rglob("*")) if f.is_file()} if src.is_dir() else {}
+
+
+def export_session(anomaly, gamma, mo2_profile, dest, report=lambda _line: None) -> Path:
+    """Write every save plus the co-op settings, keybinds, MCM values, Steam
+    game and join address to the zip ``dest``."""
+    state = load_state(anomaly)
+    if state is None:
+        raise CoopError("xrRazom Co-op is not installed.")
+    dest = Path(dest).expanduser()
+    if dest.suffix.lower() != ".zip":
+        dest = dest.with_name(dest.name + ".zip")
+    try:
+        files = [(f"{top}/{f.relative_to(folder).as_posix()}", f)
+                 for top, folder in _save_roots(anomaly, gamma, mo2_profile).items() if folder.is_dir()
+                 for f in sorted(folder.rglob("*")) if f.is_file() and not f.is_symlink()]
+        files += [("coop/" + name, path) for name, path in _coop_files(anomaly, gamma).items()]
+        values, _present = _read_settings(anomaly)  # read_settings() may write
+        manifest = {
+            "format": 1,
+            "type": EXPORT_TYPE,
+            "created": time.time(),
+            "xrrazom": state.get("version", ""),
+            "kind": state.get("kind", KIND_GAMMA),
+            "settings": {key: _format(key, value) for key, value in values.items()},
+            "appid": steam_appid(anomaly),
+            "last_ip": read_last_ip(anomaly, gamma, mo2_profile),
+            "saves": sum(1 for name, _path in files if name.lower().endswith(".scop")),
+        }
+        _write_zip(dest, files, manifest, report)
+    except (BackupError, OSError) as exc:
+        raise CoopError(f"Could not write the export: {exc}") from exc
+    return dest
+
+
+def read_export(path) -> dict:
+    """The manifest of a co-op export; CoopError when ``path`` isn't one."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            bad = [n for n in archive.namelist() if _safe_member(n) is None]
+            if bad:
+                raise CoopError(f"Unsafe path in archive: {bad[0]}")
+            _check_unpacked_size(archive)
+            if archive.getinfo(MANIFEST).file_size > 1_000_000:
+                raise KeyError(MANIFEST)
+            manifest = json.loads(archive.read(MANIFEST).decode("utf-8"))
+    except (KeyError, ValueError, zipfile.BadZipFile, OSError) as exc:
+        raise CoopError("This isn't a co-op export from COMMANDER.") from exc
+    if not isinstance(manifest, dict) or manifest.get("type") != EXPORT_TYPE:
+        raise CoopError("This isn't a co-op export from COMMANDER.")
+    return manifest
+
+
+def _extract(archive: zipfile.ZipFile, name: str, dest: Path) -> None:
+    if _safe_member(name) is None:
+        raise CoopError(f"Unsafe path in archive: {name}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent)
+    try:
+        with os.fdopen(fd, "wb") as out, archive.open(name) as src:
+            shutil.copyfileobj(src, out, 1 << 20)
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def import_session(anomaly, gamma, mo2_profile, profile_name: str, path, report=lambda _line: None) -> None:
+    """Put an export back. Every file it replaces is first kept in a
+    "before restore" backup, listed with the profile's other backups."""
+    manifest = read_export(path)
+    if load_state(anomaly) is None:
+        raise CoopError("Install xrRazom Co-op first, then import.")
+    roots = _save_roots(anomaly, gamma, mo2_profile)
+    snapshot = state_dir(anomaly) / "modes" / "coop"
+    with zipfile.ZipFile(path) as archive:
+        plan = []
+        for name in archive.namelist():
+            parts = PurePosixPath(name).parts
+            if name.endswith("/") or len(parts) < 2:
+                continue
+            if parts[0] in roots:
+                plan.append((name, roots[parts[0]].joinpath(*parts[1:])))
+            elif parts[0] == "coop":
+                plan.append((name, snapshot.joinpath(*parts[1:])))
+        replaced = [(name, dest) for name, dest in plan if not name.startswith("coop/") and dest.is_file()]
+        # Co-op on: the snapshot goes live below, over these files.
+        live = _mode_files(anomaly, gamma) if is_active(anomaly) else {}
+        replaced += [(name, live[name[len("coop/"):]]) for name, _dest in plan
+                     if name.startswith("coop/") and live.get(name[len("coop/"):], Path()).is_file()]
+        try:
+            if replaced:
+                report(f"Keeping a copy of the {len(replaced)} files this import replaces...")
+                create_backup_of_files(profile_name, replaced, report)
+            for name, dest in plan:
+                _extract(archive, name, dest)
+        except BackupError as exc:
+            raise CoopError(str(exc)) from exc
+    if is_active(anomaly):
+        _load_mode(anomaly, gamma, "coop")
+    settings = {}
+    for key, raw in (manifest.get("settings") or {}).items():
+        if key in SETTINGS:
+            try:
+                settings[key] = _parse(key, raw)
+            except ValueError:
+                pass
+    if settings:
+        write_settings(anomaly, settings)
+    if manifest.get("appid") in (COP_APPID, SPACEWAR_APPID):
+        set_steam_appid(anomaly, manifest["appid"])
+    if isinstance(manifest.get("last_ip"), str) and manifest["last_ip"].strip():
+        write_last_ip(anomaly, gamma, mo2_profile, manifest["last_ip"])
+    report(f"Imported {len(plan)} files.")
 
 
 # -- addresses -------------------------------------------------------------------

@@ -189,9 +189,10 @@ def _raw_repo_url(profile, filename: str) -> str:
     """Raw.githubusercontent URL for a file in the GAMMA repo."""
     owner, repo = _repo_owner_and_name(profile)
     branch = _repo_branch(profile)
+    quote = urllib.parse.quote  # a "#" or "?" in the profile must not end the path
     return (
-        f"https://raw.githubusercontent.com/{owner}/{repo}/"
-        f"refs/heads/{branch}/{filename}"
+        f"https://raw.githubusercontent.com/{quote(owner)}/{quote(repo)}/"
+        f"refs/heads/{quote(branch, safe='/')}/{filename}"
     )
 
 
@@ -750,13 +751,16 @@ def rebuild_modpack_list(
             lines.append("\t".join(parts))
         # No MD5 to blank: leaving the line out (Added) is what forces it.
 
+    txt = profile_dir / "modpack_maker_list.txt"
+    js = profile_dir / "modpack_maker_list.json"
     try:
-        write_text(profile_dir / "modpack_maker_list.txt", "\n".join(lines) + "\n")
-        write_text(
-            profile_dir / "modpack_maker_list.json",
-            json.dumps([_cli_json_record(line) for line in lines], indent=2),
-        )
+        write_text(js, json.dumps([_cli_json_record(line) for line in lines], indent=2))
+        write_text(txt, "\n".join(lines) + "\n")
     except OSError:
+        # Either file alone would block a retry ("a list exists") and leave
+        # the two out of step, so neither is kept.
+        js.unlink(missing_ok=True)
+        txt.unlink(missing_ok=True)
         return None
     return unconfirmed
 

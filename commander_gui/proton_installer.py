@@ -12,6 +12,7 @@ import shutil
 import tarfile
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -115,11 +116,18 @@ def _find_assets(release_tag: str) -> tuple[str, str]:
 
     Raises ``ValueError`` if the release or assets are not found.
     """
+    if not re.fullmatch(r"GE-Proton[\w.-]+", release_tag):
+        raise ValueError(f"Not a GE-Proton release tag: {release_tag!r}")
     rel = _api_get(f"{_GITHUB_API}/tags/{release_tag}")
     try:
         tar_url, sum_url, _name = _pick_assets(rel.get("assets", []), host_arch())
     except ValueError as exc:
         raise ValueError(f"{exc} ({release_tag})") from exc
+    for url in (tar_url, sum_url):
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        if parts.scheme != "https" or not (host == "github.com" or host.endswith(".githubusercontent.com")):
+            raise ValueError(f"Unexpected download host for {release_tag}: {host}")
     return tar_url, sum_url
 
 

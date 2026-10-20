@@ -16,9 +16,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from commander_gui.steam_shortcuts import (
-    _shortcut_appid,
     COOP_SHORTCUT_NAME,
     ShortcutsFileError,
+    _shortcut_appid,
     add_commander_shortcuts,
     add_or_update_shortcut,
     add_to_steam,
@@ -726,3 +726,36 @@ class CoopShortcutTests(unittest.TestCase):
             ("Proton Hotfix", "proton_hotfix"),
         ):
             self.assertEqual(compat_tool_name(Path("/nowhere") / folder), name)
+
+
+class SteamHardeningTests(unittest.TestCase):
+    def test_compat_tool_name_with_quote_refused(self):
+        from commander_gui import steam_shortcuts
+
+        text = '"Valve"\n{\n\t"Steam"\n\t{\n\t}\n}\n'
+        with self.assertRaises(ValueError):
+            steam_shortcuts.set_compat_tool(text, 1, 'x"\n"evil" "1')
+
+    def test_plain_anomaly_arguments_are_quoted(self):
+        from commander_gui import steam_shortcuts
+
+        out = steam_shortcuts.coop_launch_options("/p", "", "t", 1, "-a $(id) 'b c'", mo2=False)
+        self.assertIn("'$(id)'", out)
+        self.assertIn("'b c'", out)
+
+
+class CoopShortcutRollbackTests(unittest.TestCase):
+    def test_shortcuts_restored_when_config_write_fails(self):
+        from commander_gui import steam_shortcuts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = Path(tmp) / "userdata" / "1" / "config" / "shortcuts.vdf"
+            vdf.parent.mkdir(parents=True)
+            fields = dict(exe="/x/run", start_dir="/x", launch_options="a", proton_name=None)
+            steam_shortcuts.write_coop_shortcut(vdf, **fields)
+            before = vdf.read_bytes()
+            fields.update(launch_options="b", proton_name="GE-Proton9-1")
+            with patch.object(steam_shortcuts, "_write_compat_config", side_effect=OSError("full")):
+                with self.assertRaises(OSError):
+                    steam_shortcuts.write_coop_shortcut(vdf, **fields)
+            self.assertEqual(vdf.read_bytes(), before)

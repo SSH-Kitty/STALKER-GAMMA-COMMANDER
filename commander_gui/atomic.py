@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -14,6 +15,19 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
 _WRITE_LOCK = threading.RLock()
+
+
+def split_lines(text: str) -> list[str]:
+    """``text.splitlines()`` for files that only break on \\n, \\r\\n or \\r.
+
+    ``str.splitlines()`` also breaks on U+2028, U+0085, \\x0b, \\x0c and
+    \\x1c-\\x1e, so a mod name or INI value holding one was split in two
+    and rewritten as two lines on the next save.
+    """
+    lines = re.split(r"\r\n|\r|\n", text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def write_text(path: Path, text: str) -> None:
@@ -78,6 +92,14 @@ def _write(path: Path, data: bytes, *, lock: bool) -> None:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, path)
+            try:  # make the rename itself survive a power cut
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
             if lock_fd is not None:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 os.close(lock_fd)

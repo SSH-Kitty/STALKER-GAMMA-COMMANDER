@@ -29,6 +29,7 @@ with no special-casing.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -278,7 +279,8 @@ def add_commander_shortcuts(
     root = read_shortcuts(vdf_path)
     if vdf_path.is_file():
         backup = vdf_path.with_name(vdf_path.name + ".gammagui.bak")
-        atomic.write_bytes(backup, vdf_path.read_bytes(), lock=False)
+        if not backup.exists():  # keep the first copy: it is the untouched original
+            atomic.write_bytes(backup, vdf_path.read_bytes(), lock=False)
     else:
         vdf_path.parent.mkdir(parents=True, exist_ok=True)
     deck_options = f"{base_launch_options} --deck".strip()
@@ -475,7 +477,11 @@ def list_steam_accounts() -> list[tuple[str, Path]]:
 
 
 def _is_flatpak_steam(steam_root: Path) -> bool:
-    return ".var/app/com.valvesoftware.Steam" in str(steam_root)
+    marker = ".var/app/com.valvesoftware.Steam"
+    try:
+        return marker in str(steam_root) or marker in str(steam_root.resolve())
+    except OSError:
+        return marker in str(steam_root)
 
 
 def steam_launch_command(steam_root: Path) -> list[str]:
@@ -551,8 +557,8 @@ def _stop_hung_steam() -> bool:
     The user already agreed to a restart, so it is terminated, then killed.
     """
     pkill = shutil.which("pkill")
-    if not pkill:
-        return False
+    if not pkill or os.environ.get("SteamGamepadUI"):
+        return False  # Game Mode: Steam is the session, killing it ends the session
     for sig, wait in (("TERM", 10.0), ("KILL", 5.0)):
         subprocess.run(
             [pkill, f"-{sig}", "-x", "steam"],
@@ -746,6 +752,10 @@ def coop_launch_options(
     """
     q = shlex.quote
     if not mo2:
+        try:
+            arguments = " ".join(q(a) for a in shlex.split(arguments))
+        except ValueError:
+            arguments = q(arguments)
         return f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command% {arguments}".rstrip()
     run = f"run {q('--arguments=' + arguments)} " if arguments else "run "
     profile = f"-p {q(mo2_profile)} " if mo2_profile else ""
@@ -824,6 +834,8 @@ def set_compat_tool(text: str, appid: int, name: str) -> str:
     Raises ValueError for a file without a recognisable Steam section rather
     than guessing where the mapping belongs.
     """
+    if not re.fullmatch(r"[^\"\\\x00-\x1f]+", name):
+        raise ValueError(f"Unusable compatibility tool name: {name!r}")
     entry = f'"{appid}"\n\t\t\t\t\t{{\n\t\t\t\t\t\t"name"\t\t"{name}"\n\t\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t\t"priority"\t\t"250"\n\t\t\t\t\t}}'
     span = _mapping_span(text)
     if span is None:
@@ -924,23 +936,37 @@ def write_coop_shortcut(
     )
 
     if vdf_path.is_file():
-        atomic.write_bytes(
-            vdf_path.with_name(vdf_path.name + ".gammagui.bak"), vdf_path.read_bytes(), lock=False
-        )
+        backup = vdf_path.with_name(vdf_path.name + ".gammagui.bak")
+        if not backup.exists():
+            atomic.write_bytes(backup, vdf_path.read_bytes(), lock=False)
     else:
         vdf_path.parent.mkdir(parents=True, exist_ok=True)
+    before = vdf_path.read_bytes() if vdf_path.is_file() else None
     write_shortcuts(vdf_path, set_shortcuts_map(root, shortcuts))
+    try:
+        _write_compat_config(config, new_config)
+    except OSError:
+        # A shortcut without its Proton mapping launches with the wrong tool:
+        # put the shortcuts back as they were rather than keep half the change.
+        if before is None:
+            vdf_path.unlink(missing_ok=True)
+        else:
+            atomic.write_bytes(vdf_path, before, lock=False)
+        raise
+    install_artwork(vdf_path, appid, COOP_ARTWORK_DIR)
+    return appid
+
+
+def _write_compat_config(config: Path, new_config: str | None) -> None:
     if new_config is not None:
         if config.is_file():
-            atomic.write_bytes(
-                config.with_name(config.name + ".gammagui.bak"), config.read_bytes(), lock=False
-            )
+            backup = config.with_name(config.name + ".gammagui.bak")
+            if not backup.exists():
+                atomic.write_bytes(backup, config.read_bytes(), lock=False)
         else:
             config.parent.mkdir(parents=True, exist_ok=True)
         # No lock files left behind in Steam's own folders (see write_shortcuts).
         atomic.write_bytes(config, new_config.encode("utf-8"), lock=False)
-    install_artwork(vdf_path, appid, COOP_ARTWORK_DIR)
-    return appid
 
 
 def coop_launch_url(exe: str) -> str:

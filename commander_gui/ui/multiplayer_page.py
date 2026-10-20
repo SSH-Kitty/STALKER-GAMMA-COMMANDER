@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -35,15 +36,15 @@ from PySide6.QtWidgets import (
 
 from .. import coop
 from .common import (
-    notice,
     BackgroundTask,
     PlainSpinBox,
-    gamma_installed,
     game_running,
+    gamma_installed,
     info_label,
     install_hover_grow_text,
     make_card,
     mo2_running,
+    notice,
     open_url,
     play_click_sound,
     section_label,
@@ -494,7 +495,7 @@ class MultiplayerPage(QWidget):
         setup.addWidget(self.intro_label)
         # Only asked when the profile has GAMMA; plain Anomaly has no choice.
         self.gamma_pill = _tab(tr("GAMMA"))
-        self.anomaly_pill = _tab(tr("Plain Anomaly"))
+        self.anomaly_pill = _tab(tr("Anomaly"))
         for button, kind in ((self.gamma_pill, coop.KIND_GAMMA), (self.anomaly_pill, coop.KIND_ANOMALY)):
             button.clicked.connect(lambda _c=False, k=kind: self._pick_kind(k))
         self.kind_box = QWidget()
@@ -619,12 +620,12 @@ class MultiplayerPage(QWidget):
         dash.addWidget(self.reverted_label)
         # Installed for GAMMA (or before plain Anomaly was supported), but
         # this profile has no GAMMA: the mod's files would never load.
-        self.mismatch_button = QPushButton(tr("Reinstall for plain Anomaly"))
+        self.mismatch_button = QPushButton(tr("Reinstall for Anomaly"))
         self.mismatch_button.setObjectName("secondary")
         self.mismatch_button.clicked.connect(lambda: self._install_zip(self._found) if self._found else self._pick_zip())
         self.mismatch_box = _action_row(
             tr("Set up for GAMMA"),
-            tr("This co-op install was made for GAMMA, but this profile has no GAMMA. Reinstall it for plain Anomaly to play."),
+            tr("This co-op install was made for GAMMA, but this profile has no GAMMA. Reinstall it for Anomaly to play."),
             self.mismatch_button,
         )
         dash.addWidget(self.mismatch_box)
@@ -948,15 +949,39 @@ class MultiplayerPage(QWidget):
         kind_box.setContentsMargins(0, 0, 0, 0)
         kind_box.setSpacing(8)
         kind_box.addWidget(_action_row(
-            tr("GAMMA or plain Anomaly"),
-            tr("Move co-op between GAMMA and plain Anomaly. No zip needed, and co-op stays on or off as it is."),
+            tr("GAMMA or Anomaly"),
+            tr("Move co-op between GAMMA and Anomaly. No zip needed, and co-op stays on or off as it is."),
             self.kind_button,
         ))
         kind_box.addWidget(_divider())
         layout.addWidget(self.kind_manage)
+        # Plain Anomaly co-op starts the game exe the launcher last saved
+        # (play_page.plain_game_exe), so the launcher is where it's changed.
+        launcher = QPushButton(tr("Open Anomaly Launcher"))
+        launcher.clicked.connect(lambda: self.window._ensure_page("play").open_anomaly_launcher())
+        self.launcher_manage = QWidget()
+        self.launcher_manage.setObjectName("panelTransparent")
+        launcher_box = QVBoxLayout(self.launcher_manage)
+        launcher_box.setContentsMargins(0, 0, 0, 0)
+        launcher_box.setSpacing(8)
+        launcher_box.addWidget(_action_row(
+            tr("Renderer and game options"),
+            tr("Co-op starts the game with the renderer saved in the Anomaly Launcher, such as DX11 or DX9. Change it there, press Save Settings, then close the launcher."),
+            launcher,
+        ))
+        launcher_box.addWidget(_divider())
+        layout.addWidget(self.launcher_manage)
         check = QPushButton(tr("Check moddb for updates"))
         check.clicked.connect(lambda: open_url(coop.MODDB_PAGE))
         layout.addWidget(_action_row(tr("New releases"), tr("Everyone in a session must use the same version."), check))
+        layout.addWidget(_divider())
+        self.export_button = QPushButton(tr("Export…"))
+        self.export_button.clicked.connect(lambda: self._export())
+        layout.addWidget(_action_row(tr("Export co-op"), tr("Save your co-op settings, keybinds, MCM values and all your saves to a zip."), self.export_button))
+        layout.addWidget(_divider())
+        self.import_button = QPushButton(tr("Import…"))
+        self.import_button.clicked.connect(self._import)
+        layout.addWidget(_action_row(tr("Import co-op"), tr("Bring back an exported zip. Files it replaces are backed up first."), self.import_button))
         layout.addWidget(_divider())
         self.uninstall_button = QPushButton(tr("Uninstall co-op"))
         self.uninstall_button.setObjectName("danger")
@@ -966,83 +991,82 @@ class MultiplayerPage(QWidget):
 
     def _help_tab(self) -> QWidget:
         """The xrRazom guide from moddb, reworded for this page's controls."""
-        # English only for now: wrap these in tr() when they get translated.
         page, layout = _panel()
         layout.setSpacing(12)
 
-        start, left = _section("Getting started")
+        start, left = _section(tr("Getting started"))
         left.setSpacing(14)
         for number, (title, text) in enumerate((
-            ("Pick your role and session", "Choose Hosting or Joining above. The whole party picks the same session type and Steam game."),
-            ("Set your player name", "On the Player tab. The host knows you by this name, so keep it the same."),
-            ("Launch Co-op", "COMMANDER sets the game up for the choices above."),
-            ("Play together", "The host loads a save or starts a new game, then friends join. The Hosting and Joining tabs walk you through it."),
+            (tr("Pick your role and session"), tr("Choose Hosting or Joining above. The whole party picks the same session type and Steam game.")),
+            (tr("Set your player name"), tr("On the Player tab. The host knows you by this name, so keep it the same.")),
+            (tr("Launch Co-op"), tr("COMMANDER sets the game up for the choices above.")),
+            (tr("Play together"), tr("The host loads a save or starts a new game, then friends join. The Hosting and Joining tabs walk you through it.")),
         ), 1):
             left.addWidget(_step(number, title, text))
         left.addStretch(1)
         left.addWidget(_divider())
-        left.addWidget(_hint("Everyone needs the same mods and xrRazom version as the host."))
+        left.addWidget(_hint(tr("Everyone needs the same mods and xrRazom version as the host.")))
 
-        works, right = _section("How it works")
+        works, right = _section(tr("How it works"))
         _facts(right, (
-            ("The host keeps the world", "Everything is created and saved on the host's PC. Everyone else mirrors it."),
-            ("Join any time", "Up to 5 players, the host included. Friends can join at any point in the game and leave whenever they like."),
-            ("Your name is your profile", "Change it and the host sees a new player with a fresh character."),
-            ("The host sets the rules", "Session rules on the Hosting tab apply to everyone."),
-            ("Call of Pripyat or Spacewar", "Everyone picks the same one. Call of Pripyat must be owned. Spacewar is free."),
-            ("GAMMA or plain Anomaly", "One Anomaly folder runs co-op for one of them at a time. To keep both ready, give plain Anomaly its own folder and profile."),
+            (tr("The host keeps the world"), tr("Everything is created and saved on the host's PC. Everyone else mirrors it.")),
+            (tr("Join any time"), tr("Up to 5 players, the host included. Friends can join at any point in the game and leave whenever they like.")),
+            (tr("Your name is your profile"), tr("Change it and the host sees a new player with a fresh character.")),
+            (tr("The host sets the rules"), tr("Session rules on the Hosting tab apply to everyone.")),
+            (tr("Call of Pripyat or Spacewar"), tr("Everyone picks the same one. Call of Pripyat must be owned. Spacewar is free.")),
+            (tr("GAMMA or Anomaly"), tr("One Anomaly folder runs co-op for one of them at a time. To keep both ready, use a second Anomaly folder and profile for Anomaly co-op.")),
         ))
         _columns(layout, start, works)
 
-        game, left = _section("In game")
+        game, left = _section(tr("In game"))
         left.setSpacing(10)
         for key, text in (
-            ("F5 / F9", "Quicksave and quickload, if the host allows it."),
-            ("Send to", "Right-click an item or money near a player to give it to them."),
-            ("Tag / Chat", "Bind keys under Settings → Control → Keybinds → xrRazom Co-op."),
-            ("Rescue", "Pick up a downed teammate, if the host turned it on."),
-            ("Anabiotic", "Protects you from the current emission."),
+            (tr("F5 / F9"), tr("Quicksave and quickload, if the host allows it.")),
+            (tr("Send to"), tr("Right-click an item or money near a player to give it to them.")),
+            (tr("Tag / Chat"), tr("Bind keys under Settings → Control → Keybinds → xrRazom Co-op.")),
+            (tr("Rescue"), tr("Pick up a downed teammate, if the host turned it on.")),
+            (tr("Anabiotic"), tr("Protects you from the current emission.")),
         ):
             left.addWidget(_key_row(key, text))
         left.addStretch(1)
         left.addWidget(_divider())
-        left.addWidget(_hint("Companions follow the host. Only the host can give them orders."))
+        left.addWidget(_hint(tr("Companions follow the host. Only the host can give them orders.")))
 
-        fixes, right = _section("Troubleshooting")
+        fixes, right = _section(tr("Troubleshooting"))
         _facts(right, (
-            ("Join rejected", "Your mods differ from the host's. Search the game log for [xrRazom] cfg-diff to find the file."),
-            ("Crashed or out of sync", "Quit to the main menu and join again. Your progress is kept on the host."),
-            ("Quest won't progress", "Give the quest item to the host, or ask the host to talk to the NPC."),
-            ("Engine reverted", "A GAMMA update or repair put the original files back. Click Re-apply co-op."),
+            (tr("Join rejected"), tr("Your mods differ from the host's. Search the game log for [xrRazom] cfg-diff to find the file.")),
+            (tr("Crashed or out of sync"), tr("Quit to the main menu and join again. Your progress is kept on the host.")),
+            (tr("Quest won't progress"), tr("Give the quest item to the host, or ask the host to talk to the NPC.")),
+            (tr("Engine reverted"), tr("A GAMMA update or repair put the original files back. Click Re-apply co-op.")),
         ))
         _columns(layout, game, fixes)
 
-        issues, box = _section("Known issues")
+        issues, box = _section(tr("Known issues"))
         grid = QGridLayout()
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(8)
         for index, text in enumerate((
-            "Saving, loading and level changes can crash now and then. Save often.",
-            "Don't continue from an autosave made while joined. Only the host's saves hold the full game.",
-            "Weather can look slightly different for each player.",
-            "Some quests and dialogs depend on your faction.",
-            "The debug menu can desync the session. Some options, like Weather, stay in the save.",
-            "Not in co-op yet: vehicles, personal companions and Azazel mode.",
+            tr("Saving, loading and level changes can crash now and then. Save often."),
+            tr("Don't continue from an autosave made while joined. Only the host's saves hold the full game."),
+            tr("Weather can look slightly different for each player."),
+            tr("Some quests and dialogs depend on your faction."),
+            tr("The debug menu can desync the session. Some options, like Weather, stay in the save."),
+            tr("Not in co-op yet: vehicles, personal companions and Azazel mode."),
         )):
             label = _hint("• " + text)
             grid.addWidget(label, index // 2, index % 2)
         label.setObjectName("warn")  # the missing-features line, so it stands out
         box.addLayout(grid)
         box.addWidget(_divider())
-        gamma = info_label("GAMMA works with co-op, but not every mod has been tested together. Expect bugs.")
+        gamma = info_label(tr("GAMMA works with co-op, but not every mod has been tested together. Expect bugs."))
         gamma.setObjectName("warn")
         box.addWidget(gamma)
         layout.addWidget(issues)
 
         layout.addWidget(_divider())
-        discord = QPushButton("Open Discord")
+        discord = QPushButton(tr("Open Discord"))
         discord.clicked.connect(lambda: open_url(coop.DISCORD_URL))
-        layout.addWidget(_action_row("Bugs and questions", "The xrRazom Discord has support, bug reports and patches for other mods.", discord))
+        layout.addWidget(_action_row(tr("Bugs and questions"), tr("The xrRazom Discord has support, bug reports and patches for other mods."), discord))
         return page
 
     # ---------------------------------------------------------------- state
@@ -1135,14 +1159,15 @@ class MultiplayerPage(QWidget):
         self.gamma_pill.setChecked(not plain)
         self.anomaly_pill.setChecked(plain)
         if not has_gamma:
-            hint = tr("No GAMMA found, so co-op is set up for plain Anomaly. Everything goes into your Anomaly folder.")
+            hint = tr("No GAMMA found, so co-op is set up for Anomaly. Everything goes into your Anomaly folder.")
         elif plain:
             hint = tr("Everything goes into your Anomaly folder. While co-op is on, GAMMA can't start: switch to singleplayer first to play GAMMA.")
         else:
             hint = tr("The co-op files are added to GAMMA as a Mod Organizer mod.")
         self.kind_hint.setText(hint)
         self.kind_manage.setVisible(installed and has_gamma)
-        self.kind_button.setText(tr("Switch to GAMMA") if plain else tr("Switch to plain Anomaly"))
+        self.launcher_manage.setVisible(installed and plain)
+        self.kind_button.setText(tr("Switch to GAMMA") if plain else tr("Switch to Anomaly"))
         profile = self._profile()
         mismatch = installed and not has_gamma and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
         self.mismatch_box.setVisible(mismatch)
@@ -1187,7 +1212,7 @@ class MultiplayerPage(QWidget):
             set_hover_grow_text(self.hero_button, tr("Quit Co-op"))
         self.hero_button.setEnabled(idle and (quit_coop or not launching) and not mismatch)
         self.sp_button.setEnabled(idle and not launching)
-        for button in (self.zip_button, self.other_zip_button, self.update_button, self.uninstall_button, self.mismatch_button, self.kind_button):
+        for button in (self.zip_button, self.other_zip_button, self.update_button, self.export_button, self.import_button, self.uninstall_button, self.mismatch_button, self.kind_button):
             button.setEnabled(idle)
         found = self._found is not None
         self.found_label.setVisible(found)
@@ -1470,9 +1495,9 @@ class MultiplayerPage(QWidget):
         to_plain = coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
         kind = coop.KIND_ANOMALY if to_plain else coop.KIND_GAMMA
         self._start(
-            tr("Switching co-op to plain Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
+            tr("Switching co-op to Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
             coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, kind,
-            done=tr("Co-op is set up for plain Anomaly") if to_plain else tr("Co-op is set up for GAMMA"),
+            done=tr("Co-op is set up for Anomaly") if to_plain else tr("Co-op is set up for GAMMA"),
         )
 
     def _set_appid(self, appid: int) -> None:
@@ -1488,14 +1513,72 @@ class MultiplayerPage(QWidget):
         profile = self._ready()
         if profile is None:
             return
-        if QMessageBox.question(
+        SB = QMessageBox.StandardButton
+        answer = QMessageBox.question(
             self, tr("Uninstall co-op?"),
             tr("This removes xrRazom Co-op and puts your original game files back."),
-            points=(tr("Your co-op saves are kept."), tr("You can install co-op again at any time.")),
-            labels={QMessageBox.StandardButton.Yes: tr("Uninstall"), QMessageBox.StandardButton.No: tr("Cancel")},
+            SB.Save | SB.Yes | SB.No, SB.Save,
+            points=(
+                tr("Your co-op saves are kept."),
+                tr("Export first to keep your co-op settings and saves in a zip."),
+                tr("You can install co-op again at any time."),
+            ),
+            labels={SB.Save: tr("Export first"), SB.Yes: tr("Uninstall"), SB.No: tr("Cancel")},
+        )
+        uninstall = lambda _result=None: self._start(
+            tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile,
+            done=tr("xrRazom Co-op uninstalled"),
+        )
+        if answer == SB.Save:
+            self._export(then=uninstall)  # uninstalls only once the zip is written
+        elif answer == SB.Yes:
+            uninstall()
+
+    def _export(self, then=None) -> None:
+        profile = self._ready()
+        if profile is None or not self._save():
+            return
+        suggested = Path.home() / f"xrRazom co-op {time.strftime('%Y-%m-%d')}.zip"
+        path, _ = QFileDialog.getSaveFileName(self, tr("Export co-op"), str(suggested), "Zip (*.zip)")
+        if not path:
+            return
+
+        def exported(dest) -> None:
+            self._say(tr("Exported to {path}", path=str(dest)))
+            if then:
+                then()
+
+        self._start(tr("Exporting…"), coop.export_session, profile.anomaly, profile.gamma, profile.mo2_profile, path,
+                    on_done=exported)
+
+    def _import(self) -> None:
+        profile = self._ready()
+        if profile is None or not self._save():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, tr("Import co-op"), str(Path.home()), "Zip (*.zip)")
+        if not path:
+            return
+        try:
+            manifest = coop.read_export(path)
+        except coop.CoopError as exc:
+            QMessageBox.warning(self, tr("Couldn't import this zip"), tr(str(exc)))
+            return
+        game = "Spacewar" if manifest.get("appid") == coop.SPACEWAR_APPID else "Call of Pripyat"
+        if QMessageBox.question(
+            self, tr("Import co-op?"),
+            tr("This puts back the co-op setup from {name}.", name=Path(path).name),
+            points=(
+                tr("{count} saves", count=int(manifest.get("saves") or 0)),
+                tr("Co-op settings, keybinds and MCM values"),
+                tr("Steam game: {game}", game=game),
+                tr("Files it replaces are backed up first."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Import"), QMessageBox.StandardButton.No: tr("Cancel")},
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._start(tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile, done=tr("xrRazom Co-op uninstalled"))
+        self._dirty.clear()  # the imported settings replace what's on screen
+        self._start(tr("Importing…"), coop.import_session, profile.anomaly, profile.gamma, profile.mo2_profile,
+                    profile.profile_name, path, done=tr("Co-op imported"))
 
     # -------------------------------------------------------------- settings
     def _save(self) -> bool:

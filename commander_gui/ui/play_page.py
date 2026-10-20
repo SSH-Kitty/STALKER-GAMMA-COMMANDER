@@ -11,7 +11,9 @@ import os
 import shlex
 import shutil
 import signal
+import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -43,26 +45,26 @@ from ..discord_rpc import (
     update_presence,
 )
 from ..launcher import (
-    anomaly_launcher_target,
     DEFAULT_PROTON_PREFIX,
     DEFAULT_UMU_PREFIX,
-    ForeignPrefixError,
     PTRACE_FIX_COMMAND,
+    ForeignPrefixError,
     LaunchError,
     Mo2Executable,
     ProcessGroupRegistry,
     _pick_umu_proton,
     _terminate_process_group,
+    anomaly_launcher_target,
     available_commands,
     build_command,
     build_direct_command,
-    mo2_profile_args,
     debugger_crash_loop,
     default_launch_target,
     ensure_runner_prefix,
     find_extra_protons,
     kill_stray_debuggers,
     launch_detached,
+    mo2_profile_args,
     parse_mo2_executables,
     prefix_foreign_dlls,
     ptrace_scope,
@@ -95,8 +97,8 @@ from ..steam_shortcuts import (
     setup_coop_shortcut,
     steam_root_for,
 )
+from . import game_splash
 from .common import (
-    notice,
     ACCENT,
     WARN,
     BackgroundTask,
@@ -113,6 +115,7 @@ from .common import (
     mo2_pids,
     mo2_running,
     normalize_path,
+    notice,
     notify_desktop,
     pick_shortcuts_vdf,
     play_click_sound,
@@ -124,7 +127,6 @@ from .common import (
     tr,
 )
 from .dialogs import MessageBox as QMessageBox
-from . import game_splash
 from .game_splash import is_launcher
 from .install_page import _PathEdit, _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
@@ -201,18 +203,68 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
     kill_stray_debuggers(runner_env)
 
 
-def plain_game_exe(anomaly) -> Path:
-    """The game exe AnomalyLauncher.exe is set to start (its cfg's first two
-    lines, e.g. DX11 + AVX), else the best one that exists."""
-    bin_dir = Path(anomaly) / "bin"
+def cpu_has_avx(cpuinfo: str = "/proc/cpuinfo") -> bool:
+    """The CPU runs the AVX builds of the game; True when it can't be told."""
     try:
-        api, avx = (bin_dir.parent / "AnomalyLauncher.cfg").read_text().split()[:2]
-        wanted = bin_dir / f"Anomaly{api}{'AVX' if avx.upper() == 'AVX' else ''}.exe"
+        return " avx " in f" {Path(cpuinfo).read_text(errors='replace').split('flags', 2)[1].splitlines()[0]} "
+    except (OSError, IndexError):
+        return True
+
+
+def readable_log_tail(text: str, limit: int = 12) -> str:
+    """The last *limit* log lines worth reading: GameMode's missing 32-bit
+    library warning (one per Wine process) left out, and a line repeated
+    in a row shown once with its count."""
+    lines: list[list] = []
+    for line in text.rstrip().splitlines():
+        if line.startswith("gamemodeauto:"):
+            continue
+        if lines and lines[-1][0] == line:
+            lines[-1][1] += 1
+        else:
+            lines.append([line, 1])
+    return "\n".join(line if count == 1 else f"{line}  (x{count})" for line, count in lines[-limit:])
+
+
+def engine_closed_cleanly(anomaly, since: float) -> bool:
+    """The engine log written since *since* ends in its normal shutdown,
+    with no crash in it."""
+    logs = Path(anomaly) / "appdata" / "logs"
+    try:
+        newest = max(
+            (log for log in logs.glob("*.log") if log.stat().st_mtime >= since),
+            key=lambda log: log.stat().st_mtime,
+        )
     except (OSError, ValueError):
-        wanted = bin_dir / "AnomalyDX11AVX.exe"
+        return False
+    tail = read_log_tail(newest)
+    return "InternalCloseLog" in tail and not any(m in tail for m in ("FATAL ERROR", "stack trace:"))
+
+
+def plain_game_exe(anomaly, *, avx: bool | None = None) -> Path:
+    """The game exe AnomalyLauncher.exe is set to start (its cfg's first two
+    lines, e.g. DX11 + AVX), else the best one that exists for this CPU."""
+    bin_dir = Path(anomaly) / "bin"
+    avx = cpu_has_avx() if avx is None else avx
+    try:
+        api, flag = (bin_dir.parent / "AnomalyLauncher.cfg").read_text().split()[:2]
+        wanted = bin_dir / f"Anomaly{api}{'AVX' if flag.upper() == 'AVX' else ''}.exe"
+    except (OSError, ValueError):
+        wanted = bin_dir / ("AnomalyDX11AVX.exe" if avx else "AnomalyDX11.exe")
     if wanted.is_file():
         return wanted
-    return next((bin_dir / n for n in ("AnomalyDX11AVX.exe", "AnomalyDX11.exe", "AnomalyDX9.exe") if (bin_dir / n).is_file()), wanted)
+    names = ("AnomalyDX11AVX.exe",) * avx + ("AnomalyDX11.exe", "AnomalyDX9.exe")
+    return next((bin_dir / n for n in names if (bin_dir / n).is_file()), wanted)
+
+
+def plain_coop_exe(exe, anomaly) -> Mo2Executable:
+    """What a plain Anomaly co-op launch runs for ``exe``: the game with the
+    switch that hides the engine's splash (COMMANDER's shows instead). The
+    launcher becomes the game it would start, since it can't pass that switch."""
+    if is_launcher(exe.binary) or not exe.binary:
+        exe = Mo2Executable(title="Anomaly", binary=str(plain_game_exe(anomaly)), working_directory=str(anomaly))
+    arguments = game_splash.splash_arguments(exe)
+    return replace(exe, arguments=arguments) if arguments is not None else exe
 
 
 def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = "") -> dict:
@@ -794,6 +846,8 @@ class PlayPage(QWidget):
             exe = next(
                 (e for e in self.executables if e.title == target), Mo2Executable()
             )
+            if coop_launch is not False and self._plain_coop_on():
+                exe = plain_coop_exe(exe, profile.anomaly)
             command, env, cwd = build_direct_command(exe, runner)
         else:
             target = None if open_mo2 else self._selected_target()
@@ -1324,6 +1378,26 @@ class PlayPage(QWidget):
             self._set_result(tr("Couldn't get the game ready to start: {error}", error=exc), error=True)
             QMessageBox.warning(self, tr("The game couldn't start"), str(exc))
 
+    def open_anomaly_launcher(self) -> None:
+        """The Anomaly Launcher on its own, where plain co-op's renderer is
+        picked: co-op runs the game exe it saved (plain_game_exe)."""
+        profile = self.window.settings.active_profile
+        if profile is None or self._launching or self._install_busy:
+            return
+        exe = Mo2Executable(
+            title="Anomaly Launcher", binary=str(Path(profile.anomaly) / "AnomalyLauncher.exe"),
+            working_directory=str(profile.anomaly),
+        )
+        try:
+            if not Path(exe.binary).is_file():
+                raise LaunchError(f"AnomalyLauncher.exe not found in {profile.anomaly}")
+            runner = self._runner()
+            command, env, cwd = build_direct_command(exe, runner)
+            ensure_runner_prefix(runner)
+            launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log", registry=self._registry)
+        except (LaunchError, OSError) as exc:
+            QMessageBox.warning(self, tr("The Anomaly Launcher couldn't start"), str(exc))
+
     def _open_mo2(self) -> None:
         if self._launching or self._install_busy or ptrace_blocks_mo2(self):
             return
@@ -1565,12 +1639,11 @@ class PlayPage(QWidget):
         if log_path is None:
             QMessageBox.warning(self, tr("The game couldn't start"), message)
             return
-        detail = "\n".join(read_log_tail(log_path, 4096).rstrip().splitlines()[-8:])
         QMessageBox.warning(
             self,
             tr("The game couldn't start"),
             message,
-            info=tr("Last log lines:") + "\n" + detail,
+            details=tr("Last log lines:") + "\n" + readable_log_tail(read_log_tail(log_path), 8),
         )
 
     def _repair_prefix(self) -> None:
@@ -1987,6 +2060,13 @@ class PlayPage(QWidget):
             self._refresh_preview()
             self._stop_discord_presence()
             code = proc_code
+            if code != 0 and self._launch_started_at is not None:
+                # Proton hands back a non-zero code (5) for a game that was
+                # quit from its own menu: the engine's log tells the truth.
+                profile = self.window.settings.active_profile
+                since = time.time() - (time.monotonic() - self._launch_started_at)
+                if profile is not None and engine_closed_cleanly(profile.anomaly, since):
+                    code = 0
             if code == 0:
                 self._record_playtime()
                 self._check_for_crash()
@@ -1995,10 +2075,9 @@ class PlayPage(QWidget):
                 self._check_for_crash()
                 detail = self._log_tail(log_path)
                 msg = tr("{name} closed with an error (code {code})", name=label, code=code)
-
-                msg += "\n\n" + tr("Command: {command}", command=shlex.join(command))
+                details = tr("Command: {command}", command=shlex.join(command))
                 if detail:
-                    msg += "\n\n" + tr("Last log lines:") + f"\n{detail}"
+                    details += "\n\n" + tr("Last log lines:") + f"\n{detail}"
                 self._set_result(msg, error=True)
                 if runner_graphics_error(detail):
                     graphics_message = tr(
@@ -2031,8 +2110,8 @@ class PlayPage(QWidget):
                         ),
                         info=(
                             tr(
-                                "The GameMode lines in the log are only a warning. "
-                                "Install lib32-gamemode, or turn off Always use GameMode."
+                                "The GameMode lines in the log are harmless: Proton can't load "
+                                "GameMode's library. Turn off Always use GameMode to hide them."
                             )
                             if "libgamemode" in detail.lower()
                             else ""
@@ -2073,7 +2152,18 @@ class PlayPage(QWidget):
                         note=tr("Don't switch runners while the prefix is in use."),
                     )
                 else:
-                    QMessageBox.warning(self, tr("The game couldn't start"), msg)
+                    QMessageBox.warning(
+                        self,
+                        tr("The game stopped with an error"),
+                        msg,
+                        info=tr(
+                            "The GameMode lines in the log are harmless: Proton can't load "
+                            "GameMode's library. Turn off Always use GameMode to hide them."
+                        )
+                        if "libgamemode" in read_log_tail(log_path).lower()
+                        else "",
+                        details=details,
+                    )
                 self._offer_crash_report()
             self._launch_status_clear_timer.start(3000)
 
@@ -2166,8 +2256,7 @@ class PlayPage(QWidget):
     def _log_tail(self, path: Path, limit: int = 12) -> str:
         # Bounded read: a crash loop grows launcher.log by megabytes, and this
         # must never be the thing that makes COMMANDER itself heavy.
-        lines = read_log_tail(path).rstrip().splitlines()
-        return "\n".join(lines[-limit:])
+        return readable_log_tail(read_log_tail(path), limit)
 
     def _set_result(self, text: str, *, error: bool = False) -> None:
         color = WARN.name() if error else ACCENT.name()
@@ -2234,14 +2323,15 @@ class PlayPage(QWidget):
             return
         self._close_splash()
         exe = self._target_exe()
-        if exe is not None and is_launcher(exe.binary) and not self._no_mo2_session:
+        # Plain Anomaly co-op runs the game exe with the flag (plain_coop_exe).
+        plain = self._no_mo2_session or (coop_launch is not False and self._plain_coop_on())
+        if exe is not None and is_launcher(exe.binary) and not plain:
             # The player still has to press Play in the launcher: a splash
             # that lets it stay in front (see game_splash.start).
             if coop.is_active(profile.anomaly) if coop_launch is None else coop_launch:
                 self._start_splash(on_top=False)
             return
-        # Plain Anomaly co-op through Steam runs the game exe with the flag.
-        if self._splash_arguments(coop_launch) is None and not self._no_mo2_session:
+        if self._splash_arguments(coop_launch) is None and not plain:
             return
         self._start_splash()
 
@@ -2256,6 +2346,10 @@ class PlayPage(QWidget):
         if self._splash is not None:
             if self._splash.poll() is None:
                 self._splash.terminate()
+                try:
+                    self._splash.wait(0.3)  # reap it so it does not linger as a zombie
+                except subprocess.TimeoutExpired:
+                    pass
             self._splash = None
 
     def _set_launch_button_state(self, launching: bool) -> None:

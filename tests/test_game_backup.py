@@ -200,7 +200,6 @@ class ProtonBuildTests(unittest.TestCase):
     def test_auto_stays_on_its_build_when_a_newer_one_is_installed(self) -> None:
         from commander_gui.launcher import _pick_umu_proton
 
-        old = self.builds["GE-Proton10-1"]
         newest = self.builds["GE-Proton11-5-x86_64"]
         self.assertEqual(_pick_umu_proton(), str(newest.resolve()))
         # A newer build gets installed: Auto keeps the pin.

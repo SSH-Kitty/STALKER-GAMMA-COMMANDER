@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
-from commander_gui.launcher import build_command, mo2_profile_args, Runner
+from commander_gui.launcher import Runner, build_command, mo2_profile_args
 from commander_gui.steam_shortcuts import coop_launch_options
 
 NAMES = ["CLIKRΔD - ROMEO", " CLIKRΔD - ROMEO ", "a;b,cΔ", "Δ=1", "ÄBCé0"]
@@ -54,3 +54,18 @@ class Mo2ProfileArgsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SelectedProfileTests(unittest.TestCase):
+    def test_non_ascii_name_round_trips_through_the_ini(self):
+        from commander_gui.launcher import qt_ini_text, select_mo2_profile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ini = Path(tmp) / "ModOrganizer.ini"
+            ini.write_text("[General]\nselected_profile=@ByteArray(G.A.M.M.A)\n")
+            self.assertEqual(select_mo2_profile(tmp, "CLIKRΔD - ROMEO"), (0, ""))
+            self.assertIn(r"selected_profile=@ByteArray(CLIKR\xce\x94\x44 - ROMEO)", ini.read_text())
+            # What `mo2 config get selected-profile` prints for it.
+            self.assertEqual(qt_ini_text(r"CLIKR\xce\x94\x44 - ROMEO"), "CLIKRΔD - ROMEO")
+            self.assertEqual(qt_ini_text("G.A.M.M.A"), "G.A.M.M.A")
+            self.assertEqual(select_mo2_profile(str(Path(tmp) / "missing"), "x")[0], 1)

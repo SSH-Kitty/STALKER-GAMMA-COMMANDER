@@ -1683,6 +1683,8 @@ def open_url(url: str) -> bool:
     output. Also given a clean environment, so an AppImage's own library
     paths never reach the browser.
     """
+    if not url.lower().startswith(("http://", "https://")):
+        return False  # also keeps a "-option" from reaching xdg-open
     if sys.platform.startswith("linux"):
         for opener in ("xdg-open", "gio"):
             exe = shutil.which(opener)

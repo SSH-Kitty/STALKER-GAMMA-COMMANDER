@@ -224,6 +224,8 @@ def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, s
     These commands perform extra side effects (MO2 selected_profile + modlist
     download), so we shell out to the CLI instead of editing JSON by hand.
     """
+    if args and args[0] in ("use", "delete") and any(a.lstrip().startswith("-") for a in args[1:]):
+        return 2, "", "A profile name can't start with \"-\""  # the CLI would read it as an option
     binary = str(cli_binary_path())
     cmd = [binary, "config", *args]
     try:

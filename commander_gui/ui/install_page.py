@@ -81,6 +81,7 @@ from ..winetricks import (
     umu_install_command,
     winetricks_binary,
     winetricks_install_command,
+    forget_verbs,
     winetricks_tool_install_command,
 )
 from .common import (
@@ -110,7 +111,7 @@ from .common import (
     tr,
     winetricks_tooltip,
 )
-from .dialogs import MessageBox as QMessageBox
+from .dialogs import MessageBox as QMessageBox, ProgressDialog
 from .multiplayer_page import confirm_singleplayer
 
 #: tr() msgid shared between the Install button's own label and the failure
@@ -940,6 +941,7 @@ def _install_failure_message(
 
 
 class InstallPage(QWidget):
+    _wt_dialog = None  # progress pop-up while dependencies install
     def __init__(self, window):
         super().__init__()
         self.setObjectName("installPage")
@@ -2145,6 +2147,8 @@ class InstallPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Stop install"), QMessageBox.StandardButton.No: tr("Keep installing")},
         )
         if answer != QMessageBox.StandardButton.Yes:
+            if self._wt_dialog is not None:
+                self._wt_dialog.resume()
             return
         # The install may have finished while the dialog was open, clearing
         # the runner - re-check before touching it, or this crashes.
@@ -3839,6 +3843,14 @@ class InstallPage(QWidget):
         self.wt_status.set_installing()
         self._set_wt_console_visible(True)
         self.wt_progress.reset()
+        self._wt_dialog = ProgressDialog(
+            tr("Reinstalling dependencies") if self._wt_force else tr("Installing dependencies"),
+            tr("Starting..."),
+            self,
+            log=True,
+        )
+        self._wt_dialog.canceled.connect(self._cancel_winetricks)
+        self._wt_dialog.show()
         self._start_winetricks_stage()
 
     def _set_wt_console_visible(self, visible: bool) -> None:
@@ -3867,10 +3879,12 @@ class InstallPage(QWidget):
                 self.wt_progress.on_finished(1, msg)
                 self._wt_runner = None
                 self._wt_status_failed(msg)
+                self._wt_dialog_done(1, msg)
                 self.window.set_install_busy(False)
                 self._refresh_winetricks_status()
                 return
             self.wt_progress.status_message(tr("Installing winetricks..."))
+            self._wt_dialog_text(tr("Installing winetricks..."))
             self.wt_progress.log.append_line("== Installing winetricks ==")
         elif self._wt_stage == "umu":
             command = umu_install_command()
@@ -3879,10 +3893,12 @@ class InstallPage(QWidget):
                 self.wt_progress.on_finished(1, msg)
                 self._wt_runner = None
                 self._wt_status_failed(msg)
+                self._wt_dialog_done(1, msg)
                 self.window.set_install_busy(False)
                 self._refresh_winetricks_status()
                 return
             self.wt_progress.status_message(tr("Installing umu-run..."))
+            self._wt_dialog_text(tr("Installing umu-run..."))
             self.wt_progress.log.append_line(
                 "== Installing umu-run (Proton launcher) =="
             )
@@ -3907,13 +3923,19 @@ class InstallPage(QWidget):
                 self.wt_progress.on_finished(1, failure)
                 self._wt_runner = None
                 self._wt_status_failed(failure)
+                self._wt_dialog_done(1, failure)
                 self.window.set_install_busy(False)
                 self._refresh_winetricks_status()
                 return
-            if self._wt_force:
+            if self._wt_force and runner.kind == "umu":
+                # umu-run rejects --force as "not a verb"; it only looks at
+                # winetricks.log, so clear our verbs from it instead.
+                forget_verbs(runner.env.get("WINEPREFIX") or self._wt_prefix())
+            elif self._wt_force:
                 # winetricks skips verbs already in winetricks.log without this.
                 command.insert(len(command) - len(WINETRICKS_VERBS), "--force")
             self.wt_progress.status_message(tr("Installing runtimes..."))
+            self._wt_dialog_text(tr("Installing runtimes..."))
             self.wt_progress.log.append_line(
                 "== Winetricks via " + runner.label + ": " + " ".join(WINETRICKS_VERBS) + " =="
             )
@@ -3937,6 +3959,8 @@ class InstallPage(QWidget):
         if clean.startswith(("Using winetricks", "gamemodeauto")):
             return
         self.wt_progress.on_line(line)
+        if self._wt_dialog is not None:
+            self._wt_dialog.appendLine(clean)
         pct = _winetricks_progress(clean, self._wt_stage, self._wt_completed_verbs)
         overall = _dependencies_progress(self._wt_stage, pct)
         if overall is not None and overall >= self._wt_last_pct:
@@ -3944,12 +3968,15 @@ class InstallPage(QWidget):
             self.wt_progress.bar.setValue(overall)
             self.wt_progress.bar.setFormat("%p%")
             self._wt_last_pct = overall
+            if self._wt_dialog is not None:
+                self._wt_dialog.setValue(overall)
 
     def _on_winetricks_finished(self, rc, output):
         # 'finished' still arrives after a cancel; don't overwrite the
         # 'Cancelled' status with a spurious failure.
         if self._wt_runner is not None and self._wt_runner.was_cancelled:
             self._wt_runner = None
+            self._wt_dialog_done(None)
             self.window.set_install_busy(False)
             self._refresh_winetricks_status()
             return
@@ -3973,11 +4000,36 @@ class InstallPage(QWidget):
         self._wt_runner = None
         self.window.set_install_busy(False)
         self._refresh_winetricks_status()
+        self._wt_dialog_done(rc, output)
+
+    def _wt_dialog_text(self, text: str) -> None:
+        if self._wt_dialog is not None:
+            self._wt_dialog.setLabelText(text)
+
+    def _wt_dialog_done(self, rc, detail: str = "") -> None:
+        """Close the progress pop-up; report the outcome (rc None = cancelled)."""
+        dialog, self._wt_dialog = self._wt_dialog, None
+        if dialog is not None:
+            dialog.hide()
+            dialog.deleteLater()
+        if rc is None:
+            return
+        if rc == 0:
+            QMessageBox.information(self, tr("Dependencies installed"), tr("The Windows libraries are ready."))
+        else:
+            lines = [ln for ln in (detail or "").strip().splitlines() if ln.strip()]
+            QMessageBox.warning(
+                self,
+                tr("Dependencies failed"),
+                tr("The install stopped with exit code {rc}.", rc=rc),
+                note=lines[-1] if lines else None,
+            )
 
     def _on_winetricks_cancelled(self):
         self.wt_progress.log.append_line("Winetricks cancelled")
         self.wt_progress.on_cancelled()
         self.wt_progress.status_message(tr("Cancelled"))
+        self._wt_dialog_done(None)
 
     def _cancel_winetricks(self):
         if self._wt_runner is None or not self._wt_runner.is_running():

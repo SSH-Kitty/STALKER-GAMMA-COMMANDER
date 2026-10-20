@@ -22,10 +22,9 @@ from PySide6.QtWidgets import (
 
 from .. import coop
 from ..achievements import ACHIEVEMENTS, unlocked_count
-from ..cli_runner import run_sync
 from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
-from ..launcher import find_extra_protons
+from ..launcher import find_extra_protons, select_mo2_profile
 from ..settings import CliSettings
 from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
@@ -62,7 +61,7 @@ from .common import (
 from .deck_icon import deck_icon
 from .deck_switch import switch_mode
 from .dialogs import MessageBox as QMessageBox
-from .mod_manager_page import _QUERY_TIMEOUT, _query_mo2_profiles
+from .mod_manager_page import _query_mo2_profiles
 
 #: Below this much free space the drive meter turns to the warning colour:
 #: a GAMMA update alone can download tens of GB.
@@ -676,10 +675,7 @@ class DashboardPage(QWidget):
         combo.setEnabled(False)
         generation = self._refresh_generation
         task = BackgroundTask(
-            run_sync,
-            ["mo2", "config", "set", "selected-profile", name],
-            timeout=_QUERY_TIMEOUT,
-            parent=self,
+            select_mo2_profile, profile.gamma if profile is not None else "", name, parent=self
         )
         owner = profile.profile_name if profile is not None else None
         task.result.connect(

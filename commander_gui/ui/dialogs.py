@@ -270,7 +270,7 @@ class MessageBox(QMessageBox):
 
     # ------------------------------------------------------- static helpers
     @classmethod
-    def _ask(cls, icon, parent, title, text, buttons, default, points=(), note="", info="", labels=None):
+    def _ask(cls, icon, parent, title, text, buttons, default, points=(), note="", info="", labels=None, details=""):
         box = cls(icon, title, text, buttons, parent)
         if default != _SB.NoButton:
             box.setDefaultButton(default)
@@ -279,6 +279,8 @@ class MessageBox(QMessageBox):
         box.note = note
         if info:
             box.setInformativeText(info)
+        if details:
+            box.setDetailedText(details)
         box.exec()
         clicked = box.clickedButton()
         return box.standardButton(clicked) if clicked is not None else _SB.NoButton
@@ -367,7 +369,7 @@ class ProgressDialog(QDialog):
 
     canceled = Signal()
 
-    def __init__(self, title: str, text: str, parent: QWidget | None = None) -> None:
+    def __init__(self, title: str, text: str, parent: QWidget | None = None, *, log: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("popupWindow")
         self.setWindowTitle(title)
@@ -382,8 +384,20 @@ class ProgressDialog(QDialog):
         self._bar.setRange(0, 100)
         self._bar.setTextVisible(True)
         layout.addWidget(self._bar)
-        layout.addSpacing(6)
+        self._log = None
         row = QHBoxLayout()
+        if log:
+            self._log = QPlainTextEdit()
+            self._log.setReadOnly(True)
+            self._log.setMaximumBlockCount(2000)
+            self._log.setFixedHeight(180)
+            self._log.hide()
+            layout.addWidget(self._log)
+            self._toggle = QPushButton(tr("Show details"))
+            self._toggle.setMinimumSize(110, 34)
+            self._toggle.clicked.connect(self._toggle_log)
+            row.addWidget(self._toggle)
+        layout.addSpacing(6)
         row.addStretch(1)
         self._cancel = QPushButton(tr("Cancel"))
         self._cancel.setMinimumSize(110, 34)
@@ -395,6 +409,17 @@ class ProgressDialog(QDialog):
 
     def setValue(self, value: int) -> None:
         self._bar.setValue(int(value))
+
+    def appendLine(self, text: str) -> None:
+        if self._log is not None:
+            self._log.appendPlainText(text)
+
+    def _toggle_log(self) -> None:
+        show = not self._log.isVisible()
+        self._log.setVisible(show)
+        self._toggle.setText(tr("Hide details") if show else tr("Show details"))
+        self.setMinimumHeight(0)
+        _fit(self.layout())
 
     def setLabelText(self, text: str) -> None:
         if text == self._text.text():
@@ -409,6 +434,10 @@ class ProgressDialog(QDialog):
         self._cancel.setEnabled(False)
         self._text.setText(tr("Stopping..."))
         self.canceled.emit()
+
+    def resume(self) -> None:
+        """Cancel was declined: put the button back."""
+        self._cancel.setEnabled(True)
 
     def reject(self) -> None:
         # Esc cancels like the button; the caller closes the window once

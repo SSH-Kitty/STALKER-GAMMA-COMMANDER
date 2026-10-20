@@ -136,3 +136,103 @@ class DiscordIpcTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_redirect_downgrade_and_non_http_refused():
+    import urllib.error
+    import urllib.request
+
+    from commander_gui import network
+
+    handler = network._SafeRedirect()
+    req = urllib.request.Request("https://example.com/a")
+    for target in ("http://example.com/b", "ftp://example.com/b", "file:///etc/passwd"):
+        try:
+            handler.redirect_request(req, None, 302, "Found", {}, target)
+        except urllib.error.HTTPError:
+            continue
+        raise AssertionError(target)
+    assert handler.redirect_request(req, None, 302, "Found", {}, "https://example.com/b")
+
+
+def test_raw_repo_url_quotes_branch_and_z_drive_is_case_insensitive():
+    from types import SimpleNamespace
+
+    from commander_gui import launcher, updates
+
+    profile = SimpleNamespace(
+        stalker_gamma_repo_url="https://github.com/Grokitach/Stalker_GAMMA", stalker_gamma_repo_branch="a#b?c"
+    )
+    url = updates._raw_repo_url(profile, "version.txt")
+    assert "#" not in url and "?" not in url
+    assert launcher.mo2_path_to_host("z:\\home\\x") == "/home/x"
+
+
+def test_proton_release_tag_and_host_checked():
+    import pytest
+
+    from commander_gui import proton_installer as pi
+
+    with pytest.raises(ValueError):
+        pi._find_assets("../../x")
+    rel = {"assets": [
+        {"name": "GE-Proton9-1.tar.gz", "browser_download_url": "https://evil.example/GE-Proton9-1.tar.gz"},
+        {"name": "GE-Proton9-1.sha512sum", "browser_download_url": "https://github.com/x/GE-Proton9-1.sha512sum"},
+    ]}
+    orig = pi._api_get
+    pi._api_get = lambda url: rel
+    try:
+        with pytest.raises(ValueError):
+            pi._find_assets("GE-Proton9-1")
+    finally:
+        pi._api_get = orig
+
+
+def test_archive_listing_refuses_line_break_names(tmp_path):
+    from types import SimpleNamespace
+    from unittest import mock
+
+    import pytest
+
+    from commander_gui import mod_install as mi
+
+    def listing(body):
+        out = "Path = x.zip\nType = zip\n\n----------\n" + body
+        return SimpleNamespace(returncode=0, stdout=out)
+
+    with mock.patch.object(mi.subprocess, "run", return_value=listing("Path = a/b\nSize = 1\n")):
+        assert mi._list_archive_paths(Path("7z"), Path("x.zip")) == ["a/b"]
+    # An old 7-Zip prints a name with a blank line raw, hiding "../" in a fake block.
+    with mock.patch.object(mi.subprocess, "run", return_value=listing("Path = ok\n\n../../evil\nSize = 1\n")):
+        with pytest.raises(mi.ModInstallError):
+            mi._list_archive_paths(Path("7z"), Path("x.zip"))
+
+
+def test_config_use_delete_refuse_option_like_names():
+    from commander_gui import settings
+
+    for sub in ("use", "delete"):
+        rc, _out, err = settings.run_config_command([sub, "--gamma"])
+        assert rc == 2 and "start with" in err
+
+
+def test_update_asset_name_is_lowercase_for_cased_tags():
+    from commander_gui import self_update
+
+    url = self_update.commander_update_asset_url("v1.4.0-Unstable2")
+    assert url.endswith("/STALKER-GAMMA-COMMANDER-1.4.0-unstable2-x86_64.AppImage")
+
+
+def test_line_split_and_launch_helpers():
+    from types import SimpleNamespace
+
+    from commander_gui import atomic, launcher
+
+    assert atomic.split_lines("a\u2028b\r\nc\rd\n") == ["a\u2028b", "c", "d"]
+    assert atomic.split_lines("") == []
+    assert launcher.shortcut_slug("Сталкер") != launcher.shortcut_slug("Зона")
+    assert launcher.shortcut_slug("!!!") == "stalker-gamma"
+    exe = SimpleNamespace(binary="/x/a.exe", working_directory="", arguments=r'-c C:\Games\x "a b"', title="t")
+    runner = SimpleNamespace(wrapper=[], env={})
+    command, _env, _cwd = launcher.build_direct_command(exe, runner)
+    assert command == ["/x/a.exe", "-c", r"C:\Games\x", "a b"]

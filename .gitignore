@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 *.log
 *.bak
+*.orig
 *.swp
 *.swo
 .coverage

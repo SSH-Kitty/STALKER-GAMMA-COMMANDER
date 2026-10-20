@@ -31,6 +31,7 @@ import re
 import shutil
 from pathlib import Path
 
+from . import atomic
 from .dependencies import configured_tool
 from .launcher import runner_build_dir
 
@@ -69,6 +70,20 @@ def winetricks_binary() -> str:
 def umu_binary() -> str:
     """Path to umu-run, or '' when it is not on PATH."""
     return configured_tool("umu-run") or shutil.which("umu-run") or ""
+
+
+def forget_verbs(prefix, verbs: tuple[str, ...] = WINETRICKS_VERBS) -> None:
+    """Drop ``verbs`` from the prefix's winetricks.log so they reinstall.
+
+    umu-run refuses a verb listed there ("already installed") before
+    winetricks, and its --force, ever runs.
+    """
+    log = Path(prefix) / "winetricks.log"
+    try:
+        lines = log.read_text(encoding="utf-8").splitlines()
+        atomic.write_bytes(log, "".join(f"{ln}\n" for ln in lines if ln.strip() not in verbs).encode("utf-8"), lock=False)
+    except OSError:
+        pass
 
 
 def winetricks_install_command(

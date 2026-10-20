@@ -52,7 +52,6 @@ from ..profile_bundle import (
 from ..settings import CliProfile, cli_ok, run_config_command
 from ..themes import active_theme_tokens
 from .common import (
-    notice,
     GAMMA_MARKERS,
     GAMMA_PROFILE,
     BackgroundTask,
@@ -67,6 +66,7 @@ from .common import (
     make_card,
     mo2_running,
     normalize_path,
+    notice,
     open_in_file_manager,
     section_label,
     tr,

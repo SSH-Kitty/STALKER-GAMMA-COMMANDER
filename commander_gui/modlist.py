@@ -13,7 +13,7 @@ from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 
-from .atomic import write_text
+from .atomic import split_lines, write_bytes, write_text
 
 
 def _valid_name(name: str) -> bool:
@@ -40,7 +40,7 @@ def read_lines(path: str | Path) -> list[str]:
         # Strict decode: silently replacing invalid bytes with U+FFFD would
         # permanently corrupt a non-UTF-8 mod name (e.g. a legacy Latin-1
         # modlist.txt) the moment this file is next saved.
-        return path.read_text(encoding="utf-8-sig").splitlines()
+        return split_lines(path.read_text(encoding="utf-8-sig"))
     except UnicodeDecodeError as exc:
         raise ValueError(
             f"{path} is not valid UTF-8 ({exc}). Fix the file's encoding "
@@ -605,7 +605,7 @@ def seed_new_mo2_profile(
         dest_file = dest_dir / name
         if src_file.is_file() and (replace or not dest_file.exists()):
             try:
-                shutil.copy2(src_file, dest_file)
+                write_bytes(dest_file, src_file.read_bytes())
             except OSError:
                 pass
     return True

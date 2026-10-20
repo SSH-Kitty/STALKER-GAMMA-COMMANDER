@@ -15,6 +15,23 @@ _ALLOWED_SCHEMES = ("http", "https")
 _RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to http(s), and never from https down to http."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url).scheme.lower()
+        new = urllib.parse.urlsplit(newurl).scheme.lower()
+        if new not in _ALLOWED_SCHEMES or (old == "https" and new != "https"):
+            raise urllib.error.HTTPError(
+                req.full_url, code, f"Refusing redirect to {newurl!r}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# Installed globally so every urllib.request.urlopen in the app is covered.
+urllib.request.install_opener(urllib.request.build_opener(_SafeRedirect))
+
+
 def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
     """``urllib.request.urlopen`` restricted to http(s).
 

@@ -24,11 +24,11 @@ from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
 from commander_gui.themes import active_theme_tokens
 from commander_gui.ui.common import (
-    notice,
     BackgroundTask,
     CommandRunner,
     aggregate_progress_value,
     mo2_running,
+    notice,
 )
 from commander_gui.updates import (
     check_updates,
@@ -49,8 +49,8 @@ from ..widgets import (
     repolish,
 )
 from .base import DeckScreen
-from .multiplayer import confirm_singleplayer
 from .install import battery_warning
+from .multiplayer import confirm_singleplayer
 
 #: Releases listed under Patch notes (Patchnotes.md holds the whole history).
 _MAX_RELEASES = 6

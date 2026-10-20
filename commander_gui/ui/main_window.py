@@ -69,7 +69,6 @@ from ..updates import (
 )
 from .about_page import _DISCORD, AboutPage
 from .common import (
-    notice,
     OK_GREEN,
     STATUS_GREY,
     WARN,
@@ -79,6 +78,7 @@ from .common import (
     human_size,
     instance_window_title,
     mo2_running,
+    notice,
     notify_desktop,
     open_url,
     resume_after_shutdown,
@@ -344,7 +344,7 @@ class _CommanderUpdateProgressBridge(QObject):
 class _NoticeStatusBar(QStatusBar):
     """Every page's status-bar notice goes through notice()."""
 
-    def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt override
+    def showMessage(self, text: str, timeout: int = 0) -> None:
         super().showMessage(notice(text), timeout)
 
 
@@ -1687,10 +1687,13 @@ class MainWindow(QMainWindow):
             self.mod_counter_label.setText(
                 tr("{enabled} Mods (incomplete)", enabled=enabled)
             )
-            self.mod_counter_label.setStyleSheet(f"color: {WARN.name()};")
+            style = f"color: {WARN.name()};"
+            if self.mod_counter_label.styleSheet() != style:  # restyling every tick is not free
+                self.mod_counter_label.setStyleSheet(style)
         else:
             self.mod_counter_label.setText(tr("{enabled} Mods", enabled=enabled))
-            self.mod_counter_label.setStyleSheet("")
+            if self.mod_counter_label.styleSheet():
+                self.mod_counter_label.setStyleSheet("")
         if counts is not None:
             tooltip = tr(
                 "{enabled} of {total} mods enabled in profile “{profile_name}”",

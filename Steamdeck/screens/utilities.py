@@ -45,11 +45,11 @@ from commander_gui.parsers import parse_prune_archive, strip_ansi
 from commander_gui.repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
 from commander_gui.ui.backup_dialog import backup_summary, backup_title
 from commander_gui.ui.common import (
-    notice,
     BackgroundTask,
     CommandRunner,
     StreamTask,
     mo2_running,
+    notice,
 )
 from commander_gui.ui.utilities_page import (
     _backup_then_wipe,

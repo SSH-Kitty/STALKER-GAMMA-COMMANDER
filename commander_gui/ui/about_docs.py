@@ -90,7 +90,7 @@ TOPICS: list[dict] = [
                         ("From source", "Python 3.10 or newer and PySide6 6.6 or newer (below 7). run.sh installs PySide6 into a private virtual environment for you. Network access is needed the first time."),
                         ("To play", "A Vulkan-capable graphics driver, including the 32-bit Vulkan driver, and a way to run Windows programs: umu-run with GE-Proton is the recommended one. System Check lists exactly what is missing."),
                         ("Disk space", "About 150 GB for Anomaly, GAMMA and the download cache, or about 100 GB with the Minimal install option. A GE-Proton build is about 1.5 GB more."),
-                        ("Optional", "GameMode (gamemoderun) for better performance and MangoHud for an on-screen performance overlay. Both are used only when installed."),
+                        ("Optional", "GameMode (gamemoderun), used only when you turn on Always use GameMode, and MangoHud for an on-screen performance overlay."),
                     ]),
                     ("warn", "If COMMANDER says it could not load the Qt platform plugin xcb, install libxcb-cursor0 (Debian, Ubuntu) or xcb-util-cursor (Fedora, Arch) with your package manager."),
                 ],
@@ -322,7 +322,7 @@ TOPICS: list[dict] = [
                 [
                     ("table", [
                         ("stalker-gamma CLI", "That the bundled binary exists and runs."),
-                        ("Wine, Winetricks, Protontricks, umu-run", "Each is found automatically. You only need one way to run the game, so once Steam, Wine or umu-run is found, the others show Optional."),
+                        ("Wine, Winetricks, umu-run", "Each is found automatically. You only need one way to run the game, so once Steam, Wine or umu-run is found, the others show Optional."),
                         ("Vulkan", "Your graphics driver must support Vulkan, and the 32-bit Vulkan loader must also be present. The card name is shown."),
                         ("Runtime libraries", "How many of the eight verbs above are in your prefix. Hover for the list."),
                         ("Proton builds", "Every GE-Proton build found in Steam's compatibilitytools.d folders."),
@@ -348,7 +348,7 @@ TOPICS: list[dict] = [
                 "Runner choices",
                 [
                     ("table", [
-                        ("Auto-detect (auto)", "The recommended choice. Uses umu-run with the newest GE-Proton (wrapped in gamemoderun when GameMode is installed). Without umu-run it falls back to Steam's Proton, then to plain Wine."),
+                        ("Auto-detect (auto)", "The recommended choice. Uses umu-run with the newest GE-Proton. Without umu-run it falls back to Steam's Proton, then to plain Wine."),
                         ("A specific GE-Proton", "Runs that build through umu-run, using PROTONPATH to tell umu which build."),
                         ("Steam Proton", "Any Proton installed through Steam (steamapps/common/Proton*), run with 'proton run'. It works, but MO2 is less reliable on Valve's builds."),
                         ("Wine", "Plain system Wine with WINEPREFIX set."),
@@ -421,6 +421,18 @@ TOPICS: list[dict] = [
                     ]),
                     ("code", "DXVK_HUD=fps mangohud %command%"),
                     "The quick toggles add common ones for you: MangoHud, an FPS counter, and No Esync / No Fsync (which can help if the game freezes or stutters). Always use GameMode wraps every launch in gamemoderun. The live preview shows the exact command, with a copy button.",
+                ],
+            ),
+            (
+                'GameMode',
+                [
+                    "GameMode (Feral GameMode) is an optional Linux tool. While the game runs, it switches the CPU to its performance mode and raises the game's priority. COMMANDER leaves it off unless you turn it on.",
+                    ("table", [
+                        ('When it helps', 'Laptops and PCs whose CPU normally saves power. Anomaly leans on a single CPU core, so a CPU that clocks down can cost frames.'),
+                        ('When it does nothing', 'PCs whose CPU already runs in performance mode, which some gaming distros such as CachyOS set by default, and the Steam Deck, where SteamOS manages power itself.'),
+                        ('How to turn it on', "Install GameMode with your package manager (gamemode, plus lib32-gamemode on Arch), then tick Always use GameMode on the Play page. System Check shows whether it's installed."),
+                    ]),
+                    ("note", 'With Proton the log fills with "gamemodeauto: dlopen failed" lines. They\'re harmless: Proton can\'t load GameMode\'s library inside its container. The CPU still switches to performance mode, but the game itself doesn\'t get the higher priority.'),
                 ],
             ),
             (
@@ -680,6 +692,7 @@ TOPICS: list[dict] = [
                 "Switching",
                 [
                     "Switch to co-op backs up whatever is in the Anomaly folder now, then copies the co-op files in and enables the mod. Switch to Singleplayer puts the originals back, removes what co-op added and disables the mod. Your co-op saves are kept.",
+                    "Export co-op on the Manage tab writes one zip with all your saves, the co-op settings, keybinds and MCM values, the Steam game and the join address. Uninstall offers to export first. Import co-op puts it all back once co-op is installed again, and keeps a copy of every file it replaces in the backups folder.",
                     "Launches are checked: with co-op on, only co-op can be launched; with it off, only singleplayer. Updates and repairs ask you to switch back to singleplayer first, because they rewrite the same engine files. If an update put the original engine back, Re-apply co-op fixes it.",
                 ],
             ),

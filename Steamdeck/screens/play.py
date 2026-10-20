@@ -27,11 +27,11 @@ from commander_gui.launcher import Mo2Executable, set_mo2_selected_title
 from commander_gui.log_dump import create_log_dump
 from commander_gui.modlist import looks_flipped, modlist_path_for, read_lines, unflip
 from commander_gui.ui.common import (
-    notice,
     BackgroundTask,
     format_last_played,
     format_playtime,
     gamma_installed,
+    notice,
     play_click_sound,
 )
 

@@ -53,7 +53,6 @@ from ..updates import (
     status_summary,
 )
 from .common import (
-    notice,
     ACCENT,
     LIGHT_GREY,
     OK_GREEN,
@@ -68,6 +67,7 @@ from .common import (
     install_hover_grow_text,
     make_card,
     mo2_running,
+    notice,
     notify_desktop,
     play_click_sound,
     section_label,
@@ -77,12 +77,12 @@ from .common import (
 from .dashboard import _TITLE_ROW_H, _card_title
 from .dialogs import MessageBox as QMessageBox
 from .multiplayer_page import (
-    _Stat,
     _columns,
     _divider,
     _hint,
     _pills,
     _section,
+    _Stat,
     _tab,
     confirm_singleplayer,
 )
@@ -198,6 +198,7 @@ class UpdatePage(QWidget):
         self._check_task: BackgroundTask | None = None
         self._apply_runner: CommandRunner | None = None
         self._diffs: list[UpdateDiff] = []
+        self._focus_changes = False  # open on Mod changes once the check reports them
         self._checking = False
         self._applying = False
         self._up_to_date = False
@@ -353,6 +354,11 @@ class UpdatePage(QWidget):
         self.tab_group.button(1).setText(f"{changes} ({change_count})" if change_count else changes)
         self.tab_group.button(2).setText(tr("Update options"))
 
+    def _show_changes_if_any(self) -> None:
+        if self._diffs:
+            self.tab_group.button(1).setChecked(True)
+            self._show_tab(1)
+
     def _show_tab(self, index: int) -> None:
         # Hidden pages take no room, so each tab is exactly as tall as it needs.
         for i, page in enumerate(self._pages):
@@ -470,6 +476,8 @@ class UpdatePage(QWidget):
     def refresh(self) -> None:
         """Called every time the page is shown; auto-check updates."""
         self._check_generation += 1
+        self._focus_changes = True
+        self._show_changes_if_any()
         self.window.refresh_settings()
         self._update_button_states()
         self._check()
@@ -552,12 +560,17 @@ class UpdatePage(QWidget):
         modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
         if modlist_path is None or not modlist_path.is_file():
             return
+        snapshot = modlist_path.with_name(modlist_path.name + ".pre-update.bak")
         try:
-            shutil.copy2(
-                modlist_path, modlist_path.with_name(modlist_path.name + ".pre-update.bak")
-            )
+            shutil.copy2(modlist_path, snapshot)
         except OSError:
-            pass
+            # An older snapshot left in place would make "Undo Last Update"
+            # restore the wrong list, so it goes, and the user is told.
+            snapshot.unlink(missing_ok=True)
+            self.window.statusBar().showMessage(
+                tr("Couldn't save a copy of the mod list before updating, so Undo last update won't be available."),
+                10000,
+            )
 
     def _undo_last_update(self) -> None:
         if self.window.install_busy or self._checking or self._applying:
@@ -711,6 +724,9 @@ class UpdatePage(QWidget):
         )
         self._set_tab_titles(self._new_count, len(diffs))
         self._apply_filter()
+        if known and self._focus_changes:
+            self._focus_changes = False
+            self._show_changes_if_any()
 
     def _seen_version(self, status: UpdateStatus) -> str | None:
         """The last GAMMA version this profile was up to date on.

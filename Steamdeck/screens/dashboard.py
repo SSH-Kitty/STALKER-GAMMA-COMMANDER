@@ -26,7 +26,6 @@ from commander_gui import gui_settings
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.i18n import tr
 from commander_gui.ui.common import (
-    notice,
     BackgroundTask,
     anomaly_installed,
     count_active_mods,
@@ -36,6 +35,7 @@ from commander_gui.ui.common import (
     free_space_bytes,
     gamma_installed,
     human_size,
+    notice,
 )
 from commander_gui.ui.install_page import _resume_state_matches
 from commander_gui.updates import check_updates, format_version

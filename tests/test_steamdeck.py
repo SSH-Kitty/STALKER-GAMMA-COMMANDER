@@ -938,9 +938,9 @@ class DeckLayoutTests(DeckWindowFixture):
         install._finish_run()
 
     def test_offline_toggle_reaches_full_install_args(self):
-        from commander_gui import gui_settings
-
         import tempfile
+
+        from commander_gui import gui_settings
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

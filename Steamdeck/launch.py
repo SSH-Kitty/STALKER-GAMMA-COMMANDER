@@ -25,6 +25,7 @@ from commander_gui.i18n import tr
 from commander_gui.launcher import (
     PTRACE_FIX_COMMAND,
     ProcessGroupRegistry,
+    anomaly_launcher_target,
     build_command,
     build_direct_command,
     default_launch_target,
@@ -32,7 +33,6 @@ from commander_gui.launcher import (
     find_extra_protons,
     kill_stray_debuggers,
     launch_detached,
-    anomaly_launcher_target,
     parse_mo2_executables,
     ptrace_scope,
     read_log_tail,
@@ -266,7 +266,12 @@ class DeckLaunchController(QObject):
             watch_exe = Path(direct.binary).name if direct.binary else None
         else:
             watch_exe = self._target_exe_name(profile, target)
-        arguments = self._splash_arguments(profile, target) if direct is None else None
+        if direct is None:
+            arguments = self._splash_arguments(profile, target)
+        else:
+            # Plain Anomaly co-op runs the game with the no-splash switch
+            # (Multiplayer.start_coop), so ours stands in for the engine's.
+            arguments = direct.arguments if game_splash.SPLASH_FLAG in direct.arguments.split() else None
         task = BackgroundTask(
             _prepare_launch, profile, kind, prefix, target, direct, watch_exe, arguments,
             parent=self,
@@ -289,8 +294,8 @@ class DeckLaunchController(QObject):
         self._steam_launch = True
         self._mo2_only = False
         plain = coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
-        # Plain Anomaly: Steam runs the Anomaly launcher, which starts the
-        # game itself; any renderer's exe ("AnomalyDX...") is the session.
+        # Plain Anomaly: Steam runs the game exe AnomalyLauncher.cfg picks
+        # (play_page.plain_game_exe); any renderer's exe ("AnomalyDX...") is the session.
         self._watch_exe = "AnomalyDX" if plain else self._target_exe_name(profile, target)
         self._pre_launch_pids = exe_pids(self._watch_exe) if self._watch_exe else set()
         self._pre_launch_mo2 = mo2_pids()
@@ -303,7 +308,8 @@ class DeckLaunchController(QObject):
         self._game_seen = False
         self._set_active(True)
         self.status.emit(tr("Starting Anomaly through Steam") if plain else tr("Starting GAMMA through Steam"))
-        if self._splash_arguments(profile, target) is not None:
+        # Plain Anomaly's shortcut hides the engine's splash too (coop_shortcut_fields).
+        if plain or self._splash_arguments(profile, target) is not None:
             self._start_splash(profile)
         self._timer.setInterval(_POLL_MS)
         self._timer.start()
