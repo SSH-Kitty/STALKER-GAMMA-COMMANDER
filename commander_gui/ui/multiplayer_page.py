@@ -592,19 +592,35 @@ class MultiplayerPage(QWidget):
         port_row.addWidget(port_caption)
         port_row.addWidget(port)
         port_row.addStretch(1)
+        # GAMMA or Anomaly: only with GAMMA, plain Anomaly alone has nothing
+        # to switch to. Moves the install at once, no zip needed.
+        self.dash_gamma_pill = _tab(tr("GAMMA"))
+        self.dash_anomaly_pill = _tab(tr("Anomaly"))
+        for button, kind in ((self.dash_gamma_pill, coop.KIND_GAMMA), (self.dash_anomaly_pill, coop.KIND_ANOMALY)):
+            button.clicked.connect(lambda _c=False, k=kind: self._switch_kind(k))
+        self.dash_kind_box = QWidget()
+        self.dash_kind_box.setObjectName("panelTransparent")
+        kind_row = QHBoxLayout(self.dash_kind_box)
+        kind_row.setContentsMargins(0, 0, 0, 0)
+        kind_row.setSpacing(24)
         for index, (caption, pills, extras) in enumerate((
             (tr("Role"), _pills(self.host_pill, self.join_pill), (self.role_hint,)),
             (tr("Session type"), _pills(self.steam_pill, self.lan_pill), (self.session_hint, self.port_box)),
             (tr("Run on Steam as"), _pills(self.cop_pill, self.spacewar_pill), (self.app_note,)),
+            (tr("Play co-op on"), _pills(self.dash_gamma_pill, self.dash_anomaly_pill),
+             (_hint(tr("Move co-op between GAMMA and Anomaly. No zip needed, and co-op stays on or off as it is.")),)),
         )):
+            target = kind_row if index == 3 else body
+            if index == 3:
+                body.addWidget(self.dash_kind_box, 1)
             if index:
-                body.addWidget(_vline())
+                target.addWidget(_vline())
             column = _field(caption, pills)
             column.setSpacing(6)
             for widget in extras:
                 column.addWidget(widget)
             column.addStretch(1)
-            body.addLayout(column, 1)
+            target.addLayout(column, 1)
         body.addWidget(_vline())
         stats = QVBoxLayout()
         stats.setSpacing(8)
@@ -940,21 +956,6 @@ class MultiplayerPage(QWidget):
         self.update_button.clicked.connect(self._pick_zip)
         layout.addWidget(_action_row(tr("Update xrRazom"), tr("Install a newer Slim zip. Your settings are kept."), self.update_button))
         layout.addWidget(_divider())
-        # Only with GAMMA: plain Anomaly alone has nothing to switch to.
-        self.kind_button = QPushButton()
-        self.kind_button.clicked.connect(self._switch_kind)
-        self.kind_manage = QWidget()
-        self.kind_manage.setObjectName("panelTransparent")
-        kind_box = QVBoxLayout(self.kind_manage)
-        kind_box.setContentsMargins(0, 0, 0, 0)
-        kind_box.setSpacing(8)
-        kind_box.addWidget(_action_row(
-            tr("GAMMA or Anomaly"),
-            tr("Move co-op between GAMMA and Anomaly. No zip needed, and co-op stays on or off as it is."),
-            self.kind_button,
-        ))
-        kind_box.addWidget(_divider())
-        layout.addWidget(self.kind_manage)
         # Plain Anomaly co-op starts the game exe the launcher last saved
         # (play_page.plain_game_exe), so the launcher is where it's changed.
         launcher = QPushButton(tr("Open Anomaly Launcher"))
@@ -975,13 +976,13 @@ class MultiplayerPage(QWidget):
         check.clicked.connect(lambda: open_url(coop.MODDB_PAGE))
         layout.addWidget(_action_row(tr("New releases"), tr("Everyone in a session must use the same version."), check))
         layout.addWidget(_divider())
-        self.export_button = QPushButton(tr("Export…"))
-        self.export_button.clicked.connect(lambda: self._export())
-        layout.addWidget(_action_row(tr("Export co-op"), tr("Save your co-op settings, keybinds, MCM values and all your saves to a zip."), self.export_button))
-        layout.addWidget(_divider())
-        self.import_button = QPushButton(tr("Import…"))
-        self.import_button.clicked.connect(self._import)
-        layout.addWidget(_action_row(tr("Import co-op"), tr("Bring back an exported zip. Files it replaces are backed up first."), self.import_button))
+        self.backup_button = QPushButton(tr("Export or import…"))
+        self.backup_button.clicked.connect(self._export_or_import)
+        layout.addWidget(_action_row(
+            tr("Export or import co-op"),
+            tr("Keep your co-op settings, keybinds, MCM values and saves in a zip, or bring one back."),
+            self.backup_button,
+        ))
         layout.addWidget(_divider())
         self.uninstall_button = QPushButton(tr("Uninstall co-op"))
         self.uninstall_button.setObjectName("danger")
@@ -1006,6 +1007,8 @@ class MultiplayerPage(QWidget):
         left.addStretch(1)
         left.addWidget(_divider())
         left.addWidget(_hint(tr("Everyone needs the same mods and xrRazom version as the host.")))
+        self.zip_label = _hint()
+        left.addWidget(self.zip_label)
 
         works, right = _section(tr("How it works"))
         _facts(right, (
@@ -1097,6 +1100,9 @@ class MultiplayerPage(QWidget):
             tr("A build without a version number, such as a test build. Everyone playing together needs the same one.")
             if custom else tr("Everyone playing together needs this version.")
         )
+        zip_name = coop.installed_zip(profile.anomaly, profile.gamma) if state else ""
+        self.zip_label.setText(tr("Installed xrRazom version: {name}", name=zip_name))
+        self.zip_label.setVisible(bool(zip_name))
         self._lan_ip = coop.lan_ip()
         self._ip_failed = False
         if profile is not None and (
@@ -1165,9 +1171,10 @@ class MultiplayerPage(QWidget):
         else:
             hint = tr("The co-op files are added to GAMMA as a Mod Organizer mod.")
         self.kind_hint.setText(hint)
-        self.kind_manage.setVisible(installed and has_gamma)
+        self.dash_kind_box.setVisible(installed and has_gamma)
+        self.dash_gamma_pill.setChecked(not plain)
+        self.dash_anomaly_pill.setChecked(plain)
         self.launcher_manage.setVisible(installed and plain)
-        self.kind_button.setText(tr("Switch to GAMMA") if plain else tr("Switch to Anomaly"))
         profile = self._profile()
         mismatch = installed and not has_gamma and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
         self.mismatch_box.setVisible(mismatch)
@@ -1212,7 +1219,7 @@ class MultiplayerPage(QWidget):
             set_hover_grow_text(self.hero_button, tr("Quit Co-op"))
         self.hero_button.setEnabled(idle and (quit_coop or not launching) and not mismatch)
         self.sp_button.setEnabled(idle and not launching)
-        for button in (self.zip_button, self.other_zip_button, self.update_button, self.export_button, self.import_button, self.uninstall_button, self.mismatch_button, self.kind_button):
+        for button in (self.zip_button, self.other_zip_button, self.update_button, self.backup_button, self.uninstall_button, self.mismatch_button, self.dash_gamma_pill, self.dash_anomaly_pill):
             button.setEnabled(idle)
         found = self._found is not None
         self.found_label.setVisible(found)
@@ -1488,12 +1495,12 @@ class MultiplayerPage(QWidget):
         done = tr("Switched to co-op") if to_coop else tr("Switched to singleplayer")
         self._start(label, fn, profile.anomaly, profile.gamma, profile.mo2_profile, done=done)
 
-    def _switch_kind(self) -> None:
-        profile = self._ready()
+    def _switch_kind(self, kind: str) -> None:
+        profile = self._ready() if kind != self._install_kind() else None
         if profile is None:
+            self._sync_enabled()  # puts the pills back
             return
-        to_plain = coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
-        kind = coop.KIND_ANOMALY if to_plain else coop.KIND_GAMMA
+        to_plain = kind == coop.KIND_ANOMALY
         self._start(
             tr("Switching co-op to Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
             coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, kind,
@@ -1533,6 +1540,22 @@ class MultiplayerPage(QWidget):
             self._export(then=uninstall)  # uninstalls only once the zip is written
         elif answer == SB.Yes:
             uninstall()
+
+    def _export_or_import(self) -> None:
+        SB = QMessageBox.StandardButton
+        answer = QMessageBox.question(
+            self, tr("Export or import co-op"), "",
+            SB.Save | SB.Open | SB.Cancel, SB.Save,
+            points=(
+                tr("Save your co-op settings, keybinds, MCM values and all your saves to a zip."),
+                tr("Bring back an exported zip. Files it replaces are backed up first."),
+            ),
+            labels={SB.Save: tr("Export…"), SB.Open: tr("Import…"), SB.Cancel: tr("Cancel")},
+        )
+        if answer == SB.Save:
+            self._export()
+        elif answer == SB.Open:
+            self._import()
 
     def _export(self, then=None) -> None:
         profile = self._ready()

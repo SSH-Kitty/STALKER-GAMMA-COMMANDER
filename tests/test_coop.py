@@ -57,6 +57,16 @@ class CoopTests(unittest.TestCase):
         self.assertEqual((self.anomaly / "bin" / "anomalydx11.exe").read_bytes(), b"MZgamma")
         self.assertNotIn(f"+{coop.MOD_NAME}", self.modlist.read_text())
 
+    def test_installed_zip_name(self):
+        coop.install(self.zip, self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(coop.installed_zip(self.anomaly, self.gamma), "xrRazom-1.4-Slim.zip")
+        # Installs from before the name was saved fall back to meta.ini.
+        state = coop.load_state(self.anomaly)
+        del state["zip"]
+        coop._save_state(self.anomaly, state)
+        self.assertEqual(coop.installed_zip(self.anomaly, self.gamma), "xrRazom-1.4-Slim.zip")
+        self.assertEqual(coop.installed_zip(self.anomaly, ""), "")
+
     def test_update_keeps_singleplayer(self):
         self._install()
         coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")

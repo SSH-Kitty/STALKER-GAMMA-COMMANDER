@@ -27,6 +27,7 @@ inherits the current files.
 
 from __future__ import annotations
 
+import configparser
 import functools
 import hashlib
 import json
@@ -258,6 +259,24 @@ def _remove_mod_entry(gamma, mo2_profile) -> None:
 
 
 # -- install / switch ------------------------------------------------------------
+def installed_zip(anomaly, gamma) -> str:
+    """The zip co-op was installed from, or "" when unknown."""
+    state = load_state(anomaly) or {}
+    if state.get("zip"):
+        return state["zip"]
+    if not str(gamma).strip():
+        return ""
+    # Installs from before "zip" was saved: GAMMA ones have it in meta.ini.
+    meta = configparser.ConfigParser(interpolation=None)
+    try:
+        meta.read(Path(gamma).expanduser() / "mods" / MOD_NAME / "meta.ini", encoding="utf-8")
+    except (OSError, configparser.Error):
+        return ""
+    # A switch back from Anomaly wrote the mod's name there instead.
+    name = meta.get("General", "installationFile", fallback="")
+    return name if name.lower().endswith(".zip") else ""
+
+
 def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, kind: str = KIND_GAMMA) -> dict:
     """Install (or update) from ``zip_path``.
 
@@ -314,7 +333,7 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
             _remove_mod(gamma, mo2_profile)  # reinstalled for plain Anomaly
         shutil.rmtree(root / "files", ignore_errors=True)
         os.replace(staging / "files", root / "files")
-        state = {"version": info.get("version", ""), "release": info, "files": files,
+        state = {"version": info.get("version", ""), "release": info, "files": files, "zip": Path(zip_path).name,
                  "originals": [], "active": False, "kind": kind,
                  "slots_lifted": bool((previous or {}).get("slots_lifted")),
                  "host_default": bool((previous or {}).get("host_default"))}
@@ -570,7 +589,7 @@ def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
         try:
             for rel in moved:
                 _copy_atomic(root / "files" / rel, staging / rel)
-            write_basic_meta_ini(staging, (state.get("release") or {}).get("title") or MOD_NAME)
+            write_basic_meta_ini(staging, state.get("zip") or (state.get("release") or {}).get("title") or MOD_NAME)
             _swap_dir(staging, mod_dir)
         finally:
             shutil.rmtree(staging, ignore_errors=True)

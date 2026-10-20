@@ -257,9 +257,10 @@ Testing unstable builds is the most useful way to help before a release. When re
 - **[FaithBeam](https://github.com/FaithBeam)**: [`stalker-gamma-cli`](https://github.com/FaithBeam/stalker-gamma-cli),
   the installer that COMMANDER bundles and runs.
 - **[dnttnd](https://github.com/dnttnd)**: testing, development builds, bug reports and UI refinement.
+- **Harbingerr**: xrRazom Co-op, the multiplayer mod.
 - **[Grokitach](https://github.com/Grokitach)** and the GAMMA team: [the modpack itself](https://github.com/Grokitach/Stalker_GAMMA).
-- **The xrRazom team**, for xrRazom Co-op.
-- **[GSC Game World](https://www.gsc-game.com/)** and the Anomaly team, for the game.
+- **The Anomaly Team**: developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base.
+- **[GSC Game World](https://www.gsc-game.com/)**: creators of the original S.T.A.L.K.E.R. games and universe.
 
 <a><img src="docs/readme/h-license.svg" width="100%" alt="License"></a>
 

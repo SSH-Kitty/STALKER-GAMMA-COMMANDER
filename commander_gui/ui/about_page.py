@@ -59,8 +59,10 @@ CREDITS = (
     "SSH-Kitty — COMMANDER graphical user interface.",
     "Dnttnd — testing implementations, dev builds, bug reports, and helping polish the UI.",
     "FaithBeam — the STALKER-GAMMA CLI.",
+    "Harbingerr — xrRazom Co-op, the multiplayer mod.",
     "Grokitach and the GAMMA team — the GAMMA modpack.",
-    "GSC Game World and the Anomaly team — the game.",
+    "The Anomaly Team — developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base.",
+    "GSC Game World — creators of the original S.T.A.L.K.E.R. games and universe.",
 )
 
 #: Live keys that are not paths, so get no Open button.
