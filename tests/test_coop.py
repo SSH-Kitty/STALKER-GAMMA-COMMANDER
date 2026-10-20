@@ -226,7 +226,7 @@ class CoopTests(unittest.TestCase):
         coop.switch_to_coop(self.anomaly, self.gamma, "G.A.M.M.A")
         text = user_ltx.read_text().splitlines()
         self.assertEqual(text[0], "rs_screenmode windowed")
-        self.assertEqual(sorted(text[1:]), ["xrr_friendly_fire on", "xrr_max_players 4", "xrr_player_name Old"])
+        self.assertEqual(sorted(text[1:]), ["xrr_friendly_fire on", "xrr_host_session on", "xrr_max_players 4", "xrr_player_name Old"])
 
     def test_slot_default_lifted_once(self):
         # The engine writes 3 friends; xrRazom takes 4. Lift it once, then
@@ -235,9 +235,17 @@ class CoopTests(unittest.TestCase):
         user_ltx.write_text("xrr_max_players 3\n")
         self._install()
         self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_max_players"], 4)
-        self.assertEqual(user_ltx.read_text(), "xrr_max_players 4\n")
+        self.assertEqual(user_ltx.read_text(), "xrr_max_players 4\nxrr_host_session on\n")
         coop.write_settings(self.anomaly, {"xrr_max_players": 3})
         self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_max_players"], 3)
+
+    def test_role_starts_as_host_once(self):
+        self._install()
+        self.assertTrue(coop.read_settings(self.anomaly)[0]["xrr_host_session"])
+        coop.write_settings(self.anomaly, {"xrr_host_session": False})  # the player picks Joining
+        self.assertFalse(coop.read_settings(self.anomaly)[0]["xrr_host_session"])
+        self._install()  # an update keeps the pick
+        self.assertFalse(coop.read_settings(self.anomaly)[0]["xrr_host_session"])
 
     def test_last_ip_round_trip(self):
         coop.write_last_ip(self.anomaly, self.gamma, "G.A.M.M.A", "1.2.3.4:5445")
@@ -371,7 +379,7 @@ class PlainAnomalyCoopTests(unittest.TestCase):
         from commander_gui.steam_shortcuts import coop_launch_options
 
         options = coop_launch_options("/p", "G.A.M.M.A", "Anomaly", 480, "-x", mo2=False)
-        self.assertEqual(options, "STEAM_COMPAT_DATA_PATH=/p SteamAppId=480 %command%")
+        self.assertEqual(options, "STEAM_COMPAT_DATA_PATH=/p SteamAppId=480 %command% -x")
 
 
 if __name__ == "__main__":
@@ -414,6 +422,49 @@ class MultiplayerPageTests(unittest.TestCase):
             self.assertFalse(page._dirty)
             self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_friendly_fire"], fire.isChecked())
         page.deleteLater()
+
+    def test_unversioned_build_says_custom_and_first_role_is_host(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.multiplayer_page import MultiplayerPage
+
+        QApplication.instance() or QApplication([])
+        self._install()
+        state = coop.load_state(self.anomaly)
+        state["release"] = {"title": "", "version": ""}
+        coop._save_state(self.anomaly, state)
+        profile = SimpleNamespace(anomaly=str(self.anomaly), gamma=str(self.gamma), mo2_profile="G.A.M.M.A")
+        window = SimpleNamespace(settings=SimpleNamespace(active_profile=profile), install_busy=False)
+        with patch.object(coop, "find_downloaded_zip", return_value=None):
+            page = MultiplayerPage(window)
+            page.refresh()
+            self.assertEqual(page.version_stat.value.text(), "Custom")
+            self.assertTrue(page.host_pill.isChecked())
+            self.assertEqual(page.tab_group.checkedId(), 0)
+        page.deleteLater()
+
+    def test_plain_anomaly_shortcut_runs_the_game_without_its_splash(self):
+        from commander_gui.steam_shortcuts import coop_launch_options
+        from commander_gui.ui.play_page import plain_game_exe
+
+        (self.anomaly / "bin").mkdir(exist_ok=True)
+        (self.anomaly / "bin" / "AnomalyDX10.exe").write_bytes(b"MZ")
+        (self.anomaly / "AnomalyLauncher.cfg").write_text("DX10\n\n0\n")
+        self.assertEqual(plain_game_exe(self.anomaly).name, "AnomalyDX10.exe")
+        (self.anomaly / "bin" / "AnomalyDX11AVX.exe").write_bytes(b"MZ")
+        (self.anomaly / "AnomalyLauncher.cfg").write_text("DX11\nAVX\n0\n")
+        self.assertEqual(plain_game_exe(self.anomaly).name, "AnomalyDX11AVX.exe")
+        self.assertTrue(coop_launch_options("/p", "", "t", 41700, "-nosplashwindow", mo2=False).endswith("%command% -nosplashwindow"))
+
+    def test_copied_files_keep_their_mode(self):
+        src = self.anomaly / "src.bin"
+        src.write_text("x")
+        src.chmod(0o755)
+        coop._copy_atomic(src, self.anomaly / "dst.bin")
+        self.assertEqual((self.anomaly / "dst.bin").stat().st_mode & 0o777, 0o755)
 
     def test_mirrors_play_page_launch_status(self):
         from types import SimpleNamespace

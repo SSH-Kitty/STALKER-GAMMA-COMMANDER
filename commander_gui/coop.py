@@ -128,6 +128,7 @@ def _copy_atomic(src: Path, dst: Path) -> None:
     os.close(fd)
     try:
         shutil.copyfile(src, tmp)
+        shutil.copymode(src, tmp)  # mkstemp makes it 0600; keep the source's mode
         os.replace(tmp, dst)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -273,7 +274,8 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
         os.replace(staging / "files", root / "files")
         state = {"version": info.get("version", ""), "release": info, "files": files,
                  "originals": [], "active": False, "kind": kind,
-                 "slots_lifted": bool((previous or {}).get("slots_lifted"))}
+                 "slots_lifted": bool((previous or {}).get("slots_lifted")),
+                 "host_default": bool((previous or {}).get("host_default"))}
         if kind == KIND_ANOMALY:
             # Which co-op files are the mod's, for set_install_kind(). One
             # the engine half ships too stays an engine file.
@@ -610,14 +612,22 @@ def read_settings(anomaly) -> tuple[dict, set[str]]:
 
 def _lift_slot_default(anomaly) -> None:
     """Once per install, raise the engine's default of 3 friends to 4, the
-    most xrRazom takes (host + 4). A value picked after that stays."""
+    most xrRazom takes (host + 4), and start as the host. A value picked
+    after that stays."""
     state = load_state(anomaly)
-    if state is None or state.get("slots_lifted"):
+    if state is None or (state.get("slots_lifted") and state.get("host_default")):
         return
-    if _read_settings(anomaly)[0]["xrr_max_players"] == 3:
-        write_settings(anomaly, {"xrr_max_players": 4})
+    values, present = _read_settings(anomaly)
+    changes = {}
+    if not state.get("slots_lifted") and values["xrr_max_players"] == 3:
+        changes["xrr_max_players"] = 4
+    if not state.get("host_default") and "xrr_host_session" not in present \
+            and "xrr_host_session" not in (state.get("settings") or {}):
+        changes["xrr_host_session"] = True
+    if changes:
+        write_settings(anomaly, changes)
         state = load_state(anomaly)
-    state["slots_lifted"] = True
+    state["slots_lifted"] = state["host_default"] = True
     _save_state(anomaly, state)
 
 

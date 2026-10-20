@@ -201,6 +201,20 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
     kill_stray_debuggers(runner_env)
 
 
+def plain_game_exe(anomaly) -> Path:
+    """The game exe AnomalyLauncher.exe is set to start (its cfg's first two
+    lines, e.g. DX11 + AVX), else the best one that exists."""
+    bin_dir = Path(anomaly) / "bin"
+    try:
+        api, avx = (bin_dir.parent / "AnomalyLauncher.cfg").read_text().split()[:2]
+        wanted = bin_dir / f"Anomaly{api}{'AVX' if avx.upper() == 'AVX' else ''}.exe"
+    except (OSError, ValueError):
+        wanted = bin_dir / "AnomalyDX11AVX.exe"
+    if wanted.is_file():
+        return wanted
+    return next((bin_dir / n for n in ("AnomalyDX11AVX.exe", "AnomalyDX11.exe", "AnomalyDX9.exe") if (bin_dir / n).is_file()), wanted)
+
+
 def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = "") -> dict:
     """What the co-op Steam shortcut has to run (see steam_shortcuts).
 
@@ -211,7 +225,10 @@ def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = 
     if mo2:
         exe, start_dir = Path(profile.gamma) / "ModOrganizer.exe", profile.gamma
     else:
-        exe, start_dir = Path(profile.anomaly) / "AnomalyLauncher.exe", profile.anomaly
+        # The game itself, not AnomalyLauncher.exe: the launcher starts it
+        # with no way to add the switch that hides the engine's splash.
+        exe, start_dir = plain_game_exe(profile.anomaly), profile.anomaly
+        arguments = game_splash.SPLASH_FLAG
     if not exe.is_file():
         raise LaunchError(f"{exe.name} not found in {start_dir}")
     prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
@@ -2217,14 +2234,14 @@ class PlayPage(QWidget):
             return
         self._close_splash()
         exe = self._target_exe()
-        # Plain Anomaly co-op through Steam always runs the Anomaly launcher.
-        if (exe is not None and is_launcher(exe.binary)) or self._no_mo2_session:
+        if exe is not None and is_launcher(exe.binary) and not self._no_mo2_session:
             # The player still has to press Play in the launcher: a splash
             # that lets it stay in front (see game_splash.start).
             if coop.is_active(profile.anomaly) if coop_launch is None else coop_launch:
                 self._start_splash(on_top=False)
             return
-        if self._splash_arguments(coop_launch) is None:
+        # Plain Anomaly co-op through Steam runs the game exe with the flag.
+        if self._splash_arguments(coop_launch) is None and not self._no_mo2_session:
             return
         self._start_splash()
 

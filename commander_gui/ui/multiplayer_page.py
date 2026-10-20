@@ -1067,8 +1067,12 @@ class MultiplayerPage(QWidget):
         self.status_pill.style().unpolish(self.status_pill)
         self.status_pill.style().polish(self.status_pill)
         release = (state or {}).get("release", {})
-        self.version_stat.set(release.get("version") or "?")
-        self.version_stat.setToolTip(tr("Everyone playing together needs this version."))
+        custom = self._status != coop.NOT_INSTALLED and not release.get("version")
+        self.version_stat.set(release.get("version") or (tr("Custom") if custom else "?"))
+        self.version_stat.setToolTip(
+            tr("A build without a version number, such as a test build. Everyone playing together needs the same one.")
+            if custom else tr("Everyone playing together needs this version.")
+        )
         self._lan_ip = coop.lan_ip()
         self._ip_failed = False
         if profile is not None and (

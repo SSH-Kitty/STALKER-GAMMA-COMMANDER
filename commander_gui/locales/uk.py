@@ -1384,6 +1384,8 @@ TRANSLATIONS: dict[str, str] = {
     'Open Multiplayer': 'Відкрити Мультиплеєр',
     'Play GAMMA Co-op': 'Грати в GAMMA кооператив',
     'Travel': 'Подорожі',
+    'Custom': 'Власна збірка',
+    'A build without a version number, such as a test build. Everyone playing together needs the same one.': 'Збірка без номера версії, наприклад тестова. Усім, хто грає разом, потрібна та сама.',
     'Everyone playing together needs this version.': 'Усім, хто грає разом, потрібна ця версія.',
     'Max players in your server, you included.': 'Максимум гравців на вашому сервері, включно з вами.',
     'Download the Slim zip': 'Завантаж zip Slim',

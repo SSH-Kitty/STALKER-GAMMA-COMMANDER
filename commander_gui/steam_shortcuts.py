@@ -746,7 +746,7 @@ def coop_launch_options(
     """
     q = shlex.quote
     if not mo2:
-        return f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command%"
+        return f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command% {arguments}".rstrip()
     run = f"run {q('--arguments=' + arguments)} " if arguments else "run "
     profile = f"-p {q(mo2_profile)} " if mo2_profile else ""
     return (
