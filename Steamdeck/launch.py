@@ -32,6 +32,7 @@ from commander_gui.launcher import (
     find_extra_protons,
     kill_stray_debuggers,
     launch_detached,
+    anomaly_launcher_target,
     parse_mo2_executables,
     ptrace_scope,
     read_log_tail,
@@ -287,7 +288,10 @@ class DeckLaunchController(QObject):
         self._crash_timer.stop()
         self._steam_launch = True
         self._mo2_only = False
-        self._watch_exe = self._target_exe_name(profile, target)
+        plain = coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+        # Plain Anomaly: Steam runs the Anomaly launcher, which starts the
+        # game itself; any renderer's exe ("AnomalyDX...") is the session.
+        self._watch_exe = "AnomalyDX" if plain else self._target_exe_name(profile, target)
         self._pre_launch_pids = exe_pids(self._watch_exe) if self._watch_exe else set()
         self._pre_launch_mo2 = mo2_pids()
         self._anomaly = profile.anomaly or ""
@@ -298,7 +302,7 @@ class DeckLaunchController(QObject):
         self._game_started_at = 0.0
         self._game_seen = False
         self._set_active(True)
-        self.status.emit(tr("Starting GAMMA through Steam"))
+        self.status.emit(tr("Starting Anomaly through Steam") if plain else tr("Starting GAMMA through Steam"))
         if self._splash_arguments(profile, target) is not None:
             self._start_splash(profile)
         self._timer.setInterval(_POLL_MS)
@@ -379,12 +383,15 @@ class DeckLaunchController(QObject):
 
     def targets(self, profile) -> tuple[list[str], str]:
         """Launch target titles from ModOrganizer.ini, and the default one."""
-        titles = [exe.title for exe in parse_mo2_executables(profile.gamma)]
+        titles = [exe.title for exe in self.executables(profile)]
         saved = gui_settings.load_gui_settings().get("target") or ""
         return titles, default_launch_target(titles, profile.gamma, saved)
 
     def executables(self, profile):
-        return parse_mo2_executables(profile.gamma)
+        """MO2's launch targets, or plain Anomaly's launcher without MO2."""
+        found = parse_mo2_executables(profile.gamma)
+        launcher = None if found else anomaly_launcher_target(profile.anomaly)
+        return [launcher] if launcher is not None else found
 
     # -- watchdog ---------------------------------------------------------
     def _poll(self) -> None:

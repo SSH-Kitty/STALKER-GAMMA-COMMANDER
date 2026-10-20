@@ -624,6 +624,16 @@ def _qsettings_value(value: str) -> str:
     return value
 
 
+def anomaly_launcher_target(anomaly_dir: str) -> Mo2Executable | None:
+    """The "Anomaly" launch target of an install without MO2: AnomalyLauncher.exe."""
+    if not str(anomaly_dir).strip():
+        return None
+    launcher = Path(anomaly_dir) / "AnomalyLauncher.exe"
+    if not launcher.is_file():
+        return None
+    return Mo2Executable(title="Anomaly", binary=str(launcher), working_directory=str(anomaly_dir))
+
+
 def parse_mo2_executables(gamma_dir: str) -> list[Mo2Executable]:
     """Parse the ``[customExecutables]`` section of ModOrganizer.ini."""
     ini = Path(gamma_dir) / "ModOrganizer.ini"

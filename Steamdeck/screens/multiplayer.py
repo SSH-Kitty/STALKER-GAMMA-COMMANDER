@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from commander_gui import coop, gui_settings
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
+    Mo2Executable,
     parse_mo2_executables,
     resolve_runner,
     steam_shortcut_appid,
@@ -48,6 +49,7 @@ from commander_gui.steam_shortcuts import (
 from commander_gui.ui.common import (
     notice,
     BackgroundTask,
+    gamma_installed,
     game_running,
     mo2_running,
     play_click_sound,
@@ -158,7 +160,8 @@ def refuse_launch(window, reason: str) -> None:
 
 def _prepare_coop_steam(profile, kind, prefix, mo2_profile, target, arguments) -> dict:
     """The disk-bound half of a Steam co-op launch, on a worker thread."""
-    unblock_mo2_python(profile.gamma)
+    if coop.install_kind(profile.anomaly) == coop.KIND_GAMMA:
+        unblock_mo2_python(profile.gamma)
     coop.ensure_root_appid(profile.anomaly, profile.gamma, profile.mo2_profile)
     runner = resolve_runner(kind, prefix)
     return coop_shortcut_fields(profile, runner, mo2_profile, target, arguments)
@@ -647,7 +650,7 @@ class MultiplayerScreen(DeckScreen):
         self._ip_failed = False
         if profile is not None:
             self._values, _present = coop.read_settings(profile.anomaly)
-            self._join_ip = coop.read_last_ip(profile.gamma, profile.mo2_profile)
+            self._join_ip = coop.read_last_ip(profile.anomaly, profile.gamma, profile.mo2_profile)
             self._settings_from = profile
         self._render_values()
         self._sync()
@@ -854,11 +857,11 @@ class MultiplayerScreen(DeckScreen):
             if profile is None:
                 return
             try:
-                coop.write_last_ip(profile.gamma, profile.mo2_profile, text)
+                coop.write_last_ip(profile.anomaly, profile.gamma, profile.mo2_profile, text)
             except (OSError, ValueError) as exc:
                 self.window.notify(tr("Couldn't save your settings") + ": " + str(exc), 8000)
                 return
-            self._join_ip = coop.read_last_ip(profile.gamma, profile.mo2_profile)
+            self._join_ip = coop.read_last_ip(profile.anomaly, profile.gamma, profile.mo2_profile)
             self._render_values()
 
         self._keyboard(tr("Host address"), getattr(self, "_join_ip", ""), _done,
@@ -1000,14 +1003,22 @@ class MultiplayerScreen(DeckScreen):
             _go()
             return
         self.window.confirm(
-            tr("Not the Slim edition"),
-            tr("{title} isn't the Slim edition. Slim is the one made for GAMMA, and other editions may not work with it.", title=info.get("title") or path.name),
+            tr("Install this edition?"),
+            tr("{title} isn't the Slim edition from moddb. Other editions and test builds install the same way and work with co-op.", title=info.get("title") or path.name),
             _go,
-            confirm_text=tr("Install anyway"),
+            confirm_text=tr("Install now"),
         )
 
     def _install_job(self, path: Path, profile):
-        return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit)
+        # No GAMMA: plain Anomaly. With GAMMA, an update keeps the kind; the
+        # GAMMA-or-plain choice for a first install is the desktop page's.
+        if not gamma_installed(profile.gamma, profile.mo2_profile):
+            kind = coop.KIND_ANOMALY
+        elif coop.load_state(profile.anomaly) is not None:
+            kind = coop.install_kind(profile.anomaly)
+        else:
+            kind = coop.KIND_GAMMA
+        return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit, kind=kind)
 
     def _run_switch(self, to_coop: bool) -> None:
         profile = self._ready()
@@ -1084,6 +1095,13 @@ class MultiplayerScreen(DeckScreen):
             steam = coop.read_settings(profile.anomaly)[0]["xrr_host_steam"]
             if os.name != "nt" and steam:
                 self._launch_steam(profile, target)
+            elif coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY:
+                anomaly = Path(profile.anomaly)
+                launcher = Mo2Executable(
+                    title="Anomaly", binary=str(anomaly / "AnomalyLauncher.exe"),
+                    working_directory=str(anomaly),
+                )
+                self._play().controller.launch(profile, target=None, direct=launcher)
             else:
                 self._play().controller.launch(profile, target=target)
 

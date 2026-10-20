@@ -38,6 +38,7 @@ from .common import (
     notice,
     BackgroundTask,
     PlainSpinBox,
+    gamma_installed,
     game_running,
     info_label,
     install_hover_grow_text,
@@ -434,6 +435,10 @@ class MultiplayerPage(QWidget):
         self._ip_shown = False
         self._found: Path | None = None
         self._appid = coop.COP_APPID
+        #: Where a new install goes when the profile has GAMMA too: GAMMA
+        #: and plain Anomaly share the Anomaly folder, so co-op is set up
+        #: for one of them (see coop.KIND_ANOMALY).
+        self._kind_pick = coop.KIND_GAMMA
         self._play_bound = False
         self._bridge = _Bridge(self)
         self._bridge.progress.connect(self._on_progress)
@@ -485,7 +490,21 @@ class MultiplayerPage(QWidget):
         # -- not installed: three step tiles, then one big install button -----
         self.install_box, setup = _panel()
         setup.setSpacing(14)
-        setup.addWidget(info_label(tr("Play GAMMA with up to 4 friends. You can switch back to singleplayer any time.")))
+        self.intro_label = info_label("")
+        setup.addWidget(self.intro_label)
+        # Only asked when the profile has GAMMA; plain Anomaly has no choice.
+        self.gamma_pill = _tab(tr("GAMMA"))
+        self.anomaly_pill = _tab(tr("Plain Anomaly"))
+        for button, kind in ((self.gamma_pill, coop.KIND_GAMMA), (self.anomaly_pill, coop.KIND_ANOMALY)):
+            button.clicked.connect(lambda _c=False, k=kind: self._pick_kind(k))
+        self.kind_box = QWidget()
+        self.kind_box.setObjectName("panelTransparent")
+        kind_column = _field(tr("Play co-op on"), _pills(self.gamma_pill, self.anomaly_pill))
+        kind_column.setContentsMargins(0, 0, 0, 0)
+        self.kind_box.setLayout(kind_column)
+        setup.addWidget(self.kind_box)
+        self.kind_hint = _hint()
+        setup.addWidget(self.kind_hint)
         self.download_button = QPushButton(tr("Download from moddb"))
         self.download_button.setObjectName("secondary")
         self.download_button.clicked.connect(lambda: open_url(coop.MODDB_PAGE))
@@ -598,6 +617,17 @@ class MultiplayerPage(QWidget):
         self.reverted_label = info_label(tr("A GAMMA update or repair put the original game files back. Re-apply co-op to play together again."))
         self.reverted_label.setObjectName("warn")
         dash.addWidget(self.reverted_label)
+        # Installed for GAMMA (or before plain Anomaly was supported), but
+        # this profile has no GAMMA: the mod's files would never load.
+        self.mismatch_button = QPushButton(tr("Reinstall for plain Anomaly"))
+        self.mismatch_button.setObjectName("secondary")
+        self.mismatch_button.clicked.connect(lambda: self._install_zip(self._found) if self._found else self._pick_zip())
+        self.mismatch_box = _action_row(
+            tr("Set up for GAMMA"),
+            tr("This co-op install was made for GAMMA, but this profile has no GAMMA. Reinstall it for plain Anomaly to play."),
+            self.mismatch_button,
+        )
+        dash.addWidget(self.mismatch_box)
 
         # One big button that always does the next step: switch to co-op,
         # or launch it once co-op is on (same hero button as the Play page).
@@ -909,6 +939,21 @@ class MultiplayerPage(QWidget):
         self.update_button.clicked.connect(self._pick_zip)
         layout.addWidget(_action_row(tr("Update xrRazom"), tr("Install a newer Slim zip. Your settings are kept."), self.update_button))
         layout.addWidget(_divider())
+        # Only with GAMMA: plain Anomaly alone has nothing to switch to.
+        self.kind_button = QPushButton()
+        self.kind_button.clicked.connect(self._switch_kind)
+        self.kind_manage = QWidget()
+        self.kind_manage.setObjectName("panelTransparent")
+        kind_box = QVBoxLayout(self.kind_manage)
+        kind_box.setContentsMargins(0, 0, 0, 0)
+        kind_box.setSpacing(8)
+        kind_box.addWidget(_action_row(
+            tr("GAMMA or plain Anomaly"),
+            tr("Move co-op between GAMMA and plain Anomaly. No zip needed, and co-op stays on or off as it is."),
+            self.kind_button,
+        ))
+        kind_box.addWidget(_divider())
+        layout.addWidget(self.kind_manage)
         check = QPushButton(tr("Check moddb for updates"))
         check.clicked.connect(lambda: open_url(coop.MODDB_PAGE))
         layout.addWidget(_action_row(tr("New releases"), tr("Everyone in a session must use the same version."), check))
@@ -945,6 +990,7 @@ class MultiplayerPage(QWidget):
             ("Your name is your profile", "Change it and the host sees a new player with a fresh character."),
             ("The host sets the rules", "Session rules on the Hosting tab apply to everyone."),
             ("Call of Pripyat or Spacewar", "Everyone picks the same one. Call of Pripyat must be owned. Spacewar is free."),
+            ("GAMMA or plain Anomaly", "One Anomaly folder runs co-op for one of them at a time. To keep both ready, give plain Anomaly its own folder and profile."),
         ))
         _columns(layout, start, works)
 
@@ -1051,14 +1097,58 @@ class MultiplayerPage(QWidget):
         ):
             self._widgets[child].setEnabled(self._widgets[parent].isChecked())
         self._widgets["xrr_host_lan_port"].setEnabled(not self._widgets["xrr_host_steam"].isChecked())
-        self.join_edit.setText(coop.read_last_ip(profile.gamma, profile.mo2_profile))
+        self.join_edit.setText(coop.read_last_ip(profile.anomaly, profile.gamma, profile.mo2_profile))
         self._dirty.clear()
         self._settings_from = profile
+
+    def _has_gamma(self) -> bool:
+        profile = self._profile()
+        return profile is not None and gamma_installed(profile.gamma, profile.mo2_profile)
+
+    def _install_kind(self) -> str:
+        """How the next install (or update) of the zip goes for this profile."""
+        profile = self._profile()
+        if not self._has_gamma():
+            return coop.KIND_ANOMALY
+        if self._status != coop.NOT_INSTALLED:
+            return coop.install_kind(profile.anomaly)  # an update keeps it
+        return self._kind_pick
+
+    def _pick_kind(self, kind: str) -> None:
+        self._kind_pick = kind
+        self._sync_enabled()
+
+    def _sync_kind(self, installed: bool) -> bool:
+        """The install kind's widgets; True when the install doesn't fit the profile."""
+        has_gamma = self._has_gamma()
+        kind = self._install_kind()
+        plain = kind == coop.KIND_ANOMALY
+        self.intro_label.setText(
+            tr("Play Anomaly with up to 4 friends. You can switch back to singleplayer any time.") if plain
+            else tr("Play GAMMA with up to 4 friends. You can switch back to singleplayer any time.")
+        )
+        self.kind_box.setVisible(has_gamma)
+        self.gamma_pill.setChecked(not plain)
+        self.anomaly_pill.setChecked(plain)
+        if not has_gamma:
+            hint = tr("No GAMMA found, so co-op is set up for plain Anomaly. Everything goes into your Anomaly folder.")
+        elif plain:
+            hint = tr("Everything goes into your Anomaly folder. While co-op is on, GAMMA can't start: switch to singleplayer first to play GAMMA.")
+        else:
+            hint = tr("The co-op files are added to GAMMA as a Mod Organizer mod.")
+        self.kind_hint.setText(hint)
+        self.kind_manage.setVisible(installed and has_gamma)
+        self.kind_button.setText(tr("Switch to GAMMA") if plain else tr("Switch to plain Anomaly"))
+        profile = self._profile()
+        mismatch = installed and not has_gamma and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
+        self.mismatch_box.setVisible(mismatch)
+        return mismatch
 
     def _sync_enabled(self) -> None:
         installed = self._status != coop.NOT_INSTALLED
         # Greying the buttons for a few file writes only makes them flash.
         idle = self._quiet or (not self._busy and not self.window.install_busy)
+        mismatch = self._sync_kind(installed)
         self.install_box.setVisible(not installed)
         self.dash_box.setVisible(installed)
         self.settings_card.setVisible(installed)
@@ -1091,9 +1181,9 @@ class MultiplayerPage(QWidget):
         quit_coop = launching and self._status == coop.COOP
         if quit_coop:
             set_hover_grow_text(self.hero_button, tr("Quit Co-op"))
-        self.hero_button.setEnabled(idle and (quit_coop or not launching))
+        self.hero_button.setEnabled(idle and (quit_coop or not launching) and not mismatch)
         self.sp_button.setEnabled(idle and not launching)
-        for button in (self.zip_button, self.other_zip_button, self.update_button, self.uninstall_button):
+        for button in (self.zip_button, self.other_zip_button, self.update_button, self.uninstall_button, self.mismatch_button, self.kind_button):
             button.setEnabled(idle)
         found = self._found is not None
         self.found_label.setVisible(found)
@@ -1348,16 +1438,17 @@ class MultiplayerPage(QWidget):
         except (coop.CoopError, OSError) as exc:
             QMessageBox.warning(self, tr("This isn't an xrRazom zip"), tr(str(exc)))
             return
-        if "slim" not in info.get("title", "").lower() and QMessageBox.question(
-            self, tr("Not the Slim edition"),
-            tr("{title} isn't the Slim edition. Slim is the one made for GAMMA, and other editions may not work with it.", title=info.get("title") or path.name),
-            labels={QMessageBox.StandardButton.Yes: tr("Install anyway"), QMessageBox.StandardButton.No: tr("Cancel")},
+        kind = self._install_kind()
+        if kind == coop.KIND_GAMMA and "slim" not in info.get("title", "").lower() and QMessageBox.question(
+            self, tr("Install this edition?"),
+            tr("{title} isn't the Slim edition from moddb. Other editions and test builds install the same way and work with co-op.", title=info.get("title") or path.name),
+            labels={QMessageBox.StandardButton.Yes: tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._start(tr("Installing {name}…", name=path.name), self._install_job, path, profile, done=tr("xrRazom Co-op installed"))
+        self._start(tr("Installing {name}…", name=path.name), self._install_job, path, profile, kind, done=tr("xrRazom Co-op installed"))
 
-    def _install_job(self, path: Path, profile):
-        return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit)
+    def _install_job(self, path: Path, profile, kind: str):
+        return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit, kind=kind)
 
     def _run_switch(self, to_coop: bool) -> None:
         profile = self._ready()
@@ -1367,6 +1458,18 @@ class MultiplayerPage(QWidget):
         label = tr("Switching to co-op…") if to_coop else tr("Switching to singleplayer…")
         done = tr("Switched to co-op") if to_coop else tr("Switched to singleplayer")
         self._start(label, fn, profile.anomaly, profile.gamma, profile.mo2_profile, done=done)
+
+    def _switch_kind(self) -> None:
+        profile = self._ready()
+        if profile is None:
+            return
+        to_plain = coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
+        kind = coop.KIND_ANOMALY if to_plain else coop.KIND_GAMMA
+        self._start(
+            tr("Switching co-op to plain Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
+            coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, kind,
+            done=tr("Co-op is set up for plain Anomaly") if to_plain else tr("Co-op is set up for GAMMA"),
+        )
 
     def _set_appid(self, appid: int) -> None:
         profile = self._ready() if appid != self._appid else None
@@ -1414,7 +1517,7 @@ class MultiplayerPage(QWidget):
             if changes:
                 coop.write_settings(profile.anomaly, changes)
             if "last_ip" in self._dirty:
-                coop.write_last_ip(profile.gamma, profile.mo2_profile, self.join_edit.text())
+                coop.write_last_ip(profile.anomaly, profile.gamma, profile.mo2_profile, self.join_edit.text())
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, tr("Couldn't save your settings"), str(exc))
             return False

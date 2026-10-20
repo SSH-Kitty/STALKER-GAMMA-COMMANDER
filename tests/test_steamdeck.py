@@ -3017,6 +3017,26 @@ _TWO_STEP_FOMOD = """<config>
 """
 
 
+class DeckPlainAnomalyTests(unittest.TestCase):
+    """A profile with Anomaly alone: Play launches AnomalyLauncher.exe, no MO2."""
+
+    def test_anomaly_alone_gets_the_launcher_target(self):
+        from types import SimpleNamespace
+
+        from Steamdeck.launch import DeckLaunchController
+        from Steamdeck.screens.play import play_label
+
+        with tempfile.TemporaryDirectory() as tmp:
+            anomaly = Path(tmp)
+            (anomaly / "AnomalyLauncher.exe").write_bytes(b"MZ")
+            profile = SimpleNamespace(anomaly=str(anomaly), gamma="", mo2_profile="")
+            controller = DeckLaunchController()
+            self.assertEqual(controller.targets(profile)[0], ["Anomaly"])
+            launcher = controller.executables(profile)[0]
+            self.assertEqual(Path(launcher.binary).name, "AnomalyLauncher.exe")
+            self.assertEqual(play_label(profile), "Play Anomaly")
+
+
 class DeckControllerNavigationTests(DeckWindowFixture):
     def focused(self):
         return self.app.focusWidget()
@@ -3082,7 +3102,8 @@ class DeckControllerNavigationTests(DeckWindowFixture):
         self.assertIs(self.focused(), settings.language_row)
 
     def test_play_starts_on_the_play_button(self):
-        play = self.goto("play")
+        play = self.window._ensure_page("play")
+        self.goto("dashboard")
         self.window._nav_buttons["dashboard"].setFocus()
         self.window.cycle_page(1)  # dashboard -> play, first visit
         self.pump()

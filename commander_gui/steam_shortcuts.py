@@ -729,7 +729,7 @@ def install_artwork(vdf_path: Path, appid: int, source: Path) -> None:
 
 
 def coop_launch_options(
-    prefix: str, mo2_profile: str, target: str, appid: int, arguments: str = ""
+    prefix: str, mo2_profile: str, target: str, appid: int, arguments: str = "", *, mo2: bool = True
 ) -> str:
     """LaunchOptions for the co-op shortcut.
 
@@ -742,8 +742,11 @@ def coop_launch_options(
     Steam runs LaunchOptions through ``sh -c``: every value is shell-quoted
     so a ``"`` or ``$(...)`` in a path or profile name stays a literal.
     An empty *mo2_profile* leaves out ``-p``: MO2 opens its selected one.
+    ``mo2=False`` (plain Anomaly) runs the shortcut's exe as it is.
     """
     q = shlex.quote
+    if not mo2:
+        return f"STEAM_COMPAT_DATA_PATH={q(prefix)} SteamAppId={int(appid)} %command%"
     run = f"run {q('--arguments=' + arguments)} " if arguments else "run "
     profile = f"-p {q(mo2_profile)} " if mo2_profile else ""
     return (

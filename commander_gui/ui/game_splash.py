@@ -43,6 +43,8 @@ RAIN_FADE = 90
 #: At most this share of the screen's width: full size on a 1920 px desktop,
 #: 768 px of the Steam Deck's 1280, so the Deck's screen is not covered.
 SCREEN_SHARE = 0.6
+#: Then drawn at this share of that: 720 px of a large desktop, 576 px on the Deck.
+SIZE = 0.75
 
 
 def wants_splash(binary: str) -> bool:
@@ -96,16 +98,16 @@ def mo2_error(log: Path, since: float) -> bool:
 class GameSplash(QWidget):
     """Shown from Play until the engine is up (or the launch ends)."""
 
-    def __init__(self, anomaly: str | Path, gamma: str | Path, accent: str, label: str) -> None:
-        super().__init__(
-            None,
-            # Tool, not SplashScreen: KWin does not keep splash windows above.
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
-        )
+    def __init__(
+        self, anomaly: str | Path, gamma: str | Path, accent: str, label: str, *, on_top: bool = True
+    ) -> None:
+        # Tool, not SplashScreen: KWin does not keep splash windows above.
+        flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+        if on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        super().__init__(None, flags)
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        self._scale = min(1.0, screen.width() * SCREEN_SHARE / WIDTH)
+        self._scale = min(1.0, screen.width() * SCREEN_SHARE / WIDTH) * SIZE
         self.setFixedSize(round(WIDTH * self._scale), round(HEIGHT * self._scale))
         self._background = QPixmap(str(ASSETS / "background.jpg"))
         self._logo = QPixmap(str(ASSETS / "logo.png"))
@@ -199,12 +201,14 @@ class GameSplash(QWidget):
         super().closeEvent(event)
 
 
-def start(anomaly: str | Path, gamma: str | Path) -> subprocess.Popen:
+def start(anomaly: str | Path, gamma: str | Path, *, on_top: bool = True) -> subprocess.Popen:
     """Show the splash in a process of its own; terminate it to close early.
 
     On Wayland no window can keep itself above others, so the splash runs
     through XWayland, where the window manager honours "stay on top" - the
     MO2 and Steam windows that open meanwhile come up underneath it.
+    ``on_top=False`` is for the Anomaly launcher, which opens first and
+    where the player still has to press Play: it opens in front.
     """
     env = dict(os.environ)
     if env.get("WAYLAND_DISPLAY") and env.get("DISPLAY"):
@@ -213,7 +217,7 @@ def start(anomaly: str | Path, gamma: str | Path) -> subprocess.Popen:
     return subprocess.Popen(
         [
             sys.executable, "-m", __name__, str(anomaly), str(gamma), accent,
-            tr("Loading").upper(), tr("Loading xrRAZOM"),
+            tr("Loading").upper(), tr("Loading xrRAZOM"), *([] if on_top else ["--below"]),
         ],
         cwd=Path(__file__).resolve().parents[2],
         env=env,
@@ -230,7 +234,7 @@ if __name__ == "__main__":
     app.setApplicationName("stalker-gamma-commander")
     app.setDesktopFileName("stalker-gamma-commander")
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[2] / "cli" / "stalker-gamma.png")))
-    splash = GameSplash(*sys.argv[1:5])
+    splash = GameSplash(*sys.argv[1:5], on_top="--below" not in sys.argv[6:])
     splash.setWindowTitle(sys.argv[5])
     splash.show()
     sys.exit(app.exec())

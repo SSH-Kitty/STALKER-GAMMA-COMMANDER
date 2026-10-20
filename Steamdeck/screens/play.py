@@ -31,6 +31,7 @@ from commander_gui.ui.common import (
     BackgroundTask,
     format_last_played,
     format_playtime,
+    gamma_installed,
     play_click_sound,
 )
 
@@ -59,9 +60,24 @@ def play_label(profile) -> str:
 
     Shared by the Play screen, the Dashboard banner and the quick menu.
     """
-    if profile is not None and coop.is_active(profile.anomaly):
-        return tr("Play GAMMA Co-op")
-    return tr("Play GAMMA")
+    coop_on = profile is not None and coop.is_active(profile.anomaly)
+    plain = profile is not None and (
+        not _has_mo2(profile) or (coop_on and coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY)
+    )
+    if coop_on:
+        return tr("Play Anomaly Co-op") if plain else tr("Play GAMMA Co-op")
+    return tr("Play Anomaly") if plain else tr("Play GAMMA")
+
+
+def _has_mo2(profile) -> bool:
+    """False for a plain Anomaly profile: every launch then skips MO2."""
+    return gamma_installed(profile.gamma, profile.mo2_profile)
+
+
+def _anomaly_allowed(profile) -> bool:
+    """Play Anomaly (no MO2) can run: co-op off, or co-op set up for plain
+    Anomaly. GAMMA's co-op without MO2 would run its engine without its mod."""
+    return not coop.is_active(profile.anomaly) or coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
 
 
 class PlayScreen(DeckScreen):
@@ -169,10 +185,8 @@ class PlayScreen(DeckScreen):
         busy = self.window.install_busy or self.controller.is_active()
         # Quit Game stays pressable while a game runs, whatever else is busy.
         self.hero.setEnabled((bool(current) and not busy) or self.controller.is_active())
-        self.mo2_button.setEnabled(not busy)
-        coop_on = coop.is_active(profile.anomaly)
-        # Anomaly without MO2 would run co-op's engine without its mod.
-        self.anomaly_button.setEnabled(bool(current) and not busy and not coop_on)
+        self.mo2_button.setEnabled(not busy and _has_mo2(profile))
+        self.anomaly_button.setEnabled(bool(current) and not busy and _anomaly_allowed(profile))
         if not self.controller.is_active():
             self.hero.setText("\u25b6   " + self._play_text())
         self.update_hints()
@@ -200,10 +214,11 @@ class PlayScreen(DeckScreen):
         if self.controller.is_active():
             return
         self.hero.setEnabled(not busy and bool(self._targets))
-        self.mo2_button.setEnabled(not busy)
         profile = self.profile()
-        coop_on = profile is not None and coop.is_active(profile.anomaly)
-        self.anomaly_button.setEnabled(not busy and bool(self._targets) and not coop_on)
+        self.mo2_button.setEnabled(not busy and profile is not None and _has_mo2(profile))
+        self.anomaly_button.setEnabled(
+            not busy and bool(self._targets) and profile is not None and _anomaly_allowed(profile)
+        )
         self.update_hints()
 
     # -- shortcuts --------------------------------------------------------
@@ -282,7 +297,8 @@ class PlayScreen(DeckScreen):
         launch, which the Multiplayer screen finishes (player name, and
         Steam for a Steam session)."""
         coop_on = coop.is_active(profile.anomaly)
-        reason = coop.launch_block_reason(profile.anomaly, coop_launch=coop_on)
+        plain = coop_on and coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+        reason = coop.launch_block_reason(profile.anomaly, coop_launch=coop_on, direct=plain)
         if reason:
             from .multiplayer import refuse_launch
 
@@ -290,6 +306,8 @@ class PlayScreen(DeckScreen):
             return
         if coop_on:
             self.window._ensure_page("multiplayer").start_coop(profile, target)
+        elif not _has_mo2(profile):
+            self._play_anomaly(sound=False)  # plain Anomaly: no MO2 to start
         else:
             self.controller.launch(profile, target=target)
 
@@ -340,7 +358,7 @@ class PlayScreen(DeckScreen):
         # instead of auto-running an executable through it.
         self.controller.launch(profile, target=None)
 
-    def _play_anomaly(self) -> None:
+    def _play_anomaly(self, *, sound: bool = True) -> None:
         """Anomaly without MO2, like the desktop Play page's direct launch.
 
         Runs the selected target's executable (desktop's
@@ -349,6 +367,13 @@ class PlayScreen(DeckScreen):
         """
         profile = self.profile()
         if profile is None or self.window.install_busy:
+            return
+        if coop.is_active(profile.anomaly):
+            # Plain Anomaly co-op: the player name and a Steam session are
+            # the Multiplayer screen's (see _launch).
+            if sound:
+                play_click_sound()
+            self._launch(profile, gui_settings.load_gui_settings().get("target") or "")
             return
         executables = self.controller.executables(profile)
         target = gui_settings.load_gui_settings().get("target") or "Anomaly"
@@ -359,7 +384,8 @@ class PlayScreen(DeckScreen):
         if not exe.binary:
             self.window.notify(tr("Not installed"))
             return
-        play_click_sound()
+        if sound:
+            play_click_sound()
         self.controller.launch(profile, target=None, direct=exe)
 
     def _pick_target(self) -> None:
@@ -498,8 +524,11 @@ class PlayScreen(DeckScreen):
             self.hero.setObjectName("deckHero")
             self.hero.setEnabled(bool(self._targets) and not self.window.install_busy)
         repolish(self.hero)
-        self.mo2_button.setEnabled(not active)
-        self.anomaly_button.setEnabled(not active and bool(self._targets))
+        profile = self.profile()
+        self.mo2_button.setEnabled(not active and profile is not None and _has_mo2(profile))
+        self.anomaly_button.setEnabled(
+            not active and bool(self._targets) and profile is not None and _anomaly_allowed(profile)
+        )
         if self.window.current_page() is self:
             self.window.update_hints()
         if active:

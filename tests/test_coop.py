@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import zipfile
@@ -239,10 +240,138 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(coop.read_settings(self.anomaly)[0]["xrr_max_players"], 3)
 
     def test_last_ip_round_trip(self):
-        coop.write_last_ip(self.gamma, "G.A.M.M.A", "1.2.3.4:5445")
-        self.assertEqual(coop.read_last_ip(self.gamma, "G.A.M.M.A"), "1.2.3.4:5445")
-        coop.write_last_ip(self.gamma, "G.A.M.M.A", "5.6.7.8:1")
-        self.assertEqual(coop.read_last_ip(self.gamma, "G.A.M.M.A"), "5.6.7.8:1")
+        coop.write_last_ip(self.anomaly, self.gamma, "G.A.M.M.A", "1.2.3.4:5445")
+        self.assertEqual(coop.read_last_ip(self.anomaly, self.gamma, "G.A.M.M.A"), "1.2.3.4:5445")
+        coop.write_last_ip(self.anomaly, self.gamma, "G.A.M.M.A", "5.6.7.8:1")
+        self.assertEqual(coop.read_last_ip(self.anomaly, self.gamma, "G.A.M.M.A"), "5.6.7.8:1")
+
+
+class PlainAnomalyCoopTests(unittest.TestCase):
+    """Co-op on Anomaly alone: no MO2, so the gamedata half goes loose."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.anomaly = root / "anomaly"
+        (self.anomaly / "bin").mkdir(parents=True)
+        (self.anomaly / "bin" / "anomalydx11.exe").write_bytes(b"MZvanilla")
+        self.zip = _make_zip(root / "xrRazom-1.4-Slim.zip")
+        self.core = self.anomaly / "gamedata" / "scripts" / "xrr_core.script"
+        # A plain Anomaly profile may leave the GAMMA folder empty, and
+        # Path("") is the cwd: nothing may land there.
+        self._cwd = os.getcwd()
+        self.cwd = root / "cwd"
+        self.cwd.mkdir()
+        os.chdir(self.cwd)
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self._tmp.cleanup()
+
+    def _install(self):
+        coop.install(self.zip, self.anomaly, "", "", kind=coop.KIND_ANOMALY)
+        coop.switch_to_coop(self.anomaly, "", "")
+
+    def test_round_trip_leaves_nothing_behind(self):
+        self._install()
+        self.assertEqual(coop.status(self.anomaly), coop.COOP)
+        self.assertEqual(coop.install_kind(self.anomaly), coop.KIND_ANOMALY)
+        self.assertEqual(self.core.read_text(), "-- core")
+        self.assertFalse((self.anomaly / "fomod").exists())
+        coop.switch_to_singleplayer(self.anomaly, "", "")
+        self.assertFalse(self.core.exists())
+        self.assertEqual((self.anomaly / "bin" / "anomalydx11.exe").read_bytes(), b"MZvanilla")
+        self._install()
+        coop.uninstall(self.anomaly, "", "")
+        self.assertFalse(self.core.exists())
+        self.assertFalse(coop.state_dir(self.anomaly).exists())
+        self.assertEqual(list(self.cwd.iterdir()), [])
+
+    def test_an_original_identical_to_the_coop_copy_survives_a_round_trip(self):
+        # GAMMA's Anomaly folder already holds some of the Modded Exes files
+        # xrRazom ships, byte for byte.
+        same = self.anomaly / "gamedata" / "scripts" / "x.script"
+        same.parent.mkdir(parents=True)
+        same.write_text("-- coop")
+        self._install()
+        coop.switch_to_singleplayer(self.anomaly, "", "")
+        self.assertEqual(same.read_text(), "-- coop")
+        self._install()
+        coop.uninstall(self.anomaly, "", "")
+        self.assertEqual(same.read_text(), "-- coop")
+
+    def test_launch_lock_allows_only_launches_without_mo2(self):
+        block = coop.launch_block_reason
+        self._install()
+        self.assertIsNone(block(self.anomaly, coop_launch=True, direct=True))
+        self.assertIn("plain Anomaly", block(self.anomaly, coop_launch=True))
+        self.assertIsNotNone(block(self.anomaly, coop_launch=False, direct=True))
+        coop.switch_to_singleplayer(self.anomaly, "", "")
+        self.assertIsNone(block(self.anomaly, coop_launch=False))
+
+    def test_last_ip_goes_where_plain_anomaly_reads_it(self):
+        self._install()
+        coop.write_last_ip(self.anomaly, "", "", "1.2.3.4:5445")
+        options = self.anomaly / "gamedata" / "configs" / "axr_options.ltx"
+        self.assertIn("last_ip = 1.2.3.4:5445", options.read_text())
+        self.assertEqual(coop.read_last_ip(self.anomaly, "", ""), "1.2.3.4:5445")
+
+    def test_reinstall_for_plain_anomaly_drops_the_mo2_mod(self):
+        gamma = Path(self._tmp.name) / "gamma"
+        modlist = gamma / "profiles" / "G.A.M.M.A" / "modlist.txt"
+        modlist.parent.mkdir(parents=True)
+        modlist.write_text("+GAMMA Base\n")
+        coop.install(self.zip, self.anomaly, gamma, "G.A.M.M.A")
+        coop.switch_to_coop(self.anomaly, gamma, "G.A.M.M.A")
+        coop.install(self.zip, self.anomaly, gamma, "G.A.M.M.A", kind=coop.KIND_ANOMALY)
+        self.assertEqual(coop.status(self.anomaly), coop.COOP)
+        self.assertTrue(self.core.is_file())
+        self.assertFalse((gamma / "mods" / coop.MOD_NAME).exists())
+        self.assertNotIn(coop.MOD_NAME, modlist.read_text())
+
+    def test_switching_kind_needs_no_zip_and_keeps_coop_on(self):
+        gamma = Path(self._tmp.name) / "gamma"
+        modlist = gamma / "profiles" / "G.A.M.M.A" / "modlist.txt"
+        modlist.parent.mkdir(parents=True)
+        modlist.write_text("+GAMMA Base\n")
+        mod = gamma / "mods" / coop.MOD_NAME / "gamedata" / "scripts" / "xrr_core.script"
+        coop.install(self.zip, self.anomaly, gamma, "G.A.M.M.A")
+        coop.switch_to_coop(self.anomaly, gamma, "G.A.M.M.A")
+        self.zip.unlink()  # nothing below may need it
+
+        coop.set_install_kind(self.anomaly, gamma, "G.A.M.M.A", coop.KIND_ANOMALY)
+        self.assertEqual(coop.install_kind(self.anomaly), coop.KIND_ANOMALY)
+        self.assertEqual(coop.status(self.anomaly), coop.COOP)
+        self.assertEqual(self.core.read_text(), "-- core")
+        self.assertFalse(mod.exists())
+        self.assertNotIn(coop.MOD_NAME, modlist.read_text())
+
+        coop.set_install_kind(self.anomaly, gamma, "G.A.M.M.A", coop.KIND_GAMMA)
+        self.assertEqual(coop.install_kind(self.anomaly), coop.KIND_GAMMA)
+        self.assertEqual(coop.status(self.anomaly), coop.COOP)
+        self.assertFalse(self.core.exists())
+        self.assertEqual(mod.read_text(), "-- core")
+        self.assertIn(f"+{coop.MOD_NAME}", modlist.read_text())
+        # The engine half's own gamedata stays where it was.
+        self.assertTrue((self.anomaly / "gamedata" / "scripts" / "x.script").is_file())
+        coop.switch_to_singleplayer(self.anomaly, gamma, "G.A.M.M.A")
+        self.assertFalse((self.anomaly / "gamedata" / "scripts" / "x.script").exists())
+
+    def test_a_plain_install_switches_to_gamma(self):
+        gamma = Path(self._tmp.name) / "gamma"
+        (gamma / "profiles" / "G.A.M.M.A").mkdir(parents=True)
+        (gamma / "profiles" / "G.A.M.M.A" / "modlist.txt").write_text("+GAMMA Base\n")
+        self._install()
+        coop.set_install_kind(self.anomaly, gamma, "G.A.M.M.A", coop.KIND_GAMMA)
+        self.assertFalse(self.core.exists())
+        self.assertTrue((gamma / "mods" / coop.MOD_NAME / "gamedata" / "scripts" / "xrr_core.script").is_file())
+        self.assertTrue((gamma / "mods" / coop.MOD_NAME / "meta.ini").is_file())
+
+    def test_launch_options_without_mo2(self):
+        from commander_gui.steam_shortcuts import coop_launch_options
+
+        options = coop_launch_options("/p", "G.A.M.M.A", "Anomaly", 480, "-x", mo2=False)
+        self.assertEqual(options, "STEAM_COMPAT_DATA_PATH=/p SteamAppId=480 %command%")
 
 
 if __name__ == "__main__":

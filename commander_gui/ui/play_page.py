@@ -43,6 +43,7 @@ from ..discord_rpc import (
     update_presence,
 )
 from ..launcher import (
+    anomaly_launcher_target,
     DEFAULT_PROTON_PREFIX,
     DEFAULT_UMU_PREFIX,
     ForeignPrefixError,
@@ -203,11 +204,16 @@ def _kill_stray_debuggers(runner_env: dict[str, str] | None) -> None:
 def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = "") -> dict:
     """What the co-op Steam shortcut has to run (see steam_shortcuts).
 
-    Shared by the Play page and Deck Mode's Multiplayer screen.
+    Shared by the Play page and Deck Mode's Multiplayer screen. Plain
+    Anomaly co-op runs AnomalyLauncher.exe itself, with no MO2 in between.
     """
-    exe = Path(profile.gamma) / "ModOrganizer.exe"
+    mo2 = coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
+    if mo2:
+        exe, start_dir = Path(profile.gamma) / "ModOrganizer.exe", profile.gamma
+    else:
+        exe, start_dir = Path(profile.anomaly) / "AnomalyLauncher.exe", profile.anomaly
     if not exe.is_file():
-        raise LaunchError(f"ModOrganizer.exe not found in {profile.gamma}")
+        raise LaunchError(f"{exe.name} not found in {start_dir}")
     prefix = runner.env.get("STEAM_COMPAT_DATA_PATH") or runner.env.get("WINEPREFIX")
     if runner.kind not in ("umu", "proton") or not prefix:
         raise LaunchError(
@@ -232,13 +238,13 @@ def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = 
             "Steam co-op sessions need a GE-Proton build. Install one from the Play page first."
         )
     # Empty when MO2 can't take this name through -p (see mo2_profile_args).
-    if not mo2_profile_args(profile.gamma, mo2_profile):
+    if mo2 and not mo2_profile_args(profile.gamma, mo2_profile):
         mo2_profile = ""
     return {
         "exe": str(exe),
-        "start_dir": str(profile.gamma),
+        "start_dir": str(start_dir),
         "launch_options": coop_launch_options(
-            prefix, mo2_profile, target, coop.steam_appid(profile.anomaly), arguments,
+            prefix, mo2_profile, target, coop.steam_appid(profile.anomaly), arguments, mo2=mo2,
         ),
         "proton_name": compat_tool_name(proton_dir),
     }
@@ -248,9 +254,9 @@ class PlayPage(QWidget):
     launch_state_changed = Signal(bool)
     #: The splash's own process (see game_splash.start).
     _splash = None
-    #: Anomaly Launcher target: the game pids already running at launch;
-    #: the splash waits for a new one (Play pressed in the launcher).
-    _splash_after: set[int] | None = None
+    #: Plain Anomaly co-op through Steam: no MO2 runs, so the handoff
+    #: tracking follows the Anomaly launcher and game instead.
+    _no_mo2_session = False
     #: The live launch status line or the playtime changed (Multiplayer mirrors both).
     launch_status_changed = Signal()
 
@@ -442,7 +448,8 @@ class PlayPage(QWidget):
         self.direct_button.setToolTip(
             tr("Run the selected Anomaly executable without MO2 or its virtual mod list.")
         )
-        self.direct_button.clicked.connect(self._launch_direct)
+        # Wrapped: clicked() passes a bool.
+        self.direct_button.clicked.connect(lambda: self._launch_direct())
         self.direct_button.clicked.connect(play_click_sound)
         secondary_row.addWidget(self.direct_button, 1)
         root.addLayout(secondary_row)
@@ -599,16 +606,9 @@ class PlayPage(QWidget):
             if not _is_hidden_launch_target(executable.title)
         ]
         if not self.executables and profile is not None:
-            anomaly_path = Path(profile.anomaly)
-            launcher = anomaly_path / "AnomalyLauncher.exe"
-            if launcher.is_file():
-                self.executables.append(
-                    Mo2Executable(
-                        title="Anomaly",
-                        binary=str(launcher),
-                        working_directory=str(anomaly_path),
-                    )
-                )
+            launcher = anomaly_launcher_target(profile.anomaly)
+            if launcher is not None:
+                self.executables.append(launcher)
         titles = [exe.title for exe in self.executables]
         self.target_combo.blockSignals(True)
         self.target_combo.clear()
@@ -895,13 +895,15 @@ class PlayPage(QWidget):
             None,
         )
         base_ok = not self._launching and not self._install_busy and not incomplete
+        # Plain Anomaly co-op launches without MO2 (see launch_game).
+        plain_ok = self._plain_coop_on() and (direct_ok or anomaly_fallback is not None)
         if not self._launching:
-            self.launch_button.setEnabled(base_ok and mo2_ok)
+            self.launch_button.setEnabled(base_ok and (mo2_ok or plain_ok))
         self.open_mo2_button.setEnabled(base_ok and mo2_ok)
         self.direct_button.setEnabled(
             base_ok and (mo2_ok or direct_ok or anomaly_fallback is not None)
         )
-        if mo2_ok:
+        if mo2_ok or plain_ok:
             self.launch_button.setToolTip("")
             self.open_mo2_button.setToolTip("")
         elif not gamma_installed(profile.gamma, profile.mo2_profile):
@@ -924,7 +926,7 @@ class PlayPage(QWidget):
             self.launch_button.setToolTip(tip)
             self.open_mo2_button.setToolTip(tip)
             self.direct_button.setToolTip(tip)
-        if self._coop_on():
+        if self._coop_on() and not self._plain_coop_on():
             self.direct_button.setEnabled(False)
             self.direct_button.setToolTip(tr("Co-op is active. Anomaly cannot be launched without Mod Organizer 2 in co-op mode."))
         if not self._launching:
@@ -1106,6 +1108,11 @@ class PlayPage(QWidget):
         profile = self.window.settings.active_profile
         return profile is not None and coop.is_active(profile.anomaly)
 
+    def _plain_coop_on(self) -> bool:
+        """Co-op is on and set up for plain Anomaly (no MO2)."""
+        profile = self.window.settings.active_profile
+        return self._coop_on() and coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+
     def _launch_text(self) -> str:
         return tr("Launch Co-op") if self._coop_on() else tr("Launch Game")
 
@@ -1133,12 +1140,14 @@ class PlayPage(QWidget):
         """Start co-op through the co-op Steam shortcut, adding it first
         (which needs a Steam restart) when Steam does not have it yet."""
         profile = self.window.settings.active_profile
-        reason = coop.launch_block_reason(profile.anomaly, coop_launch=True)
+        no_mo2 = coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+        reason = coop.launch_block_reason(profile.anomaly, coop_launch=True, direct=no_mo2)
         if reason:
             refuse_launch(self.window, self, reason)
             return
         try:
-            unblock_mo2_python(profile.gamma)
+            if not no_mo2:
+                unblock_mo2_python(profile.gamma)
             coop.ensure_root_appid(profile.anomaly, profile.gamma, profile.mo2_profile)
             fields = self._coop_shortcut_fields(profile)
         except (LaunchError, coop.CoopError, OSError) as exc:
@@ -1152,7 +1161,7 @@ class PlayPage(QWidget):
         if vdf_path is None:
             return
         steam_root = steam_root_for(vdf_path)
-        snapshot = self._session_snapshot(True, False)
+        snapshot = self._session_snapshot(True, False, no_mo2=no_mo2)
         if coop_shortcut_current(vdf_path, **fields):
             self._set_launch_button_state(True)
             try:
@@ -1220,7 +1229,8 @@ class PlayPage(QWidget):
         self._crash_prompted = False
         self._proc = None
         self._launch_wrapper_pid = None
-        self._arm_session("GAMMA", True, snapshot)
+        label = "STALKER ANOMALY" if self._no_mo2_session else "GAMMA"
+        self._arm_session(label, True, snapshot)
         self._steam_launch = True
         self._show_splash(True)
         try:
@@ -1232,8 +1242,11 @@ class PlayPage(QWidget):
         # Steam may still be starting (or restarting), then Proton: allow
         # two minutes for MO2 to appear rather than the usual 2.5 s.
         self._handoff_limit = 480
-        self._start_launch_timer("GAMMA", [], None)
-        self._set_result(tr("Starting GAMMA through Steam"))
+        self._start_launch_timer(label, [], None)
+        self._set_result(
+            tr("Starting Anomaly through Steam") if self._no_mo2_session
+            else tr("Starting GAMMA through Steam")
+        )
 
     def launch_game(self, *, coop_launch: bool | None = None) -> None:
         """Launch the selected game target using the primary Play workflow.
@@ -1253,19 +1266,23 @@ class PlayPage(QWidget):
                 info=tr("Is the list empty? Check that your profile points to a GAMMA install with a set-up ModOrganizer.ini."),
             )
             return
-        if ptrace_blocks_mo2(self):
-            return
-        if not self._confirm_load_order():
-            return
         profile = self.window.settings.active_profile
-        if (
-            profile is not None
-            and (coop.is_active(profile.anomaly) if coop_launch is None else coop_launch)
-            and not confirm_player_name(self, profile.anomaly)
-        ):
+        want_coop = profile is not None and (
+            coop.is_active(profile.anomaly) if coop_launch is None else coop_launch
+        )
+        # Plain Anomaly co-op starts the game itself; no MO2 is involved.
+        plain = want_coop and coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+        if not plain and ptrace_blocks_mo2(self):
+            return
+        if not plain and not self._confirm_load_order():
+            return
+        if want_coop and not confirm_player_name(self, profile.anomaly):
             return
         if self._steam_session(coop_launch):
             self._launch_coop_steam()
+            return
+        if plain:
+            self._launch_direct(coop_launch=True)
             return
         self._set_launch_button_state(True)
         # Try MO2 first; fall back to direct launch if MO2 is unavailable.
@@ -1296,8 +1313,17 @@ class PlayPage(QWidget):
         self._set_launch_button_state(True)
         self._run(open_mo2=True, direct=False)
 
-    def _launch_direct(self) -> None:
+    def _launch_direct(self, *, coop_launch: bool | None = None) -> None:
         if self._launching or self._install_busy:
+            return
+        profile = self.window.settings.active_profile
+        if (
+            coop_launch is None and profile is not None and coop.is_active(profile.anomaly)
+            and coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
+        ):
+            # Plain Anomaly co-op: the player name and a Steam session
+            # are launch_game()'s, which comes back here for LAN.
+            self.launch_game()
             return
         if self._selected_target() is None:
             # Anomaly-only installs may have no combo selection yet.
@@ -1307,7 +1333,7 @@ class PlayPage(QWidget):
             if fallback is not None:
                 self.target_combo.setCurrentText(fallback)
         self._set_launch_button_state(True)
-        self._run(open_mo2=False, direct=True)
+        self._run(open_mo2=False, direct=True, coop_launch=coop_launch)
 
     def _run(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None) -> None:
         """Launch the game through Mod Organizer 2 or directly."""
@@ -1392,20 +1418,28 @@ class PlayPage(QWidget):
         )
         self._launch_timer.start()
 
-    def _session_snapshot(self, monitoring_mo2: bool, open_mo2: bool) -> tuple:
+    def _host_pids(self) -> set[int]:
+        """The processes a tracked launch hands off to: MO2, or the Anomaly
+        launcher and the game it starts (see _no_mo2_session)."""
+        if self._no_mo2_session:
+            return exe_pids("AnomalyLauncher") | exe_pids(_GAME_EXE_PREFIX)
+        return mo2_pids()
+
+    def _session_snapshot(self, monitoring_mo2: bool, open_mo2: bool, *, no_mo2: bool = False) -> tuple:
         """What already runs/exists before a launch, for _arm_session()."""
+        self._no_mo2_session = no_mo2
         # Snapshot pre-existing MO2 processes before spawning so handoff
         # detection can tell this launch's own instance apart from one
         # the user already had open (see mo2_pids() docstring) - taken
         # after launch_detached() a fast wrapper could already have
         # started MO2, making its pid look pre-existing and breaking
         # handoff detection.
-        pre_launch_mo2_pids = mo2_pids() if monitoring_mo2 else set()
+        pre_launch_mo2_pids = self._host_pids() if monitoring_mo2 else set()
         # Same idea, but for the actual game executable MO2 will launch
         # (not MO2 itself) - MO2 stays running after the game closes,
         # so playtime must be recorded on the game exiting, not MO2.
         game_exe_name = None
-        if monitoring_mo2 and not open_mo2:
+        if monitoring_mo2 and not open_mo2 and not no_mo2:
             target = self._selected_target()
             game_binary = next(
                 (e.binary for e in self.executables if e.title == target),
@@ -1582,7 +1616,7 @@ class PlayPage(QWidget):
             # Steam's reaper owns the process group, and killing that group
             # could take Steam's own helpers with it - only this launch's
             # MO2 and game processes go.
-            pids = mo2_pids() - self._pre_launch_mo2_pids
+            pids = self._host_pids() - self._pre_launch_mo2_pids
             if self._game_exe_name:
                 pids |= exe_pids(self._game_exe_name) - self._pre_launch_game_pids
             for pid in pids:
@@ -1806,7 +1840,7 @@ class PlayPage(QWidget):
                 # user already had open cannot make the buttons stay
                 # disabled forever after this launch's instance closes.
                 if not self._mo2_seen:
-                    new_pids = mo2_pids() - self._pre_launch_mo2_pids
+                    new_pids = self._host_pids() - self._pre_launch_mo2_pids
                     if new_pids:
                         self._mo2_seen = True
                         self._mo2_launch_pids = new_pids
@@ -1814,7 +1848,10 @@ class PlayPage(QWidget):
                         # Sub-second polling is only needed to catch the
                         # handoff quickly; MO2 can stay open for hours after.
                         self._launch_timer.setInterval(2000)
-                        self._set_result(tr("Mod Organizer 2 is running"))
+                        self._set_result(
+                            tr("Game is running") if self._no_mo2_session
+                            else tr("Mod Organizer 2 is running")
+                        )
                         applog.get_logger().info(
                             "play: mo2 handoff detected pids=%s", new_pids
                         )
@@ -1853,7 +1890,6 @@ class PlayPage(QWidget):
                     self._check_for_crash()
                     self._finish_launch(tr("{name} closed normally.", name=label))
                     return
-                self._splash_on_game_start()
                 if self._game_exe_name:
                     # MO2 stays running after the game it launched closes,
                     # so wait for the game itself to exit rather than MO2
@@ -1877,7 +1913,11 @@ class PlayPage(QWidget):
                         # MO2 usually stays open after the game exits, so
                         # look for a crash dump now, not only once MO2 goes.
                         self._check_for_crash()
-                if not (mo2_pids() & self._mo2_launch_pids):
+                host_pids = self._host_pids()
+                if self._no_mo2_session:
+                    # The launcher exits once it has started the game.
+                    self._mo2_launch_pids |= host_pids - self._pre_launch_mo2_pids
+                if not (host_pids & self._mo2_launch_pids):
                     applog.get_logger().info(
                         "play: mo2 exited, finishing launch (game_seen=%s)",
                         self._game_seen,
@@ -1888,7 +1928,8 @@ class PlayPage(QWidget):
                     return
                 # _game_exe_name is cleared once the game exits, back to MO2.
                 self._set_result(
-                    tr("Game is running") if self._game_seen and self._game_exe_name
+                    tr("Game is running")
+                    if self._no_mo2_session or (self._game_seen and self._game_exe_name)
                     else tr("Mod Organizer 2 is running")
                 )
                 return
@@ -1901,7 +1942,7 @@ class PlayPage(QWidget):
                 # still say what's actually running instead of "Launching".
                 if self._game_exe_name and exe_pids(self._game_exe_name) - self._pre_launch_game_pids:
                     status = tr("Game is running")
-                elif mo2_pids() - self._pre_launch_mo2_pids:
+                elif self._host_pids() - self._pre_launch_mo2_pids:
                     status = tr("Mod Organizer 2 is running")
                 else:
                     return
@@ -2176,32 +2217,25 @@ class PlayPage(QWidget):
             return
         self._close_splash()
         exe = self._target_exe()
-        if exe is not None and is_launcher(exe.binary):
-            # The flag can't reach a game the launcher starts, so the
-            # engine's small splash opens too - under this larger one,
-            # which comes up after it and stays on top.
+        # Plain Anomaly co-op through Steam always runs the Anomaly launcher.
+        if (exe is not None and is_launcher(exe.binary)) or self._no_mo2_session:
+            # The player still has to press Play in the launcher: a splash
+            # that lets it stay in front (see game_splash.start).
             if coop.is_active(profile.anomaly) if coop_launch is None else coop_launch:
-                self._splash_after = exe_pids(_GAME_EXE_PREFIX)
+                self._start_splash(on_top=False)
             return
         if self._splash_arguments(coop_launch) is None:
             return
         self._start_splash()
 
-    def _start_splash(self) -> None:
+    def _start_splash(self, *, on_top: bool = True) -> None:
         profile = self.window.settings.active_profile
         try:
-            self._splash = game_splash.start(profile.anomaly, profile.gamma)
+            self._splash = game_splash.start(profile.anomaly, profile.gamma, on_top=on_top)
         except OSError:
             self._splash = None  # cosmetic; the launch goes on without it
 
-    def _splash_on_game_start(self) -> None:
-        """Anomaly Launcher target: show the splash once the game starts."""
-        if self._splash_after is not None and exe_pids(_GAME_EXE_PREFIX) - self._splash_after:
-            self._splash_after = None
-            self._start_splash()
-
     def _close_splash(self) -> None:
-        self._splash_after = None
         if self._splash is not None:
             if self._splash.poll() is None:
                 self._splash.terminate()
@@ -2226,7 +2260,7 @@ class PlayPage(QWidget):
         )
         self.launch_button.setEnabled(True)
         self.open_mo2_button.setEnabled(not launching)
-        self.direct_button.setEnabled(not launching and not self._coop_on())
+        self.direct_button.setEnabled(not launching and (not self._coop_on() or self._plain_coop_on()))
         self.shortcut_button.setEnabled(not launching)
         self.launch_state_changed.emit(launching)
 

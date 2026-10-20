@@ -11,6 +11,8 @@ The xrRazom zip has two halves:
   backups while the co-op engine stays in place.
 * ``gamedata/**`` - an ordinary MO2 mod, installed as ``xrRazom Co-op`` at
   the highest priority and enabled/disabled together with the engine files.
+  A plain Anomaly install (``KIND_ANOMALY``, no MO2) gets these loose in the
+  Anomaly folder instead, as more co-op files beside the engine half's.
 
 Co-op settings are the mod's console variables in ``appdata/user.ltx``.
 The single-player engine drops console variables it doesn't know when it
@@ -50,6 +52,10 @@ COP_APPID, SPACEWAR_APPID = 41700, 480
 
 NOT_INSTALLED, COOP, SINGLEPLAYER, REVERTED = "not_installed", "coop", "singleplayer", "reverted"
 
+#: How the gamedata half is installed: as an MO2 mod for GAMMA, or loose in
+#: the Anomaly folder for plain Anomaly. A state without "kind" is GAMMA's.
+KIND_GAMMA, KIND_ANOMALY = "gamma", "anomaly"
+
 
 class CoopError(RuntimeError):
     pass
@@ -71,6 +77,10 @@ def load_state(anomaly) -> dict | None:
         return None
     # A hand-edited file holding a list or a string is no state at all.
     return state if isinstance(state, dict) else None
+
+
+def install_kind(anomaly) -> str:
+    return KIND_ANOMALY if (load_state(anomaly) or {}).get("kind") == KIND_ANOMALY else KIND_GAMMA
 
 
 def _save_state(anomaly, state: dict) -> None:
@@ -206,19 +216,22 @@ def _remove_mod_entry(gamma, mo2_profile) -> None:
 
 
 # -- install / switch ------------------------------------------------------------
-def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None) -> dict:
+def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, kind: str = KIND_GAMMA) -> dict:
     """Install (or update) from ``zip_path``.
 
     A first install stays in singleplayer until the player switches to co-op;
-    an update keeps whichever mode was on.
+    an update keeps whichever mode was on. ``KIND_ANOMALY`` puts the
+    gamedata half loose in the Anomaly folder and never touches ``gamma``,
+    which a plain Anomaly profile may leave empty.
     """
     info = inspect_zip(zip_path)
-    gamma = Path(gamma).expanduser()
     root = state_dir(anomaly)
     root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".coop-", dir=root))
     try:
         files: dict[str, str] = {}
+        engine_rels: set[str] = set()
+        mod_rels: set[str] = set()
         with zipfile.ZipFile(zip_path) as archive:
             members = [m for m in archive.infolist() if not m.is_dir()]
             for count, member in enumerate(members, 1):
@@ -226,7 +239,12 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None) ->
                 if name.startswith(_ENGINE_ROOT):
                     rel = name[len(_ENGINE_ROOT):]
                     target = staging / "files" / rel
-                elif name.startswith(_MOD_ROOTS):
+                    engine_rels.add(rel)
+                elif kind == KIND_ANOMALY and name.startswith("gamedata/"):
+                    rel = name
+                    target = staging / "files" / rel
+                    mod_rels.add(rel)
+                elif kind == KIND_GAMMA and name.startswith(_MOD_ROOTS):
                     rel = None
                     target = staging / "mod" / name
                 else:
@@ -243,16 +261,23 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None) ->
             # Put the originals back first: the new version may ship a
             # different file set, and backups are keyed to the old one.
             switch_to_singleplayer(anomaly, gamma, mo2_profile)
-        write_basic_meta_ini(staging / "mod", Path(zip_path).name)
-        mod_dir = gamma / "mods" / MOD_NAME
-        shutil.rmtree(mod_dir, ignore_errors=True)
-        mod_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staging / "mod"), mod_dir)  # may cross filesystems
+        if kind == KIND_GAMMA:
+            write_basic_meta_ini(staging / "mod", Path(zip_path).name)
+            mod_dir = Path(gamma).expanduser() / "mods" / MOD_NAME
+            shutil.rmtree(mod_dir, ignore_errors=True)
+            mod_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staging / "mod"), mod_dir)  # may cross filesystems
+        elif previous and previous.get("kind", KIND_GAMMA) == KIND_GAMMA:
+            _remove_mod(gamma, mo2_profile)  # reinstalled for plain Anomaly
         shutil.rmtree(root / "files", ignore_errors=True)
         os.replace(staging / "files", root / "files")
         state = {"version": info.get("version", ""), "release": info, "files": files,
-                 "originals": [], "active": False,
+                 "originals": [], "active": False, "kind": kind,
                  "slots_lifted": bool((previous or {}).get("slots_lifted"))}
+        if kind == KIND_ANOMALY:
+            # Which co-op files are the mod's, for set_install_kind(). One
+            # the engine half ships too stays an engine file.
+            state["mod_files"] = sorted(mod_rels - engine_rels)
         _save_state(anomaly, state)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -336,7 +361,11 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
         for rel, digest in state["files"].items():
             target = _resolve_ci(anomaly, rel)
             if target.is_file():
-                if _sha256(target) == digest:
+                # From singleplayer every file on disk is an original, even
+                # one identical to the co-op copy (GAMMA ships some of the
+                # same Modded Exes files): skipping it made switching back
+                # delete it as if co-op had added it.
+                if _sha256(target) == digest and (state.get("active") or rel in originals):
                     continue  # already co-op; keep the backup we have
                 # Re-captured every time: a GAMMA update since the last
                 # switch may have shipped a newer original.
@@ -352,7 +381,8 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
     state["originals"] = sorted(originals)
     state["active"] = True
     _save_state(anomaly, state)
-    _set_mod_enabled(gamma, mo2_profile, True)
+    if state.get("kind", KIND_GAMMA) == KIND_GAMMA:
+        _set_mod_enabled(gamma, mo2_profile, True)
     # A solo session since the last switch may have wiped the xrr_* lines.
     values, present = read_settings(anomaly)
     missing = {key: values[key] for key in state.get("settings", {}) if key not in present}
@@ -390,13 +420,74 @@ def switch_to_singleplayer(anomaly, gamma, mo2_profile) -> None:
     state["settings"] = {**state.get("settings", {}), **{key: _format(key, values[key]) for key in present}}
     state["active"] = False
     _save_state(anomaly, state)
-    _set_mod_enabled(gamma, mo2_profile, False)
+    if state.get("kind", KIND_GAMMA) == KIND_GAMMA:
+        _set_mod_enabled(gamma, mo2_profile, False)
+
+
+def set_install_kind(anomaly, gamma, mo2_profile, kind: str) -> None:
+    """Move the gamedata half between GAMMA's MO2 mod and the Anomaly folder,
+    from the copies kept here, so no zip is needed. Co-op stays on or off."""
+    state = load_state(anomaly)
+    if state is None:
+        raise CoopError("xrRazom Co-op is not installed.")
+    if state.get("kind", KIND_GAMMA) == kind:
+        return
+    was_active = bool(state.get("active"))
+    if was_active:
+        switch_to_singleplayer(anomaly, gamma, mo2_profile)
+        state = load_state(anomaly)
+    root = state_dir(anomaly)
+    mod_dir = Path(gamma).expanduser() / "mods" / MOD_NAME
+    if kind == KIND_ANOMALY:
+        source = mod_dir / "gamedata"
+        if not str(gamma).strip() or not source.is_dir():
+            raise CoopError("The xrRazom Co-op mod is missing from GAMMA's mods folder. Install the zip again.")
+        moved = ["gamedata/" + f.relative_to(source).as_posix() for f in sorted(source.rglob("*")) if f.is_file()]
+        if any(rel in state["files"] for rel in moved):
+            # Switching back would take the engine half's copy with it.
+            raise CoopError("This xrRazom edition can't be switched. Install the zip again for plain Anomaly.")
+        for rel in moved:
+            _copy_atomic(source / rel[len("gamedata/"):], root / "files" / rel)
+            state["files"][rel] = _sha256(root / "files" / rel)
+        state.update(kind=KIND_ANOMALY, mod_files=moved)
+        _save_state(anomaly, state)
+        _remove_mod(gamma, mo2_profile)
+    else:
+        moved = state.get("mod_files")
+        if moved is None:
+            raise CoopError("This co-op install is too old to switch. Install the zip again for GAMMA.")
+        staging = Path(tempfile.mkdtemp(prefix=".coop-", dir=root))
+        try:
+            for rel in moved:
+                _copy_atomic(root / "files" / rel, staging / rel)
+            write_basic_meta_ini(staging, (state.get("release") or {}).get("title") or MOD_NAME)
+            shutil.rmtree(mod_dir, ignore_errors=True)
+            mod_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staging), mod_dir)  # may cross filesystems
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        for rel in moved:
+            state["files"].pop(rel, None)
+            (root / "files" / rel).unlink(missing_ok=True)
+        state.pop("mod_files")
+        state["kind"] = KIND_GAMMA
+        _save_state(anomaly, state)
+    if was_active:
+        switch_to_coop(anomaly, gamma, mo2_profile)
+
+
+def _remove_mod(gamma, mo2_profile) -> None:
+    if not str(gamma).strip():
+        return  # plain Anomaly profile: no MO2 folder, and Path("") is the cwd
+    _remove_mod_entry(gamma, mo2_profile)
+    shutil.rmtree(Path(gamma).expanduser() / "mods" / MOD_NAME, ignore_errors=True)
 
 
 def uninstall(anomaly, gamma, mo2_profile) -> None:
+    was = install_kind(anomaly)
     switch_to_singleplayer(anomaly, gamma, mo2_profile)
-    _remove_mod_entry(gamma, mo2_profile)
-    shutil.rmtree(Path(gamma).expanduser() / "mods" / MOD_NAME, ignore_errors=True)
+    if was == KIND_GAMMA:
+        _remove_mod(gamma, mo2_profile)
     shutil.rmtree(state_dir(anomaly), ignore_errors=True)
 
 
@@ -443,8 +534,9 @@ def launch_block_reason(anomaly, *, coop_launch: bool, direct: bool = False) -> 
     """Why this launch must not start, or None. Co-op on means co-op only, off means solo only.
 
     The engine files on disk decide what actually runs, so a "solo" launch with
-    co-op applied would start the co-op engine, and a direct (no MO2) launch
-    would start it without the mod's gamedata.
+    co-op applied would start the co-op engine. ``direct`` is a launch without
+    MO2: GAMMA's co-op needs MO2 for the mod's gamedata, plain Anomaly's has
+    it loose and must not run under GAMMA's mods.
     """
     try:
         mode = status(anomaly)
@@ -452,7 +544,10 @@ def launch_block_reason(anomaly, *, coop_launch: bool, direct: bool = False) -> 
         mode = NOT_INSTALLED
     if mode == REVERTED:
         return "A GAMMA update or Anomaly repair put the original game files back over co-op. Open the Multiplayer page to re-apply co-op or switch to singleplayer."
-    if mode == COOP and direct:
+    if mode == COOP and install_kind(anomaly) == KIND_ANOMALY:
+        if not direct:
+            return "Co-op is set up for plain Anomaly. Switch co-op off on the Multiplayer page to play GAMMA."
+    elif mode == COOP and direct:
         return "Co-op is on, and co-op only works through Mod Organizer 2. Use Launch Co-op instead."
     if mode == COOP and not coop_launch:
         return "Co-op is on. Start co-op from the Multiplayer page, or switch back to singleplayer there to play solo."
@@ -586,9 +681,11 @@ def write_settings(anomaly, changes: dict) -> None:
 
 
 # -- join address (axr_options.ltx) ----------------------------------------------
-def _options_file(gamma, mo2_profile) -> Path:
+def _options_file(anomaly, gamma, mo2_profile) -> Path:
     """The axr_options.ltx the game actually reads: overwrite/ wins, then the
-    highest-priority enabled mod that ships one."""
+    highest-priority enabled mod that ships one. Plain Anomaly reads its own."""
+    if install_kind(anomaly) == KIND_ANOMALY:
+        return Path(anomaly).expanduser() / "gamedata" / "configs" / "axr_options.ltx"
     gamma = Path(gamma).expanduser()
     candidates = dict(mcm_files(gamma))
     overwrite = "overwrite/gamedata/configs/axr_options.ltx"
@@ -604,9 +701,9 @@ def _options_file(gamma, mo2_profile) -> Path:
     return gamma / overwrite
 
 
-def read_last_ip(gamma, mo2_profile) -> str:
+def read_last_ip(anomaly, gamma, mo2_profile) -> str:
     try:
-        text = _options_file(gamma, mo2_profile).read_text(encoding="utf-8", errors="replace")
+        text = _options_file(anomaly, gamma, mo2_profile).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     section = re.search(r"^\[xrrazom\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
@@ -614,9 +711,9 @@ def read_last_ip(gamma, mo2_profile) -> str:
     return match.group(1) if match else ""
 
 
-def write_last_ip(gamma, mo2_profile, address: str) -> None:
+def write_last_ip(anomaly, gamma, mo2_profile, address: str) -> None:
     address = "".join(ch for ch in address.strip() if ch.isprintable() and ch not in "[]=;")
-    path = _options_file(gamma, mo2_profile)
+    path = _options_file(anomaly, gamma, mo2_profile)
     try:
         text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except FileNotFoundError:
