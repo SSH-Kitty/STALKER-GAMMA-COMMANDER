@@ -56,7 +56,12 @@ from commander_gui.ui.common import (
     notice,
     play_click_sound,
 )
-from commander_gui.ui.play_page import coop_shortcut_fields, plain_game_exe
+from commander_gui.ui.play_page import (
+    coop_options_only_change,
+    coop_shortcut_fields,
+    plain_game_exe,
+    with_coop_options,
+)
 
 from .. import gamepad as pad
 from ..folder_picker import show_folder_picker
@@ -120,10 +125,6 @@ def confirm_singleplayer(window, profile, action: str, proceed) -> None:
             return
         proceed()
 
-    def _keep() -> None:
-        window.dismiss_overlay()
-        proceed()
-
     window.show_overlay(
         DeckOverlay(
             tr("Switch to singleplayer first?"),
@@ -136,7 +137,6 @@ def confirm_singleplayer(window, profile, action: str, proceed) -> None:
             ),
             [
                 (tr("Switch to singleplayer"), _switch, "primary"),
-                (tr("Keep co-op"), _keep, "normal"),
                 (tr("Cancel"), window.dismiss_overlay, "normal"),
             ],
             panel_width=1000,
@@ -160,13 +160,16 @@ def refuse_launch(window, reason: str) -> None:
     )
 
 
-def _prepare_coop_steam(profile, kind, prefix, mo2_profile, target, arguments) -> dict:
-    """The disk-bound half of a Steam co-op launch, on a worker thread."""
+def _prepare_coop_steam(profile, kind, prefix, mo2_profile, target, arguments) -> tuple:
+    """The disk-bound half of a Steam co-op launch, on a worker thread:
+    the shortcut's fields, and the same built without launch options (see
+    coop_options_only_change)."""
     if coop.install_kind(profile.anomaly) == coop.KIND_GAMMA:
         unblock_mo2_python(profile.gamma)
     coop.ensure_root_appid(profile.anomaly, profile.gamma, profile.mo2_profile)
     runner = resolve_runner(kind, prefix)
-    return coop_shortcut_fields(profile, runner, mo2_profile, target, arguments)
+    base_fields = coop_shortcut_fields(profile, runner, mo2_profile, target, arguments, options="")
+    return with_coop_options(base_fields), base_fields
 
 
 # ------------------------------------------------------------- small pieces
@@ -1266,17 +1269,17 @@ class MultiplayerScreen(DeckScreen):
         self._steam_task = BackgroundTask(
             _prepare_coop_steam, profile, kind, prefix, mo2_profile, target, arguments, parent=self
         )
-        self._steam_task.result.connect(lambda fields: self._pick_account(profile, target, fields))
+        self._steam_task.result.connect(lambda prepared: self._pick_account(profile, target, *prepared))
         self._steam_task.error.connect(self._steam_failed)
         self._steam_task.start()
         self._sync()
 
-    def _pick_account(self, profile, target: str, fields: object) -> None:
+    def _pick_account(self, profile, target: str, fields: dict, base_fields: dict) -> None:
         self._steam_task = None
         self._sync()
         vdf_path = find_shortcuts_vdf()
         if vdf_path is not None:
-            self._steam_with(vdf_path, profile, target, fields)
+            self._steam_with(vdf_path, profile, target, fields, base_fields)
             return
         accounts = list_steam_accounts()
         if not accounts:
@@ -1286,12 +1289,12 @@ class MultiplayerScreen(DeckScreen):
 
         def _chosen(path: object) -> None:
             self.window.dismiss_overlay(refocus=False)
-            self._steam_with(Path(path), profile, target, fields)
+            self._steam_with(Path(path), profile, target, fields, base_fields)
 
         picker.chosen.connect(_chosen)
         self.window.show_overlay(picker_overlay(self.window, tr("Pick your Steam account"), picker))
 
-    def _steam_with(self, vdf_path: Path, profile, target: str, fields: dict) -> None:
+    def _steam_with(self, vdf_path: Path, profile, target: str, fields: dict, base_fields: dict) -> None:
         controller = self._play().controller
         if coop_shortcut_current(vdf_path, **fields):
             try:
@@ -1337,6 +1340,18 @@ class MultiplayerScreen(DeckScreen):
 
         if not restart:
             _setup()
+            return
+        if coop_options_only_change(vdf_path, base_fields):
+            self.window.confirm(
+                tr("Restart Steam to use your launch options"),
+                tr("Your launch options changed. Co-op starts from Steam, and Steam only picks up new launch options after a restart.")
+                + "\n\n• " + tr("Steam closes and opens again.")
+                + "\n• " + tr("The game then starts in co-op with your new launch options.")
+                + "\n• " + tr("You see this after each change to the launch options.")
+                + "\n\n" + tr("Anything running through Steam right now will close."),
+                _setup,
+                confirm_text=tr("Restart Steam"),
+            )
             return
         self.window.confirm(
             tr("Restart Steam to start co-op"),

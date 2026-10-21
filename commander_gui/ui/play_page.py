@@ -16,9 +16,10 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import applog, coop, gui_settings
+from .. import applog, coop, gui_settings, launch_options
 from ..assistant_launcher import AssistantLaunchError, launch_assistant
 from ..config import logs_dir
 from ..discord_rpc import (
@@ -89,10 +90,12 @@ from ..modlist import (
     unflip,
 )
 from ..steam_shortcuts import (
+    ShortcutsFileError,
     compat_tool_name,
     coop_launch_options,
     coop_launch_url,
     coop_shortcut_current,
+    coop_shortcut_entry,
     open_in_steam,
     setup_coop_shortcut,
     steam_root_for,
@@ -102,6 +105,7 @@ from .common import (
     ACCENT,
     WARN,
     BackgroundTask,
+    CenteredFlowLayout,
     clear_layout,
     crash_dump_names,
     discord_presence_state,
@@ -169,15 +173,6 @@ def ptrace_blocks_mo2(parent: QWidget) -> bool:
 
 
 _HIDDEN_LAUNCH_TARGETS = {"dx8", "dx8-avx"}
-
-#: Launch options the Play page offers as one-click toggles: (label, the
-#: token added to the launch options box, tooltip).
-_LAUNCH_OPTION_TOGGLES = (
-    ("MangoHud", "mangohud", "Show the MangoHud overlay (FPS, frame times, temperatures)."),
-    ("FPS counter", "DXVK_HUD=fps", "Show DXVK's small FPS counter in the corner."),
-    ("No Esync", "PROTON_NO_ESYNC=1", "Turn off Esync. Can help if the game stutters or hangs."),
-    ("No Fsync", "PROTON_NO_FSYNC=1", "Turn off Fsync. Can help if the game stutters or hangs."),
-)
 
 # X-Ray's crash handler can take tens of seconds to finish writing a
 # .mdmp after the wrapper/MO2 process is already gone (confirmed against
@@ -267,10 +262,42 @@ def plain_coop_exe(exe, anomaly) -> Mo2Executable:
     return replace(exe, arguments=arguments) if arguments is not None else exe
 
 
-def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = "") -> dict:
+def coop_launch_options_text() -> str:
+    """The player's saved launch options as co-op uses them (for_coop)."""
+    return launch_options.for_coop(gui_settings.load_gui_settings().get("custom_launch_options") or "")
+
+
+def coop_options_only_change(vdf_path, base_fields: dict) -> bool:
+    """True when the co-op shortcut is out of date only because of the
+    player's launch options: ``base_fields`` (built with none) plus some
+    launch options is the shortcut Steam already has."""
+    try:
+        entry = coop_shortcut_entry(vdf_path)
+    except ShortcutsFileError:
+        return False
+    if entry is None:
+        return False
+    existing = entry.get("LaunchOptions", "")
+    return launch_options.extends(existing, base_fields["launch_options"]) and coop_shortcut_current(
+        vdf_path, **{**base_fields, "launch_options": existing}
+    )
+
+
+def with_coop_options(base_fields: dict, options: str | None = None) -> dict:
+    """``base_fields`` (built with no launch options) with ``options``
+    merged in, by default the player's own (coop_launch_options_text)."""
+    if options is None:
+        options = coop_launch_options_text()
+    return {**base_fields, "launch_options": launch_options.for_steam(options, base_fields["launch_options"])}
+
+
+def coop_shortcut_fields(
+    profile, runner, mo2_profile, target, arguments: str = "", *, options: str | None = None
+) -> dict:
     """What the co-op Steam shortcut has to run (see steam_shortcuts).
 
-    Shared by the Play page and Deck Mode's Multiplayer screen. Plain
+    Shared by the Play page and Deck Mode's Multiplayer screen. ``options``
+    replaces the player's current launch options (coop_launch_options_text). Plain
     Anomaly co-op runs AnomalyLauncher.exe itself, with no MO2 in between.
     """
     mo2 = coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
@@ -304,16 +331,23 @@ def coop_shortcut_fields(profile, runner, mo2_profile, target, arguments: str = 
     )
     if not proton_dir:
         raise LaunchError(
-            "Steam co-op sessions need a GE-Proton build. Install one from the Play page first."
+            "Steam co-op sessions need a Proton-GE build. Install one from the Play page first."
         )
     # Empty when MO2 can't take this name through -p (see mo2_profile_args).
     if mo2 and not mo2_profile_args(profile.gamma, mo2_profile):
         mo2_profile = ""
+    # Steam starts co-op itself, so the player's launch options ride along
+    # in the shortcut's own.
+    if options is None:
+        options = coop_launch_options_text()
     return {
         "exe": str(exe),
         "start_dir": str(start_dir),
-        "launch_options": coop_launch_options(
-            prefix, mo2_profile, target, coop.steam_appid(profile.anomaly), arguments, mo2=mo2,
+        "launch_options": launch_options.for_steam(
+            options,
+            coop_launch_options(
+                prefix, mo2_profile, target, coop.steam_appid(profile.anomaly), arguments, mo2=mo2,
+            ),
         ),
         "proton_name": compat_tool_name(proton_dir),
     }
@@ -323,6 +357,8 @@ class PlayPage(QWidget):
     launch_state_changed = Signal(bool)
     #: The splash's own process (see game_splash.start).
     _splash = None
+    #: The splash is under a COMMANDER pop-up (see _sync_splash).
+    _splash_below = False
     #: Plain Anomaly co-op through Steam: no MO2 runs, so the handoff
     #: tracking follows the Anomaly launcher and game instead.
     _no_mo2_session = False
@@ -440,11 +476,11 @@ class PlayPage(QWidget):
         )
         self.gamemode_check.toggled.connect(self._on_gamemode_toggled)
         grid.addWidget(self.gamemode_check, 3, 0)
-        self.manage_proton_button = QPushButton(tr("Manage GE-Proton..."))
+        self.manage_proton_button = QPushButton(tr("Manage Proton-GE"))
         self.manage_proton_button.setObjectName("secondary")
         self.manage_proton_button.setMinimumHeight(34)
         self.manage_proton_button.setToolTip(
-            tr("Install new GE-Proton builds, and remove the ones you no longer use.")
+            tr("Install new Proton-GE builds, and remove the ones you no longer use.")
         )
         self.manage_proton_button.clicked.connect(self._manage_protons)
         grid.addWidget(self.manage_proton_button, 4, 0)
@@ -473,8 +509,9 @@ class PlayPage(QWidget):
         root.addWidget(config_card)
 
         # -- status chip row -------------------------------------------------
-        self.chips_row = QHBoxLayout()
-        self.chips_row.setSpacing(8)
+        # Wraps onto more lines rather than widen the page (one pill per
+        # launch option toggle in use).
+        self.chips_row = CenteredFlowLayout()
         root.addLayout(self.chips_row)
 
         # -- launch actions ---------------------------------------------------
@@ -547,23 +584,32 @@ class PlayPage(QWidget):
         )
         self.custom_options_edit.textChanged.connect(self._sync_option_toggles)
         options_layout.addWidget(self.custom_options_edit)
-        toggles_row = QHBoxLayout()
-        toggles_row.setSpacing(8)
+        # One labelled row per group; equal-width columns line the chips up
+        # across rows and fill the card.
+        toggles_grid = QGridLayout()
+        toggles_grid.setHorizontalSpacing(8)
+        toggles_grid.setVerticalSpacing(8)
+        columns = max(len(options) for _, options in launch_options.GROUPS)
+        for column in range(1, columns + 1):
+            toggles_grid.setColumnStretch(column, 1)
         self._option_toggles: list[tuple[QPushButton, str]] = []
-        for label, token, tip in _LAUNCH_OPTION_TOGGLES:
-            toggle = QPushButton(tr(label))
-            toggle.setObjectName("segment")
-            toggle.setCheckable(True)
-            toggle.setFixedHeight(34)
-            toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-            toggle.setToolTip(tr(tip))
-            toggle.toggled.connect(
-                lambda on, token=token: self._toggle_launch_option(token, on)
-            )
-            toggles_row.addWidget(toggle)
-            self._option_toggles.append((toggle, token))
-        toggles_row.addStretch(1)
-        options_layout.addLayout(toggles_row)
+        for row, (heading, options) in enumerate(launch_options.GROUPS):
+            toggles_grid.addWidget(info_label(tr(heading), wrap=False), row, 0)
+            for column, (label, token, tip) in enumerate(options, 1):
+                toggle = QPushButton(tr(label))
+                toggle.setObjectName("segment")
+                toggle.setCheckable(True)
+                toggle.setFixedHeight(34)
+                toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+                toggle.setToolTip(tr(tip))
+                toggle.toggled.connect(
+                    lambda on, token=token: self._toggle_launch_option(token, on)
+                )
+                toggles_grid.addWidget(toggle, row, column)
+                self._option_toggles.append((toggle, token))
+                if token == launch_options.NO_STEAM_OVERLAY:
+                    self._overlay_toggle = (toggle, tr(tip))
+        options_layout.addLayout(toggles_grid)
         root.addWidget(options_card)
 
         # -- folders card -----------------------------------------------------
@@ -733,27 +779,16 @@ class PlayPage(QWidget):
             self._persist_dirs()
 
     # --------------------------------------------------------- launch options
-    def _option_tokens(self) -> list[str]:
-        text = self.custom_options_edit.text()
-        try:
-            return shlex.split(text)
-        except ValueError:
-            return text.split()
-
-    def _toggle_launch_option(self, token: str, on: bool) -> None:
-        tokens = [t for t in self._option_tokens() if t != token]
-        if on:
-            # Wrappers and variables go in front of the game, so before
-            # %command% when the user wrote one.
-            at = tokens.index("%command%") if "%command%" in tokens else len(tokens)
-            tokens.insert(at, token)
-        self.custom_options_edit.setText(shlex.join(tokens))
+    def _toggle_launch_option(self, option: str, on: bool) -> None:
+        self.custom_options_edit.setText(
+            launch_options.toggle(self.custom_options_edit.text(), option, on)
+        )
 
     def _sync_option_toggles(self) -> None:
-        tokens = set(self._option_tokens())
-        for toggle, token in self._option_toggles:
+        text = self.custom_options_edit.text()
+        for toggle, option in self._option_toggles:
             toggle.blockSignals(True)
-            toggle.setChecked(token in tokens)
+            toggle.setChecked(launch_options.is_on(text, option))
             toggle.blockSignals(False)
 
     def _persist_dirs(self) -> None:
@@ -834,8 +869,6 @@ class PlayPage(QWidget):
         return runner
 
     def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None):
-        import re
-
         profile = self.window.settings.active_profile
         if profile is None:
             raise LaunchError("No active profile. Configure a profile first.")
@@ -858,30 +891,10 @@ class PlayPage(QWidget):
                 profile=self._active_profile_name(),
                 arguments=None if open_mo2 else self._splash_arguments(coop_launch),
             )
-        options_str = self.custom_options_edit.text().strip()
-        if options_str:
-            try:
-                tokens = shlex.split(options_str)
-            except ValueError:
-                tokens = options_str.split()
-            # Steam's syntax: "VAR=1 wrapper %command% --arg". What comes
-            # after %command% belongs after the command, as its arguments;
-            # it used to be moved in front of it along with the wrappers.
-            suffix: list[str] = []
-            if "%command%" in tokens:
-                marker = tokens.index("%command%")
-                tokens, suffix = tokens[:marker], [
-                    t for t in tokens[marker + 1 :] if t != "%command%"
-                ]
-            env_var_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-            prefix: list[str] = []
-            for token in tokens:
-                if env_var_re.match(token):
-                    key, _, value = token.partition("=")
-                    env[key] = value
-                else:
-                    prefix.append(token)
-            command = [*prefix, *command, *suffix]
+        options = self.custom_options_edit.text()
+        if coop.is_active(profile.anomaly) if coop_launch is None else coop_launch:
+            options = launch_options.for_coop(options)
+        command = launch_options.apply(command, env, options)
         return command, env, cwd
 
     def _refresh_preview(self) -> None:
@@ -1002,6 +1015,10 @@ class PlayPage(QWidget):
             self.direct_button.setToolTip(tr("Co-op is active. Anomaly cannot be launched without Mod Organizer 2 in co-op mode."))
         if not self._launching:
             set_hover_grow_text(self.launch_button, self._launch_text())
+        # Co-op leaves "No Steam overlay" out (see coop_shortcut_fields).
+        toggle, tip = self._overlay_toggle
+        toggle.setEnabled(not self._coop_on())
+        toggle.setToolTip(tip if toggle.isEnabled() else tr("Co-op keeps the Steam overlay for Steam invites."))
         self._build_chips(ok=True, runner=runner)
         target = self._selected_target()
         exe = next((e for e in self.executables if e.title == target), Mo2Executable())
@@ -1021,21 +1038,29 @@ class PlayPage(QWidget):
         if runner is not None and runner.kind == "umu":
             proton_path = runner.env.get("PROTONPATH", "")
             if proton_path:
-                proton_version = Path(proton_path).name.removeprefix("GE-Proton")
+                proton_version = Path(proton_path).name.removeprefix("GE-Proton").removesuffix("-x86_64")
         proton_text = (
-            f"Proton GE: {proton_version}" if proton_version else "Proton GE: none"
+            f"Proton-GE: {proton_version}" if proton_version else "Proton-GE: none"
         )
         chips.append((proton_text, bool(proton_version)))
         # GameMode (only if installed AND enabled in Settings)
         if gui_settings.load_gui_settings().get("always_gamemoderun"):
             gamemoderun = available_commands().get("gamemoderun")
             chips.append(("GameMode", bool(gamemoderun)))
-        # MangoHud (if installed)
-        if shutil.which("mangohud"):
-            chips.append(("MangoHud", True))
+        # One per quick toggle the launch options use. A wrapper
+        # (mangohud, gamescope) is red when it isn't installed. Co-op
+        # leaves "No Steam overlay" out (see coop_shortcut_fields).
+        text = self.custom_options_edit.text()
+        for _heading, options in launch_options.GROUPS:
+            for label, option, _tip in options:
+                if not launch_options.is_on(text, option):
+                    continue
+                if option == launch_options.NO_STEAM_OVERLAY and self._coop_on():
+                    continue
+                wrapper = option.split()[0]
+                chips.append((tr(label), "=" in wrapper or bool(shutil.which(wrapper))))
         if self._coop_on():
             chips.append((tr("Co-op mode"), True))
-        self.chips_row.addStretch(1)
         for text, state in chips:
             chip = QLabel(text)
             chip.setObjectName("chip")
@@ -1043,7 +1068,6 @@ class PlayPage(QWidget):
             chip.style().unpolish(chip)
             chip.style().polish(chip)
             self.chips_row.addWidget(chip)
-        self.chips_row.addStretch(1)
 
     def _save_state(self) -> None:
         # currentData() is None on an empty/uninitialized combo (or if a
@@ -1074,17 +1098,17 @@ class PlayPage(QWidget):
     def _update_runner_hint(self, kind: str | None) -> None:
         if not kind or kind == "auto":
             self.runner_hint.setText(
-                tr("Pick a GE-Proton runner, or install one with Manage GE-Proton.")
+                tr("Pick a Proton-GE runner, or install one with Manage Proton-GE.")
             )
         elif kind.startswith("umup:"):
-            self.runner_hint.setText(tr("GE-Proton — recommended for GAMMA."))
+            self.runner_hint.setText(tr("Proton-GE — recommended for GAMMA."))
         elif kind == "proton:stable":
             self.runner_hint.setText(
-                tr("Steam Proton Stable — may crash with MO2 (concrt140.dll). Use GE-Proton instead if available.")
+                tr("Steam Proton Stable — may crash with MO2 (concrt140.dll). Use Proton-GE instead if available.")
             )
         elif kind.startswith("proton:"):
             self.runner_hint.setText(
-                tr("Steam Proton — may crash with MO2 (concrt140.dll). Use GE-Proton instead if available.")
+                tr("Steam Proton — may crash with MO2 (concrt140.dll). Use Proton-GE instead if available.")
             )
         else:
             self.runner_hint.setText("")
@@ -1200,11 +1224,12 @@ class PlayPage(QWidget):
         want_coop = coop.is_active(profile.anomaly) if coop_launch is None else coop_launch
         return want_coop and coop.read_settings(profile.anomaly)[0]["xrr_host_steam"]
 
-    def _coop_shortcut_fields(self, profile) -> dict:
+    def _coop_shortcut_fields(self, profile, options: str | None = None) -> dict:
         """What the co-op Steam shortcut has to run (see steam_shortcuts)."""
         return coop_shortcut_fields(
             profile, self._runner(), self._active_profile_name(),
             self._selected_target(), self._splash_arguments(True) or "",
+            options=options,
         )
 
     def _launch_coop_steam(self) -> None:
@@ -1220,7 +1245,8 @@ class PlayPage(QWidget):
             if not no_mo2:
                 unblock_mo2_python(profile.gamma)
             coop.ensure_root_appid(profile.anomaly, profile.gamma, profile.mo2_profile)
-            fields = self._coop_shortcut_fields(profile)
+            base_fields = self._coop_shortcut_fields(profile, "")
+            fields = with_coop_options(base_fields)
         except (LaunchError, coop.CoopError, OSError) as exc:
             QMessageBox.warning(self, tr("Co-op couldn't start"), str(exc))
             return
@@ -1258,7 +1284,22 @@ class PlayPage(QWidget):
                 info=tr("After that, co-op works from Steam too, until you switch between Call of Pripyat and Spacewar."),
             )
             return
-        if restart and QMessageBox.question(
+        if restart and coop_options_only_change(vdf_path, base_fields):
+            if QMessageBox.question(
+                self,
+                tr("Restart Steam to use your launch options"),
+                tr("Your launch options changed. Co-op starts from Steam, and Steam only picks up new launch options after a restart."),
+                points=(
+                    tr("Steam closes and opens again."),
+                    tr("The game then starts in co-op with your new launch options."),
+                    tr("You see this after each change to the launch options."),
+                ),
+                note=tr("Anything running through Steam right now will close."),
+                buttons=QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                labels={QMessageBox.StandardButton.Ok: tr("Restart Steam")},
+            ) != QMessageBox.StandardButton.Ok:
+                return
+        elif restart and QMessageBox.question(
             self,
             tr("Restart Steam to start co-op"),
             tr("Co-op starts from a STALKER COMMANDER xrRAZOM shortcut in your Steam library. COMMANDER needs to add or update it, and Steam only picks up the change after a restart."),
@@ -2105,8 +2146,8 @@ class PlayPage(QWidget):
                             runner=self._runner().label,
                         ),
                         points=(
-                            tr("Pick an older GE-Proton on the Play page and try again."),
-                            tr("Or open Manage GE-Proton and reinstall this runner."),
+                            tr("Pick an older Proton-GE on the Play page and try again."),
+                            tr("Or open Manage Proton-GE and reinstall this runner."),
                         ),
                         info=(
                             tr(
@@ -2133,7 +2174,7 @@ class PlayPage(QWidget):
                     if "concrt140.dll" in detail.lower():
                         fixes.append(tr(
                             "Mod Organizer needs concrt140.dll, which some Proton/Wine "
-                            "versions don't have. Switch to GE-Proton and try again."
+                            "versions don't have. Switch to Proton-GE and try again."
                         ))
                     info = (
                         tr(
@@ -2339,10 +2380,51 @@ class PlayPage(QWidget):
         profile = self.window.settings.active_profile
         try:
             self._splash = game_splash.start(profile.anomaly, profile.gamma, on_top=on_top)
+            self._splash_below = False
+            QApplication.instance().installEventFilter(self)
         except OSError:
             self._splash = None  # cosmetic; the launch goes on without it
 
+    def eventFilter(self, obj, event) -> bool:
+        """Put COMMANDER's pop-ups above the splash while it is up."""
+        kind = event.type()
+        if kind not in (QEvent.Type.Show, QEvent.Type.Hide):
+            return False
+        if self._splash is None or self._splash.poll() is not None:
+            # The splash closed itself: pop-ups keep their parent again.
+            QApplication.instance().removeEventFilter(self)
+            return False
+        if (
+            kind in (QEvent.Type.Show, QEvent.Type.Hide)
+            and obj.isWidgetType()
+            and obj.isWindow()
+            and obj.windowModality() != Qt.WindowModality.NonModal
+        ):
+            popup = None
+            if kind == QEvent.Type.Show and obj.windowHandle() is not None:
+                # KWin raises a pop-up's parent window with it, which would
+                # bury the splash; a pop-up of its own goes up alone.
+                obj.windowHandle().setTransientParent(None)
+                popup = obj
+            QTimer.singleShot(0, lambda: self._sync_splash(popup))
+        return False
+
+    def _sync_splash(self, popup=None) -> None:
+        """Splash under an open pop-up, still above COMMANDER's window."""
+        if self._splash is None or self._splash.poll() is not None:
+            return
+        below = QApplication.activeModalWidget() is not None
+        # Only on a change: an early signal, before the splash process set
+        # up its handlers, would end it.
+        if below != self._splash_below:
+            self._splash_below = below
+            self._splash.send_signal(game_splash.POPUP_OPEN if below else game_splash.POPUP_CLOSED)
+        if popup is not None and below:
+            # Once the splash has stepped down and raised itself.
+            QTimer.singleShot(300, popup, lambda: (popup.raise_(), popup.activateWindow()))
+
     def _close_splash(self) -> None:
+        QApplication.instance().removeEventFilter(self)
         if self._splash is not None:
             if self._splash.poll() is None:
                 self._splash.terminate()

@@ -37,7 +37,7 @@ def scan_generic(arcname: str, where: str, lines: list[str]) -> list[Finding]:
                     suggestion=tr(
                         "Segmentation faults often come from the game or a Wine "
                         "component. Check surrounding lines for the failing "
-                        "module, and try Verify Integrity plus a GE-Proton "
+                        "module, and try Verify Integrity plus a Proton-GE "
                         "runner."
                     ),
                     excerpt_text=excerpt(lines, index),

@@ -40,7 +40,7 @@ _CREDITS = (
     ("Grokitach and the GAMMA team", "The GAMMA modpack."),
     ("The Anomaly Team", "Developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base."),
     ("GSC Game World", "Creators of the original S.T.A.L.K.E.R. games and universe."),
-    ("Other projects", "GE-Proton (GloriousEggroll), umu-launcher (Open Wine Components), Winetricks, Wine, Mod Organizer 2, xrRazom Co-op, 7-Zip, Qt and PySide6."),
+    ("Other projects", "Proton-GE (GloriousEggroll), umu-launcher (Open Wine Components), Winetricks, Wine, Mod Organizer 2, xrRazom Co-op, 7-Zip, Qt and PySide6."),
 )
 
 _COPYRIGHT = "Copyright \u00a9 2026 SSH-Kitty and contributors"

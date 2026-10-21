@@ -772,9 +772,8 @@ class CoopHardeningTests(unittest.TestCase):
             (dest / "keep").write_text("old")
             new = Path(tmp) / "new"
             new.mkdir()
-            with mock.patch.object(coop.shutil, "move", side_effect=OSError("disk")):
-                with self.assertRaises(OSError):
-                    coop._swap_dir(new, dest)
+            with mock.patch.object(coop.shutil, "move", side_effect=OSError("disk")), self.assertRaises(OSError):
+                coop._swap_dir(new, dest)
             self.assertEqual((dest / "keep").read_text(), "old")
             self.assertFalse(dest.with_name("x.old").exists())
 
@@ -782,15 +781,13 @@ class CoopHardeningTests(unittest.TestCase):
         from unittest import mock
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = _make_zip(Path(tmp) / "a.zip")
-            with mock.patch.object(coop, "_MAX_UNPACKED", 10):
-                with self.assertRaises(coop.CoopError):
-                    coop.inspect_zip(zip_path)
+            with mock.patch.object(coop, "_MAX_UNPACKED", 10), self.assertRaises(coop.CoopError):
+                coop.inspect_zip(zip_path)
 
     def test_extract_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "a.zip"
             with zipfile.ZipFile(zip_path, "w") as archive:
                 archive.writestr("../evil", "x")
-            with zipfile.ZipFile(zip_path) as archive:
-                with self.assertRaises(coop.CoopError):
-                    coop._extract(archive, "../evil", Path(tmp) / "out" / "evil")
+            with zipfile.ZipFile(zip_path) as archive, self.assertRaises(coop.CoopError):
+                coop._extract(archive, "../evil", Path(tmp) / "out" / "evil")

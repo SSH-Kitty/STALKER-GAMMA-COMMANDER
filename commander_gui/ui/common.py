@@ -17,6 +17,8 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
+    QPoint,
+    QRect,
     QSize,
     Qt,
     QThread,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -39,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import gui_settings
 from ..config import child_environment, is_secondary_instance
 from ..i18n import tr
 from ..integrity import format_size
@@ -1356,6 +1360,9 @@ def install_hover_grow_text(
 
     def start(target: float) -> None:
         anim.stop()
+        if not gui_settings.animations_enabled():
+            apply_scale(1.0)
+            return
         anim.setDuration(duration)
         anim.setStartValue(state["scale"])
         anim.setEndValue(target)
@@ -1400,6 +1407,78 @@ def set_hover_grow_text(button: QPushButton, text: str) -> None:
         overlay.setText(text)
     else:
         button.setText(text)
+
+
+class CenteredFlowLayout(QLayout):
+    """Lays widgets out left to right and wraps them onto a new line when
+    the width runs out, each line centred - for a row of status pills that
+    must never make the page wider than the window."""
+
+    def __init__(self, parent=None, spacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._arrange(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._arrange(rect, move=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+
+    def _arrange(self, rect, *, move: bool) -> int:
+        """Place the items in ``rect`` (when ``move``); return the height."""
+        visible = [item for item in self._items if not item.isEmpty()]
+        lines: list[list] = [[]]
+        used = 0
+        for item in visible:
+            width = item.sizeHint().width()
+            if lines[-1] and used + self._spacing + width > rect.width():
+                lines.append([])
+                used = 0
+            used += width if not lines[-1] else self._spacing + width
+            lines[-1].append(item)
+        y = rect.y()
+        for line in lines:
+            if not line:
+                continue
+            widths = [item.sizeHint().width() for item in line]
+            height = max(item.sizeHint().height() for item in line)
+            x = rect.x() + max(0, (rect.width() - sum(widths) - self._spacing * (len(line) - 1)) // 2)
+            for item, width in zip(line, widths):
+                if move:
+                    item.setGeometry(QRect(QPoint(x, y), QSize(width, height)))
+                x += width + self._spacing
+            y += height + self._spacing
+        return max(0, y - rect.y() - self._spacing)
 
 
 def clear_layout(layout) -> None:
@@ -1517,11 +1596,11 @@ def populate_runner_combo(
     """
     combo.blockSignals(True)
     combo.clear()
-    combo.addItem(tr("Auto-detect (installed GE-Proton)"), "auto")
+    combo.addItem(tr("Auto-detect (installed Proton-GE)"), "auto")
     if protons:
         combo.insertSeparator(combo.count())
         for label, path in protons:
-            combo.addItem(tr("{label} (Installed)", label=label), f"umup:{path}")
+            combo.addItem(tr("{label} (Installed)", label=label.removesuffix("-x86_64")), f"umup:{path}")
     chosen = saved
     if not chosen or combo.findData(chosen) < 0:
         chosen = fallback

@@ -137,7 +137,7 @@ _OPERATION_REASONS = {
     "gamma": "Installing or updating GAMMA",
     "anomaly": "Installing STALKER Anomaly",
     "dependencies": "Installing dependencies",
-    "proton": "Installing GE-Proton",
+    "proton": "Installing Proton-GE",
     "move": "Moving the installation",
     "mod_install": "Installing a mod",
 }

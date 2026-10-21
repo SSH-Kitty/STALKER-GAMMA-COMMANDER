@@ -112,14 +112,14 @@ class ProtonManagerDialog(QDialog):
         self._releases: list[dict] = []
         self._sizes: dict[str, int] = {}
         self._builds: list[ProtonBuild] = []
-        self.setWindowTitle(tr("Manage GE-Proton"))
+        self.setWindowTitle(tr("Manage Proton-GE"))
         self.setMinimumSize(640, 500)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
-        style_window(self, tr("Manage GE-Proton"))
+        style_window(self, tr("Manage Proton-GE"))
 
         # -- install a new build --
-        layout.addWidget(section_label(tr("Install GE-Proton"), level=2))
+        layout.addWidget(section_label(tr("Install Proton-GE"), level=2))
         install_row = QHBoxLayout()
         install_row.setSpacing(8)
         self.version_combo = _ProtonVersionComboBox()
@@ -129,7 +129,7 @@ class ProtonManagerDialog(QDialog):
         self.version_combo.view().setUniformItemSizes(True)
         self.version_combo.currentIndexChanged.connect(self._update_install_button)
         install_row.addWidget(self.version_combo, 1)
-        self.install_button = QPushButton(tr("Install GE-Proton"))
+        self.install_button = QPushButton(tr("Install Proton-GE"))
         self.install_button.setObjectName("primary")
         self.install_button.setMinimumSize(200, 34)
         self.install_button.clicked.connect(self._install)
@@ -155,7 +155,7 @@ class ProtonManagerDialog(QDialog):
 
         # -- installed builds --
         layout.addSpacing(6)
-        layout.addWidget(section_label(tr("Installed GE-Proton builds"), level=2))
+        layout.addWidget(section_label(tr("Installed Proton-GE builds"), level=2))
         layout.addWidget(
             info_label(
                 tr(
@@ -233,7 +233,7 @@ class ProtonManagerDialog(QDialog):
             self.install_button.setText(tr("Install {selected}", selected=selected))
             self.install_button.setEnabled(idle)
         else:
-            self.install_button.setText(tr("Install GE-Proton"))
+            self.install_button.setText(tr("Install Proton-GE"))
             self.install_button.setEnabled(False)
         self.version_combo.setEnabled(idle)
 
@@ -350,7 +350,7 @@ class ProtonManagerDialog(QDialog):
             row = self.table.rowCount()
             self.table.insertRow(row)
             size = self._sizes.get(str(build.path))
-            name_item = QTableWidgetItem(build.name)
+            name_item = QTableWidgetItem(build.name.removesuffix("-x86_64"))
             name_item.setData(Qt.ItemDataRole.UserRole, build)
             size_item = QTableWidgetItem(format_size(size) if size is not None else "…")
             use_item = QTableWidgetItem("✓" if build.in_use else "")
@@ -363,7 +363,7 @@ class ProtonManagerDialog(QDialog):
             self.table.setItem(row, 1, size_item)
             self.table.setItem(row, 2, use_item)
         if not self._builds:
-            self.status.setText(tr("No GE-Proton builds found in compatibilitytools.d."))
+            self.status.setText(tr("No Proton-GE builds found in compatibilitytools.d."))
         elif not self._unused():
             self.status.setText(
                 tr("{count} build(s), none unused.", count=len(self._builds))
@@ -465,7 +465,7 @@ class ProtonManagerDialog(QDialog):
         )
         answer = QMessageBox.question(
             self,
-            tr("Delete these GE-Proton builds?"),
+            tr("Delete these Proton-GE builds?"),
             tr("They're removed from your computer for good:"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             points=tuple(

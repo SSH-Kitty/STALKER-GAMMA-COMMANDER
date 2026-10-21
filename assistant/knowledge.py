@@ -16,7 +16,7 @@ from commander_gui.i18n import tr
 CONCRT140 = (
     "MO2 needs the Microsoft C++ runtime (concrt140.dll), which some Wine/Proton "
     "builds do not provide. In COMMANDER, go to Install → Install Dependencies and "
-    "run it against your active prefix, or switch to GE-Proton on COMMANDER's Play page."
+    "run it against your active prefix, or switch to Proton-GE on COMMANDER's Play page."
 )
 
 PREFIX_MISMATCH = (
@@ -30,7 +30,7 @@ PROTON_TOO_OLD = (
     "Wine stopped because part of it called a function the rest of it does not "
     "have. This usually means the Proton build is older than the files in the "
     "prefix, for example after another tool ran the prefix with a newer Proton. "
-    "Install the latest GE-Proton in COMMANDER's Proton Manager, select it on the "
+    "Install the latest Proton-GE in COMMANDER's Proton Manager, select it on the "
     "Play page, and launch again."
 )
 

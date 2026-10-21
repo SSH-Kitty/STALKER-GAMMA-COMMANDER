@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from commander_gui import coop, gui_settings
+from commander_gui import coop, gui_settings, launch_options
 from commander_gui.config import logs_dir
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
@@ -65,7 +65,7 @@ def runner_options() -> list[tuple[str, str]]:
     a choice made in either interface means the same thing in the other.
     """
     options: list[tuple[str, str]] = [
-        (tr("Auto-detect (installed GE-Proton)"), "auto")
+        (tr("Auto-detect (installed Proton-GE)"), "auto")
     ]
     for label, path in find_extra_protons():
         options.append((tr("{label} (Installed)", label=label), f"umup:{path}"))
@@ -95,6 +95,12 @@ def _prepare_launch(profile, kind, prefix, target, direct, watch_exe, arguments)
             profile=profile.mo2_profile or None,
             arguments=arguments,
         )
+    # The same launch options the desktop Play page edits; co-op keeps the
+    # Steam overlay (a launch here is co-op whenever co-op is on).
+    options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
+    if coop.is_active(profile.anomaly):
+        options = launch_options.for_coop(options)
+    command = launch_options.apply(command, env, options)
     ensure_runner_prefix(runner)
     return {
         "runner_env": dict(runner.env),

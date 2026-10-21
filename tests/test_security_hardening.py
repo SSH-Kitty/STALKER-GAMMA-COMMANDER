@@ -203,9 +203,8 @@ def test_archive_listing_refuses_line_break_names(tmp_path):
     with mock.patch.object(mi.subprocess, "run", return_value=listing("Path = a/b\nSize = 1\n")):
         assert mi._list_archive_paths(Path("7z"), Path("x.zip")) == ["a/b"]
     # An old 7-Zip prints a name with a blank line raw, hiding "../" in a fake block.
-    with mock.patch.object(mi.subprocess, "run", return_value=listing("Path = ok\n\n../../evil\nSize = 1\n")):
-        with pytest.raises(mi.ModInstallError):
-            mi._list_archive_paths(Path("7z"), Path("x.zip"))
+    with mock.patch.object(mi.subprocess, "run", return_value=listing("Path = ok\n\n../../evil\nSize = 1\n")), pytest.raises(mi.ModInstallError):
+        mi._list_archive_paths(Path("7z"), Path("x.zip"))
 
 
 def test_config_use_delete_refuse_option_like_names():

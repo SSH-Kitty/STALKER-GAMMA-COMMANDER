@@ -1190,7 +1190,7 @@ def resolve_runner(kind: str, wine_prefix: str = "") -> Runner:
         if kind == "wine":
             raise LaunchError("wine not found on PATH.")
     raise LaunchError(
-        "No game runner detected. Install umu-run and a GE-Proton build to launch the game."
+        "No game runner detected. Install umu-run and a Proton-GE build to launch the game."
     )
 
 

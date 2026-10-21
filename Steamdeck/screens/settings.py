@@ -1,6 +1,6 @@
 """Deck settings: look, language, runner, startup behaviour, Steam, exit.
 
-Still shorter than the desktop page - launch options, MO2 DPI, autostart
+Still shorter than the desktop page - typed launch options, MO2 DPI, autostart
 and Discord presence stay there - but everything a Deck owner plausibly
 changes while holding the device is here, including the two that used to
 send people back to Desktop Mode: whether COMMANDER opens straight into
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 
-from commander_gui import __version_label__, gui_settings
+from commander_gui import __version_label__, coop, gui_settings, launch_options
 from commander_gui.deck_launch import in_game_mode, steam_deck_model
 from commander_gui.i18n import LANGUAGE_INFO, set_active_language, tr
 from commander_gui.steam_shortcuts import (
@@ -91,6 +91,19 @@ class SettingsScreen(DeckScreen):
         self.runner_row = DeckRow(tr("Runner"))
         self.runner_row.activated.connect(self._pick_runner)
         self.body.addWidget(self.runner_row)
+
+        # The desktop Play page's one-click launch options, as switches.
+        self.body.addWidget(deck_label(tr("Launch options"), role="rowTitle"))
+        self.option_rows: list[tuple[DeckToggleRow, str]] = []
+        for heading, options in launch_options.GROUPS:
+            self.body.addWidget(deck_label(tr(heading), role="caption"))
+            for label, option, _tip in options:
+                row = DeckToggleRow(tr(label))
+                row.toggled.connect(
+                    lambda on, option=option: self._toggle_launch_option(option, on)
+                )
+                self.body.addWidget(row)
+                self.option_rows.append((row, option))
 
         self.body.addWidget(deck_label(tr("Deck Mode"), role="rowTitle"))
         self.start_row = DeckRow(tr("Start screen"))
@@ -196,6 +209,13 @@ class SettingsScreen(DeckScreen):
         self.chime_row.set_checked(state.get("deck_finish_sound", True) is not False)
         self.rumble_row.set_checked(state.get("deck_finish_rumble", True) is not False)
         self.welcome_row.set_checked(not state.get("welcome_hidden", False))
+        options = state.get("custom_launch_options") or ""
+        for row, option in self.option_rows:
+            row.set_checked(launch_options.is_on(options, option))
+            # Co-op leaves "No Steam overlay" out (see coop_shortcut_fields).
+            if option == launch_options.NO_STEAM_OVERLAY:
+                profile = self.profile()
+                row.setEnabled(profile is None or not coop.is_active(profile.anomaly))
         self.steam_row.set_value(
             tr("Adding...") if self._steam_task is not None else ""
         )
@@ -207,6 +227,14 @@ class SettingsScreen(DeckScreen):
         gui_settings.save_gui_settings(deck_finish_sound=bool(on))
         if on:
             play_click_sound()
+
+    def _toggle_launch_option(self, option: str, on: bool) -> None:
+        options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
+        options = launch_options.toggle(options, option, on)
+        gui_settings.save_gui_settings(custom_launch_options=options)
+        # One switch can turn another off (Quiet Wine logs and Proton log).
+        for row, other in self.option_rows:
+            row.set_checked(launch_options.is_on(options, other))
 
     def _toggle_rumble(self, on: bool) -> None:
         gui_settings.save_gui_settings(deck_finish_rumble=bool(on))

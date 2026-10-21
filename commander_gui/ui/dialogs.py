@@ -211,8 +211,9 @@ class MessageBox(QMessageBox):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addStretch(1)
-        # Ways out on the left, the action on the right.
-        ordered = sorted(buttons, key=lambda b: (b is default, self.buttonRole(b) in _ACCEPT_ROLES or self.buttonRole(b) == _ROLE.DestructiveRole))
+        # Action first, Cancel / Close / Exit always last (right-most).
+        exits = {tr("Cancel"), tr("Close"), tr("Quit")}
+        ordered = sorted(buttons, key=lambda b: (self.standardButton(b) in (_SB.Cancel, _SB.Close) or b.text().replace("&", "") in exits, b is default, self.buttonRole(b) in _ACCEPT_ROLES or self.buttonRole(b) == _ROLE.DestructiveRole))
         for button in ordered:
             # Qt's own "Show Details..." toggle: _add_details() has ours.
             if button.isHidden() or button.text().replace("&", "").startswith(("Show Details", "Hide Details")):
@@ -529,21 +530,21 @@ def add_close_button(dialog: QDialog, layout) -> None:
 
 
 def add_buttons(dialog: QDialog, layout, confirm: str, cancel: str = "") -> QPushButton:
-    """Cancel plus the main action, right-aligned like every pop-up.
+    """The main action plus Cancel (right-most), right-aligned like every pop-up.
     Returns the action button."""
     layout.addSpacing(6)
     row = QHBoxLayout()
     row.setSpacing(8)
     row.addStretch(1)
-    cancel_button = QPushButton(cancel or tr("Cancel"))
-    cancel_button.setMinimumSize(110, 34)
-    cancel_button.clicked.connect(dialog.reject)
-    row.addWidget(cancel_button)
     ok = QPushButton(confirm)
     ok.setObjectName("primary")
     ok.setMinimumSize(110, 34)
     ok.setDefault(True)
     ok.clicked.connect(dialog.accept)
     row.addWidget(ok)
+    cancel_button = QPushButton(cancel or tr("Cancel"))
+    cancel_button.setMinimumSize(110, 34)
+    cancel_button.clicked.connect(dialog.reject)
+    row.addWidget(cancel_button)
     layout.addLayout(row)
     return ok

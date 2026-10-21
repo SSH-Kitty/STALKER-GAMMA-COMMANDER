@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
 from .. import gui_settings
 from ..cli_runner import run_sync
 from ..config import logs_dir
+from ..coop import looks_like_xrrazom
 from ..fomod import apply_options, find_installer
 from ..integrity import _md5_file, invalidate_baseline
 from ..launcher import (
@@ -503,6 +505,7 @@ class DragTree(QTreeWidget):
             target_sb.minimum(), min(target_sb.maximum(), round(base - pixel_delta))
         )
         self._scroll_anim.stop()
+        self._scroll_anim.setDuration(180 if gui_settings.animations_enabled() else 0)
         self._scroll_anim_target = target_sb
         self._scroll_anim.setStartValue(target_sb.value())
         self._scroll_anim.setEndValue(new_value)
@@ -1023,7 +1026,7 @@ class ModManagerPage(QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setAnimated(True)
+        self.tree.setAnimated(gui_settings.animations_enabled())
         self.tree.setIndentation(18)
         # Taller now that the page-level title/subtitle above are gone -
         # reclaims that freed vertical space for the modlist itself.
@@ -1201,6 +1204,8 @@ class ModManagerPage(QWidget):
 
     # ----- load -----
     def refresh(self) -> None:
+        # Settings > Animations may have changed since the page was built.
+        self.tree.setAnimated(gui_settings.animations_enabled())
         self._profiles_generation += 1
         self.window.refresh_settings()
         if self._profiles_loading:
@@ -1717,6 +1722,8 @@ class ModManagerPage(QWidget):
 
     def _install_archive(self, archive: Path) -> None:
         """Name, check and install one archive (picked or dropped)."""
+        if self._refuse_xrrazom(archive):
+            return
         try:
             default_name = default_mod_name(archive)
         except ModInstallError as exc:
@@ -1996,7 +2003,7 @@ class ModManagerPage(QWidget):
             str(Path.home()),
             tr("Mod archives") + " (*.zip *.7z *.rar *.fomod);;" + tr("All files") + " (*)",
         )
-        if not archive_name:
+        if not archive_name or self._refuse_xrrazom(Path(archive_name)):
             return
         answer = QMessageBox.question(
             self,
@@ -2220,6 +2227,34 @@ class ModManagerPage(QWidget):
             tr("The mod list (modlist.txt) couldn't be updated, so the copied files were removed again. Try installing the mod again."),
         )
         self._finish_install()
+
+    def _refuse_xrrazom(self, archive: Path) -> bool:
+        """Stop an xrRazom Co-op archive before it is unpacked: it is more
+        than a mod (its engine goes in the Anomaly folder), so only the
+        Multiplayer page may install it. Returns ``True`` if refused.
+
+        Only zips, the one format the Multiplayer page takes: their listing
+        is instant, where 7-Zip would stall the window on a big archive."""
+        if archive.suffix.lower() != ".zip":
+            return False
+        try:
+            with zipfile.ZipFile(archive) as opened:
+                names = opened.namelist()
+        except (OSError, zipfile.BadZipFile):
+            return False  # extraction reports the real problem
+        if not looks_like_xrrazom(names):
+            return False
+        answer = QMessageBox.question(
+            self,
+            tr("Install xrRAZOM from the Multiplayer page"),
+            tr("This is xrRAZOM Co-op. It can't be installed as a mod, because the Multiplayer page also sets up the game files co-op needs."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            labels={QMessageBox.StandardButton.Yes: tr("Open Multiplayer"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._drop_queue = []
+            self.window.set_page("multiplayer")
+        return True
 
     def _on_install_error(self, message: str, generation: int) -> None:
         if not self._install_active or generation != self._install_generation:

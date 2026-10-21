@@ -77,11 +77,11 @@ from ..themes import active_theme_tokens
 from ..winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
+    forget_verbs,
     umu_binary,
     umu_install_command,
     winetricks_binary,
     winetricks_install_command,
-    forget_verbs,
     winetricks_tool_install_command,
 )
 from .common import (
@@ -111,7 +111,8 @@ from .common import (
     tr,
     winetricks_tooltip,
 )
-from .dialogs import MessageBox as QMessageBox, ProgressDialog
+from .dialogs import MessageBox as QMessageBox
+from .dialogs import ProgressDialog
 from .multiplayer_page import confirm_singleplayer
 
 #: tr() msgid shared between the Install button's own label and the failure
@@ -952,6 +953,10 @@ class InstallPage(QWidget):
         self._post_anomaly_verify_runner = None
         self._post_anomaly_verify_cancelled = False
         self._verify_anomaly_after_install = False
+        # (rc, output) of an Anomaly run that exited badly, held while its
+        # files are verified; _anomaly_failed: last attempt left it broken.
+        self._anomaly_failure: tuple[int, str] | None = None
+        self._anomaly_failed = False
         self._auto_chain = False
         self._resume_state: dict[str, str] | None = None
         self._auto_cancelled = False
@@ -1440,7 +1445,10 @@ class InstallPage(QWidget):
         offline = self.checkboxes["offline"].isChecked()
         # `anomaly install` has no offline mode; the offline full install
         # unpacks Anomaly from the cache together with GAMMA.
-        self.anomaly_button.setEnabled(not anomaly and not offline)
+        self.anomaly_button.setText(
+            tr("Retry Anomaly") if self._anomaly_failed else tr("Install Anomaly")
+        )
+        self.anomaly_button.setEnabled((not anomaly or self._anomaly_failed) and not offline)
         self.anomaly_button.setToolTip(
             tr("Offline install unpacks Anomaly from the cache together with GAMMA. Use the install button on the right.")
             if offline and not anomaly
@@ -1480,6 +1488,10 @@ class InstallPage(QWidget):
         gamma_state = display_state(gamma_installed(profile.gamma, profile.mo2_profile), op, "gamma")
         if anomaly_state == "installing":
             self.anomaly_status.set_installing()
+        elif anomaly_state and self._anomaly_failed:
+            self.anomaly_status.set_incomplete(
+                tr("Last install attempt failed - retry it to finish.")
+            )
         else:
             self.anomaly_status.set_state(bool(anomaly_state))
         if gamma_state == "installing":
@@ -2224,6 +2236,8 @@ class InstallPage(QWidget):
             self._verify_anomaly_after_install = self.anomaly_checkboxes[
                 "verify_after_install"
             ].isChecked()
+        self._anomaly_failed = False
+        self._anomaly_failure = None
         self.window.set_install_busy(True, "anomaly")
         self.full_progress.reset()
         self.anomaly_button.setEnabled(False)
@@ -2280,22 +2294,22 @@ class InstallPage(QWidget):
         self.full_progress.on_finished(rc, output)
         self.full_progress.set_runner(None)
         install_ok = not cancelled and cli_ok(rc, output, "")
-        if cancelled:
-            self.full_progress.status_message(tr("Cancelled"))
-        elif not install_ok:
-            self.full_progress.status_message(tr("Failed (exit code {rc})", rc=rc))
-            self._show_error_popup(
-                tr("The Anomaly install didn't finish"),
-                rc,
-                output,
-                resume_hint=tr("Try the Anomaly install again."),
-            )
-        self._update_install_status()
         # Single-shot: consumed unconditionally on every outcome so a
         # failed/cancelled run cannot leave it armed for a later, unrelated
         # (e.g. Reset-driven) anomaly install that never asked for it.
         should_verify = self._verify_anomaly_after_install
         self._verify_anomaly_after_install = False
+        if cancelled:
+            self.full_progress.status_message(tr("Cancelled"))
+        elif not install_ok:
+            # The exit code alone can lie (the installer can crash on exit
+            # after it finished), so check the files before calling it a
+            # failure or holding GAMMA back.
+            self._anomaly_failure = (rc, output)
+            self._update_install_status()
+            self._start_post_anomaly_verify()
+            return
+        self._update_install_status()
         if install_ok and should_verify:
             self._start_post_anomaly_verify()
             return
@@ -2341,9 +2355,10 @@ class InstallPage(QWidget):
         self._post_anomaly_verify_runner = None
         self.full_progress.on_finished(rc, output)
         self.full_progress.set_runner(None)
+        verified = not cancelled and cli_ok(rc, output, "")
         if cancelled:
             self.full_progress.status_message(tr("Cancelled"))
-        elif cli_ok(rc, output, ""):
+        elif verified:
             self.full_progress.status_message(
                 tr("Anomaly files verified - no issues found.")
             )
@@ -2351,7 +2366,43 @@ class InstallPage(QWidget):
             self.full_progress.status_message(
                 tr("Anomaly verification found issues - see Verify Integrity for details.")
             )
-        self._finish_anomaly_sequence(cancelled, True)
+        if getattr(self, "_anomaly_failure", None) is not None:
+            # The install itself exited badly: only files that check out
+            # and are really there overrule that. A cancelled check proves
+            # nothing, so the failure still stands.
+            profile = self.window.settings.active_profile
+            ok = verified and profile is not None and anomaly_installed(profile.anomaly)
+            self._finish_anomaly_sequence(False, ok)
+            return
+        self._finish_anomaly_sequence(cancelled, verified or cancelled)
+
+    def _offer_anomaly_retry(self, chain: bool) -> None:
+        """Anomaly is broken: GAMMA was not started - offer a retry."""
+        failure, self._anomaly_failure = self._anomaly_failure, None
+        if failure is not None:
+            summary, detail = _install_failure_message(
+                failure[0], failure[1], None
+            )
+        else:
+            summary = tr("Anomaly verification found issues - see Verify Integrity for details.")
+            detail = ""
+        if chain:
+            summary = tr("GAMMA install was not started.") + "\n\n" + summary
+        box = QMessageBox(
+            QMessageBox.Icon.Warning,
+            tr("Anomaly didn't install correctly"),
+            summary,
+            QMessageBox.StandardButton.NoButton,
+            self,
+        )
+        if detail:
+            box.setDetailedText(detail)
+        retry = box.addButton(tr("Retry Anomaly"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(retry)
+        box.exec()
+        if box.clickedButton() is retry:
+            self._start_anomaly_install(skip_confirm=True)
 
     def _finish_anomaly_sequence(self, cancelled: bool, install_ok: bool) -> None:
         """Deliver the final outcome of an Anomaly install (and its
@@ -2363,7 +2414,14 @@ class InstallPage(QWidget):
         # The chain is single-shot: clear it on every outcome so a failed
         # anomaly install cannot leave it armed for a later manual run.
         self._auto_chain = False
+        self._anomaly_failed = not cancelled and not install_ok
+        if cancelled:
+            self._anomaly_failure = None
         if chain and not cancelled and install_ok:
+            self._anomaly_failure = None
+            self.full_progress.status_message(
+                tr("Anomaly installed. Starting GAMMA install...")
+            )
             self._start_full_install(skip_confirm=True)
             return
         # Only for a run that's actually done (not chaining into GAMMA,
@@ -2383,7 +2441,10 @@ class InstallPage(QWidget):
                     tr("Anomaly install failed"),
                     tr("The Anomaly installation failed. Open COMMANDER for details."),
                 )
+        # Refreshes the badge and button labels through on_busy_changed().
         self.window.set_install_busy(False)
+        if self._anomaly_failed:
+            self._offer_anomaly_retry(chain)
 
     def _show_error_popup(
         self, title: str, rc: int, output: str, *, resume_hint: str | None = None

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import coop
+from .. import coop, gui_settings
 from .common import (
     BackgroundTask,
     PlainSpinBox,
@@ -72,7 +72,7 @@ class _Bridge(QObject):
 def confirm_singleplayer(parent: QWidget, profile, action: str) -> bool:
     """Before a GAMMA update/repair: offer to put the single-player engine back.
 
-    Returns False when the user cancels. Those jobs rewrite the Anomaly
+    Returns False when the user cancels. There is no keep-co-op option. Those jobs rewrite the Anomaly
     folder; with co-op's exes in place they either flag them as broken or
     overwrite them, quietly breaking co-op.
     """
@@ -82,11 +82,10 @@ def confirm_singleplayer(parent: QWidget, profile, action: str) -> bool:
         parent,
         tr("Switch to singleplayer first?"),
         tr("Co-op is on. Switch back to singleplayer before {action}, so co-op isn't broken by the changes.", action=action),
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         note=tr("You can turn co-op back on from the Multiplayer page afterwards."),
         labels={
             QMessageBox.StandardButton.Yes: tr("Switch to singleplayer"),
-            QMessageBox.StandardButton.No: tr("Keep co-op"),
         },
     )
     if answer == QMessageBox.StandardButton.Cancel:
@@ -387,6 +386,14 @@ class _SecretAddress(QFrame):
             super().keyPressEvent(event)
 
 
+class _Fade(QPropertyAnimation):
+    """The status-label fade; instant while Animations are off."""
+
+    def start(self, *args) -> None:
+        self.setDuration(400 if gui_settings.animations_enabled() else 0)
+        super().start(*args)
+
+
 def _add_fade(label: QLabel) -> None:
     """Let a status label fade out instead of being cleared.
 
@@ -396,8 +403,7 @@ def _add_fade(label: QLabel) -> None:
     effect = QGraphicsOpacityEffect(label)
     effect.setOpacity(1.0)  # the effect's own default is 0.7
     label.setGraphicsEffect(effect)
-    fade = QPropertyAnimation(effect, b"opacity", label)
-    fade.setDuration(400)
+    fade = _Fade(effect, b"opacity", label)
     fade.setStartValue(1.0)
     fade.setEndValue(0.0)
     label._fade = fade
@@ -626,7 +632,7 @@ class MultiplayerPage(QWidget):
         stats.setSpacing(8)
         self.version_stat = _Stat(tr("xrRazom version"))
         self.players_stat = _Stat(tr("Player slots"))
-        self.players_stat.setToolTip(tr("Max players in your server, you included."))
+        self.players_stat.setToolTip(tr("How many friends can join, up to 4."))
         stats.addWidget(self.version_stat)
         stats.addWidget(self.players_stat)
         body.addLayout(stats)

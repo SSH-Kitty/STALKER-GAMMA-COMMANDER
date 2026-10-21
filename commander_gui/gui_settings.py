@@ -28,6 +28,13 @@ except ImportError:  # Windows
 _allowed_languages = {code for code, _native, _english in LANGUAGE_INFO}
 _allowed_themes = {key for key, _label, _description, _swatches in THEME_INFO}
 
+# Top-bar tabs the user may hide (main_window.NAV_ITEMS keys, minus the
+# dashboard). Hardcoded for the same reason as start_page below.
+_HIDEABLE_NAV_TABS = {
+    "systemcheck", "install", "play", "multiplayer", "update",
+    "modmanager", "profiles", "utilities", "about", "credits",
+}
+
 _DEFAULTS = {
     "runner": "auto",  # "auto" | "umu" | "wine" | "proton:<path-to-proton>"
     "auto_proton": "",  # GE-Proton build dir Auto-detect is pinned to
@@ -48,6 +55,8 @@ _DEFAULTS = {
     "move_expected": [],  # destination folder names owned by an in-progress move
     "move_sources": [],  # absolute source folders of an in-progress move
     "custom_title_bar": True,  # draw COMMANDER's own title bar instead of the desktop's
+    "animations_enabled": True,  # hover grow, page fades, smooth scroll, splash effects
+    "hidden_nav_tabs": [],  # top-bar tabs the user hid (keys into main_window.NAV_ITEMS)
     "window_width": 1080,
     "window_height": 950,
     "window_maximized": False,  # reopen maximized when it was closed maximized
@@ -88,6 +97,11 @@ _cache: dict | None = None
 _SAVE_LOCK = threading.RLock()
 _cache_path_str: str = ""
 _cache_file_mtime: float = 0.0
+
+
+def animations_enabled() -> bool:
+    """The Settings > Appearance "Animations" switch (cheap: mtime-cached)."""
+    return bool(load_gui_settings().get("animations_enabled", True))
 
 
 def load_gui_settings() -> dict:
@@ -212,6 +226,16 @@ def load_gui_settings() -> dict:
         data["discord_client_id"] = ""
     if not isinstance(data.get("update_notifications"), bool):
         data["update_notifications"] = True
+    if not isinstance(data.get("animations_enabled"), bool):
+        data["animations_enabled"] = True
+    hidden = data.get("hidden_nav_tabs")
+    # Same hardcoded key set as start_page; the dashboard is the way back
+    # to everything else, so it can never be hidden.
+    data["hidden_nav_tabs"] = (
+        sorted({k for k in hidden if k in _HIDEABLE_NAV_TABS})
+        if isinstance(hidden, list)
+        else []
+    )
     for key in ("notified_gamma_version", "notified_commander_tag", "dismissed_update_tag"):
         if not isinstance(data.get(key), str):
             data[key] = ""

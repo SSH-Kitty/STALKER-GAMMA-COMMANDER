@@ -21,6 +21,19 @@ one of:
 
 from __future__ import annotations
 
+from ..launch_options import GROUPS
+
+
+def _launch_option_blocks() -> list:
+    """The Play page's quick toggles: each group's name, then a table of
+    its toggles with the same text as their tooltips."""
+    blocks: list = []
+    for heading, options in GROUPS:
+        blocks.append(heading)
+        blocks.append(("table", [(label, tip) for label, _option, tip in options]))
+    return blocks
+
+
 TOPICS: list[dict] = [
     {
         "title": "Overview",
@@ -32,7 +45,7 @@ TOPICS: list[dict] = [
                 [
                     "STALKER GAMMA COMMANDER is a Linux desktop application for installing, updating, launching, repairing and managing S.T.A.L.K.E.R. Anomaly with the GAMMA modpack. GAMMA is normally installed on Windows with its own launcher and played through Mod Organizer 2. On Linux, the community answer is FaithBeam's stalker-gamma-cli, an installer that runs in a terminal. COMMANDER is a graphical front-end for that CLI, plus everything around it that the CLI does not do on its own.",
                     "COMMANDER does not reimplement the installer. Every download, checksum check and archive extraction is done by the real stalker-gamma binary, which COMMANDER starts as a separate process and whose output it reads line by line. That means an install made with COMMANDER is exactly the same as one made with the CLI by hand: you can switch between the two at any time, and they share the same settings file.",
-                    "On top of the CLI, COMMANDER adds: launching through Mod Organizer 2 inside a Wine/Proton prefix, a GE-Proton downloader, installing the Windows runtime libraries the game needs, a mod list editor with backups, FOMOD installers, integrity checks with automatic repair, save and settings backups, co-op through xrRazom, a controller-friendly Steam Deck interface and a log analyser.",
+                    "On top of the CLI, COMMANDER adds: launching through Mod Organizer 2 inside a Wine/Proton prefix, a Proton-GE downloader, installing the Windows runtime libraries the game needs, a mod list editor with backups, FOMOD installers, integrity checks with automatic repair, save and settings backups, co-op through xrRazom, a controller-friendly Steam Deck interface and a log analyser.",
                     ("widget", "update"),
                 ],
             ),
@@ -88,8 +101,8 @@ TOPICS: list[dict] = [
                         ("Operating system", "Linux on x86_64, in an X11 or Wayland desktop session, or SteamOS Game Mode on a Steam Deck."),
                         ("AppImage", "glibc 2.34 or newer. Python, Qt and the CLI are bundled inside, so nothing else needs installing to open COMMANDER."),
                         ("From source", "Python 3.10 or newer and PySide6 6.6 or newer (below 7). run.sh installs PySide6 into a private virtual environment for you. Network access is needed the first time."),
-                        ("To play", "A Vulkan-capable graphics driver, including the 32-bit Vulkan driver, and a way to run Windows programs: umu-run with GE-Proton is the recommended one. System Check lists exactly what is missing."),
-                        ("Disk space", "About 150 GB for Anomaly, GAMMA and the download cache, or about 100 GB with the Minimal install option. A GE-Proton build is about 1.5 GB more."),
+                        ("To play", "A Vulkan-capable graphics driver, including the 32-bit Vulkan driver, and a way to run Windows programs: umu-run with Proton-GE is the recommended one. System Check lists exactly what is missing."),
+                        ("Disk space", "About 150 GB for Anomaly, GAMMA and the download cache, or about 100 GB with the Minimal install option. A Proton-GE build is about 1.5 GB more."),
                         ("Optional", "GameMode (gamemoderun), used only when you turn on Always use GameMode, and MangoHud for an on-screen performance overlay."),
                     ]),
                     ("warn", "If COMMANDER says it could not load the Qt platform plugin xcb, install libxcb-cursor0 (Debian, Ubuntu) or xcb-util-cursor (Fedora, Arch) with your package manager."),
@@ -184,7 +197,7 @@ TOPICS: list[dict] = [
             (
                 "Runners, Proton and Wine prefixes",
                 [
-                    "Anomaly and MO2 are Windows programs. A runner is what lets them run on Linux. Wine translates Windows calls into Linux ones; Proton is Valve's version of Wine with extra parts for games (such as DXVK, which turns Direct3D into Vulkan); GE-Proton is a community build of Proton with more fixes, and is what COMMANDER recommends. umu-run is a small launcher that runs a Proton build outside Steam the way Steam would.",
+                    "Anomaly and MO2 are Windows programs. A runner is what lets them run on Linux. Wine translates Windows calls into Linux ones; Proton is Valve's version of Wine with extra parts for games (such as DXVK, which turns Direct3D into Vulkan); Proton-GE is a community build of Proton with more fixes, and is what COMMANDER recommends. umu-run is a small launcher that runs a Proton build outside Steam the way Steam would.",
                     "A Wine prefix is a folder that acts as a small, private Windows installation: a C: drive, a registry, and Windows system files. The game's Windows runtime libraries (DirectX, Visual C++) are installed into it by Install Dependencies.",
                     "A prefix belongs to the Wine build that created it. If a different Wine build is pointed at it, it 'updates' the prefix and overwrites the system files with its own. The game then crashes the moment it starts. COMMANDER is built around never letting that happen (see Runners and Wine prefixes).",
                 ],
@@ -210,7 +223,7 @@ TOPICS: list[dict] = [
                         "Open Install. Pick an empty base folder on a drive with about 150 GB free and press Create folders. COMMANDER makes anomaly, gamma and cache folders inside it and saves them to your profile.",
                         "Press Install Dependencies. COMMANDER installs any missing tools first (umu-run, winetricks), then installs the Windows runtime libraries into your runner's Wine prefix. This is about 150 MB and only needs doing once per prefix.",
                         "Press Install GAMMA. If Anomaly is not installed yet, it is installed first (stalker-gamma anomaly install), then GAMMA (stalker-gamma full-install). This downloads many gigabytes and can take a few hours. You can pause, cancel and resume.",
-                        "When it finishes, COMMANDER takes you to Play. Keep the runner on Auto-detect. If you have no GE-Proton yet, press Manage GE-Proton and download the newest one.",
+                        "When it finishes, COMMANDER takes you to Play. Keep the runner on Auto-detect. If you have no Proton-GE yet, press Manage Proton-GE and download the newest one.",
                         "Press Launch Game. The first start is slow while shaders are built.",
                     ]),
                     ("note", "Each page unlocks as the step before it is done, so greyed-out buttons usually mean an earlier step is missing."),
@@ -313,7 +326,7 @@ TOPICS: list[dict] = [
                     "A fresh Wine or Proton prefix does not contain Microsoft's DirectX and Visual C++ runtime libraries; Wine only provides stand-ins. MO2 refuses to start without the real Visual C++ runtime (the classic concrt140.dll error), and the game needs the DirectX ones. Install Dependencies installs these winetricks verbs, in order:",
                     ("code", "d3dcompiler_43 d3dcompiler_47 d3dx10 d3dx11_43 d3dx9 quartz dx8vb vcrun2022"),
                     "Before that, it installs any missing tools: umu-run (a pinned, known-good release, version 1.4.4) and winetricks (a pinned release, 20260125, checked against a known SHA-256 before use).",
-                    ("warn", "The verbs are always installed through your selected runner's own Wine: umu-run winetricks for GE-Proton, or that runner's own wine binary otherwise. Never the system wine or winetricks on your PATH. A different Wine build touching a Proton prefix overwrites its system DLLs and makes every launch crash. COMMANDER refuses to do it."),
+                    ("warn", "The verbs are always installed through your selected runner's own Wine: umu-run winetricks for Proton-GE, or that runner's own wine binary otherwise. Never the system wine or winetricks on your PATH. A different Wine build touching a Proton prefix overwrites its system DLLs and makes every launch crash. COMMANDER refuses to do it."),
                     "Checking which runtimes are installed is a plain file read of the prefix, never a winetricks command, for the same reason.",
                 ],
             ),
@@ -325,7 +338,7 @@ TOPICS: list[dict] = [
                         ("Wine, Winetricks, umu-run", "Each is found automatically. You only need one way to run the game, so once Steam, Wine or umu-run is found, the others show Optional."),
                         ("Vulkan", "Your graphics driver must support Vulkan, and the 32-bit Vulkan loader must also be present. The card name is shown."),
                         ("Runtime libraries", "How many of the eight verbs above are in your prefix. Hover for the list."),
-                        ("Proton builds", "Every GE-Proton build found in Steam's compatibilitytools.d folders."),
+                        ("Proton builds", "Every Proton-GE build found in Steam's compatibilitytools.d folders."),
                         ("GameMode and MangoHud", "Optional extras."),
                     ]),
                     "For anything missing, COMMANDER detects your distribution and package manager (and your GPU vendor for Vulkan drivers) and gives you the exact install command to copy into a terminal.",
@@ -348,8 +361,8 @@ TOPICS: list[dict] = [
                 "Runner choices",
                 [
                     ("table", [
-                        ("Auto-detect (auto)", "The recommended choice. Uses umu-run with the newest GE-Proton. Without umu-run it falls back to Steam's Proton, then to plain Wine."),
-                        ("A specific GE-Proton", "Runs that build through umu-run, using PROTONPATH to tell umu which build."),
+                        ("Auto-detect (auto)", "The recommended choice. Uses umu-run with the newest Proton-GE. Without umu-run it falls back to Steam's Proton, then to plain Wine."),
+                        ("A specific Proton-GE", "Runs that build through umu-run, using PROTONPATH to tell umu which build."),
                         ("Steam Proton", "Any Proton installed through Steam (steamapps/common/Proton*), run with 'proton run'. It works, but MO2 is less reliable on Valve's builds."),
                         ("Wine", "Plain system Wine with WINEPREFIX set."),
                     ]),
@@ -377,9 +390,9 @@ TOPICS: list[dict] = [
                 ],
             ),
             (
-                "GE-Proton manager",
+                "Proton-GE manager",
                 [
-                    "Play > Manage GE-Proton lists recent GE-Proton releases from GitHub. Download fetches the build into a temporary folder on the same drive (not /tmp, which is often too small), checks its SHA-512 checksum against the release's own checksum file, and only then unpacks it into ~/.local/share/Steam/compatibilitytools.d (or the Steam folder set in System Check's overrides), where Steam can use it too. Downloads can be cancelled.",
+                    "Play > Manage Proton-GE lists recent Proton-GE releases from GitHub. Download fetches the build into a temporary folder on the same drive (not /tmp, which is often too small), checks its SHA-512 checksum against the release's own checksum file, and only then unpacks it into ~/.local/share/Steam/compatibilitytools.d (or the Steam folder set in System Check's overrides), where Steam can use it too. Downloads can be cancelled.",
                     "Remove deletes a build, but refuses when it is the build COMMANDER launches the game with, or when the folder is not a Proton build inside compatibilitytools.d. Builds a Steam game is set to use are marked and left out of Remove unused.",
                 ],
             ),
@@ -420,7 +433,11 @@ TOPICS: list[dict] = [
                         ("words after %command%", "Are passed to the game itself."),
                     ]),
                     ("code", "DXVK_HUD=fps mangohud %command%"),
-                    "The quick toggles add common ones for you: MangoHud, an FPS counter, and No Esync / No Fsync (which can help if the game freezes or stutters). Always use GameMode wraps every launch in gamemoderun. The live preview shows the exact command, with a copy button.",
+                    "The quick toggles below the box add common ones for you. Click one to add its text to the box, and again to take it out. They come in three groups:",
+                    *_launch_option_blocks(),
+                    "Launch options are used for every launch: the Play page, desktop shortcuts, Deck Mode (Settings → Launch options has a switch for each toggle) and the co-op Steam shortcut. Always use GameMode wraps every launch in gamemoderun.",
+                    ("note", "Co-op keeps the Steam overlay for Steam invites, so No Steam overlay is greyed out while co-op is on. Proton log and Quiet Wine logs turn each other off, because Quiet Wine logs would leave the Proton log empty."),
+                    ("note", "After you change launch options, the next co-op launch restarts Steam once: Steam only reads a shortcut's launch options when it starts."),
                 ],
             ),
             (
@@ -899,7 +916,7 @@ TOPICS: list[dict] = [
                         ("Autostart entry (when enabled)", "autostart"),
                     ]),
                     ("table", [
-                        ("GE-Proton builds", "~/.local/share/Steam/compatibilitytools.d, and the same folder in the other Steam installs COMMANDER finds (~/.steam/steam, Flatpak Steam)."),
+                        ("Proton-GE builds", "~/.local/share/Steam/compatibilitytools.d, and the same folder in the other Steam installs COMMANDER finds (~/.steam/steam, Flatpak Steam)."),
                         ("Steam shortcuts", "<Steam>/userdata/<account>/config/shortcuts.vdf, only when you use Add to Steam or set up co-op."),
                         ("Steam icon", "~/.local/share/icons/stalker-gamma-commander.png"),
                         ("Desktop shortcuts", "Your desktop folder (from xdg-user-dir), only when you ask for one."),
@@ -926,8 +943,8 @@ TOPICS: list[dict] = [
                     ("table", [
                         ("raw.githubusercontent.com", "GAMMA's version file and patch notes (update checks), and the winetricks script during Install Dependencies."),
                         ("stalker-gamma.com", "GAMMA's official modpack list, for update checks, verify and repair."),
-                        ("github.com", "COMMANDER's release feed (releases.atom) for its own update check and the Welcome screen's patch notes, downloading COMMANDER updates and GE-Proton builds, and umu-launcher during Install Dependencies."),
-                        ("api.github.com", "Only the GE-Proton release list in Manage GE-Proton."),
+                        ("github.com", "COMMANDER's release feed (releases.atom) for its own update check and the Welcome screen's patch notes, downloading COMMANDER updates and Proton-GE builds, and umu-launcher during Install Dependencies."),
+                        ("api.github.com", "Only the Proton-GE release list in Manage Proton-GE."),
                         ("api.ipify.org", "Only when you ask the Multiplayer page for your public address."),
                         ("Discord", "Nothing over the internet. Rich Presence only talks to the Discord app on your own computer."),
                     ]),
@@ -964,7 +981,7 @@ TOPICS: list[dict] = [
                         ("MO2 must be closed", "Edits to files MO2 owns are blocked while it runs."),
                         ("Wine prefix protection", "No Wine build is ever pointed at a prefix it did not create; damaged prefixes are refused before launch."),
                         ("Safe archives", "Mod archives cannot write outside their own folder; untrusted XML is parsed without entity expansion; downloads have size limits."),
-                        ("Verified downloads", "GE-Proton builds are checked against SHA-512, COMMANDER updates against size, format and SHA-512."),
+                        ("Verified downloads", "Proton-GE builds are checked against SHA-512, COMMANDER updates against size, format and SHA-512."),
                         ("Crash records", "An unexpected error is written to commander.log and shown in a dialog instead of closing the app silently. A hard crash writes a stack trace to crash.log."),
                     ]),
                 ],
@@ -1024,7 +1041,7 @@ TOPICS: list[dict] = [
                         ("Play", "Launch target, runner, session timer and Force Stop Game for a game that hangs (the Deck has no Alt+F4)."),
                         ("Mods", "The mod list in MO2 order with priority numbers; fold categories, filter, search, enable or disable a whole category, reorder, install mods with FOMOD support."),
                         ("Update", "Every added, modified and removed mod, and scrollable patch notes."),
-                        ("Install", "Anomaly, GAMMA, dependencies, GE-Proton, install options, and Resume after an interrupted install."),
+                        ("Install", "Anomaly, GAMMA, dependencies, Proton-GE, install options, and Resume after an interrupted install."),
                         ("Utilities", "Cache, shader cache, ReShade, GOG fix, prefix repair, move install, log dump, and the resets."),
                         ("System", "System Check, with Copy install command on each missing item."),
                         ("Settings", "Theme, language, text size (80 to 150%), start screen, sounds and rumble, Add to Steam, Exit Deck Mode."),
@@ -1083,8 +1100,8 @@ TOPICS: list[dict] = [
                 "Install GAMMA",
                 [
                     ("steps", [
-                        "Choose Install GE-Proton.",
-                        "Choose Install Dependencies. The runtimes go into GE-Proton's Wine prefix, so do this after GE-Proton.",
+                        "Choose Install Proton-GE.",
+                        "Choose Install Dependencies. The runtimes go into Proton-GE's Wine prefix, so do this after Proton-GE.",
                         "Press X to install GAMMA. It installs Anomaly first, then every GAMMA addon.",
                     ]),
                     ("note", "You don't need system Wine or protontricks. COMMANDER installs everything it needs."),
@@ -1105,10 +1122,10 @@ TOPICS: list[dict] = [
                 "If something goes wrong",
                 [
                     ("table", [
-                        ("Mod Organizer closes straight away", "GE-Proton's VR support (wineopenxr) can crash when no VR software is installed, and takes Mod Organizer with it. GAMMA doesn't use VR, so turn it off: close the game and run this in Konsole."),
+                        ("Mod Organizer closes straight away", "Proton-GE's VR support (wineopenxr) can crash when no VR software is installed, and takes Mod Organizer with it. GAMMA doesn't use VR, so turn it off: close the game and run this in Konsole."),
                     ]),
                     ("code", "WINEPREFIX=~/Games/umu/umu-default PROTONPATH=~/.local/share/Steam/compatibilitytools.d/GE-Proton11-9-x86_64 ~/.local/bin/umu-run reg add 'HKCU\\Software\\Wine\\DllOverrides' /v wineopenxr /d '' /f"),
-                    ("note", "If your GE-Proton folder in ~/.local/share/Steam/compatibilitytools.d has another name, change GE-Proton11-9-x86_64 to match."),
+                    ("note", "If your Proton-GE folder in ~/.local/share/Steam/compatibilitytools.d has another name, change GE-Proton11-9-x86_64 to match."),
                     ("table", [
                         ("A small window in Game Mode", "Start the STALKER COMMANDER DECK shortcut, not STALKER COMMANDER. If you added the AppImage by hand, set its launch options to --deck."),
                         ("Crashes after running Wine yourself", "Another Wine damaged the game's prefix. Use Utilities > Repair Wine prefix, then Install Dependencies again."),
@@ -1260,7 +1277,7 @@ TOPICS: list[dict] = [
             (
                 "Mod Organizer closes straight away or mentions concrt140.dll",
                 [
-                    "The Visual C++ runtime is missing from the prefix, or the prefix belongs to a different runner. Run Install Dependencies on Install and use GE-Proton (Auto-detect) rather than Steam's Proton.",
+                    "The Visual C++ runtime is missing from the prefix, or the prefix belongs to a different runner. Run Install Dependencies on Install and use Proton-GE (Auto-detect) rather than Steam's Proton.",
                 ],
             ),
             (
@@ -1296,7 +1313,7 @@ TOPICS: list[dict] = [
             (
                 "No runner found",
                 [
-                    "Install umu-run (System Check), then at least one GE-Proton from Play > Manage GE-Proton.",
+                    "Install umu-run (System Check), then at least one Proton-GE from Play > Manage Proton-GE.",
                 ],
             ),
             (
@@ -1408,7 +1425,7 @@ TOPICS: list[dict] = [
                         ("Grokitach and the GAMMA team", "The GAMMA modpack."),
                         ("The Anomaly Team", "Developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base."),
                         ("GSC Game World", "Creators of the original S.T.A.L.K.E.R. games and universe."),
-                        ("Other projects", "GE-Proton (GloriousEggroll), umu-launcher (Open Wine Components), Winetricks, Wine, Mod Organizer 2, xrRazom Co-op, 7-Zip, Qt and PySide6."),
+                        ("Other projects", "Proton-GE (GloriousEggroll), umu-launcher (Open Wine Components), Winetricks, Wine, Mod Organizer 2, xrRazom Co-op, 7-Zip, Qt and PySide6."),
                     ]),
                 ],
             ),

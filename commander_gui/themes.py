@@ -213,6 +213,23 @@ QWidget#panelTransparent {
 #navtabs[settingsMode="true"]::tab:hover {
     color: $accent_strong;
 }
+/* The top bar's overflow button: looks like a tab, opens the tabs that
+   didn't fit. Underlined like a selected tab while one of them is open. */
+#navMore {
+    background: transparent;
+    color: $text_nav;
+    padding: 12px 10px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+}
+#navMore:hover {
+    color: $accent_strong;
+}
+#navMore[active="true"] {
+    color: $accent_strong;
+    border-bottom: 2px solid $accent_strong;
+}
 #titleStrip, #topbarRow {
     background: transparent;
 }
@@ -745,6 +762,12 @@ QPushButton#segment:checked {
     background-color: $chip;
     border-color: $accent_strong;
     color: $accent_strong;
+}
+QPushButton#segment:disabled {
+    background: transparent;
+    border-color: $border;
+    border-style: dashed;
+    color: $text_disabled;
 }
 QPushButton#tertiary {
     background: transparent;

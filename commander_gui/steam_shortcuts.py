@@ -868,13 +868,18 @@ def _coop_entry(shortcuts: list[Entry]) -> dict | None:
     return None
 
 
+def coop_shortcut_entry(vdf_path: Path) -> dict | None:
+    """The co-op shortcut's fields, or None when Steam has none."""
+    return _coop_entry(get_shortcuts_map(read_shortcuts(vdf_path)))
+
+
 def coop_shortcut_current(
     vdf_path: Path, *, exe: str, start_dir: str, launch_options: str, proton_name: str | None
 ) -> bool:
     """True when Steam already has this exact co-op shortcut (and, on Linux,
     its compat tool), so launching needs no Steam restart."""
     try:
-        entry = _coop_entry(get_shortcuts_map(read_shortcuts(vdf_path)))
+        entry = coop_shortcut_entry(vdf_path)
     except ShortcutsFileError:
         return False
     if entry is None or (entry.get("Exe"), entry.get("StartDir"), entry.get("LaunchOptions")) != (

@@ -189,6 +189,20 @@ def _swap_dir(new: Path, dest: Path) -> None:
     shutil.rmtree(old, ignore_errors=True)
 
 
+def looks_like_xrrazom(names: list[str]) -> bool:
+    """True when an archive's member paths are an xrRazom Co-op zip
+    (engine ``Anomaly/bin`` plus ``gamedata``), so Mod Manager can send it
+    to the Multiplayer page before unpacking anything.
+
+    Goes by layout, never the name: an addon called "xrRazom something"
+    ships only ``gamedata`` and installs as a normal mod. One wrapper
+    folder around the whole thing is looked through."""
+    parts = [n.replace("\\", "/").strip("/").lower().split("/") for n in names if n.strip("/")]
+    if len({p[0] for p in parts}) == 1:
+        parts = [p[1:] for p in parts if len(p) > 1]
+    return any(p[:2] == ["anomaly", "bin"] for p in parts) and any(p[0] == "gamedata" for p in parts)
+
+
 def inspect_zip(path: str | Path) -> dict:
     """Validate an xrRazom zip and return its release info."""
     try:

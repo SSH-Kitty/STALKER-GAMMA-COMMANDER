@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QStackedWidget,
     QStatusBar,
@@ -135,8 +137,9 @@ _RELEASES_URL = "https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/releases"
 #: Text grows to this fraction of its normal size while a tab is hovered.
 _HOVER_SCALE = 1.12
 _HOVER_ANIM_MS = 150
-#: How far (px) tab labels sit above their tab's middle.
-_TAB_TEXT_LIFT = 4
+#: How far (px) tab labels sit above their tab's middle: half the tab's
+#: 2px bottom border, so the text is centered in the area above it.
+_TAB_TEXT_LIFT = 1
 
 
 class NavTabBar(QTabBar):
@@ -182,6 +185,10 @@ class NavTabBar(QTabBar):
             self._hovered_index = -1
 
     def _animate_tab_scale(self, index: int, target: float) -> None:
+        if not gui_settings.animations_enabled():
+            self._hover_scale[index] = 1.0
+            self.update()
+            return
         anim = self._hover_anims.get(index)
         if anim is None:
             anim = QVariantAnimation(self)
@@ -220,6 +227,8 @@ class NavTabBar(QTabBar):
         current = self.currentIndex()
 
         for i in range(self.count()):
+            if not self.isTabVisible(i):
+                continue
             rect = self.tabRect(i)
             is_selected = i == current
             is_hovered = i == self._hovered_index
@@ -236,12 +245,18 @@ class NavTabBar(QTabBar):
             )
 
             if is_selected and not settings_mode:
+                # Underline hugs the label (not the whole tab rect), so it
+                # never reaches the group separators; rounded caps.
+                text_w = self.fontMetrics().horizontalAdvance(self.tabText(i))
+                half = min(text_w, rect.width() - 8) / 2 + 4
                 pen = QPen(accent)
-                pen.setWidth(2)
+                pen.setWidth(3)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
+                y = rect.bottom() - 2
                 painter.drawLine(
-                    QPointF(rect.left(), rect.bottom() - 1),
-                    QPointF(rect.right(), rect.bottom() - 1),
+                    QPointF(rect.center().x() - half, y),
+                    QPointF(rect.center().x() + half, y),
                 )
 
         if self.count() < 2:
@@ -255,10 +270,14 @@ class NavTabBar(QTabBar):
         pen.setWidth(1)
         painter.setPen(pen)
 
-        for i in range(self.count()):
-            if i in _SEPARATOR_AFTER and i < self.count() - 1:
-                r = self.tabRect(i)
-                x = r.right() + 4
+        # A separator goes between two neighbouring visible tabs that sit in
+        # different groups, so hiding tabs never leaves a doubled/dangling one.
+        visible = [i for i in range(self.count()) if self.isTabVisible(i)]
+        group = lambda i: sum(i > s for s in _SEPARATOR_AFTER)
+        for a, b in itertools.pairwise(visible):
+            if group(a) != group(b):
+                r = self.tabRect(a)
+                x = (r.right() + self.tabRect(b).left()) / 2
                 painter.drawLine(QPointF(x, r.top() + 5), QPointF(x, r.bottom() - 5))
 
         painter.end()
@@ -383,6 +402,9 @@ class MainWindow(QMainWindow):
         from .smooth_scroll import install as install_smooth_scroll
 
         self._smooth_scroll = install_smooth_scroll(self)
+        from .pointer_cursor import install as install_pointer_cursor
+
+        self._pointer_cursor = install_pointer_cursor(self)
         self.tabs.setCurrentIndex(0)
         QTimer.singleShot(0, self._maybe_check_for_updates_in_background)
         QTimer.singleShot(0, self._check_commander_update_status)
@@ -580,6 +602,7 @@ class MainWindow(QMainWindow):
         topbar_layout.addWidget(wordmark_block, 0, Qt.AlignmentFlag.AlignVCenter)
         topbar_layout.addWidget(header, 1, Qt.AlignmentFlag.AlignVCenter)
         self._topbar = topbar
+        self._wordmark_block = wordmark_block
         self._topbar_row = header
         # Floats in the top-right corner (pinned there by pin_top_right()) instead
         # of taking a row, so everything else stays centered in the bar.
@@ -591,7 +614,23 @@ class MainWindow(QMainWindow):
         self.tabs.setObjectName("navtabs")
         self.tabs.setDocumentMode(True)
         self.tabs.setExpanding(False)
-        header_layout.addWidget(self.tabs)
+        # Tabs that don't fit move into "More" (see _update_overflow), so the
+        # bar itself never scrolls.
+        self.tabs.setUsesScrollButtons(False)
+        self._user_hidden: set[int] = set()
+        self._overflow: list[int] = []
+        nav_box = QWidget()
+        nav_box.setObjectName("panelTransparent")
+        nav_layout = QHBoxLayout(nav_box)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        nav_layout.addWidget(self.tabs)
+        self._more_button = QPushButton(tr("More") + " ▾")
+        self._more_button.setObjectName("navMore")
+        self._more_button.hide()
+        self._more_button.clicked.connect(self._show_more_menu)
+        nav_layout.addWidget(self._more_button)
+        header_layout.addWidget(nav_box)
 
         header_layout.addStretch(1)
 
@@ -690,6 +729,7 @@ class MainWindow(QMainWindow):
         self.stack.currentChanged.connect(self._on_stack_page_changed)
 
         self.tabs.currentChanged.connect(self._on_nav)
+        self.tabs.currentChanged.connect(lambda _i: self._refresh_more_button())
         self.tabs.tabBarClicked.connect(self._on_tab_clicked)
         layout.addWidget(topbar)
         layout.addWidget(self._build_update_banner())
@@ -702,14 +742,125 @@ class MainWindow(QMainWindow):
             widget.installEventFilter(self._drag_filter)
         self._sync_title_bar_layout()
 
-        # Keep the full navigation strip visible at startup. The saved window
-        # size may predate the current tab labels and otherwise enables the
-        # QTabBar scroll arrows.
-        self.tabs.setMinimumWidth(self.tabs.sizeHint().width())
-        header_width = header.sizeHint().width()
-        self.setMinimumWidth(header_width)
-        if self.width() < header_width:
-            self.resize(header_width, self.height())
+        self.apply_hidden_tabs()
+        # Again once styles and fonts are applied: before that the tabs
+        # report widths that are too small.
+        QTimer.singleShot(0, self._update_overflow)
+
+    def apply_hidden_tabs(self) -> None:
+        """Show/hide top-bar tabs per Settings > Appearance > Top bar."""
+        hidden = set(gui_settings.load_gui_settings().get("hidden_nav_tabs", []))
+        self._user_hidden = {_TAB_INDEX[key] for key in hidden if key in _TAB_INDEX}
+        if self._last_tab_key in hidden:
+            self._last_tab_key = "dashboard"
+        self._update_overflow()
+
+    def _update_overflow(self) -> None:
+        """Lay out the top-bar tabs: every wanted tab that fits, the rest in More.
+
+        Tabs are dropped from the right end until the remainder plus the
+        More button fit beside the counter and cog. At normal widths nothing
+        is dropped and More stays hidden, so the bar looks as it always did.
+        """
+        if getattr(self, "_topbar_row", None) is None:  # not built yet
+            return
+        tabs = self.tabs
+        shown = [i for i in range(tabs.count()) if i not in self._user_hidden]
+        width = {i: tabs.tabSizeHint(i).width() for i in shown}
+        # header: stretch, tabs+More, stretch, counter+cog - 3 gaps of 16px
+        # and the right margin; a few px of slack so text never clips.
+        row = self._topbar_row
+        room = row.width() - 8 - 3 * 16 - 8 - self._right_cluster.sizeHint().width()
+        need = sum(width.values())
+        over: list[int] = []
+        if need > room:
+            room -= self._more_button.sizeHint().width() + 4
+            for i in reversed(shown[1:]):  # Dashboard always stays
+                if need <= room:
+                    break
+                over.append(i)
+                need -= width[i]
+            over.reverse()
+        current = tabs.currentIndex()
+        if over == self._overflow and all(
+            tabs.isTabVisible(i) == (i not in self._user_hidden and i not in over)
+            for i in range(tabs.count())
+        ):
+            self._refresh_more_button()
+            self._sync_topbar_min_width()
+            return
+        self._overflow = over
+        # Signals off: hiding the current tab must not run _on_nav(), which
+        # would close the Settings page the user is changing this from.
+        tabs.blockSignals(True)
+        for i in range(tabs.count()):
+            tabs.setTabVisible(i, i not in self._user_hidden and i not in over)
+        # Hiding the current tab makes Qt pick another one; undo that. A tab
+        # the user removes from the bar in Settings falls back to the
+        # Dashboard; one opened in code (set_page) stays, as its page shows.
+        tabs.setCurrentIndex(0 if current in self._user_hidden and self._settings_open else current)
+        tabs.blockSignals(False)
+        # QTabBar leaves the other tabs where they were until something makes
+        # it lay out again; re-setting a label does.
+        tabs.setTabText(0, tabs.tabText(0))
+        tabs.updateGeometry()
+        tabs.update()
+        self._refresh_more_button()
+        self._sync_topbar_min_width()
+
+    def _refresh_more_button(self) -> None:
+        more = self._more_button
+        more.setVisible(bool(self._overflow))
+        current = self.tabs.currentIndex()
+        active = current in self._overflow and not self._settings_open
+        if more.property("active") != active:
+            more.setProperty("active", active)
+            more.style().unpolish(more)
+            more.style().polish(more)
+
+    def _show_more_menu(self) -> None:
+        menu = QMenu(self)
+        current = self.tabs.currentIndex()
+        for i in self._overflow:
+            action = menu.addAction(tr(NAV_ITEMS[i][1]))
+            action.setCheckable(True)
+            action.setChecked(i == current and not self._settings_open)
+            action.triggered.connect(lambda _checked=False, i=i: self._go_to_tab(i))
+        menu.exec(self._more_button.mapToGlobal(self._more_button.rect().bottomLeft()))
+
+    def _go_to_tab(self, index: int) -> None:
+        if self._settings_open:
+            self._on_tab_clicked(index)
+        else:
+            self.tabs.setCurrentIndex(index)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_overflow()
+
+    def _sync_topbar_min_width(self) -> None:
+        """Window never narrower than the smallest bar that still works.
+
+        That is the wordmark, the Dashboard tab, More, the counter and the
+        cog. Redone whenever the counter text, font or theme change - sized
+        once at build time it let "577 Mods" overlap the last tabs. The
+        pages' own minimum widths still apply on top of this.
+        """
+        if getattr(self, "_topbar", None) is None:  # not built yet
+            return
+        layout = self._topbar.layout()
+        margins = layout.contentsMargins()
+        self.setMinimumWidth(
+            margins.left()
+            + margins.right()
+            + self._wordmark_block.sizeHint().width()
+            + layout.spacing()
+            + 8 + 3 * 16 + 8
+            + self._right_cluster.sizeHint().width()
+            + self.tabs.tabSizeHint(0).width()
+            + self._more_button.sizeHint().width()
+            + 4
+        )
 
     def _build_status_bar(self) -> None:
         """Build the persistent status bar contents exactly once.
@@ -1311,6 +1462,8 @@ class MainWindow(QMainWindow):
         return profile.profile_name if profile else "(none)"
 
     def _on_stack_page_changed(self, _index: int) -> None:
+        if not gui_settings.animations_enabled():
+            return
         self._stack_fade.stop()
         self._stack_opacity.setEnabled(True)
         self._stack_fade.start()
@@ -1392,6 +1545,7 @@ class MainWindow(QMainWindow):
         self.tabs.style().unpolish(self.tabs)
         self.tabs.style().polish(self.tabs)
         self._set_cog_active(True)
+        self._refresh_more_button()
         page = self._ensure_page("settings")
         self.stack.setCurrentWidget(page)
         QTimer.singleShot(0, page.refresh)
@@ -1407,6 +1561,7 @@ class MainWindow(QMainWindow):
         page = self._ensure_page(self._last_tab_key)
         self.stack.setCurrentWidget(page)
         self.tabs.setCurrentIndex(_TAB_INDEX[self._last_tab_key])
+        self._refresh_more_button()
 
     def toggle_settings(self) -> None:
         if self._settings_open:
@@ -1542,6 +1697,7 @@ class MainWindow(QMainWindow):
                 build_stylesheet(name, font_size=font_size, font_family=font_family)
             )
         self.tabs.update()
+        QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()
         self.update()
         # Icons painted in a theme colour don't follow the stylesheet.
@@ -1711,6 +1867,10 @@ class MainWindow(QMainWindow):
                 tr("No active profile, or GAMMA is not installed yet.")
             )
         self.mod_counter_label.show()
+        text = self.mod_counter_label.text()
+        if text != getattr(self, "_mod_counter_synced_text", None):
+            self._mod_counter_synced_text = text
+            self._update_overflow()
 
     def refresh_settings(self) -> None:
         self.settings = load_settings()

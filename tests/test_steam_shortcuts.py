@@ -581,6 +581,27 @@ class CoopShortcutTests(unittest.TestCase):
             "proton_name": "GE-Proton10-4",
         }
 
+    def test_a_launch_options_change_is_told_apart_from_other_changes(self):
+        from commander_gui import launch_options
+        from commander_gui.ui.play_page import coop_options_only_change
+
+        def fields(options="", profile="Default"):
+            base = self._fields(profile)
+            with patch.object(launch_options, "in_game_mode", return_value=False):
+                base["launch_options"] = launch_options.for_steam(options, base["launch_options"])
+            return base
+
+        with tempfile.TemporaryDirectory() as tmp:
+            vdf = self._setup(tmp)
+            # No co-op shortcut yet: a first-time setup, not an options change.
+            self.assertFalse(coop_options_only_change(vdf, fields()))
+            write_coop_shortcut(vdf, **fields("PROTON_ENABLE_WAYLAND=1 mangohud"))
+            self.assertFalse(coop_shortcut_current(vdf, **fields("gamescope -f -- mangohud")))
+            # Steam's shortcut is co-op's own options plus the player's.
+            self.assertTrue(coop_options_only_change(vdf, fields()))
+            # A different MO2 profile is more than a launch options change.
+            self.assertFalse(coop_options_only_change(vdf, fields(profile="Other")))
+
     def test_launch_options_point_proton_at_the_prefix_and_cop(self):
         self.assertEqual(
             coop_launch_options("/p", "Default", "Anomaly", 41700),
@@ -751,11 +772,10 @@ class CoopShortcutRollbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             vdf = Path(tmp) / "userdata" / "1" / "config" / "shortcuts.vdf"
             vdf.parent.mkdir(parents=True)
-            fields = dict(exe="/x/run", start_dir="/x", launch_options="a", proton_name=None)
+            fields = {"exe": "/x/run", "start_dir": "/x", "launch_options": "a", "proton_name": None}
             steam_shortcuts.write_coop_shortcut(vdf, **fields)
             before = vdf.read_bytes()
             fields.update(launch_options="b", proton_name="GE-Proton9-1")
-            with patch.object(steam_shortcuts, "_write_compat_config", side_effect=OSError("full")):
-                with self.assertRaises(OSError):
-                    steam_shortcuts.write_coop_shortcut(vdf, **fields)
+            with patch.object(steam_shortcuts, "_write_compat_config", side_effect=OSError("full")), self.assertRaises(OSError):
+                steam_shortcuts.write_coop_shortcut(vdf, **fields)
             self.assertEqual(vdf.read_bytes(), before)

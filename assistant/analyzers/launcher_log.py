@@ -311,7 +311,7 @@ def _protonfixes_error_finding(
             "for this launch."
         ),
         suggestion=tr(
-            "If the game fails to start, try a different GE-Proton/UMU-Proton "
+            "If the game fails to start, try a different Proton-GE/UMU-Proton "
             "build on COMMANDER's Play page."
         ),
         excerpt_text=excerpt(lines, index),

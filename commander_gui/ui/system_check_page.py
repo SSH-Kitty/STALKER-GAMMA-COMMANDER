@@ -179,7 +179,7 @@ def _check_tool(
 def _short_proton_name(label: str) -> str:
     """Turn a discovered runner label into a compact, path-free name."""
     ver = label.removeprefix("GE-Proton").removeprefix("Proton ").strip()
-    return f"GE-Proton {ver}" if ver else "GE-Proton Unknown"
+    return f"Proton-GE {ver}" if ver else "Proton-GE Unknown"
 
 
 #: Plain-language names for the Winetricks verb codenames. The codename
@@ -463,9 +463,9 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
         {
             "label": "Proton Builds",
             "state": "ready" if ge_builds else "optional",
-            "detail": tr("{count} GE-Proton build(s) detected.", count=len(ge_builds))
+            "detail": tr("{count} Proton-GE build(s) detected.", count=len(ge_builds))
             if ge_builds
-            else tr("No GE-Proton builds detected."),
+            else tr("No Proton-GE builds detected."),
             "command": "",
             "builds": ge_builds,
         }
@@ -511,7 +511,7 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             if dir_path and not Path(dir_path).is_dir():
                 check["state"] = "missing"
                 check["detail"] = tr(
-                    "GE-Proton override path is invalid: {path}", path=dir_path
+                    "Proton-GE override path is invalid: {path}", path=dir_path
                 )
                 check["command"] = ""
         # File overrides (umu-run, winetricks, vulkaninfo)
@@ -674,7 +674,7 @@ class SystemCheckPage(QWidget):
             ("umu-run", "umu-run executable", False),
             ("winetricks", "Winetricks executable", False),
             ("vulkaninfo", "Vulkan info executable", False),
-            ("umu_proton", "GE-Proton build", True),
+            ("umu_proton", "Proton-GE build", True),
         ):
             self._add_override_row(override_layout, key, label, directory)
         root.addWidget(override_card)

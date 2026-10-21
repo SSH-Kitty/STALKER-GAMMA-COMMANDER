@@ -232,11 +232,11 @@ class InstallScreen(DeckScreen):
         proton_card.body.addWidget(
             deck_label(tr("Compatibility tool"), role="rowTitle")
         )
-        self.proton_row = DeckRow(tr("GE-Proton"))
+        self.proton_row = DeckRow(tr("Proton-GE"))
         self.proton_row.activated.connect(self._pick_proton_version)
         proton_card.body.addWidget(self.proton_row)
         self.proton_install_button = deck_button(
-            tr("Install GE-Proton"), on_click=self._install_proton
+            tr("Install Proton-GE"), on_click=self._install_proton
         )
         self.proton_install_button.setEnabled(False)
         proton_card.body.addWidget(self.proton_install_button)
@@ -887,13 +887,13 @@ class InstallScreen(DeckScreen):
         self.proton_builds_row.setEnabled(idle and bool(builds))
         version = self._proton_version
         if not version:
-            self.proton_install_button.setText(tr("Install GE-Proton"))
+            self.proton_install_button.setText(tr("Install Proton-GE"))
             self.proton_install_button.setEnabled(False)
             return
         # Exact tag match: "GE-Proton9-1" must not count as installed
         # because "GE-Proton9-10" is.
         if release_installed(version, {label for label, _path in protons}):
-            self.proton_install_button.setText(tr("GE-Proton installed") + " ✓")
+            self.proton_install_button.setText(tr("Proton-GE installed") + " ✓")
             self.proton_install_button.setEnabled(False)
         else:
             self.proton_install_button.setText(tr("Install {version}", version=version))
@@ -907,7 +907,7 @@ class InstallScreen(DeckScreen):
             return
         # Fetched on demand, not eagerly on screen build: this is a GitHub
         # API call, and most visits to this screen never touch it.
-        self.window.notify(tr("Fetching GE-Proton releases..."), 0)
+        self.window.notify(tr("Fetching Proton-GE releases..."), 0)
         self._proton_releases_task = BackgroundTask(
             fetch_ge_proton_releases, count=100, parent=self
         )
@@ -920,7 +920,7 @@ class InstallScreen(DeckScreen):
         self.window.toast.hide()
         self._proton_releases = list(releases or [])
         if not self._proton_releases:
-            self.window.notify(tr("No GE-Proton releases found."), 4000)
+            self.window.notify(tr("No Proton-GE releases found."), 4000)
             return
         self._show_proton_picker()
 
@@ -937,7 +937,7 @@ class InstallScreen(DeckScreen):
         )
         picker.chosen.connect(self._apply_proton_version)
         self.window.show_overlay(
-            picker_overlay(self.window, tr("GE-Proton version"), picker, panel_width=1100)
+            picker_overlay(self.window, tr("Proton-GE version"), picker, panel_width=1100)
         )
 
     def _apply_proton_version(self, tag: object) -> None:
@@ -956,7 +956,7 @@ class InstallScreen(DeckScreen):
         if release_installed(version, {label for label, _path in find_extra_protons()}):
             return
         self.window.confirm(
-            tr("Install GE-Proton"),
+            tr("Install Proton-GE"),
             tr(
                 "Downloads and installs {version} as a Steam compatibility "
                 "tool.",
@@ -1021,7 +1021,7 @@ class InstallScreen(DeckScreen):
     def _manage_protons(self) -> None:
         if self._proton_manage_task is not None or self.window.install_busy:
             return
-        self.window.notify(tr("Checking GE-Proton builds..."), 0)
+        self.window.notify(tr("Checking Proton-GE builds..."), 0)
 
         def _scan():
             builds = installed_builds()
@@ -1042,7 +1042,7 @@ class InstallScreen(DeckScreen):
         self.window.toast.hide()
         entries = list(scanned or [])
         if not entries:
-            self.window.notify(tr("No GE-Proton builds found in compatibilitytools.d."))
+            self.window.notify(tr("No Proton-GE builds found in compatibilitytools.d."))
             self._update_proton_button()
             return
         picker = DeckPicker(
@@ -1055,7 +1055,7 @@ class InstallScreen(DeckScreen):
         )
         picker.chosen.connect(lambda index: self._confirm_proton_removal(*entries[int(index)]))
         self.window.show_overlay(
-            picker_overlay(self.window, tr("Remove a GE-Proton build"), picker, panel_width=1200)
+            picker_overlay(self.window, tr("Remove a Proton-GE build"), picker, panel_width=1200)
         )
 
     def _confirm_proton_removal(self, build, size: int) -> None:
@@ -1095,7 +1095,7 @@ class InstallScreen(DeckScreen):
             task.start()
 
         self.window.confirm(
-            tr("Remove GE-Proton"), message, _start, confirm_role="danger", confirm_text=tr("Remove")
+            tr("Remove Proton-GE"), message, _start, confirm_role="danger", confirm_text=tr("Remove")
         )
 
     def _on_proton_removed(self, name: str, size: int, error: str | None) -> None:
@@ -1126,7 +1126,7 @@ class InstallScreen(DeckScreen):
         )
         self._update_proton_button()
         self.window.announce_finished(
-            tr("GE-Proton installed"),
+            tr("Proton-GE installed"),
             tr("Installed {version}", version=self._proton_version),
         )
 
@@ -1142,6 +1142,6 @@ class InstallScreen(DeckScreen):
         else:
             self.proton_status.setText(tr("Failed") + ": " + message)
             self.window.announce_finished(
-                tr("GE-Proton install failed"), tr("Failed") + ": " + message, ok=False
+                tr("Proton-GE install failed"), tr("Failed") + ": " + message, ok=False
             )
         self._update_proton_button()

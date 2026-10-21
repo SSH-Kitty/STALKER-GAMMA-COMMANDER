@@ -6722,13 +6722,13 @@ class ModCounterTests(unittest.TestCase):
                     {"PROTONPATH": "/home/user/.../GE-Proton9-20"},
                 ),
             )
-            self.assertIn("Proton GE: 9-20", self._chip_texts(page))
+            self.assertIn("Proton-GE: 9-20", self._chip_texts(page))
 
             page._build_chips(
                 ok=True,
                 runner=Runner("wine", "Wine", ["wine"], {}),
             )
-            self.assertIn("Proton GE: none", self._chip_texts(page))
+            self.assertIn("Proton-GE: none", self._chip_texts(page))
 
     def test_switch_language_does_not_duplicate_keyboard_shortcuts(self):
         """Regression test mirroring the status-bar duplication bug above:
@@ -12725,6 +12725,41 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertIsNone(page._post_anomaly_verify_runner)
             self.assertFalse(page._post_anomaly_verify_cancelled)
 
+    def test_anomaly_bad_exit_code_is_judged_by_a_file_check(self):
+        """A nonzero Anomaly exit code (e.g. a crash after it finished) must
+
+        not by itself stop GAMMA: the files are verified first, and only a
+        failed verify holds GAMMA back. Files that are missing or a
+        cancelled check keep the failure.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            for verify_rc, installed, cancelled, expected in (
+                (0, True, False, True),
+                (1, True, False, False),
+                (0, False, False, False),
+                (0, True, True, False),
+            ):
+                page, _profile = self._make_install_page_for_repair(tmp)
+                page._anomaly_failure = None
+                page._anomaly_failed = False
+                page._auto_cancelled = False
+                page._verify_anomaly_after_install = False
+                page._anomaly_runner = Mock(was_cancelled=False)
+                with (
+                    patch.object(page, "_update_install_status"),
+                    patch.object(page, "_start_post_anomaly_verify") as mock_verify,
+                ):
+                    page._on_anomaly_finished(-11, "")
+                mock_verify.assert_called_once()
+                self.assertEqual(page._anomaly_failure, (-11, ""))
+                page._post_anomaly_verify_runner = Mock(was_cancelled=cancelled)
+                with (
+                    patch.object(page, "_finish_anomaly_sequence") as mock_finish,
+                    patch("commander_gui.ui.install_page.anomaly_installed", return_value=installed),
+                ):
+                    page._on_post_anomaly_verify_finished(verify_rc, "")
+                mock_finish.assert_called_once_with(False, expected)
+
     def test_post_anomaly_verify_finished_hides_the_cancel_button(self):
         """Regression test: full_progress.on_finished() was never called
 
@@ -14079,3 +14114,75 @@ class MessageDialogTests(unittest.TestCase):
         with patch.object(QDialog, "exec", click_primary):
             answer = MessageBox.question(page, "Title", "Text")
         self.assertEqual(answer, MessageBox.StandardButton.Yes)
+
+
+class XrRazomModManagerGuardTests(unittest.TestCase):
+    """Mod Manager refuses xrRazom by layout, never by name."""
+
+    def test_detects_xrrazom_layout_only(self):
+        from commander_gui.coop import looks_like_xrrazom
+
+        real = ["Anomaly", "Anomaly/bin", "Anomaly/bin/AnomalyDX11.exe", "gamedata/configs/x.ltx"]
+        wrapped = ["xrRazom-1.4", *("xrRazom-1.4/" + n for n in real)]
+        addon = ["xrRazom addon/gamedata/scripts/x.script", "xrRazom addon/xrRazom-release.txt"]
+
+        self.assertTrue(looks_like_xrrazom(real))
+        self.assertTrue(looks_like_xrrazom(wrapped))
+        self.assertFalse(looks_like_xrrazom(addon))
+        self.assertFalse(looks_like_xrrazom(["gamedata/x", "bin/x.dll"]))
+
+
+class LaunchOptionChipTests(unittest.TestCase):
+    """Multi-token options wrap the other wrappers and toggle off cleanly."""
+
+    def test_gamescope_wraps_mangohud(self):
+        from commander_gui import launch_options
+
+        text = "PULSE_LATENCY_MSEC=60 mangohud %command%"
+        on = launch_options.toggle(text, "gamescope -f --", True)
+        self.assertEqual(on, "gamescope -f -- PULSE_LATENCY_MSEC=60 mangohud %command%")
+        self.assertTrue(launch_options.is_on(on, "gamescope -f --"))
+        self.assertEqual(launch_options.toggle(on, "gamescope -f --", False), text)
+
+    def test_quiet_wine_logs_and_proton_log_exclude_each_other(self):
+        from commander_gui import launch_options
+
+        text = launch_options.toggle("PROTON_LOG=1", "WINEDEBUG=-all", True)
+        self.assertEqual(text, "WINEDEBUG=-all")
+        self.assertEqual(launch_options.toggle(text, "PROTON_LOG=1", True), "PROTON_LOG=1")
+
+    def test_coop_shortcut_options_ignore_game_mode(self):
+        """The co-op shortcut is the same in Game and Desktop Mode (else each
+        switch restarts Steam), and co-op never drops the Steam overlay."""
+        from commander_gui import launch_options
+
+        text = launch_options.for_coop("gamescope -f -- LD_PRELOAD= mangohud %command%")
+        self.assertEqual(text, "gamescope -f -- mangohud %command%")
+        shortcuts = set()
+        for game_mode in (True, False):
+            with patch.object(launch_options, "in_game_mode", return_value=game_mode):
+                shortcuts.add(launch_options.for_steam(text, "%command% -x"))
+        self.assertEqual(shortcuts, {"mangohud %command% -x"})
+
+    def test_for_steam_merges_into_shortcut_options(self):
+        from commander_gui import launch_options
+
+        base = "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly"
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            merged = launch_options.for_steam("SteamAppId=1 LD_PRELOAD= mangohud %command% -x", base)
+        self.assertEqual(
+            merged,
+            "SteamAppId=480 LD_PRELOAD='' STEAM_COMPAT_DATA_PATH='/my pfx' "
+            "mangohud %command% run -e Anomaly -x",
+        )
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            self.assertEqual(launch_options.for_steam("", base), "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly")
+
+    def test_apply_splits_env_wrappers_and_arguments(self):
+        from commander_gui import launch_options
+
+        env: dict[str, str] = {}
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            command = launch_options.apply(["game"], env, "gamescope -f -- LD_PRELOAD= mangohud %command% -x")
+        self.assertEqual(command, ["gamescope", "-f", "--", "mangohud", "game", "-x"])
+        self.assertEqual(env, {"LD_PRELOAD": ""})

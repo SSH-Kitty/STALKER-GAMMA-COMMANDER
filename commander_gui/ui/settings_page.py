@@ -67,7 +67,16 @@ from .common import (
 )
 from .dashboard import _card_title
 from .dialogs import MessageBox as QMessageBox
-from .multiplayer_page import _columns, _divider, _hint, _panel, _section, _Stat, _tab
+from .multiplayer_page import (
+    _columns,
+    _divider,
+    _hint,
+    _panel,
+    _section,
+    _Stat,
+    _tab,
+    _vline,
+)
 
 
 def _swatch(color: str) -> QFrame:
@@ -412,6 +421,8 @@ class SettingsPage(QWidget):
         self._language_combo.currentIndexChanged.connect(self._on_language)
         self._title_bar_check = QCheckBox(tr("Use COMMANDER's own title bar"))
         self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
+        self._animations_check = QCheckBox(tr("Animations"))
+        self._animations_check.toggled.connect(self._on_animations_toggled)
         _rows(
             box,
             _setting_row(tr("Font family"), "", self._font_family_combo),
@@ -420,6 +431,10 @@ class SettingsPage(QWidget):
             _check_row(
                 self._title_bar_check,
                 tr("Turn off to use your desktop's normal title bar instead."),
+            ),
+            _check_row(
+                self._animations_check,
+                tr("Hover effects, page fades, smooth scrolling and the game loading screen's moving scenery. Turn off for a still interface."),
             ),
         )
         # Rows at the top when Themes makes the column taller.
@@ -455,7 +470,44 @@ class SettingsPage(QWidget):
         self._group.buttonToggled.connect(self._on_toggled)
         box.addStretch(1)
         _columns(layout, interface, themes)
+        layout.addWidget(self._top_bar_card())
         return page
+
+    def _top_bar_card(self) -> QFrame:
+        from .main_window import (  # deferred: avoids an import cycle
+            _SEPARATOR_AFTER,
+            NAV_ITEMS,
+        )
+
+        card, box = _card(
+            tr("Top bar"),
+            tr("Choose which pages get a tab in the top bar. Dashboard is always shown."),
+        )
+        # One column per tab group, in the top bar's own order, split by the
+        # same thin lines the bar draws between its groups.
+        row = QHBoxLayout()
+        row.setSpacing(24)
+        self._nav_checks: dict[str, QCheckBox] = {}
+        columns: dict[int, QVBoxLayout] = {}
+        for index, (key, title) in enumerate(NAV_ITEMS):
+            group = sum(index > after for after in _SEPARATOR_AFTER)
+            if group not in columns:
+                if columns:
+                    row.addWidget(_vline())
+                columns[group] = QVBoxLayout()
+                columns[group].setSpacing(8)
+                columns[group].addStretch(1)
+                row.addLayout(columns[group], 1)
+            check = QCheckBox(tr(title))
+            if key == NAV_ITEMS[0][0]:  # Dashboard: always in the bar
+                check.setChecked(True)
+                check.setEnabled(False)
+            else:
+                check.toggled.connect(self._on_nav_tab_toggled)
+                self._nav_checks[key] = check
+            columns[group].insertWidget(columns[group].count() - 1, check)
+        box.addLayout(row)
+        return card
 
     def _integrations_tab(self) -> QWidget:
         page, layout = _panel()
@@ -919,6 +971,17 @@ class SettingsPage(QWidget):
         if callable(apply):
             apply(on)
 
+    def _on_animations_toggled(self, on: bool) -> None:
+        gui_settings.save_gui_settings(animations_enabled=on)
+
+    def _on_nav_tab_toggled(self, *_args) -> None:
+        gui_settings.save_gui_settings(
+            hidden_nav_tabs=[k for k, c in self._nav_checks.items() if not c.isChecked()]
+        )
+        apply = getattr(self.window, "apply_hidden_tabs", None)
+        if callable(apply):
+            apply()
+
     def _on_font_size(self, *_args) -> None:
         size = self._font_size_combo.currentData()
         if size:
@@ -1017,6 +1080,14 @@ class SettingsPage(QWidget):
         self._title_bar_check.blockSignals(True)
         self._title_bar_check.setChecked(bool(state.get("custom_title_bar", True)))
         self._title_bar_check.blockSignals(False)
+        self._animations_check.blockSignals(True)
+        self._animations_check.setChecked(bool(state.get("animations_enabled", True)))
+        self._animations_check.blockSignals(False)
+        hidden = set(state.get("hidden_nav_tabs") or [])
+        for key, check in self._nav_checks.items():
+            check.blockSignals(True)
+            check.setChecked(key not in hidden)
+            check.blockSignals(False)
         self._update_notify_check.blockSignals(True)
         self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
         self._update_notify_check.blockSignals(False)
