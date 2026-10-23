@@ -16,6 +16,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import overlays
 from .deck_launch import in_game_mode
 
 #: One-click launch options, in labelled groups: (group heading, ((label,
@@ -24,7 +25,7 @@ GROUPS = (
     ("Display", (
         ("Gamescope", "gamescope -f --", "Run the game fullscreen inside Gamescope. Helps with resolution and alt-tab problems."),
         ("FSR upscaling", "WINE_FULLSCREEN_FSR=1", "Sharpen and upscale with AMD FSR when the game runs below your screen's resolution. Proton-GE only."),
-        ("Native Wayland", "PROTON_ENABLE_WAYLAND=1", "Run in a native Wayland window instead of XWayland. Experimental, Proton-GE 10 or newer. The Steam overlay doesn't work with it, so co-op leaves it off."),
+        ("vkBasalt", "ENABLE_VKBASALT=1", "Sharpening and colour effects. Choose the look in Settings > Graphics."),
         ("OpenGL", "PROTON_USE_WINED3D=1", "Use OpenGL instead of Vulkan (DXVK). Try it if the game won't start or looks broken on an older GPU."),
     )),
     ("Fixes", (
@@ -34,7 +35,7 @@ GROUPS = (
         ("No Steam overlay", "LD_PRELOAD=", "Keep the Steam overlay out of the game when COMMANDER was started from Steam. Can fix stutter. Co-op keeps the overlay for Steam invites."),
     )),
     ("Overlay and logs", (
-        ("MangoHud", "mangohud", "Show the MangoHud overlay (FPS, frame times, temperatures)."),
+        ("MangoHud", "mangohud", "Show the MangoHud overlay (FPS, frame times, temperatures). Choose what it shows in Settings > Graphics."),
         ("FPS counter", "DXVK_HUD=fps", "Show DXVK's small FPS counter in the corner."),
         ("Proton log", "PROTON_LOG=1", "Write a Proton log file to your home folder. Useful for crash reports."),
         ("Quiet Wine logs", "WINEDEBUG=-all", "Turn off Wine's debug messages. Slightly less CPU work. Switches Proton log off, since it would leave the log empty."),
@@ -42,8 +43,12 @@ GROUPS = (
 )
 
 #: Options that undo each other: switching one on switches the other off.
-#: WINEDEBUG=-all silences the Wine messages PROTON_LOG=1 is there to catch.
-_CONFLICTS = {"PROTON_LOG=1": "WINEDEBUG=-all", "WINEDEBUG=-all": "PROTON_LOG=1"}
+#: WINEDEBUG=-all silences the Wine messages PROTON_LOG=1 is there to catch;
+#: vkBasalt's on/off key only reads X11 input, so not in a native Wayland window.
+_CONFLICTS = {
+    "PROTON_LOG=1": "WINEDEBUG=-all", "WINEDEBUG=-all": "PROTON_LOG=1",
+    "ENABLE_VKBASALT=1": "PROTON_ENABLE_WAYLAND=1", "PROTON_ENABLE_WAYLAND=1": "ENABLE_VKBASALT=1",
+}
 
 #: The "No Steam overlay" option. Co-op leaves it out (see
 #: play_page.coop_shortcut_fields): Steam invites need the overlay.
@@ -160,32 +165,39 @@ def frame_gen_version(dll: Path | None = None) -> str | None:
     return None
 
 
+def install_layer(bundled: Path, library_path: Path, manifest: dict, manifest_path: Path) -> None:
+    """Copy a bundled Vulkan layer out of COMMANDER, whose path changes with
+    each AppImage run and may not be visible inside Proton's Steam Runtime
+    container, and write its manifest, naming the copy by full path (a bare
+    name only loads from system folders)."""
+    from .atomic import write_bytes
+
+    library = bundled.read_bytes()
+    if not library_path.is_file() or library_path.read_bytes() != library:
+        library_path.parent.mkdir(parents=True, exist_ok=True)
+        write_bytes(library_path, library, lock=False)
+    manifest["layer"]["library_path"] = str(library_path)
+    data = (json.dumps(manifest, indent=2) + "\n").encode()
+    if not manifest_path.is_file() or manifest_path.read_bytes() != data:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        write_bytes(manifest_path, data, lock=False)
+
+
 @functools.cache  # once per run: the launch preview resolves this on every edit
 def _install_lsfg1() -> None:
     """Set up the bundled lsfg-vk 1.0 for this user, if it isn't already.
 
-    Copied out of COMMANDER, whose path changes with each AppImage run and
-    may not be visible inside Proton's Steam Runtime container. The manifest
-    names the library by full path (a bare name only loads from system
-    folders) and only loads it when LSFG_LEGACY is set: without that every
-    Vulkan app would load it.
+    Only loaded when LSFG_LEGACY is set: without that every Vulkan app
+    would load it.
     """
-    from .atomic import write_bytes
-
     if not _BUNDLED_LSFG1.is_file():
         return
-    library = _BUNDLED_LSFG1.read_bytes()
-    library_path = _data_home() / "lsfg-vk-1" / "liblsfg-vk.so"
-    if not library_path.is_file() or library_path.read_bytes() != library:
-        library_path.parent.mkdir(parents=True, exist_ok=True)
-        write_bytes(library_path, library, lock=False)
-    manifest = {
+    install_layer(_BUNDLED_LSFG1, _data_home() / "lsfg-vk-1" / "liblsfg-vk.so", {
         "file_format_version": "1.0.0",
         "layer": {
             "name": "VK_LAYER_LS_frame_generation",
             "type": "GLOBAL",
             "api_version": "1.4.313",
-            "library_path": str(library_path),
             "implementation_version": "1",
             "description": "Lossless Scaling frame generation layer",
             "functions": {
@@ -195,12 +207,7 @@ def _install_lsfg1() -> None:
             "enable_environment": {"LSFG_LEGACY": "1"},
             "disable_environment": {"DISABLE_LSFG": "1"},
         },
-    }
-    data = (json.dumps(manifest, indent=2) + "\n").encode()
-    manifest_path = _data_home() / _LSFG_LAYERS["1"]
-    if not manifest_path.is_file() or manifest_path.read_bytes() != data:
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        write_bytes(manifest_path, data, lock=False)
+    }, _data_home() / _LSFG_LAYERS["1"])
 
 
 def _lsfg1_config() -> Path:
@@ -343,6 +350,7 @@ def apply(command: list[str], env: dict[str, str], text: str, *, game_mode: bool
         else:
             prefix.append(token)
     _resolve_frame_gen(env)
+    prefix = overlays.resolve(env, prefix)
     # Game Mode already is a gamescope session; a nested one from the
     # Gamescope option only adds a second compositor.
     at = _find(prefix, _GAMESCOPE)

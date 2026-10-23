@@ -1,0 +1,184 @@
+diff --git a/src/basalt.cpp b/src/basalt.cpp
+index 8061050..9474017 100644
+--- a/src/basalt.cpp
++++ b/src/basalt.cpp
+@@ -8,6 +8,8 @@
+ #include <string>
+ #include <memory>
+ #include <cstring>
++#include <algorithm>
++#include <sys/stat.h>
+ 
+ #include "util.hpp"
+ #include "keyboard_input.hpp"
+@@ -367,44 +369,17 @@ namespace vkBasalt
+         return result;
+     }
+ 
+-    VKAPI_ATTR VkResult VKAPI_CALL vkBasalt_GetSwapchainImagesKHR(VkDevice       device,
+-                                                                  VkSwapchainKHR swapchain,
+-                                                                  uint32_t*      pCount,
+-                                                                  VkImage*       pSwapchainImages)
+-    {
+-        scoped_lock l(globalLock);
+-        Logger::trace("vkGetSwapchainImagesKHR " + std::to_string(*pCount));
+-
+-        LogicalDevice* pLogicalDevice = deviceMap[GetKey(device)].get();
+-
+-        if (pSwapchainImages == nullptr)
+-        {
+-            return pLogicalDevice->vkd.GetSwapchainImagesKHR(device, swapchain, pCount, pSwapchainImages);
+-        }
++    // COMMANDER: live reload. The game renders into the fake images, so
++    // they stay; only the effects and their command buffers are rebuilt.
++    // At least this many effects fit the fake images (AA, LUT, sharpening).
++    constexpr size_t liveEffectSlots = 3;
+ 
+-        LogicalSwapchain* pLogicalSwapchain = swapchainMap[swapchain].get();
+-
+-        // If the images got already requested once, return them again instead of creating new images
+-        if (pLogicalSwapchain->fakeImages.size())
+-        {
+-            *pCount = std::min<uint32_t>(*pCount, pLogicalSwapchain->imageCount);
+-            std::memcpy(pSwapchainImages, pLogicalSwapchain->fakeImages.data(), sizeof(VkImage) * (*pCount));
+-            return *pCount < pLogicalSwapchain->imageCount ? VK_INCOMPLETE : VK_SUCCESS;
+-        }
+-
+-        pLogicalDevice->vkd.GetSwapchainImagesKHR(device, swapchain, &pLogicalSwapchain->imageCount, nullptr);
+-        pLogicalSwapchain->images.resize(pLogicalSwapchain->imageCount);
+-        pLogicalDevice->vkd.GetSwapchainImagesKHR(device, swapchain, &pLogicalSwapchain->imageCount, pLogicalSwapchain->images.data());
++    void buildEffects(LogicalSwapchain* pLogicalSwapchain)
++    {
++        LogicalDevice* pLogicalDevice = pLogicalSwapchain->pLogicalDevice;
+ 
+         std::vector<std::string> effectStrings = pConfig->getOption<std::vector<std::string>>("effects", {"cas"});
+ 
+-        // create 1 more set of images when we can't use the swapchain it self
+-        uint32_t fakeImageCount = pLogicalSwapchain->imageCount * (effectStrings.size() + !pLogicalDevice->supportsMutableFormat);
+-
+-        pLogicalSwapchain->fakeImages =
+-            createFakeSwapchainImages(pLogicalDevice, pLogicalSwapchain->swapchainCreateInfo, fakeImageCount, pLogicalSwapchain->fakeImageMemory);
+-        Logger::debug("created fake swapchain images");
+-
+         VkFormat unormFormat = convertToUNORM(pLogicalSwapchain->format);
+         VkFormat srgbFormat  = convertToSRGB(pLogicalSwapchain->format);
+ 
+@@ -498,12 +473,52 @@ namespace vkBasalt
+         Logger::debug("effect count: " + std::to_string(pLogicalSwapchain->effects.size()));
+ 
+         pLogicalSwapchain->commandBuffersEffect = allocateCommandBuffer(pLogicalDevice, pLogicalSwapchain->imageCount);
+-        Logger::debug("allocated ComandBuffers " + std::to_string(pLogicalSwapchain->commandBuffersEffect.size()) + " for swapchain "
+-                      + convertToString(swapchain));
+ 
+         writeCommandBuffers(
+             pLogicalDevice, pLogicalSwapchain->effects, depthImage, depthImageView, depthFormat, pLogicalSwapchain->commandBuffersEffect);
+         Logger::debug("wrote CommandBuffers");
++    }
++
++    VKAPI_ATTR VkResult VKAPI_CALL vkBasalt_GetSwapchainImagesKHR(VkDevice       device,
++                                                                  VkSwapchainKHR swapchain,
++                                                                  uint32_t*      pCount,
++                                                                  VkImage*       pSwapchainImages)
++    {
++        scoped_lock l(globalLock);
++        Logger::trace("vkGetSwapchainImagesKHR " + std::to_string(*pCount));
++
++        LogicalDevice* pLogicalDevice = deviceMap[GetKey(device)].get();
++
++        if (pSwapchainImages == nullptr)
++        {
++            return pLogicalDevice->vkd.GetSwapchainImagesKHR(device, swapchain, pCount, pSwapchainImages);
++        }
++
++        LogicalSwapchain* pLogicalSwapchain = swapchainMap[swapchain].get();
++
++        // If the images got already requested once, return them again instead of creating new images
++        if (pLogicalSwapchain->fakeImages.size())
++        {
++            *pCount = std::min<uint32_t>(*pCount, pLogicalSwapchain->imageCount);
++            std::memcpy(pSwapchainImages, pLogicalSwapchain->fakeImages.data(), sizeof(VkImage) * (*pCount));
++            return *pCount < pLogicalSwapchain->imageCount ? VK_INCOMPLETE : VK_SUCCESS;
++        }
++
++        pLogicalDevice->vkd.GetSwapchainImagesKHR(device, swapchain, &pLogicalSwapchain->imageCount, nullptr);
++        pLogicalSwapchain->images.resize(pLogicalSwapchain->imageCount);
++        pLogicalDevice->vkd.GetSwapchainImagesKHR(device, swapchain, &pLogicalSwapchain->imageCount, pLogicalSwapchain->images.data());
++
++        std::vector<std::string> effectStrings = pConfig->getOption<std::vector<std::string>>("effects", {"cas"});
++
++        // create 1 more set of images when we can't use the swapchain it self
++        uint32_t fakeImageCount =
++            pLogicalSwapchain->imageCount * (std::max<size_t>(effectStrings.size(), liveEffectSlots) + !pLogicalDevice->supportsMutableFormat);
++
++        pLogicalSwapchain->fakeImages =
++            createFakeSwapchainImages(pLogicalDevice, pLogicalSwapchain->swapchainCreateInfo, fakeImageCount, pLogicalSwapchain->fakeImageMemory);
++        Logger::debug("created fake swapchain images");
++
++        buildEffects(pLogicalSwapchain);
+ 
+         pLogicalSwapchain->semaphores = createSemaphores(pLogicalDevice, pLogicalSwapchain->imageCount);
+         Logger::debug("created semaphores");
+@@ -540,6 +555,54 @@ namespace vkBasalt
+         return *pCount < pLogicalSwapchain->imageCount ? VK_INCOMPLETE : VK_SUCCESS;
+     }
+ 
++    // COMMANDER: VKBASALT_CONFIG_FILE changed? Rebuild every swapchain's
++    // effects from it. Checked about twice a second at 60 FPS.
++    void reloadConfigIfChanged()
++    {
++        static const char* path = std::getenv("VKBASALT_CONFIG_FILE");
++        static struct timespec lastChange = {};
++        static uint32_t frames = 0;
++        if (!path || ++frames % 30)
++            return;
++        struct stat info;
++        if (stat(path, &info) != 0)
++            return;
++        if (lastChange.tv_sec == 0 && lastChange.tv_nsec == 0)
++        {
++            lastChange = info.st_mtim;
++            return;
++        }
++        if (info.st_mtim.tv_sec == lastChange.tv_sec && info.st_mtim.tv_nsec == lastChange.tv_nsec)
++            return;
++        lastChange = info.st_mtim;
++
++        // Kept: an effect that could not be rebuilt still points at it.
++        static std::vector<std::shared_ptr<Config>> oldConfigs;
++        oldConfigs.push_back(pConfig);
++        pConfig = std::shared_ptr<Config>(new Config());
++        size_t wanted = pConfig->getOption<std::vector<std::string>>("effects", {"cas"}).size();
++        for (auto& [swapchain, pLogicalSwapchain] : swapchainMap)
++        {
++            LogicalDevice* pLogicalDevice = pLogicalSwapchain->pLogicalDevice;
++            if (pLogicalSwapchain->fakeImages.empty())
++                continue; // effects not built yet: they will read the new config
++            size_t slots = pLogicalSwapchain->fakeImages.size() / pLogicalSwapchain->imageCount - !pLogicalDevice->supportsMutableFormat;
++            if (wanted > slots)
++            {
++                Logger::err("live reload: more effects than the swapchain has room for; restart the game");
++                continue;
++            }
++            pLogicalDevice->vkd.QueueWaitIdle(pLogicalDevice->queue); // the effects run on this queue
++            pLogicalSwapchain->effects.clear();
++            pLogicalDevice->vkd.FreeCommandBuffers(pLogicalDevice->device,
++                                                   pLogicalDevice->commandPool,
++                                                   pLogicalSwapchain->commandBuffersEffect.size(),
++                                                   pLogicalSwapchain->commandBuffersEffect.data());
++            buildEffects(pLogicalSwapchain.get());
++        }
++        Logger::info("live reload: config reloaded");
++    }
++
+     VKAPI_ATTR VkResult VKAPI_CALL vkBasalt_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
+     {
+         scoped_lock l(globalLock);
+@@ -549,6 +612,8 @@ namespace vkBasalt
+         static bool pressed       = false;
+         static bool presentEffect = pConfig->getOption<bool>("enableOnLaunch", true);
+ 
++        reloadConfigIfChanged();
++
+         if (isKeyPressed(keySymbol))
+         {
+             if (!pressed)

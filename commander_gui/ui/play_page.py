@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import applog, coop, gui_settings, launch_options
+from .. import applog, coop, gui_settings, launch_options, overlays
 from ..assistant_launcher import AssistantLaunchError, launch_assistant
 from ..config import logs_dir
 from ..discord_rpc import (
@@ -565,26 +565,6 @@ class PlayPage(QWidget):
         options_card, options_layout = make_card()
         options_layout.setSpacing(10)
         options_layout.addWidget(section_label(tr("Launch options"), level=2))
-        options_layout.addWidget(
-            info_label(
-                tr("Extra settings for every launch, written like Steam's launch options.")
-            )
-        )
-        self.custom_options_edit = QLineEdit()
-        self.custom_options_edit.setPlaceholderText(
-            tr("Type launch options, or pick some below")
-        )
-        self.custom_options_edit.setMinimumHeight(34)
-        self.custom_options_edit.setClearButtonEnabled(True)
-        self._debounce_timer = QTimer(self)
-        self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.setInterval(300)
-        self._debounce_timer.timeout.connect(self._on_change)
-        self.custom_options_edit.textChanged.connect(
-            lambda: self._debounce_timer.start()
-        )
-        self.custom_options_edit.textChanged.connect(self._sync_option_toggles)
-        options_layout.addWidget(self.custom_options_edit)
         # One labelled row per group; equal-width columns line the chips up
         # across rows and fill the card.
         toggles_grid = QGridLayout()
@@ -612,7 +592,29 @@ class PlayPage(QWidget):
                 if token in launch_options.COOP_DROPS:
                     self._coop_drop_toggles.append((toggle, tr(tip), token))
         options_layout.addLayout(toggles_grid)
+        # Gap, then any spare height, keeps the text field apart from the chips.
+        options_layout.addSpacing(16)
         options_layout.addStretch(1)
+        options_layout.addWidget(
+            info_label(
+                tr("Extra settings for every launch, written like Steam's launch options.")
+            )
+        )
+        self.custom_options_edit = QLineEdit()
+        self.custom_options_edit.setPlaceholderText(
+            tr("Type launch options, or pick some above")
+        )
+        self.custom_options_edit.setMinimumHeight(34)
+        self.custom_options_edit.setClearButtonEnabled(True)
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(300)
+        self._debounce_timer.timeout.connect(self._on_change)
+        self.custom_options_edit.textChanged.connect(
+            lambda: self._debounce_timer.start()
+        )
+        self.custom_options_edit.textChanged.connect(self._sync_option_toggles)
+        options_layout.addWidget(self.custom_options_edit)
         cards_row = QHBoxLayout()
         cards_row.setSpacing(16)
         cards_row.addWidget(options_card, 3)
@@ -837,7 +839,7 @@ class PlayPage(QWidget):
             toggle.append((button, value))
         self._frame_gen_rows.append((toggle, None))
         layout.addLayout(header)
-        layout.addWidget(info_label(tr("Extra generated frames for smoother motion. Best above 40 FPS, adds a little input lag.")))
+        layout.addWidget(info_label(tr("Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag.")))
         self._frame_gen_missing = info_label("")
         self._frame_gen_missing.setObjectName("warn")
         self._frame_gen_missing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1181,7 +1183,6 @@ class PlayPage(QWidget):
         # Co-op leaves these out (see coop_shortcut_fields).
         why = {
             launch_options.NO_STEAM_OVERLAY: tr("Co-op keeps the Steam overlay for Steam invites."),
-            launch_options.NATIVE_WAYLAND: tr("Co-op leaves Native Wayland off so the Steam overlay works for invites."),
         }
         for toggle, tip, token in self._coop_drop_toggles:
             toggle.setEnabled(not self._coop_on())
@@ -1225,7 +1226,11 @@ class PlayPage(QWidget):
                 if option in launch_options.COOP_DROPS and self._coop_on():
                     continue
                 wrapper = option.split()[0]
-                chips.append((tr(label), "=" in wrapper or bool(shutil.which(wrapper))))
+                ready = (
+                    overlays.mangohud_available() if wrapper == overlays.MANGOHUD
+                    else "=" in wrapper or bool(shutil.which(wrapper))
+                )
+                chips.append((tr(label), ready))
         if launch_options.is_on(text, launch_options.FRAME_GEN):
             multiplier = launch_options.var(text, launch_options.FG_MULTIPLIER) or "2"
             chips.append((tr("Frame generation {multiplier}x", multiplier=multiplier), self._frame_gen_ready))

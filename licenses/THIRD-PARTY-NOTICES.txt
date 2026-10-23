@@ -91,6 +91,29 @@ lsfg-vk 1.0.0                     (cli/usr/lib/lsfg-vk-1/liblsfg-vk.so)
   It holds no Lossless Scaling code: frame generation needs the user's own
   Lossless.dll from Lossless Scaling.
 
+MangoHud 0.8.4                    (cli/usr/lib/mangohud/libMangoHud.so)
+  Copyright (c) 2020 flightlessmango.
+  License: MIT (MangoHud/LICENSE)
+  Source:  https://github.com/flightlessmango/MangoHud/tree/v0.8.4
+  The 64-bit Vulkan layer, built by build-vulkan-layers.sh. It is
+  statically built with:
+  - Dear ImGui 1.91.6 - Copyright (c) 2014-2024 Omar Cornut - MIT
+    (MangoHud/LICENSE_IMGUI)
+  - ImPlot 0.16 - Copyright (c) 2020 Evan Pezent - MIT (MangoHud/LICENSE_IMPLOT)
+  - spdlog 1.14.1 - Copyright (c) 2016 Gabi Melman - MIT
+    (MangoHud/LICENSE_SPDLOG)
+  - parts of Mesa - MIT, as stated in each source file
+
+vkBasalt 0.3.2.10                 (cli/usr/lib/vkbasalt/libvkbasalt.so)
+  Copyright (c) 2019 - 2022 Georg Lehmann.
+  License: zlib license (vkBasalt/LICENSE)
+  Source:  https://github.com/DadSchoorse/vkBasalt/tree/v0.3.2.10
+  Built by build-vulkan-layers.sh. Altered: packaging/vkbasalt-live-reload.patch
+  makes it reload its config while the game runs. It includes:
+  - ReShade FX compiler - Copyright 2014 Patrick Mours - BSD-3-Clause
+    (vkBasalt/LICENSE_RESHADE.md)
+  - stb_image, stb_image_resize - Sean Barrett - public domain
+
 7-Zip 26.03                               (cli/usr/bin/resources/7zz)
   Copyright (C) 1999-2026 Igor Pavlov.
   License: GNU LGPL-2.1-or-later, BSD-3-Clause for some parts, and the

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import string
+from pathlib import Path
 
 from PySide6.QtGui import QColor, QPalette
 
@@ -81,6 +82,9 @@ _FONT_FAMILY_MAP: dict[str, str] = {
 }
 
 
+_ROOT = Path(__file__).resolve().parent.parent
+
+
 def build_stylesheet(
     name: str, font_size: int | None = None, font_family: str | None = None
 ) -> str:
@@ -97,7 +101,7 @@ def build_stylesheet(
     qss = qss.replace("%FONT_SIZE%", f"{font_size}px")
     resolved_family = _FONT_FAMILY_MAP.get(font_family or "Exo 2", _FALLBACK_FONT)
     qss = qss.replace("%FONT_FAMILY%", resolved_family)
-    return qss
+    return qss.replace("%SLIDER_HANDLE%", (_ROOT / "cli" / "stalker-gamma.png").as_posix())
 
 
 def build_palette(name: str) -> QPalette:
@@ -954,6 +958,10 @@ QPlainTextEdit#noteEdit {
 QPlainTextEdit#noteEdit:focus {
     border-color: $focus;
 }
+/* Tall enough for the whole handle: a shorter slider clips it into an oval. */
+QSlider:horizontal {
+    min-height: 22px;
+}
 QSlider::groove:horizontal {
     height: 6px;
     background-color: $input;
@@ -964,18 +972,19 @@ QSlider::sub-page:horizontal {
     background-color: $accent_strong;
     border-radius: 3px;
 }
+/* The COMMANDER logo, 18px across and centred on the 6px groove. */
 QSlider::handle:horizontal {
-    background-color: $text_bright;
-    border: 2px solid $accent_strong;
-    width: 12px;
+    image: url("%SLIDER_HANDLE%");
+    width: 18px;
+    height: 18px;
     margin: -6px 0;
-    border-radius: 8px;
+}
+/* -50..50 sliders: no fill, so the handle in the middle reads as "unchanged". */
+QSlider[signed="true"]::sub-page:horizontal {
+    background: transparent;
 }
 QSlider::sub-page:horizontal:disabled {
     background-color: $border_input;
-}
-QSlider::handle:horizontal:disabled {
-    border-color: $border_input;
 }
 QTableWidget, QListWidget {
     background-color: $input;

@@ -159,7 +159,7 @@ New install options:
 
 - **Steam-style launch options.** `NAME=value` sets an environment variable, words before `%command%` wrap the game
   (for example `mangohud %command%`), and words after it are passed to the game.
-- **Quick toggles** in three groups. **Display**: Gamescope, FSR upscaling, Native Wayland and OpenGL. **Fixes**: No
+- **Quick toggles** in three groups. **Display**: Gamescope, FSR upscaling, vkBasalt and OpenGL. **Fixes**: No
   Esync, No Fsync, Fix audio crackle and No Steam overlay. **Overlay and logs**: MangoHud, an FPS counter, Proton log
   and Quiet Wine logs.
 - **Used for every launch.** Launch options apply to singleplayer, desktop shortcuts, Deck Mode (which has a switch for

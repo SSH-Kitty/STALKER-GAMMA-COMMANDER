@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, overlays
 from ..cli_runner import cli_binary_path
 from ..dependencies import (
     configured_tool,
@@ -480,7 +480,8 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             "manager": "" if gamemode_found else (manager or ""),
         }
     )
-    mangohud_found = configured_tool("mangohud") or shutil.which("mangohud")
+    # COMMANDER bundles one, so this only fails in a build without it.
+    mangohud_found = configured_tool("mangohud") or overlays.mangohud_available()
     checks.append(
         {
             "label": "MangoHud",

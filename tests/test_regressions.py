@@ -14137,6 +14137,12 @@ class XrRazomModManagerGuardTests(unittest.TestCase):
 class LaunchOptionChipTests(unittest.TestCase):
     """Multi-token options wrap the other wrappers and toggle off cleanly."""
 
+    def setUp(self):
+        # MangoHud and vkBasalt's own setup is tests/test_overlays.py's.
+        stub = patch("commander_gui.overlays.resolve", side_effect=lambda env, prefix: prefix)
+        stub.start()
+        self.addCleanup(stub.stop)
+
     def test_gamescope_wraps_mangohud(self):
         from commander_gui import launch_options
 
