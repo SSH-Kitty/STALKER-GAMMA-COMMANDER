@@ -15,14 +15,11 @@ whose lines all start with "• " becomes a bullet list.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -31,7 +28,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -153,13 +149,14 @@ def _fit(layout: QVBoxLayout) -> None:
 class MessageBox(QMessageBox):
     """``QMessageBox`` with COMMANDER's look. Extra over Qt's API:
     ``points`` (bullet list), ``info`` (dim small print), ``note``
-    (warning-coloured line) and
+    (warning-coloured line), ``extra`` (a widget under the text) and
     ``labels`` (``{StandardButton: text}``, e.g. ``{Yes: tr("Delete")}``)."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.points: tuple[str, ...] = ()
         self.note = ""
+        self.extra: QWidget | None = None
         self._clicked = None
 
     def clickedButton(self):
@@ -195,6 +192,8 @@ class MessageBox(QMessageBox):
         _add_text(layout, self.text())
         if self.points:
             layout.addLayout(_bullets(self.points))
+        if self.extra is not None:
+            layout.addWidget(self.extra)
         if self.informativeText():
             _add_text(layout, self.informativeText(), "dim")
         if self.note:
@@ -271,13 +270,14 @@ class MessageBox(QMessageBox):
 
     # ------------------------------------------------------- static helpers
     @classmethod
-    def _ask(cls, icon, parent, title, text, buttons, default, points=(), note="", info="", labels=None, details=""):
+    def _ask(cls, icon, parent, title, text, buttons, default, points=(), note="", info="", labels=None, details="", extra=None):
         box = cls(icon, title, text, buttons, parent)
         if default != _SB.NoButton:
             box.setDefaultButton(default)
         box.set_labels(labels or {})
         box.points = tuple(points)
         box.note = note
+        box.extra = extra
         if info:
             box.setInformativeText(info)
         if details:
@@ -445,77 +445,13 @@ class ProgressDialog(QDialog):
         # the work has actually stopped.
         self._on_cancel()
 
-
-class UpdateDialog(QDialog):
-    """Asks before a COMMANDER self-update: version jump, patch notes and
-    where the new AppImage goes. The caller loads the notes in the
-    background and passes them to ``set_notes()``; ``folder`` is the
-    chosen save folder once accepted."""
-
-    def __init__(
-        self, current: str, tag: str, channel: str, folder: str, parent: QWidget | None = None
-    ) -> None:
-        super().__init__(parent)
-        self.setObjectName("popupWindow")
-        self.setWindowTitle(tr("Update COMMANDER"))
-        self.setFixedWidth(600)
-        self.folder = folder
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(10)
-        layout.addWidget(_label(tr("Update COMMANDER"), "section1"))
-        versions = QHBoxLayout()
-        jump = _label(f"v{current.lstrip('v')}  \u2192  {tag}", "updateVersions")
-        versions.addWidget(jump, 1)
-        versions.addWidget(_label(tr("Unstable") if channel == "unstable" else tr("Stable"), "info"))
-        layout.addLayout(versions)
-        layout.addWidget(_label(tr("What's new"), "section3"))
-        self.notes = QTextBrowser()
-        self.notes.setObjectName("welcomeNotes")
-        from .common import open_web_links  # common imports this module
-
-        open_web_links(self.notes)
-        self.notes.setFixedHeight(260)
-        self.notes.setPlainText(tr("Loading patch notes..."))
-        layout.addWidget(self.notes)
-        save_row = QHBoxLayout()
-        self._folder_label = _label("", "info")
-        self._show_folder()
-        save_row.addWidget(self._folder_label, 1)
-        change = QPushButton(tr("Change..."))
-        change.setMinimumSize(110, 34)
-        change.clicked.connect(self._change_folder)
-        save_row.addWidget(change)
-        layout.addLayout(save_row)
-        layout.addWidget(_label(tr("COMMANDER restarts when the update is installed."), "info"))
-        add_buttons(self, layout, tr("Update now"), cancel=tr("Later")).setFocus()
-        _frameless(self, parent, self.reject)
-
-    def set_notes(self, result: object, releases_url: str) -> None:
-        """``fetch_latest_release_notes()``'s result, or None on failure."""
-        if isinstance(result, tuple) and len(result) == 2 and result[1]:
-            # GitHub's feed carries the body already rendered to HTML;
-            # QTextBrowser fetches nothing remote and runs no script.
-            self.notes.setHtml(str(result[1]))
-        else:
-            self.notes.setPlainText(
-                tr("Couldn't load the patch notes. They are on the Releases page:")
-                + "\n"
-                + releases_url
-            )
-
-    def _show_folder(self) -> None:
-        home = str(Path.home())
-        shown = "~" + self.folder[len(home):] if self.folder.startswith(home) else self.folder
-        self._folder_label.setText(tr("Save to: {folder}", folder=shown))
-
-    def _change_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, tr("Choose where to save the new COMMANDER"), self.folder
-        )
-        if folder:
-            self.folder = folder
-            self._show_folder()
+    def close(self) -> bool:
+        # QDialog.close() goes through reject(), which here only cancels:
+        # the caller's "work has stopped, close it" left the window-modal
+        # box up for good, blocking the main window.
+        self.hide()
+        self.deleteLater()
+        return True
 
 
 def add_close_button(dialog: QDialog, layout) -> None:

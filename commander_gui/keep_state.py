@@ -8,7 +8,11 @@ Both commands rewrite things the user owns:
   executable picked in MO2's dropdown and each executable's arguments
   (e.g. DX11 instead of DX11-AVX, or ``-dbg``);
 * Anomaly's engine executables, replaced with the ones GAMMA bundles, which
-  can be older than modded exes the user installed themselves.
+  can be older than modded exes the user installed themselves. Exes
+  COMMANDER installed also need their ``.db0`` kept and GAMMA's loose
+  gamedata cleared again (see ``modded_exes.after_gamma_update()``);
+* on a ROMEO profile, the Atmos ``.ltx`` files GAMMA copies into Anomaly's
+  appdata, which ROMEO's guide says must not be there.
 
 ``capture()`` runs before the CLI starts and ``restore()`` after it
 succeeds. On failure or cancel the caller just calls ``discard()``.
@@ -22,7 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .atomic import write_text
+from .modded_exes import GAMEDATA_DB, after_gamma_update
 from .modlist import merge_after_update, modlist_path_for, read_lines, save_lines
+from .romeo import KEPT_MCM, MCM_MOD, clean_appdata
 
 
 @dataclass
@@ -37,6 +43,10 @@ class KeptState:
     exe_arguments: dict[str, str] = field(default_factory=dict)
     bin_dir: Path | None = None
     exe_copy: Path | None = None
+    anomaly: Path | None = None
+    keep_exes: bool = False
+    db_copy: Path | None = None
+    romeo: bool = False
 
 
 def _engine_files(bin_dir: Path) -> list[Path]:
@@ -105,6 +115,8 @@ def capture(profile, *, keep_exes: bool = False) -> KeptState:
                 state.mods_dir = Path(gamma) / "mods"
             except (OSError, ValueError):
                 pass
+            else:
+                state.romeo = bool({f"+{MCM_MOD}", f"+{KEPT_MCM}"} & set(state.modlist))
             records = local_modpack_records(gamma, mo2_profile) or {}
             state.official = {record.folder_name for record in records.values()}
         ini = Path(gamma) / "ModOrganizer.ini"
@@ -122,6 +134,17 @@ def capture(profile, *, keep_exes: bool = False) -> KeptState:
             except OSError:
                 pass
     anomaly = getattr(profile, "anomaly", "") or ""
+    if anomaly:
+        state.anomaly = Path(anomaly).expanduser()
+        state.keep_exes = keep_exes
+        db = state.anomaly / "db" / "mods" / GAMEDATA_DB
+        if keep_exes and db.is_file():
+            state.db_copy = Path(tempfile.mkdtemp(prefix="commander-exes-db-"))
+            try:
+                shutil.copy2(db, state.db_copy / db.name)
+            except OSError:
+                shutil.rmtree(state.db_copy, ignore_errors=True)
+                state.db_copy = None
     if keep_exes and anomaly:
         bin_dir = Path(anomaly).expanduser() / "bin"
         files = _engine_files(bin_dir)
@@ -179,6 +202,20 @@ def restore(state: KeptState) -> list[str]:
             notes.append("Kept your current engine executables.")
         except OSError as exc:
             notes.append(f"Could not restore your engine executables: {exc}")
+    if state.anomaly is not None:
+        try:
+            if state.db_copy is not None:
+                (state.anomaly / "db" / "mods").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(state.db_copy / GAMEDATA_DB, state.anomaly / "db" / "mods" / GAMEDATA_DB)
+            after_gamma_update(state.anomaly, state.keep_exes)
+        except OSError as exc:
+            notes.append(f"Could not tidy up after keeping your modded exes: {exc}")
+        if state.romeo:
+            try:
+                clean_appdata(state.anomaly / "appdata")
+                notes.append("Removed the Atmos files GAMMA copied back, as ROMEO needs.")
+            except OSError as exc:
+                notes.append(f"Could not remove the Atmos files ROMEO doesn't want: {exc}")
     discard(state)
     return notes
 
@@ -263,6 +300,9 @@ def _restore_launch_choices(ini: Path, selected: str, arguments: dict[str, str])
 
 
 def discard(state: KeptState) -> None:
+    if state.db_copy is not None:
+        shutil.rmtree(state.db_copy, ignore_errors=True)
+        state.db_copy = None
     if state.exe_copy is not None:
         shutil.rmtree(state.exe_copy, ignore_errors=True)
         state.exe_copy = None

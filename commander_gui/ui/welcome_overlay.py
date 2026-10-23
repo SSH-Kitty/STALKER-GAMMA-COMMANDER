@@ -197,15 +197,21 @@ class _VersionBar(QFrame):
 
 
 class WelcomeOverlay(QWidget):
-    """Covers the main window; closes with ✕, Escape or a click outside."""
+    """Covers the main window; closes with ✕, Escape or a click outside.
 
-    def __init__(self, window) -> None:
+    With ``update_tag`` it is the update banner's "See what's new": the same
+    screen headed by the new version, with Later / Update now in place of
+    "Don't show again"; Update now closes it and calls ``on_update``.
+    """
+
+    def __init__(self, window, update_tag: str | None = None, on_update=None) -> None:
         super().__init__(window)
         self.window = window
         self._task: BackgroundTask | None = None
         #: The patch notes as shown, so Credits can swap back to them.
         self._notes: tuple[str, str, bool] | None = None
         self._showing_credits = False
+        self._on_update = on_update
         self.setObjectName("welcomeOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         # Paints every pixel (the snapshot), so Qt never repaints the window
@@ -235,7 +241,12 @@ class WelcomeOverlay(QWidget):
         panel_layout.setSpacing(12)
 
         title_row = QHBoxLayout()
-        title_row.addWidget(section_label(tr("Welcome to COMMANDER"), level=1), 1)
+        heading = (
+            tr("COMMANDER {tag} is out", tag=update_tag)
+            if update_tag
+            else tr("Welcome to COMMANDER")
+        )
+        title_row.addWidget(section_label(heading, level=1), 1)
         close = QPushButton("✕")
         close.setObjectName("secondary")
         close.setFixedSize(36, 36)
@@ -310,15 +321,28 @@ class WelcomeOverlay(QWidget):
         panel_layout.addLayout(body, 1)
 
         bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        self.hide_check = QCheckBox(tr("Don't show again"))
-        self.hide_check.setChecked(
-            bool(gui_settings.load_gui_settings().get("welcome_hidden"))
-        )
-        self.hide_check.toggled.connect(
-            lambda on: gui_settings.save_gui_settings(welcome_hidden=bool(on))
-        )
-        bottom.addWidget(self.hide_check)
+        bottom.setSpacing(8)
+        if update_tag:
+            bottom.addWidget(info_label(tr("COMMANDER restarts when the update is installed.")), 1)
+            update = QPushButton(tr("Update now"))
+            update.setObjectName("primary")
+            update.setMinimumSize(130, 38)
+            update.clicked.connect(self._update_now)
+            bottom.addWidget(update)
+            later = QPushButton(tr("Later"))
+            later.setMinimumSize(110, 38)
+            later.clicked.connect(self.close_overlay)
+            bottom.addWidget(later)
+        else:
+            bottom.addStretch(1)
+            self.hide_check = QCheckBox(tr("Don't show again"))
+            self.hide_check.setChecked(
+                bool(gui_settings.load_gui_settings().get("welcome_hidden"))
+            )
+            self.hide_check.toggled.connect(
+                lambda on: gui_settings.save_gui_settings(welcome_hidden=bool(on))
+            )
+            bottom.addWidget(self.hide_check)
         panel_layout.addLayout(bottom)
 
         row.addWidget(self.panel, 6)
@@ -424,6 +448,11 @@ class WelcomeOverlay(QWidget):
         self.hide()
         self.deleteLater()
 
+    def _update_now(self) -> None:
+        self.close_overlay()
+        if self._on_update is not None:
+            self._on_update()
+
     # -- content -----------------------------------------------------------
     def _load_notes(self) -> None:
         channel = effective_update_channel(
@@ -499,8 +528,8 @@ class WelcomeOverlay(QWidget):
             self.credits_button.setText("\u2605  " + tr("Credits"))
 
 
-def show_welcome(window) -> WelcomeOverlay:
-    overlay = WelcomeOverlay(window)
+def show_welcome(window, update_tag: str | None = None, on_update=None) -> WelcomeOverlay:
+    overlay = WelcomeOverlay(window, update_tag, on_update)
     overlay.show()
     overlay.raise_()
     overlay.setFocus(Qt.FocusReason.OtherFocusReason)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath
@@ -20,11 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import coop
+from .. import __version_label__, coop
 from ..achievements import ACHIEVEMENTS, unlocked_count
 from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
 from ..launcher import find_extra_protons, select_mo2_profile
+from ..self_update import commander_appimage_path
 from ..settings import CliSettings
 from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
@@ -35,6 +38,7 @@ from .common import (
     BackgroundTask,
     InstallStatusRow,
     NoWheelComboBox,
+    StatusDot,
     activate_profile,
     anomaly_installed,
     clear_layout,
@@ -185,6 +189,7 @@ class DashboardPage(QWidget):
         self.settings: CliSettings = window.settings
         self._sizes: dict[str, int] = {}
         self._update_checking = False
+        self._update_card_args: tuple | None = None
         self._winetricks_task: BackgroundTask | None = None
         self._size_task: BackgroundTask | None = None
         self._mo2_profiles_task: BackgroundTask | None = None
@@ -247,6 +252,9 @@ class DashboardPage(QWidget):
         # than keeping every card pinned at its natural size.
         root.addStretch(1)
 
+        checked = getattr(window, "commander_update_checked", None)
+        if checked is not None:
+            checked.connect(self._on_commander_update_checked)
         self.refresh()
 
     # ----- profile card -----
@@ -1107,6 +1115,7 @@ class DashboardPage(QWidget):
         status_text: str,
         status_kind: str,
     ) -> None:
+        self._update_card_args = (status, status_text, status_kind)
         layout = self.updates_card.layout()
         clear_layout(layout)
         # Title with the check as a pill beside it, like Deck Mode and
@@ -1115,7 +1124,9 @@ class DashboardPage(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(section_label(tr("Updates")))
         header.addStretch(1)
-        check_button = QPushButton(tr("Check for updates"))
+        check_button = QPushButton(
+            tr("Checking...") if self._update_checking else "⟳  " + tr("Check for updates")
+        )
         check_button.setObjectName("pillButton")
         check_button.setFixedHeight(34)
         check_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1128,65 +1139,105 @@ class DashboardPage(QWidget):
         header.addWidget(check_button)
         layout.addLayout(header)
 
-        if status is not None and status.installed is not None:
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(6)
-            rows = (
-                (
-                    tr("Installed GAMMA version:"),
-                    format_version(
-                        status.installed, status.installed_human, show_build=False
-                    ),
-                ),
-                (
-                    tr("Latest GAMMA version:"),
-                    format_version(
-                        status.latest, status.latest_human, missing="-", show_build=False
-                    ),
-                ),
-            )
-            for index, (key, value) in enumerate(rows):
-                # No wrapping: the key column sizes to its longest label
-                # instead of breaking "Installed GAMMA version:" in two.
-                key_label = QLabel(key)
-                key_label.setObjectName("dim")
-                grid.addWidget(key_label, index, 0)
-                grid.addWidget(QLabel(value), index, 1)
-            grid.setColumnStretch(2, 1)
-            layout.addLayout(grid)
+        rows = QGridLayout()
+        rows.setHorizontalSpacing(16)
+        rows.setVerticalSpacing(8)
+        rows.setColumnStretch(3, 1)
 
-        # The result as a dot + text, like the Installation status rows.
-        if status_kind == "accent":
-            # "Up to date" is a positive/ready result, same as the Installed
-            # status dot elsewhere on this page - use the same fixed green
-            # rather than the theme's accent color so the two always match.
-            color = OK_GREEN.name()
-        elif status_kind == "warn":
-            color = WARN.name()
+        def add_row(name: str, value: str, state: str | None = None, ok=None, action=None):
+            """One line: dim name | value | coloured dot + state | button."""
+            row = rows.rowCount()
+            # Every row as tall as one with a button, so the lines stay even.
+            rows.setRowMinimumHeight(row, _TITLE_ROW_H - 4)
+            caption = QLabel(name)
+            caption.setObjectName("dim")
+            rows.addWidget(caption, row, 0)
+            rows.addWidget(QLabel(value), row, 1)
+            if state is not None:
+                cell = QHBoxLayout()
+                cell.setSpacing(6)
+                color = None if ok is None else (OK_GREEN if ok else WARN).name()
+                if color is not None:
+                    dot = StatusDot()
+                    dot.setStyleSheet(f"color: {color};")
+                    cell.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+                label = QLabel(state)
+                if color is not None:
+                    label.setStyleSheet(f"color: {color};")
+                else:
+                    label.setObjectName("dim")
+                cell.addWidget(label)
+                cell.addStretch(1)
+                rows.addLayout(cell, row, 2)
+            if action is not None:
+                text, slot = action
+                button = QPushButton(text)
+                button.setObjectName("pillButton")
+                button.setFixedHeight(_TITLE_ROW_H - 4)
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(slot)
+                rows.addWidget(button, row, 4)
+
+        # GAMMA: the short result on the row, any longer explanation under it.
+        known = status is not None and status.installed is not None
+        gamma_version = (
+            format_version(status.installed, status.installed_human, show_build=False)
+            if known
+            else "–"
+        )
+        if status is None and self._update_checking:
+            add_row("GAMMA", gamma_version, tr("Checking for updates..."))
+        elif status is not None and status.update_available:
+            add_row(
+                "GAMMA", gamma_version, tr("Update available"), False,
+                (tr("Open updates"), lambda: self.window.set_page("update")),
+            )
+        elif status_kind == "accent":
+            add_row("GAMMA", gamma_version, tr("Up to date"), True)
         else:
-            color = None
-        status_row = QHBoxLayout()
-        status_row.setSpacing(6)
-        if color is not None:
-            dot = QLabel("●")
-            dot.setStyleSheet(f"color: {color}; font-size: 18px;")
-            dot.setFixedWidth(24)
-            status_row.addWidget(dot)
-        status_label = info_label(status_text)
-        if color is not None:
-            status_label.setStyleSheet(f"color: {color};")
+            add_row("GAMMA", gamma_version, tr("Unknown"), False)
+
+        # COMMANDER: the status bar's startup check, shown here too.
+        tag = getattr(self.window, "_commander_update_tag", None)
+        if not getattr(self.window, "_commander_update_known", False):
+            add_row("COMMANDER", __version_label__, tr("Checking for updates..."))
+        elif tag:
+            add_row(
+                "COMMANDER", __version_label__, tr("Update available"), False,
+                (tr("Update now"), lambda: self.window._start_commander_update(tag)),
+            )
         else:
-            status_label.setObjectName(status_kind)
-            status_label.style().unpolish(status_label)
-            status_label.style().polish(status_label)
-        status_row.addWidget(status_label, 1)
-        if status is not None and status.update_available:
-            goto_button = QPushButton(tr("Open updates"))
-            goto_button.setObjectName("primary")
-            goto_button.clicked.connect(lambda: self.window.set_page("update"))
-            status_row.addWidget(goto_button)
-        layout.addLayout(status_row)
+            add_row("COMMANDER", __version_label__, tr("Up to date"), True)
+
+        # History: when each one last changed.
+        from .update_page import _format_relative_time
+
+        def ago(path) -> str | None:
+            try:
+                return _format_relative_time(
+                    datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                )
+            except (OSError, AttributeError):
+                return None
+
+        profile = self.settings.active_profile
+        version_file = Path(profile.gamma, "version.txt") if profile and profile.gamma else None
+        add_row(tr("GAMMA last updated"), ago(version_file) or tr("Unknown"))
+        # The AppImage is swapped whole on a self-update; a source run has
+        # no install step, so its own package stands in.
+        commander_file = commander_appimage_path() or Path(__file__).parent.parent / "__init__.py"
+        add_row(tr("COMMANDER last updated"), ago(commander_file) or tr("Unknown"))
+        layout.addLayout(rows)
+
+        # Errors and other long results get their own line under the rows.
+        if status_kind == "warn":
+            note = info_label(status_text)
+            note.setObjectName("warn")
+            layout.addWidget(note)
+
+    def _on_commander_update_checked(self) -> None:
+        if self._update_card_args is not None:
+            self._render_update_card(*self._update_card_args)
 
     # ----- actions card -----
     def _build_actions(self) -> None:

@@ -1099,11 +1099,6 @@ QPushButton#updateBannerClose {
 QPushButton#updateBannerClose:hover {
     color: $text_bright;
 }
-QLabel#updateVersions {
-    color: $accent;
-    font-size: 16px;
-    font-weight: bold;
-}
 QMessageBox, QFileDialog, QDialog#messageDialog, QDialog#popupWindow {
     background-color: $card;
 }

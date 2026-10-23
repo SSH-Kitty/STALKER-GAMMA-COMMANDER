@@ -67,7 +67,6 @@ from ..updates import (
     check_commander_update,
     check_updates,
     effective_update_channel,
-    fetch_latest_release_notes,
 )
 from .about_page import _DISCORD, AboutPage
 from .common import (
@@ -90,7 +89,7 @@ from .common import (
 from .credits_page import CreditsPage
 from .dashboard import DashboardPage
 from .dialogs import MessageBox as QMessageBox
-from .dialogs import ProgressDialog, UpdateDialog
+from .dialogs import ProgressDialog
 from .install_page import InstallPage, _resume_state_matches
 from .mod_manager_page import ModManagerPage
 from .multiplayer_page import MultiplayerPage
@@ -324,23 +323,6 @@ def paint_backdrop(painter: QPainter, rect) -> None:
     painter.fillRect(rect, glow2)
 
 
-def _saved_elsewhere_note(path) -> str:
-    """Where the new AppImage went, when that isn't over the running one.
-
-    Only the default folder replaces the running AppImage; anywhere else,
-    shortcuts still start the old version.
-    """
-    running = commander_appimage_path()
-    if running is None or Path(path).resolve() == running.resolve():
-        return ""
-    shown = str(path).replace(str(Path.home()), "~", 1)
-    return tr(
-        "The new version was saved to {path}. Open that file from now on - "
-        "your shortcuts still start the old version.",
-        path=shown,
-    )
-
-
 class Backdrop(QWidget):
     """The central widget. Transparent: the main window paints the backdrop
     behind it (see paint_backdrop()); page roots stay semi-transparent and
@@ -370,6 +352,8 @@ class _NoticeStatusBar(QStatusBar):
 class MainWindow(QMainWindow):
     #: A newer COMMANDER release tag, from the one shared update check.
     commander_update_found = Signal(str)
+    #: Every finished COMMANDER update check, found or not (Dashboard card).
+    commander_update_checked = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -388,6 +372,7 @@ class MainWindow(QMainWindow):
         #: Newer COMMANDER release tag, and (label, path) of one installed
         #: but not restarted into yet - both drive the update banner.
         self._commander_update_tag: str | None = None
+        self._commander_update_known = False
         self._ready_update: tuple[str, Path] | None = None
 
         # Built before _build_ui(): constructing pages there (e.g. the
@@ -1072,7 +1057,9 @@ class MainWindow(QMainWindow):
             button.setText(tr("COMMANDER is up to date"))
             button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
             button.setEnabled(False)
+        self._commander_update_known = True
         self._refresh_update_banner()
+        self.commander_update_checked.emit()
 
     def _start_commander_update(self, tag: str) -> None:
         """The status bar's and the banner's Update button."""
@@ -1129,13 +1116,11 @@ class MainWindow(QMainWindow):
         ready = getattr(self, "_ready_update", None)
         tag = getattr(self, "_commander_update_tag", None)
         if ready is not None:
-            text = (
+            self._update_banner_text.setText(
                 tr("COMMANDER {tag} is ready. Restart to finish updating.", tag=ready[0])
                 if ready[0]
                 else tr("The new version is ready. Restart to finish updating.")
             )
-            note = _saved_elsewhere_note(ready[1])
-            self._update_banner_text.setText(f"{text} {note}" if note else text)
             self._update_banner_notes.hide()
             self._update_banner_action.setText(tr("Restart now"))
             banner.show()
@@ -1162,27 +1147,20 @@ class MainWindow(QMainWindow):
         self._update_banner.hide()
 
     def _offer_commander_self_update(self, tag: str) -> None:
-        """Show the patch notes and save folder, then download and install."""
-        running = commander_appimage_path()
-        channel = effective_update_channel(
-            gui_settings.load_gui_settings().get("update_channel"), __version__
-        )
-        dialog = UpdateDialog(
-            __version__, tag, channel, str(running.parent) if running is not None else "", self
-        )
-        task = BackgroundTask(fetch_latest_release_notes, channel, parent=dialog)
-        task.result.connect(lambda result: dialog.set_notes(result, _RELEASES_URL))
-        task.error.connect(lambda _m: dialog.set_notes(None, _RELEASES_URL))
-        task.start()
-        if not dialog.exec():
-            return
-        folder = dialog.folder
-        self._run_commander_download(
-            tr("Downloading COMMANDER {tag}...", tag=tag),
-            lambda cancel, progress: download_and_install_commander_update(
-                tag, cancel_event=cancel, progress_cb=progress, dest_dir=Path(folder)
+        """Show the patch notes (the Welcome screen's layout), then download
+        and install over the running AppImage."""
+        from .welcome_overlay import show_welcome
+
+        show_welcome(
+            self,
+            update_tag=tag,
+            on_update=lambda: self._run_commander_download(
+                tr("Downloading COMMANDER {tag}...", tag=tag),
+                lambda cancel, progress: download_and_install_commander_update(
+                    tag, cancel_event=cancel, progress_cb=progress
+                ),
+                ready_tag=tag,
             ),
-            ready_tag=tag,
         )
 
     def switch_commander_build(self, target: str, tag: str | None = None) -> None:
@@ -1292,7 +1270,6 @@ class MainWindow(QMainWindow):
                     QMessageBox.StandardButton.Yes: tr("Restart now"),
                     QMessageBox.StandardButton.No: tr("Later"),
                 },
-                note=_saved_elsewhere_note(path),
             )
             if restart == QMessageBox.StandardButton.Yes:
                 self._restart_into_update(path)
@@ -1302,7 +1279,9 @@ class MainWindow(QMainWindow):
 
         def on_error(message: str) -> None:
             progress.close()
-            self._show_commander_self_update_error(message)
+            # Cancel ends the download with an error; the user asked for it.
+            if not task.cancel_event.is_set():
+                self._show_commander_self_update_error(message)
 
         task.result.connect(on_result)
         task.error.connect(on_error)

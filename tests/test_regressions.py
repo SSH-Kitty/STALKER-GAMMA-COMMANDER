@@ -8010,30 +8010,31 @@ class UserModsTrackerTests(unittest.TestCase):
         ):
             download_and_install_commander_update("v9.9.9")
 
-    def test_download_and_install_commander_update_saves_to_a_chosen_folder(self):
+    def test_download_and_install_commander_update_replaces_the_running_appimage(self):
         body = _FAKE_APPIMAGE_HEADER + b"new"
         with tempfile.TemporaryDirectory() as tmp:
-            running = Path(tmp) / "run" / "Commander.AppImage"
-            running.parent.mkdir()
+            running = Path(tmp) / "Commander.AppImage"
             running.write_bytes(b"old")
-            chosen = Path(tmp) / "chosen"
-            chosen.mkdir()
             with (
                 patch.dict(os.environ, {"APPIMAGE": str(running)}),
                 self._serve(body, {"Content-Length": str(len(body))}),
             ):
-                path = download_and_install_commander_update("v9.9.9", dest_dir=chosen)
-                self.assertEqual(path, chosen / "STALKER-GAMMA-COMMANDER-9.9.9-x86_64.AppImage")
-                self.assertEqual(path.read_bytes(), body)
-                self.assertEqual(running.read_bytes(), b"old")
-            with (
-                patch.dict(os.environ, {"APPIMAGE": str(running)}),
-                self._serve(body, {"Content-Length": str(len(body))}),
-            ):
-                # The running AppImage's own folder keeps the in-place swap.
-                path = download_and_install_commander_update("v9.9.9", dest_dir=running.parent)
+                path = download_and_install_commander_update("v9.9.9")
                 self.assertEqual(path, running)
                 self.assertEqual(running.read_bytes(), body)
+
+    def test_progress_dialog_closes_after_cancel(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.dialogs import ProgressDialog
+
+        QApplication.instance() or QApplication([])
+        dialog = ProgressDialog("Updating", "Downloading...")
+        dialog.show()
+        dialog.reject()  # Cancel: the button disables, the box stays up
+        self.assertTrue(dialog.isVisible())
+        dialog.close()  # the work stopped: it really closes now
+        self.assertFalse(dialog.isVisible())
 
     def test_system_check_page_constructs_and_refreshes_without_error(self):
         from PySide6.QtWidgets import QApplication
@@ -13824,6 +13825,7 @@ class UpdateStatusRecheckTests(unittest.TestCase):
             patch.object(MainWindow, "_offer_commander_self_update", lambda self, tag: clicks.append(tag)),
             # A __new__()-built window has no live Qt signal to emit on.
             patch.object(MainWindow, "commander_update_found", Mock()),
+            patch.object(MainWindow, "commander_update_checked", Mock()),
         ):
             window._on_commander_update_status_checked("v1.3.0")
             window._on_commander_update_status_checked("v1.3.0H1")
@@ -14144,6 +14146,108 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertTrue(launch_options.is_on(on, "gamescope -f --"))
         self.assertEqual(launch_options.toggle(on, "gamescope -f --", False), text)
 
+    def test_frame_gen_finds_lsfg_layer_and_lossless_dll(self):
+        from commander_gui import launch_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data, library = Path(tmp, "data"), Path(tmp, "lib")
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(data), "XDG_DATA_DIRS": ""}), patch(
+                "commander_gui.launcher._steam_library_paths", return_value=[library]
+            ):
+                self.assertIsNone(launch_options.lossless_dll())
+                layer = data / "vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json"
+                layer.parent.mkdir(parents=True)
+                layer.write_text("{}")
+                self.assertEqual(launch_options.lsfg_versions(), {"2"})
+                dll = library / "steamapps/common/Lossless Scaling/lsfg-vk.dll"
+                dll.parent.mkdir(parents=True)
+                dll.write_text("")
+                self.assertEqual(launch_options.lossless_dll(), dll)
+                picked = Path(tmp, "Lossless.dll")
+                picked.write_text("")
+                with patch.object(gui_settings, "load_gui_settings", return_value={"lossless_dll": str(picked)}):
+                    self.assertEqual(launch_options.lossless_dll(), picked)
+                    picked.unlink()
+                    self.assertEqual(launch_options.lossless_dll(), dll)
+        on = launch_options.frame_gen("mangohud %command% -x", True)
+        self.assertEqual(on, "mangohud LSFGVK_ENV=1 LSFGVK_MULTIPLIER=2 %command% -x")
+        on = launch_options.set_var(on, launch_options.FG_MULTIPLIER, "4")
+        on = launch_options.set_var(on, launch_options.FG_FLOW_SCALE, "0.5")
+        self.assertEqual(launch_options.var(on, launch_options.FG_MULTIPLIER), "4")
+        self.assertEqual(launch_options.set_var(on, launch_options.FG_FLOW_SCALE, None).count("FLOW"), 0)
+        self.assertEqual(launch_options.frame_gen(on, False), "mangohud %command% -x")
+
+    def test_frame_gen_runs_on_the_lsfg_vk_the_dll_works_with(self):
+        """lsfg-vk 2 can't load Lossless Scaling 3.2's Lossless.dll (black
+        screen as it retries every frame): that DLL goes to lsfg-vk 1's
+        legacy variables, and a DLL neither can use leaves frame gen out."""
+        from commander_gui import launch_options
+
+        def pe(clr_size: int) -> bytes:
+            head = bytearray(512)
+            head[:2] = b"MZ"
+            head[0x3C:0x40] = (0x40).to_bytes(4, "little")
+            head[0x40:0x44] = b"PE\0\0"
+            head[0x58:0x5A] = (0x20B).to_bytes(2, "little")
+            clr = 0x58 + 112 + 14 * 8
+            head[clr + 4 : clr + 8] = clr_size.to_bytes(4, "little")
+            return bytes(head)
+
+        text = "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=3 LSFGVK_PERFORMANCE_MODE=1 %command%"
+        with tempfile.TemporaryDirectory() as tmp:
+            dll = Path(tmp, "Lossless.dll")
+            dll.write_bytes(pe(0))
+            self.assertTrue(launch_options.native_dll(dll))
+            dotnet = Path(tmp, "LosslessScaling.dll")
+            dotnet.write_bytes(pe(72))
+            self.assertFalse(launch_options.native_dll(dotnet))
+            conf = Path(tmp, "lsfg-vk-1.toml")
+            for version, expected in (
+                ("2", {"LSFGVK_ENV": "1", "LSFGVK_MULTIPLIER": "3", "LSFGVK_PERFORMANCE_MODE": "1", "LSFGVK_DLL_PATH": str(dll)}),
+                ("1", {"LSFG_LEGACY": "1", "LSFG_MULTIPLIER": "3", "LSFG_PERFORMANCE_MODE": "1", "LSFG_DLL_PATH": str(dll),
+                       "LSFG_CONFIG": str(conf), "DISABLE_LSFGVK": "1"}),
+                (None, {}),
+            ):
+                env: dict[str, str] = {}
+                with patch.object(launch_options, "lossless_dll", return_value=dll), patch.object(
+                    launch_options, "frame_gen_version", return_value=version
+                ), patch.object(launch_options, "_lsfg1_config", return_value=conf):
+                    launch_options.apply(["game"], env, text)
+                self.assertEqual(env, expected, version)
+
+    def test_install_lsfg1_points_the_manifest_at_the_library(self):
+        """The release zip names its library bare, which never loads from
+        ~/.local; the installed manifest names it by full path and only
+        loads with LSFG_LEGACY set."""
+        import hashlib
+        import zipfile
+
+        from commander_gui import launch_options
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("lib/liblsfg-vk.so", b"so")
+            archive.writestr(
+                "share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json",
+                json.dumps({"layer": {"library_path": "liblsfg-vk.so"}}),
+            )
+        data = buffer.getvalue()
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"XDG_DATA_HOME": tmp, "XDG_DATA_DIRS": ""}
+        ), patch("commander_gui.network.urlopen_with_retry", return_value=response), patch(
+            "commander_gui.network.read_response_bytes", return_value=data
+        ), patch.object(launch_options, "_LSFG1_ZIP_SHA256", hashlib.sha256(data).hexdigest()):
+            launch_options.install_lsfg1()
+            self.assertIn("1", launch_options.lsfg_versions())
+            layer = json.loads(Path(tmp, "vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json").read_text())["layer"]
+            self.assertEqual(Path(layer["library_path"]).read_bytes(), b"so")
+            self.assertEqual(layer["enable_environment"], {"LSFG_LEGACY": "1"})
+            with patch.object(launch_options, "_LSFG1_ZIP_SHA256", "0" * 64), self.assertRaises(ValueError):
+                launch_options.install_lsfg1()
+
     def test_quiet_wine_logs_and_proton_log_exclude_each_other(self):
         from commander_gui import launch_options
 
@@ -14156,7 +14260,7 @@ class LaunchOptionChipTests(unittest.TestCase):
         switch restarts Steam), and co-op never drops the Steam overlay."""
         from commander_gui import launch_options
 
-        text = launch_options.for_coop("gamescope -f -- LD_PRELOAD= mangohud %command%")
+        text = launch_options.for_coop("gamescope -f -- LD_PRELOAD= PROTON_ENABLE_WAYLAND=1 mangohud %command%")
         self.assertEqual(text, "gamescope -f -- mangohud %command%")
         shortcuts = set()
         for game_mode in (True, False):
@@ -14173,8 +14277,15 @@ class LaunchOptionChipTests(unittest.TestCase):
         self.assertEqual(
             merged,
             "SteamAppId=480 LD_PRELOAD='' STEAM_COMPAT_DATA_PATH='/my pfx' "
-            "mangohud %command% run -e Anomaly -x",
+            "mangohud %command% run --arguments=-x -e Anomaly",
         )
+        # Words after %command% reach the game through MO2's --arguments; MO2
+        # itself quits on them (CTD with "... %command% r__tex_evict_enabled").
+        with patch.object(launch_options, "in_game_mode", return_value=False):
+            command = launch_options.apply(
+                ["mo2", "-p", "P", "run", "--arguments=-nosplash", "-e", "Anomaly"], {}, "%command% -a b"
+            )
+        self.assertEqual(command, ["mo2", "-p", "P", "run", "--arguments=-nosplash -a b", "-e", "Anomaly"])
         with patch.object(launch_options, "in_game_mode", return_value=False):
             self.assertEqual(launch_options.for_steam("", base), "STEAM_COMPAT_DATA_PATH='/my pfx' SteamAppId=480 %command% run -e Anomaly")
 

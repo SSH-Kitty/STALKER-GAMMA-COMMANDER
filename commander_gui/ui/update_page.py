@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, modded_exes
 from ..cli_runner import cli_command, cli_resume_args
 from ..game_backup import backup_settings_before
 from ..integrity import invalidate_baseline
@@ -76,6 +76,7 @@ from .common import (
 )
 from .dashboard import _TITLE_ROW_H, _card_title
 from .dialogs import MessageBox as QMessageBox
+from .exes_card import ModdedExesCard
 from .multiplayer_page import (
     _columns,
     _divider,
@@ -121,18 +122,18 @@ def _notes_markdown(body: str) -> str:
 
 
 def _format_relative_time(checked_at: datetime) -> str:
-    """Render a UTC datetime as "just now"/"N minute(s) ago"/etc."""
+    """Render a UTC datetime as "just now"/"5 minutes ago"/"1 day ago"/etc."""
     seconds = (datetime.now(timezone.utc) - checked_at).total_seconds()
     if seconds < 60:
         return tr("just now")
     minutes = int(seconds // 60)
     if minutes < 60:
-        return tr("{minutes} minute(s) ago", minutes=minutes)
+        return tr("1 minute ago") if minutes == 1 else tr("{minutes} minutes ago", minutes=minutes)
     hours = minutes // 60
     if hours < 24:
-        return tr("{hours} hour(s) ago", hours=hours)
+        return tr("1 hour ago") if hours == 1 else tr("{hours} hours ago", hours=hours)
     days = hours // 24
-    return tr("{days} day(s) ago", days=days)
+    return tr("1 day ago") if days == 1 else tr("{days} days ago", days=days)
 
 
 class _Release(QFrame):
@@ -328,7 +329,7 @@ class UpdatePage(QWidget):
         self._pages: list[QWidget] = []
         body = QVBoxLayout()
         body.setSpacing(0)
-        for index, page in enumerate((self._notes_tab(), self._changes_tab(), self._options_tab())):
+        for index, page in enumerate((self._options_tab(), self._notes_tab(), self._changes_tab())):
             button = _tab("", "subTab")
             self.tab_group.addButton(button, index)
             header.addWidget(button)
@@ -350,14 +351,14 @@ class UpdatePage(QWidget):
     def _set_tab_titles(self, new_count: int, change_count: int) -> None:
         notes = tr("What's new")
         changes = tr("Mod changes")
-        self.tab_group.button(0).setText(f"{notes} ({new_count})" if new_count else notes)
-        self.tab_group.button(1).setText(f"{changes} ({change_count})" if change_count else changes)
-        self.tab_group.button(2).setText(tr("Update options"))
+        self.tab_group.button(0).setText(tr("Update options"))
+        self.tab_group.button(1).setText(f"{notes} ({new_count})" if new_count else notes)
+        self.tab_group.button(2).setText(f"{changes} ({change_count})" if change_count else changes)
 
     def _show_changes_if_any(self) -> None:
         if self._diffs:
-            self.tab_group.button(1).setChecked(True)
-            self._show_tab(1)
+            self.tab_group.button(2).setChecked(True)
+            self._show_tab(2)
 
     def _show_tab(self, index: int) -> None:
         # Hidden pages take no room, so each tab is exactly as tall as it needs.
@@ -471,6 +472,8 @@ class UpdatePage(QWidget):
 
         _columns(layout, keep, disk, undo)
         layout.addWidget(_hint(tr("Your saves are never touched by an update.")))
+        self.exes_card = ModdedExesCard(self.window, lambda: self.keep_exes_cb.setChecked(True))
+        layout.addWidget(self.exes_card.frame)
         return page
 
     def refresh(self) -> None:
@@ -480,11 +483,17 @@ class UpdatePage(QWidget):
         self._show_changes_if_any()
         self.window.refresh_settings()
         self._update_button_states()
+        profile = self.window.settings.active_profile
+        if profile is not None and modded_exes.load_state(str(profile.anomaly)):
+            # Exes COMMANDER installed: a GAMMA update must not swap them back.
+            self.keep_exes_cb.setChecked(True)
+        self.exes_card.refresh()
         self._check()
 
     def on_busy_changed(self, _busy: bool) -> None:
         """Global install lock changed; re-evaluate this page's controls."""
         self._update_button_states()
+        self.exes_card.refresh()
 
     def _update_button_states(self) -> None:
         """Gate this page on the global install lock.

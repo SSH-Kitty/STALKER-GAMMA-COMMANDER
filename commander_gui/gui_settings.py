@@ -49,6 +49,7 @@ _DEFAULTS = {
     "always_gamemoderun": False,  # wrap every launch command in gamemoderun
     "autostart": False,  # add to XDG autostart so the app starts at login
     "custom_launch_options": "",  # extra tokens prepended to the launch command
+    "lossless_dll": "",  # Lossless Scaling DLL picked by hand for frame generation
     "mo2_display_dpi": 120,  # Wine display DPI for Mod Organizer 2 (125%)
     "tool_overrides": {},  # manually selected Linux tools and runner locations
     "move_dest": "",  # in-progress Move Game destination (cleared on completion)

@@ -1456,6 +1456,7 @@ class MultiplayerPage(QWidget):
                 self._say_clear.start(5000)  # nothing to act on, so it fades
             if on_done:
                 on_done(result)
+        self.window.update_mod_counter()  # co-op jobs toggle mods; don't wait for the 5s poll
         self.refresh()
 
     def _on_progress(self, done: int, total: int) -> None:

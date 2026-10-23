@@ -272,28 +272,18 @@ def download_and_install_commander_update(
     tag: str,
     cancel_event: threading.Event | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
-    dest_dir: Path | None = None,
 ) -> Path:
-    """Download and install *tag*. Returns the installed AppImage's path.
-
-    By default - or when *dest_dir* is the running AppImage's own folder -
-    the new version replaces the running AppImage in place. Any other
-    *dest_dir* gets it under the release's own file name, leaving the
-    running one untouched.
-    """
+    """Download *tag* over the running AppImage. Returns its path."""
     running_path = commander_appimage_path()
     if running_path is None:
         raise CommanderSelfUpdateError(
             "COMMANDER is not running as an AppImage - it cannot update itself."
         )
-    target = running_path
-    if dest_dir is not None and dest_dir.resolve() != running_path.parent.resolve():
-        target = dest_dir / commander_update_asset_url(tag).rsplit("/", 1)[1]
     downloaded = download_commander_update(
-        tag, target, cancel_event=cancel_event, progress_cb=progress_cb
+        tag, running_path, cancel_event=cancel_event, progress_cb=progress_cb
     )
-    install_commander_update(downloaded, target)
-    return target
+    install_commander_update(downloaded, running_path)
+    return running_path
 
 
 def switch_commander_build(

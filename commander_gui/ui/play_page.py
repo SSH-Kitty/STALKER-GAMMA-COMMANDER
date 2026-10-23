@@ -121,6 +121,7 @@ from .common import (
     normalize_path,
     notice,
     notify_desktop,
+    open_url,
     pick_shortcuts_vdf,
     play_click_sound,
     populate_runner_combo,
@@ -583,6 +584,7 @@ class PlayPage(QWidget):
             lambda: self._debounce_timer.start()
         )
         self.custom_options_edit.textChanged.connect(self._sync_option_toggles)
+        self.custom_options_edit.textChanged.connect(self._sync_frame_gen_card)
         options_layout.addWidget(self.custom_options_edit)
         # One labelled row per group; equal-width columns line the chips up
         # across rows and fill the card.
@@ -593,6 +595,7 @@ class PlayPage(QWidget):
         for column in range(1, columns + 1):
             toggles_grid.setColumnStretch(column, 1)
         self._option_toggles: list[tuple[QPushButton, str]] = []
+        self._coop_drop_toggles: list[tuple[QPushButton, str, str]] = []
         for row, (heading, options) in enumerate(launch_options.GROUPS):
             toggles_grid.addWidget(info_label(tr(heading), wrap=False), row, 0)
             for column, (label, token, tip) in enumerate(options, 1):
@@ -607,10 +610,15 @@ class PlayPage(QWidget):
                 )
                 toggles_grid.addWidget(toggle, row, column)
                 self._option_toggles.append((toggle, token))
-                if token == launch_options.NO_STEAM_OVERLAY:
-                    self._overlay_toggle = (toggle, tr(tip))
+                if token in launch_options.COOP_DROPS:
+                    self._coop_drop_toggles.append((toggle, tr(tip), token))
         options_layout.addLayout(toggles_grid)
-        root.addWidget(options_card)
+        options_layout.addStretch(1)
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(16)
+        cards_row.addWidget(options_card, 3)
+        cards_row.addWidget(self._build_frame_gen_card(), 2)
+        root.addLayout(cards_row)
 
         # -- folders card -----------------------------------------------------
         # Click a folder box to pick a new folder, as on the Install page.
@@ -791,6 +799,174 @@ class PlayPage(QWidget):
             toggle.setChecked(launch_options.is_on(text, option))
             toggle.blockSignals(False)
 
+    # ------------------------------------------------------ frame generation
+    #: Each settings row: (row label, variable, ((button text, value), ...)).
+    #: A None value leaves the variable out, so lsfg-vk uses its default.
+    _FRAME_GEN_ROWS = (
+        ("Multiplier", launch_options.FG_MULTIPLIER, (("2x", "2"), ("3x", "3"), ("4x", "4"))),
+        ("Motion detail", launch_options.FG_FLOW_SCALE, (("100%", None), ("75%", "0.75"), ("50%", "0.5"))),
+        ("Model", launch_options.FG_PERFORMANCE, (("Quality", None), ("Performance", "1"))),
+    )
+
+    def _build_frame_gen_card(self) -> QFrame:
+        """lsfg-vk frame generation: on/off and its settings, all kept as
+        variables in the launch options text. Locked, with what to install,
+        until lsfg-vk and Lossless Scaling are both there."""
+        card, layout = make_card()
+        layout.setSpacing(10)
+        layout.addWidget(section_label(tr("Frame generation"), level=2))
+        layout.addWidget(info_label(tr(
+            "Smoother motion from lsfg-vk (Lossless Scaling frame generation). "
+            "Adds a little input lag and works best from 40 FPS up. Not with OpenGL."
+        )))
+        self._frame_gen_missing = info_label("")
+        self._frame_gen_missing.setObjectName("warn")
+        self._frame_gen_missing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self._frame_gen_missing)
+        self._get_lossless_button = QPushButton(tr("Get Lossless Scaling on Steam"))
+        self._get_lossless_button.setObjectName("secondary")
+        self._get_lossless_button.setMinimumHeight(34)
+        self._get_lossless_button.clicked.connect(
+            lambda: open_url("https://store.steampowered.com/app/993090/Lossless_Scaling/")
+        )
+        self._choose_dll_button = QPushButton(tr("Choose DLL..."))
+        self._choose_dll_button.setObjectName("secondary")
+        self._choose_dll_button.setMinimumHeight(34)
+        self._choose_dll_button.setToolTip(tr("Pick Lossless Scaling's lsfg-vk.dll (or Lossless.dll) yourself, for a copy outside your Steam libraries."))
+        self._choose_dll_button.clicked.connect(self._choose_lossless_dll)
+        dll_row = QHBoxLayout()
+        dll_row.setSpacing(12)
+        dll_row.addWidget(self._get_lossless_button, 1)
+        dll_row.addWidget(self._choose_dll_button, 1)
+        self._install_lsfg1_button = QPushButton(tr("Install lsfg-vk 1.0"))
+        self._install_lsfg1_button.setObjectName("secondary")
+        self._install_lsfg1_button.setMinimumHeight(34)
+        self._install_lsfg1_button.setToolTip(tr("Download lsfg-vk 1.0 from its GitHub release and set it up for your user, next to any lsfg-vk 2.0. It only loads for games COMMANDER starts with frame generation on."))
+        self._install_lsfg1_button.clicked.connect(self._install_lsfg1)
+        dll_row.addWidget(self._install_lsfg1_button, 1)
+        layout.addLayout(dll_row)
+        self._dll_label = info_label("")
+        self._dll_label.setObjectName("dim")
+        self._dll_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self._dll_label)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        for column in (1, 2, 3):
+            grid.setColumnStretch(column, 1)
+        rows = (
+            ("Frame generation", None, ((tr("Off"), False), (tr("On"), True))),
+            *((label, key, tuple((tr(text), value) for text, value in choices))
+              for label, key, choices in self._FRAME_GEN_ROWS),
+        )
+        # (row's buttons with their values, variable or None for on/off)
+        self._frame_gen_rows: list[tuple[list[tuple[QPushButton, object]], str | None]] = []
+        for row, (label, key, choices) in enumerate(rows):
+            grid.addWidget(info_label(tr(label), wrap=False), row, 0)
+            buttons = []
+            for column, (text, value) in enumerate(choices, 1):
+                button = QPushButton(text)
+                button.setObjectName("segment")
+                button.setCheckable(True)
+                button.setFixedHeight(34)
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(
+                    lambda _=False, key=key, value=value: self._set_frame_gen(key, value)
+                )
+                grid.addWidget(button, row, column)
+                buttons.append((button, value))
+            self._frame_gen_rows.append((buttons, key))
+        layout.addLayout(grid)
+        layout.addStretch(1)
+        return card
+
+    def _choose_lossless_dll(self) -> None:
+        dll = launch_options.lossless_dll()
+        start = str(dll.parent if dll else Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("Select Lossless Scaling's DLL"), start, "DLL (*.dll)"
+        )
+        if path:
+            gui_settings.save_gui_settings(lossless_dll=path)
+            self._refresh_preview()
+
+    def _install_lsfg1(self) -> None:
+        self._install_lsfg1_button.setEnabled(False)
+        self._install_lsfg1_button.setText(tr("Installing lsfg-vk 1.0..."))
+        task = BackgroundTask(launch_options.install_lsfg1, parent=self)
+        task.result.connect(lambda _r: self._lsfg1_install_done(None))
+        task.error.connect(self._lsfg1_install_done)
+        self._lsfg1_task = task
+        task.start()
+
+    def _lsfg1_install_done(self, error: str | None) -> None:
+        self._lsfg1_task = None
+        self._install_lsfg1_button.setEnabled(True)
+        self._install_lsfg1_button.setText(tr("Install lsfg-vk 1.0"))
+        if error:
+            QMessageBox.warning(self, tr("Couldn't install lsfg-vk 1.0"), error)
+        self._refresh_preview()
+
+    def _set_frame_gen(self, key: str | None, value) -> None:
+        text = self.custom_options_edit.text()
+        if key is None:
+            text = launch_options.frame_gen(text, value)
+        else:
+            text = launch_options.set_var(text, key, value)
+        self.custom_options_edit.setText(text)
+        # Clicking the picked button again unticks it and leaves the text
+        # as it was, so no textChanged: tick it back here.
+        self._sync_frame_gen_card()
+
+    def _sync_frame_gen_card(self) -> bool:
+        """Show the card's state from the options text, and lock it with what
+        to install until lsfg-vk and Lossless Scaling are both there. True
+        when they are."""
+        text = self.custom_options_edit.text()
+        on = launch_options.is_on(text, launch_options.FRAME_GEN)
+        steps = []
+        versions = launch_options.lsfg_versions()
+        if not versions:
+            steps.append(tr("Install lsfg-vk from your distro's packages (on Arch and CachyOS: sudo pacman -S lsfg-vk), or from lsfg-vk.dev."))
+        dll = launch_options.lossless_dll()
+        dll_missing = dll is None
+        version = launch_options.frame_gen_version(dll) if versions and dll else None
+        if dll_missing:
+            steps.append(tr("Buy and install Lossless Scaling on Steam. It's a Windows app, so first tick Properties > Compatibility > Force the use of a specific Steam Play compatibility tool. Then pick the lsfg-vk branch under Properties > Betas.")
+                         + " " + tr("Have the DLL somewhere else? Pick it with Choose DLL."))
+        elif versions and version is None:
+            if not launch_options.native_dll(dll):
+                steps.append(tr("This file isn't Lossless Scaling's frame generation DLL. Pick Lossless.dll or lsfg-vk.dll with Choose DLL."))
+            else:
+                steps.append(tr("lsfg-vk 2.0 can't use this DLL: it needs lsfg-vk.dll from Lossless Scaling's lsfg-vk branch on Steam. A Lossless.dll from Lossless Scaling 3.1 or 3.2 works with lsfg-vk 1.0 instead: click Install lsfg-vk 1.0."))
+        if dll:
+            self._dll_label.setText(
+                tr("DLL: {path} (runs on lsfg-vk {version}.0)", path=dll, version=version)
+                if version else tr("DLL: {path}", path=dll)
+            )
+        self._dll_label.setVisible(not dll_missing)
+        if steps:
+            lines = [tr("Needs lsfg-vk and Lossless Scaling (paid, on Steam). Still to do:")]
+            lines += [f"{n}. {step}" for n, step in enumerate(steps, 1)]
+            lines.append(tr("This card unlocks by itself once that's done."))
+            self._frame_gen_missing.setText("\n".join(lines))
+        self._frame_gen_missing.setVisible(bool(steps))
+        self._get_lossless_button.setVisible(dll_missing)
+        self._install_lsfg1_button.setVisible(
+            bool(dll) and version is None and "1" not in versions and launch_options.native_dll(dll)
+        )
+        for buttons, key in self._frame_gen_rows:
+            current = on if key is None else launch_options.var(text, key)
+            if key == launch_options.FG_MULTIPLIER:
+                current = current or "2"
+            for button, value in buttons:
+                button.setChecked(value == current)
+                # Left on (typed in, or set before an uninstall): Off stays
+                # clickable so it can still be switched off.
+                button.setEnabled(on and not steps if key else not steps or (on and value is False))
+        return not steps
+
     def _persist_dirs(self) -> None:
         if self._persisting:
             return
@@ -894,6 +1070,10 @@ class PlayPage(QWidget):
         options = self.custom_options_edit.text()
         if coop.is_active(profile.anomaly) if coop_launch is None else coop_launch:
             options = launch_options.for_coop(options)
+        if open_mo2 and "%command%" in (tokens := launch_options.split(options)):
+            # MO2 on its own: no game to hand the words after %command% to,
+            # and MO2 quits on a word it doesn't know.
+            options = shlex.join(tokens[: tokens.index("%command%") + 1])
         command = launch_options.apply(command, env, options)
         return command, env, cwd
 
@@ -917,6 +1097,7 @@ class PlayPage(QWidget):
         self.shortcut_button.setEnabled(self.open_mo2_button.isEnabled())
 
     def _refresh_preview_inner(self) -> None:
+        self._frame_gen_ready = self._sync_frame_gen_card()
         # Resolve the runner once: each resolution probes the filesystem for
         # Steam libraries and Proton builds, and this runs on every edit.
         profile = self.window.settings.active_profile
@@ -1015,10 +1196,14 @@ class PlayPage(QWidget):
             self.direct_button.setToolTip(tr("Co-op is active. Anomaly cannot be launched without Mod Organizer 2 in co-op mode."))
         if not self._launching:
             set_hover_grow_text(self.launch_button, self._launch_text())
-        # Co-op leaves "No Steam overlay" out (see coop_shortcut_fields).
-        toggle, tip = self._overlay_toggle
-        toggle.setEnabled(not self._coop_on())
-        toggle.setToolTip(tip if toggle.isEnabled() else tr("Co-op keeps the Steam overlay for Steam invites."))
+        # Co-op leaves these out (see coop_shortcut_fields).
+        why = {
+            launch_options.NO_STEAM_OVERLAY: tr("Co-op keeps the Steam overlay for Steam invites."),
+            launch_options.NATIVE_WAYLAND: tr("Co-op leaves Native Wayland off so the Steam overlay works for invites."),
+        }
+        for toggle, tip, token in self._coop_drop_toggles:
+            toggle.setEnabled(not self._coop_on())
+            toggle.setToolTip(tip if toggle.isEnabled() else why[token])
         self._build_chips(ok=True, runner=runner)
         target = self._selected_target()
         exe = next((e for e in self.executables if e.title == target), Mo2Executable())
@@ -1049,16 +1234,19 @@ class PlayPage(QWidget):
             chips.append(("GameMode", bool(gamemoderun)))
         # One per quick toggle the launch options use. A wrapper
         # (mangohud, gamescope) is red when it isn't installed. Co-op
-        # leaves "No Steam overlay" out (see coop_shortcut_fields).
+        # leaves the COOP_DROPS options out (see coop_shortcut_fields).
         text = self.custom_options_edit.text()
         for _heading, options in launch_options.GROUPS:
             for label, option, _tip in options:
                 if not launch_options.is_on(text, option):
                     continue
-                if option == launch_options.NO_STEAM_OVERLAY and self._coop_on():
+                if option in launch_options.COOP_DROPS and self._coop_on():
                     continue
                 wrapper = option.split()[0]
                 chips.append((tr(label), "=" in wrapper or bool(shutil.which(wrapper))))
+        if launch_options.is_on(text, launch_options.FRAME_GEN):
+            multiplier = launch_options.var(text, launch_options.FG_MULTIPLIER) or "2"
+            chips.append((tr("Frame generation {multiplier}x", multiplier=multiplier), self._frame_gen_ready))
         if self._coop_on():
             chips.append((tr("Co-op mode"), True))
         for text, state in chips:
@@ -2071,9 +2259,16 @@ class PlayPage(QWidget):
                 # Some runners (umu/GE-Proton) keep the wrapper alive for the
                 # whole session, so the handoff branch above never runs -
                 # still say what's actually running instead of "Launching".
+                new_host_pids = self._host_pids() - self._pre_launch_mo2_pids
+                if new_host_pids:
+                    # Remember it, so the wrapper exiting after MO2 has
+                    # already closed finishes at once instead of waiting
+                    # out the handoff window for an MO2 that already ran.
+                    self._mo2_seen = True
+                    self._mo2_launch_pids |= new_host_pids
                 if self._game_exe_name and exe_pids(self._game_exe_name) - self._pre_launch_game_pids:
                     status = tr("Game is running")
-                elif self._host_pids() - self._pre_launch_mo2_pids:
+                elif new_host_pids:
                     status = tr("Mod Organizer 2 is running")
                 else:
                     return
@@ -2092,7 +2287,8 @@ class PlayPage(QWidget):
                 proc_code, self._monitoring_mo2,
             )
             if proc_code == 0 and self._monitoring_mo2:
-                self._set_result(tr("Waiting for Mod Organizer 2 to open"))
+                if not self._mo2_seen:
+                    self._set_result(tr("Waiting for Mod Organizer 2 to open"))
                 return
             self._launch_wrapper_pid = None
             self._monitoring_mo2 = False

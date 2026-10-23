@@ -63,8 +63,10 @@ from ..launcher import (
 )
 from ..mod_install import (
     ModInstallError,
+    _list_archive_paths,
     default_mod_name,
     extract_archive,
+    find_archiver,
     make_staging_dir,
     move_payload,
     sanitize_name,
@@ -100,8 +102,11 @@ from ..modlist import (
     timestamped_backup_path,
     unflip,
 )
+from ..romeo import KEPT_MCM, MCM_MOD, find_romeo, mcm_changed, old_mods, unpacked_size
+from ..romeo import install as install_romeo
 from ..themes import active_theme_tokens
 from ..updates import local_modpack_records
+from .about_page import _copy_button
 from .common import (
     ACCENT,
     ITEM_GREEN,
@@ -109,6 +114,7 @@ from .common import (
     BackgroundTask,
     ProgressArea,
     StreamTask,
+    gamma_installed,
     info_label,
     make_card,
     mo2_running,
@@ -1722,7 +1728,7 @@ class ModManagerPage(QWidget):
 
     def _install_archive(self, archive: Path) -> None:
         """Name, check and install one archive (picked or dropped)."""
-        if self._refuse_xrrazom(archive):
+        if self._refuse_xrrazom(archive) or self._install_romeo(archive):
             return
         try:
             default_name = default_mod_name(archive)
@@ -2255,6 +2261,194 @@ class ModManagerPage(QWidget):
             self._drop_queue = []
             self.window.set_page("multiplayer")
         return True
+
+    def _install_romeo(self, archive: Path) -> bool:
+        """Install CLIKRΔD's ROMEO repack the way its guide does, instead of
+        as one mod: it is ~170 mods, an MO2 profile and Anomaly files. Returns
+        ``True`` if the archive was ROMEO (installed or not)."""
+        try:
+            archiver = find_archiver()
+            found = find_romeo(_list_archive_paths(archiver, archive))
+        except ModInstallError:
+            return False  # extraction reports the real problem
+        if found is None:
+            return False
+        self._drop_queue = []
+        wrapper, mo2_profile = found
+        profile = self.window.settings.active_profile
+        if profile is None or not str(profile.anomaly).strip() or not gamma_installed(profile.gamma):
+            QMessageBox.warning(
+                self,
+                tr("Install GAMMA first"),
+                tr("ROMEO goes on top of GAMMA. Install GAMMA for this profile, then install ROMEO."),
+            )
+            return True
+        gamma, anomaly = Path(profile.gamma), Path(profile.anomaly)
+        need = unpacked_size(archiver, archive)
+        free = shutil.disk_usage(gamma).free
+        if need and need > free:
+            QMessageBox.warning(
+                self,
+                tr("Not enough free space"),
+                tr(
+                    "ROMEO needs {need} GB free on the GAMMA folder's drive, but only {free} GB is free.",
+                    need=round(need / 1e9), free=round(free / 1e9),
+                ),
+            )
+            return True
+        requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")
+        update = (gamma / "profiles" / mo2_profile).is_dir()
+        keep_mcm = False
+        if not update:
+            answer = QMessageBox.question(
+                self,
+                tr("Install ROMEO?"),
+                tr("This is CLIKRΔD's ROMEO repack. COMMANDER adds its mods and its own Mod Organizer profile to GAMMA. Your G.A.M.M.A mod list isn't changed."),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                info=tr("Both profiles share the Anomaly folder, so as ROMEO's guide asks, GAMMA's Atmos weather files and the shader cache are removed there. A GAMMA update puts the Atmos files back for G.A.M.M.A."),
+                note=requirements,
+                labels={QMessageBox.StandardButton.Yes: tr("Install ROMEO"), QMessageBox.StandardButton.No: tr("Cancel")},
+            )
+        else:
+            changed = mcm_changed(gamma, mo2_profile)
+            if changed is None and (gamma / "mods" / MCM_MOD).is_dir():
+                # Installed by hand: no record of ROMEO's own settings to
+                # compare with, so ask. Closing the box cancels, never
+                # silently drops the player's settings.
+                answer = QMessageBox.question(
+                    self,
+                    tr("Keep your MCM settings?"),
+                    tr("Updating replaces ROMEO's MCM settings. If you changed any MCM settings, COMMANDER can keep yours and turn ROMEO's new ones off."),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                    labels={QMessageBox.StandardButton.Yes: tr("Keep mine"), QMessageBox.StandardButton.No: tr("Use ROMEO's new ones")},
+                )
+                if answer not in (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No):
+                    return True
+                keep_mcm = answer == QMessageBox.StandardButton.Yes
+            else:
+                keep_mcm = bool(changed)
+            answer = QMessageBox.question(
+                self,
+                tr("Update ROMEO?"),
+                tr("COMMANDER removes the {count} old xx- mods, as ROMEO's guide says, then installs the new version.", count=len(old_mods(gamma))),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                info=tr("Your MCM settings are kept as '{name}', turned on in place of ROMEO's.", name=KEPT_MCM) if keep_mcm else "",
+                note=requirements,
+                labels={QMessageBox.StandardButton.Yes: tr("Update ROMEO"), QMessageBox.StandardButton.No: tr("Cancel")},
+            )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_romeo_install(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update)
+        return True
+
+    def _start_romeo_install(
+        self, archive: Path, wrapper: str, mo2_profile: str, gamma: Path, anomaly: Path,
+        keep_mcm: bool, update: bool,
+    ) -> None:
+        if self.window.install_busy or self._install_active or self._mo2_running():
+            self._update_guard()
+            return
+        self._install_generation += 1
+        generation = self._install_generation
+        self._install_source = archive
+        self._install_name = mo2_profile
+        self._romeo_update = update
+        self._install_staging = None
+        self._install_active = True
+        self.window.set_install_busy(True, "mod_install")
+        self._update_guard()
+        self.install_progress.reset()
+        self.install_progress.show()
+        self.install_progress.on_started()
+        self.install_progress.pause_button.hide()
+
+        cancel_event = None
+
+        def worker(report):
+            staging_parent = make_staging_dir(gamma)
+            try:
+                staging = staging_parent / "archive"
+                extract_archive(
+                    archive,
+                    staging,
+                    cancel_event,
+                    lambda percent, text: report(
+                        f"Extracting {archive.name}... {percent}%" if percent is not None else text
+                    ),
+                )
+                install_romeo(
+                    staging, wrapper, mo2_profile, gamma, anomaly, cancel_event,
+                    lambda done, total: report(f"Installing ROMEO mods... {done}/{total}"),
+                    keep_mcm,
+                )
+                return mo2_profile
+            finally:
+                shutil.rmtree(staging_parent, ignore_errors=True)
+
+        self._install_task = StreamTask(worker, parent=self)
+        cancel_event = self._install_task.cancel_event
+        self._install_task.line.connect(self.install_progress.status_message)
+        self._install_task.result.connect(
+            lambda name, generation=generation: self._on_romeo_installed(name, generation)
+        )
+        self._install_task.error.connect(
+            lambda message, generation=generation: self._on_install_error(message, generation)
+        )
+        self._install_task.start()
+
+    def _on_romeo_installed(self, name: str, generation: int) -> None:
+        if not self._install_active or generation != self._install_generation:
+            return
+        self._finish_install()
+        profile = self.window.settings.active_profile
+        if profile is not None and profile.mo2_profile != name:
+            answer = QMessageBox.question(
+                self,
+                tr("Switch to ROMEO?"),
+                tr("ROMEO is installed as the Mod Organizer profile '{name}'. Switch this COMMANDER profile to it now?", name=name),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                info=tr("You can switch back to G.A.M.M.A on the Dashboard at any time."),
+                labels={QMessageBox.StandardButton.Yes: tr("Switch to ROMEO"), QMessageBox.StandardButton.No: tr("Not now")},
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                rc, out = select_mo2_profile(profile.gamma, name)
+                if rc == 0:
+                    profile.mo2_profile = name
+                    self.window.settings.save()
+                    self.refresh()
+                else:
+                    QMessageBox.warning(self, tr("Couldn't change the MO2 profile"), out.strip())
+        if self._romeo_update:
+            # In-game settings carry over between versions: no checklist.
+            QMessageBox.information(
+                self,
+                tr("ROMEO updated"),
+                tr("The new version of ROMEO is installed."),
+                info=tr("Your previous mod list is saved as modlist.txt.before-update in the ROMEO profile folder."),
+            )
+            return
+        # ROMEO's own MCM settings mod already sets the in-game options its
+        # guide lists (A-Life, Dynamic News, Wearable Devices): only these
+        # two are left to the player.
+        command = "cfg_load atmos_neutral"
+        extra = QWidget()
+        extra.setObjectName("panelTransparent")
+        row = QHBoxLayout(extra)
+        row.setContentsMargins(0, 0, 0, 0)
+        copy = _copy_button(lambda: command)
+        copy.setObjectName("")  # a full-size button, like the box's own
+        copy.setMinimumSize(110, 34)
+        row.addWidget(copy)
+        row.addStretch(1)
+        QMessageBox.information(
+            self,
+            tr("Finish setting up ROMEO in the game"),
+            tr("Two things to do once in the game:"),
+            points=[
+                tr("Start a new save. ROMEO doesn't work with old saves."),
+                tr("Open the console (~) and run: cfg_load atmos_neutral"),
+            ],
+            extra=extra,
+        )
 
     def _on_install_error(self, message: str, generation: int) -> None:
         if not self._install_active or generation != self._install_generation:
