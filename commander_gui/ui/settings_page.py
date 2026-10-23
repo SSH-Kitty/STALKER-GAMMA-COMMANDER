@@ -677,8 +677,12 @@ class SettingsPage(QWidget):
             self._plugin_status.setText(tr("Running"))
         else:
             self._plugin_status.setText(tr("Installed"))
+        ready = not moddb.busy and info is not None and not outdated
+        self._plugin_status.setObjectName("accent" if ready else "dim")
+        self._plugin_status.style().unpolish(self._plugin_status)
+        self._plugin_status.style().polish(self._plugin_status)
         self._plugin_install.setText(tr("Update") if outdated else tr("Install"))
-        self._plugin_install.setToolTip(tr("A separate download of about 200 MB."))
+        self._plugin_install.setToolTip(tr("A separate download of about 100 MB."))
         can_install = not moddb.busy and (info is None or outdated)
         self._plugin_install.setVisible(can_install)
         self._plugin_install.setEnabled(not moddb.running)

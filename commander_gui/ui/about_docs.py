@@ -1275,6 +1275,12 @@ TOPICS: list[dict] = [
                 ],
             ),
             (
+                "Reinstall GAMMA also downloads Anomaly",
+                [
+                    "Install GAMMA and Reinstall GAMMA run the CLI's full-install, which always installs Anomaly too. Whether anything is downloaded depends on the download cache, not on whether the game already runs: if Anomaly's archive is in the cache and its MD5 matches, it is reused. An install copied over from Windows or set up by hand has no cache yet, so the first run downloads and unpacks Anomaly once. Later reinstalls and updates reuse it, unless the cache folder is deleted or Minimal is on.",
+                ],
+            ),
+            (
                 "Mod Organizer closes straight away or mentions concrt140.dll",
                 [
                     "The Visual C++ runtime is missing from the prefix, or the prefix belongs to a different runner. Run Install Dependencies on Install and use Proton-GE (Auto-detect) rather than Steam's Proton.",

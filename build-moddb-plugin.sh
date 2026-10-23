@@ -64,8 +64,8 @@ printf '%s\n' "$QT_REQUIREMENTS" > "$QT_REQ_FILE"
   --require-hashes -r "$QT_REQ_FILE" || die "Qt wheels missing from the cache - run ./build-appimage.sh first"
 rm -f "$QT_REQ_FILE"
 
-# Only what is certainly unused: QtWebEngine pulls in Quick, Qml, WebChannel,
-# Positioning and more through its own libraries, so Qt's libraries stay.
+# Tools and headers first; the Qt libraries are pruned further down, by what
+# QtWebEngine and the browser actually link.
 log "pruning developer tools and unused stdlib"
 for tool in qmlls qmlformat assistant linguist lupdate lrelease designer uic rcc \
             qmllint qmlimportscanner qmlcachegen qmltyperegistrar qsb balsam \
@@ -86,12 +86,56 @@ for lib in "$APPIMAGE_BASE/opt/python$PY_SERIES/lib/python$PY_SERIES/site-packag
   [ -e "$lib" ] && cp -L "$lib" "$PS/Qt/lib/"
 done
 
+# The PySide6 wheels carry every Qt add-on (3D, Charts, Multimedia with its
+# own FFmpeg, Designer...). Keep only the Python modules the browser imports,
+# the plugin folders a desktop session can load, and whatever Qt library
+# those link to (followed through readelf); the rest goes.
+log "pruning Qt down to what the browser links"
+KEEP_MODULES="QtCore QtGui QtWidgets QtNetwork QtPrintSupport QtWebChannel QtWebEngineCore QtWebEngineWidgets"
+KEEP_PLUGINS="platforms platformthemes platforminputcontexts iconengines imageformats tls networkinformation
+              xcbglintegrations egldeviceintegrations wayland-decoration-client
+              wayland-graphics-integration-client wayland-shell-integration"
+for module in "$PS"/Qt*.abi3.so; do
+  name="$(basename "$module" .abi3.so)"
+  case " $KEEP_MODULES " in *" $name "*) ;; *) rm -f "$module" ;; esac
+done
+for dir in "$PS/Qt/plugins"/*/; do
+  case " $(echo $KEEP_PLUGINS) " in *" $(basename "$dir") "*) ;; *) rm -rf "$dir" ;; esac
+done
+"$PY" -s -P - "$PS" <<'PRUNE' || die "couldn't work out which Qt libraries are used"
+import pathlib, subprocess, sys
+ps = pathlib.Path(sys.argv[1])
+lib = ps / "Qt" / "lib"
+roots = [*ps.glob("*.so*"), *(ps / "Qt" / "plugins").rglob("*.so"), ps / "Qt" / "libexec" / "QtWebEngineProcess"]
+keep, todo = set(), list(roots)
+while todo:
+    out = subprocess.run(["readelf", "-d", str(todo.pop())], capture_output=True, text=True, check=True).stdout
+    for line in out.splitlines():
+        if "(NEEDED)" in line:
+            name = line.split("[", 1)[1].rstrip("]")
+            if (lib / name).is_file() and name not in keep:
+                keep.add(name)
+                todo.append(lib / name)
+for path in lib.iterdir():
+    if path.name not in keep:
+        path.unlink()
+PRUNE
+# Translations: Qt's own aren't loaded; Chromium's only for COMMANDER's languages.
+rm -f "$PS/Qt/translations"/*.qm
+find "$PS/Qt/translations/qtwebengine_locales" -name '*.pak' \
+  ! -regex '.*/\(en-US\|en-GB\|de\|es\|es-419\|fr\|pl\|pt-BR\|pt-PT\|ro\|ru\|tr\|uk\)\.pak' -delete
+# Only the developer tools (never opened here) use this one.
+rm -f "$PS/Qt/resources/qtwebengine_devtools_resources.pak"
+rm -f "$PLUGIN"/usr/lib/lib{tcl,tk}8*.so
+
 log "copying commander_gui"
 APP="$PLUGIN/app"
 mkdir -p "$APP"
 cp -r "$PROJECT_DIR/commander_gui" "$APP/"
 cp "$PROJECT_DIR/LICENSE" "$PLUGIN/"
 cp -r "$PROJECT_DIR/licenses" "$PLUGIN/"
+# The main app's artwork; the browser only shows its own icon.
+find "$APP/commander_gui/assets" -mindepth 1 -maxdepth 1 ! -name moddb-browser.png -exec rm -rf {} +
 find "$PLUGIN" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PLUGIN" -name '*.pyc' -delete 2>/dev/null || true
 

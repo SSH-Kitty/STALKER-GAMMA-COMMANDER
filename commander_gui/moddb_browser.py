@@ -19,12 +19,13 @@ plugin keep their old copy of it until that number moves.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import quote
 
 from PySide6.QtCore import QEvent, Qt, QUrl
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QIcon, QKeySequence, QShortcut
 from PySide6.QtWebEngineCore import (
     QWebEngineDownloadRequest,
     QWebEnginePage,
@@ -40,18 +41,23 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
+    QTabBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from . import plugins, themes
+from .atomic import write_bytes
 from .i18n import set_active_language, tr
-from .ui.common import open_url
+from .ui.common import make_card, open_in_file_manager, open_url
 from .ui.dialogs import MessageBox
 from .ui.multiplayer_page import _hint
 from .ui.title_bar import (
     EdgeResizeFilter,
+    WindowButton,
     WindowDragFilter,
     attach_resize_filter,
     build_window_buttons,
@@ -90,8 +96,17 @@ _HIDE_ADS_CSS = (
 _TRIM_CSS = (
     " body > #body > .container > header, #body footer, .headermediabox,"
     " .nextmediabox, .column.span-all, .column.span-300.last,"
-    " #downloadsbrowse form.filter, #adBanner { display: none !important; }"
+    " #downloadsbrowse form.filter, .normalcorner .options, #adBanner"
+    " { display: none !important; }"
     " .column.span-300-alt { width: 100% !important; margin: 0 !important; }"
+    # The comment form's sign-up and social sign-in, which can't work here
+    # (they leave ModDB), cut down to its first sentence. CSS can't cut a text
+    # node, so the paragraph's text shrinks to nothing and the line is redrawn.
+    " .rowcommentguest a, .rowcommentguest .helper { display: none !important; }"
+    " .rowcommentguest p { font-size: 0 !important; width: auto !important;"
+    " float: none !important; margin: 0 0 6px !important; }"
+    " .rowcommentguest p::before { content: 'Your comment will be anonymous.';"
+    " font-size: 12px; }"
 )
 
 
@@ -101,11 +116,39 @@ _BAR_HEIGHT = 26
 
 def page_css(tokens: dict) -> str:
     """CSS added to every page: hides the empty ad boxes and everything but
-    the addons, and draws the scrollbars like COMMANDER's own (thin, theme colours)."""
-    thumb = tokens.get("border_strong", "#3a4a33")
+    the addons, swaps ModDB's backdrop picture for COMMANDER's background, and
+    draws the scrollbars like COMMANDER's own (thin, theme colours)."""
+    def t(name: str, fallback: str) -> str:
+        return tokens.get(name, fallback)
+
+    thumb = t("border_strong", "#3a4a33")
+    bg = t("bg", "#0d130c")
+    card, chip, border = t("card", "#141b15"), t("chip", "#18221a"), t("border", "#26321f")
     # The standard properties, not ::-webkit-scrollbar: Chromium ignores those
     # as soon as a page sets scrollbar-color or scrollbar-width itself.
     return _HIDE_ADS_CSS + _TRIM_CSS + (
+        f" html, body, #body, .container {{ background: {bg} !important; }}"
+        # ModDB's grey boxes drawn as COMMANDER cards: card fill, thin border,
+        # a slightly lighter title strip, rows on the card colour.
+        f" .normalbox {{ background: {card} !important; border: 1px solid {border} !important;"
+        " border-radius: 8px; overflow: hidden; }"
+        " .normalbox .inner, .normalbox .body, .normalbox .table,"
+        " .normalbox div.table div.row, .normalbox div.table div.row:nth-of-type(2n-1)"
+        f" {{ background: {card} !important; background-image: none !important; }}"
+        f" .normalbox .normalcorner, .normalbox .normalcorner .title {{ background: {chip} !important;"
+        f" background-image: none !important; border-bottom: 1px solid {border} !important; }}"
+        f" .normalbox .normalcorner .heading {{ color: {t('accent_strong', '#8fe45c')} !important;"
+        " text-shadow: none !important; }"
+        f" .normalbox div.table div.row div.content p, .normalbox .row .summary p"
+        f" {{ background: {chip} !important; border-color: {border} !important; }}"
+        f" .normalbox .comment {{ background: {chip} !important; border: 1px solid {border} !important;"
+        " border-radius: 6px; }"
+        " .normalbox .comment p { background: transparent !important; }"
+        f" .normalbox a {{ color: {t('text', '#e2ead8')}; }}"
+        f" .normalbox, .normalbox p, .normalbox span, .normalbox h5 {{ color: {t('text_info', '#9aa88f')}; }}"
+        f" .normalbox img {{ border-color: {border} !important; }}"
+        f" .normalbox input, .normalbox textarea {{ background: {t('input', '#0d130e')} !important;"
+        f" color: {t('text', '#e2ead8')} !important; border: 1px solid {t('border_input', '#2e3b2c')} !important; }}"
         f" * {{ scrollbar-color: {thumb} transparent !important;"
         " scrollbar-width: thin !important; }"
     )
@@ -146,16 +189,32 @@ class _Page(QWebEnginePage):
 
 
 class _View(QWebEngineView):
-    def createWindow(self, _type):
-        # Pop-ups and target=_blank links load here, through the same filter.
-        return self
+    def __init__(self, window: BrowserWindow) -> None:
+        super().__init__()
+        self._window = window
+
+    def createWindow(self, type_):
+        # Pop-ups, target=_blank and "open in new tab" links open a tab here,
+        # through the same filter.
+        background = type_ == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
+        return self._window.new_tab(focus=not background)
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self.createStandardContextMenu()
+        for action in (
+            QWebEnginePage.WebAction.SavePage,
+            QWebEnginePage.WebAction.ViewSource,
+            QWebEnginePage.WebAction.OpenLinkInNewWindow,  # it opens a tab too
+        ):
+            menu.removeAction(self.pageAction(action))
+        menu.popup(event.globalPos())
 
 
 class BrowserWindow(QMainWindow):
     def __init__(self, config: dict) -> None:
         super().__init__()
         self.custom_title_bar = False  # read by the title-bar filters; set in _apply_title_bar()
-        self.setWindowTitle(tr("ModDB - STALKER COMMANDER"))
+        self.setWindowTitle("ModDB Browser")
         self.resize(1200, 800)
         self._downloads = Path(config["downloads"])
         self._downloads.mkdir(parents=True, exist_ok=True)
@@ -183,13 +242,19 @@ class BrowserWindow(QMainWindow):
             ".observe(document, {childList: true, subtree: true});"
         )
         profile.scripts().insert(style)
-        self.view = _View(self)
-        page = _Page(profile, self.view)
-        page.settings().setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
-        self.view.setPage(page)
-        # A redirect is let through for download mirrors; one that lands on a
-        # page outside ModDB goes to the normal browser instead.
-        self.view.urlChanged.connect(self._left_moddb)
+        self._profile = profile
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setMovable(True)
+        self.tabs.tabBar().setObjectName("navtabs")
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+        self.tabs.setStyleSheet(
+            "QTabWidget::pane { border: none; }"
+            " QTabBar::tab { padding: 4px 10px; max-width: 220px; }"
+        )
+        self.tabs.tabBar().setDrawBase(False)
+        QShortcut(QKeySequence.StandardKey.AddTab, self, self._new_home_tab)
+        QShortcut(QKeySequence.StandardKey.Close, self, lambda: self._close_tab(self.tabs.currentIndex()))
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -200,12 +265,63 @@ class BrowserWindow(QMainWindow):
         body = QVBoxLayout()
         body.setContentsMargins(8, 6, 8, 4)
         body.setSpacing(6)
-        body.addWidget(self.view, 1)
+        body.addWidget(self.tabs, 1)
+        # One card per running download, bottom left; gone when it ends.
+        self._download_cards = QVBoxLayout()
+        self._download_cards.setSpacing(6)
+        cards_row = QHBoxLayout()
+        cards_row.addLayout(self._download_cards)
+        cards_row.addStretch(1)
+        body.addLayout(cards_row)
         self.status = _hint(tr("Pick a mod and press Download. COMMANDER asks before installing it."))
         body.addWidget(self.status)
         layout.addLayout(body, 1)
         self._apply_title_bar(bool(config.get("custom_title_bar", True)))
-        self._home()
+        # The first tab has no close button: it goes when the browser does.
+        self._first = self.new_tab()
+        self._first.load(QUrl(HOME))
+
+    @property
+    def view(self) -> _View:
+        return self.tabs.currentWidget()
+
+    def new_tab(self, focus: bool = True) -> _View:
+        view = _View(self)
+        page = _Page(self._profile, view)
+        page.settings().setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
+        view.setPage(page)
+        # A redirect is let through for download mirrors; one that lands on a
+        # page outside ModDB goes to the normal browser instead.
+        view.urlChanged.connect(lambda url: self._left_moddb(view, url))
+        view.titleChanged.connect(lambda title: self._set_tab_title(view, title))
+        index = self.tabs.addTab(view, tr("Loading"))
+        if self.tabs.count() > 1:
+            close = WindowButton("close")
+            close.setObjectName("winClose")
+            close.setToolTip(tr("Close"))
+            close.setFixedSize(18, 18)
+            close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            close.clicked.connect(lambda: self._close_tab(self.tabs.indexOf(view)))
+            self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, close)
+        if focus:
+            self.tabs.setCurrentIndex(index)
+        return view
+
+    def _new_home_tab(self) -> None:
+        self.new_tab().load(QUrl(HOME))
+
+    def _set_tab_title(self, view: _View, title: str) -> None:
+        # "Better backpacks (0.1) addon - S.T.A.L.K.E.R. Anomaly mod for ...": the name is enough.
+        index = self.tabs.indexOf(view)
+        self.tabs.setTabText(index, title.split(" - ")[0].removesuffix(" addon"))
+        self.tabs.setTabToolTip(index, title)
+
+    def _close_tab(self, index: int) -> None:
+        view = self.tabs.widget(index)
+        if view is self._first:
+            return
+        self.tabs.removeTab(index)
+        view.deleteLater()
 
     def _build_topbar(self) -> QWidget:
         """COMMANDER's top bar: wordmark, page buttons, search, window buttons."""
@@ -229,9 +345,10 @@ class BrowserWindow(QMainWindow):
         words.addWidget(byline, 0, Qt.AlignmentFlag.AlignBaseline)
         row.addWidget(wordmark_block, 0, Qt.AlignmentFlag.AlignVCenter)
         for text, tip, slot in (
-            ("←", tr("Back"), self.view.back),
-            ("→", tr("Forward"), self.view.forward),
+            ("←", tr("Back"), lambda: self.view.back()),
+            ("→", tr("Forward"), lambda: self.view.forward()),
             (tr("Home"), "", self._home),
+            ("+", tr("New tab"), self._new_home_tab),
         ):
             button = QPushButton(text)
             button.setObjectName("settingAction")
@@ -243,11 +360,18 @@ class BrowserWindow(QMainWindow):
             row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("Search Anomaly addons on ModDB"))
-        self.search.setMaximumWidth(520)
+        self.search.setMaximumWidth(900)
         self.search.setFixedHeight(_BAR_HEIGHT)
         self.search.returnPressed.connect(self._search)
         row.addWidget(self.search, 1, Qt.AlignmentFlag.AlignVCenter)
-        row.addStretch(1)
+        row.addStretch(0)  # only what the search box can't take; Open downloads stays right
+        downloads = QPushButton(tr("Open downloads"))
+        downloads.setObjectName("settingAction")
+        downloads.setCursor(Qt.CursorShape.PointingHandCursor)
+        downloads.setFixedHeight(_BAR_HEIGHT)
+        downloads.setStyleSheet("padding: 0 12px;")
+        downloads.clicked.connect(lambda: open_in_file_manager(self._downloads))
+        row.addWidget(downloads, 0, Qt.AlignmentFlag.AlignVCenter)
         for widget in (self._topbar, wordmark_block, wordmark, byline):
             widget.installEventFilter(self._drag_filter)
         self._title_strip = build_window_buttons(self, self._drag_filter)
@@ -283,10 +407,10 @@ class BrowserWindow(QMainWindow):
         # The QWindow only exists once shown; the resize filter goes on it.
         attach_resize_filter(self, self._resize_filter, self.custom_title_bar)
 
-    def _left_moddb(self, url: QUrl) -> None:
+    def _left_moddb(self, view: _View, url: QUrl) -> None:
         if url.scheme() in ("http", "https") and not is_moddb(url):
             open_url(url.toString())
-            self._home()
+            view.load(QUrl(HOME))
 
     def _home(self) -> None:
         self.view.load(QUrl(HOME))
@@ -296,28 +420,82 @@ class BrowserWindow(QMainWindow):
         self.view.load(QUrl(SEARCH.format(quote(text)) if text else HOME))
 
     def _download(self, request: QWebEngineDownloadRequest) -> None:
+        # A download link opened in a new tab leaves that tab blank: close it.
+        for index in range(self.tabs.count()):
+            view = self.tabs.widget(index)
+            if view.page() is request.page() and not view.history().count() and self.tabs.count() > 1:
+                self._close_tab(index)
+                break
         request.setDownloadDirectory(str(self._downloads))
         name = request.downloadFileName()
+        card, layout = make_card()
+        card.setFixedWidth(380)
+        title = QHBoxLayout()
+        label = QLabel(tr("Downloading {name}…", name=name))
+        label.setToolTip(name)
+        label.setMinimumWidth(1)
+        title.addWidget(label, 1)
+        cancel = QPushButton(tr("Cancel"))
+        cancel.setObjectName("settingAction")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(request.cancel)
+        title.addWidget(cancel)
+        layout.addLayout(title)
+        bar = QProgressBar()
+        bar.setRange(0, 0)  # busy until the size is known
+        layout.addWidget(bar)
+        self._download_cards.addWidget(card)
 
         def progress() -> None:
             total, done = request.totalBytes(), request.receivedBytes()
-            self.status.setText(
-                tr("Downloading {name}… {percent}%", name=name, percent=done * 100 // total)
-                if total > 0 else tr("Downloading {name}…", name=name)
-            )
+            if total > 0:
+                bar.setRange(0, 100)
+                bar.setValue(done * 100 // total)
 
         def finished() -> None:
             state = request.state()
+            if state == QWebEngineDownloadRequest.DownloadState.DownloadInProgress:
+                return
+            card.deleteLater()
+            path = Path(request.downloadDirectory()) / request.downloadFileName()
             if state == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
                 self.status.setText(tr("{name} downloaded. Switch to COMMANDER to install it.", name=name))
-                path = Path(request.downloadDirectory()) / request.downloadFileName()
                 print(json.dumps({"event": "downloaded", "file": str(path), "url": request.url().toString()}), flush=True)
-            elif state != QWebEngineDownloadRequest.DownloadState.DownloadInProgress:
-                self.status.setText(tr("{name} didn't finish downloading.", name=name))
+                return
+            # Cancelled or broken off: the half-written file (Chromium's
+            # "<name>.download") is of no use.
+            path.with_name(path.name + ".download").unlink(missing_ok=True)
+            self.status.setText(
+                tr("Download cancelled.")
+                if state == QWebEngineDownloadRequest.DownloadState.DownloadCancelled
+                else tr("{name} didn't finish downloading.", name=name)
+            )
 
         request.receivedBytesChanged.connect(progress)
         request.isFinishedChanged.connect(finished)
         request.accept()
+
+
+_DESKTOP_ID = "commander-moddb-browser"
+
+
+def _write_desktop_entry() -> None:
+    """A hidden .desktop entry, so the taskbar shows "ModDB Browser" and its
+    icon instead of "python3.12"."""
+    home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    target = Path(home) / "applications" / f"{_DESKTOP_ID}.desktop"
+    content = (
+        "[Desktop Entry]\nType=Application\nName=ModDB Browser\n"
+        f"Icon={Path(__file__).with_name('assets') / 'moddb-browser.png'}\n"
+        f"Exec={Path(__file__).resolve().parents[2] / 'moddb-browser'}\n"
+        f"StartupWMClass={_DESKTOP_ID}\nNoDisplay=true\nTerminal=false\n"
+    )
+    try:
+        if not target.is_file() or target.read_text(encoding="utf-8") != content:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_bytes(target, content.encode())
+    except OSError:
+        pass  # only the taskbar's label and icon depend on it
 
 
 def _apply_theme(app: QApplication, config: dict) -> None:
@@ -332,7 +510,11 @@ def _apply_theme(app: QApplication, config: dict) -> None:
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("STALKER COMMANDER ModDB")
+    app.setApplicationName("ModDB Browser")
+    app.setApplicationDisplayName("ModDB Browser")
+    app.setDesktopFileName(_DESKTOP_ID)
+    _write_desktop_entry()
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "moddb-browser.png")))
     app.setStyle("Fusion")
     try:
         config = json.loads(sys.stdin.readline() if not sys.stdin.isatty() else "")
