@@ -84,6 +84,15 @@ _HIDE_ADS_CSS = (
     " div[id*='-ad-'], div[class*='advert'], div[id^='div-gpt-ad'],"
     " .adbox { display: none !important; }"
 )
+#: Leaves only the addon list and addon pages: ModDB's header and menus, the
+#: Anomaly blurb, the sidebar, the list's filter form and the footer go, and
+#: the content column takes the freed width.
+_TRIM_CSS = (
+    " body > #body > .container > header, #body footer, .headermediabox,"
+    " .nextmediabox, .column.span-all, .column.span-300.last,"
+    " #downloadsbrowse form.filter, #adBanner { display: none !important; }"
+    " .column.span-300-alt { width: 100% !important; margin: 0 !important; }"
+)
 
 
 #: Height (px) of everything in the top bar, kept slim.
@@ -91,12 +100,12 @@ _BAR_HEIGHT = 26
 
 
 def page_css(tokens: dict) -> str:
-    """CSS added to every page: hides the empty ad boxes, and draws the
-    scrollbars like COMMANDER's own (thin, theme colours)."""
+    """CSS added to every page: hides the empty ad boxes and everything but
+    the addons, and draws the scrollbars like COMMANDER's own (thin, theme colours)."""
     thumb = tokens.get("border_strong", "#3a4a33")
     # The standard properties, not ::-webkit-scrollbar: Chromium ignores those
     # as soon as a page sets scrollbar-color or scrollbar-width itself.
-    return _HIDE_ADS_CSS + (
+    return _HIDE_ADS_CSS + _TRIM_CSS + (
         f" * {{ scrollbar-color: {thumb} transparent !important;"
         " scrollbar-width: thin !important; }"
     )
