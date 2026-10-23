@@ -105,6 +105,12 @@ def _keep_mcm(gamma: Path) -> None:
     os.replace(source, target)
 
 
+def _copy_number(name: str) -> int:
+    """1 for KEPT_MCM itself, N for the "KEPT_MCM N" _keep_mcm() made."""
+    rest = name[len(KEPT_MCM):].strip()
+    return int(rest) if rest.isdigit() else 1 if not rest else 0
+
+
 def _place_kept_mcm(modlist: Path, kept: list[str]) -> None:
     """Put kept MCM mods where ROMEO's is, on, and turn ROMEO's off."""
     lines = read_lines(modlist)
@@ -171,7 +177,11 @@ def install(
     clean_appdata(anomaly / "appdata")
     if old_modlist is not None:
         (profile_dir / "modlist.txt.before-update").write_bytes(old_modlist)
-    kept = sorted(p.name for p in (gamma / "mods").iterdir() if p.name.startswith(KEPT_MCM))
+    # Newest copy first, so it wins: "<KEPT_MCM> 3" over "<KEPT_MCM> 2" over "<KEPT_MCM>".
+    kept = sorted(
+        (p.name for p in (gamma / "mods").iterdir() if p.name.startswith(KEPT_MCM)),
+        key=_copy_number, reverse=True,
+    )
     if kept:
         _place_kept_mcm(profile_dir / "modlist.txt", kept)
     (profile_dir / _STATE).write_text(json.dumps({"mcm_sha256": _mcm_hash(gamma)}))

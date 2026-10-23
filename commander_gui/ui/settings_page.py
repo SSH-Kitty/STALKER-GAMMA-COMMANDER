@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__, __version_label__, gui_settings
+from .. import __version__, __version_label__, gui_settings, plugins
 from ..config import logs_dir
 from ..deck_launch import steam_deck_model
 from ..discord_rpc import (
@@ -60,6 +60,7 @@ from .common import (
     discord_presence_state,
     make_card,
     mo2_running,
+    open_in_file_manager,
     pick_shortcuts_vdf,
     populate_runner_combo,
     steam_running,
@@ -67,6 +68,7 @@ from .common import (
 )
 from .dashboard import _card_title
 from .dialogs import MessageBox as QMessageBox
+from .moddb_plugin import controller as moddb_controller
 from .multiplayer_page import (
     _columns,
     _divider,
@@ -165,6 +167,7 @@ _TABS = (
     ("Game", "game"),
     ("Appearance", "appearance"),
     ("Integrations", "integrations"),
+    ("Plugins", "plugins"),
     ("Maintenance", "maintenance"),
 )
 
@@ -263,6 +266,12 @@ class SettingsPage(QWidget):
         self.tab_group.button(0).setChecked(True)
         self._show_tab(0)
         QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(self._build_box, 0, 80))
+
+    def show_plugins(self) -> None:
+        """The Plugins tab (the Mod manager's ModDB button, before it's installed)."""
+        index = next(i for i, (_name, key) in enumerate(_TABS) if key == "plugins")
+        self.tab_group.button(index).setChecked(True)
+        self._show_tab(index)
 
     def _general_tab(self) -> QWidget:
         page, layout = _panel()
@@ -586,6 +595,136 @@ class SettingsPage(QWidget):
         ))
         layout.addWidget(steam)
         return page
+
+    def _plugins_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+        self._moddb = moddb_controller(self.window)
+        # One bordered list, one slim row per plugin: name and status, a
+        # one-line description, actions on the right.
+        frame = QFrame()
+        frame.setObjectName("statTile")
+        rows = QVBoxLayout(frame)
+        rows.setContentsMargins(14, 4, 14, 4)
+        rows.setSpacing(0)
+
+        row = QWidget()
+        row.setObjectName("panelTransparent")
+        line = QHBoxLayout(row)
+        line.setContentsMargins(0, 8, 0, 8)
+        line.setSpacing(8)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        heading = QHBoxLayout()
+        heading.setSpacing(10)
+        name = QLabel(tr("ModDB browser"))
+        name.setObjectName("settingTitle")
+        heading.addWidget(name)
+        self._plugin_status = QLabel()
+        self._plugin_status.setObjectName("dim")
+        heading.addWidget(self._plugin_status)
+        heading.addStretch(1)
+        text.addLayout(heading)
+        text.addWidget(_hint(tr("Browse and search ModDB, then install what you download.")))
+        line.addLayout(text, 1)
+
+        self._plugin_delete_downloads = _action(tr("Delete downloads"))
+        self._plugin_delete_downloads.setObjectName("settingDanger")
+        self._plugin_delete_downloads.clicked.connect(self._delete_plugin_downloads)
+        self._plugin_open_folder = _action(tr("Open folder"))
+        self._plugin_open_folder.clicked.connect(self._open_plugin_downloads)
+        for button in (self._plugin_delete_downloads, self._plugin_open_folder):
+            button.setToolTip(tr("Mods the ModDB browser downloaded. Safe to delete once they're installed."))
+        self._plugin_from_file = _action(tr("From a file…"))
+        self._plugin_from_file.setToolTip(tr("Install a plugin .tar.xz you already downloaded from COMMANDER's GitHub releases."))
+        self._plugin_from_file.clicked.connect(self._install_plugin_file)
+        self._plugin_install = _action("")
+        self._plugin_install.clicked.connect(self._moddb.install)
+        self._plugin_open = _action(tr("Open"))
+        self._plugin_open.clicked.connect(self._moddb.open)
+        self._plugin_cancel = _action(tr("Cancel"))
+        self._plugin_cancel.clicked.connect(self._moddb.cancel)
+        self._plugin_remove = _action(tr("Remove"))
+        self._plugin_remove.setObjectName("settingDanger")
+        self._plugin_remove.clicked.connect(self._moddb.remove)
+        for button in (
+            self._plugin_delete_downloads, self._plugin_open_folder,
+            self._plugin_from_file, self._plugin_install,
+            self._plugin_open, self._plugin_cancel, self._plugin_remove,
+        ):
+            line.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        rows.addWidget(row)
+        layout.addWidget(frame)
+
+        self._moddb.changed.connect(self._render_plugins)
+        self._moddb.line.connect(self._plugin_status.setText)
+        self._render_plugins()
+        return page
+
+    def _render_plugins(self) -> None:
+        moddb = self._moddb
+        info = plugins.installed()
+        outdated = info is not None and plugins.needs_update(info)
+        self._plugin_status.setToolTip("")
+        if moddb.busy:
+            pass  # the install's own progress lines show
+        elif info is None:
+            self._plugin_status.setText(tr("Not installed"))
+        elif outdated:
+            self._plugin_status.setText(tr("Update needed"))
+            self._plugin_status.setToolTip(tr("An update is needed before it can open, for security fixes or to match this COMMANDER."))
+        elif moddb.running:
+            self._plugin_status.setText(tr("Running"))
+        else:
+            self._plugin_status.setText(tr("Installed"))
+        self._plugin_install.setText(tr("Update") if outdated else tr("Install"))
+        self._plugin_install.setToolTip(tr("A separate download of about 200 MB."))
+        can_install = not moddb.busy and (info is None or outdated)
+        self._plugin_install.setVisible(can_install)
+        self._plugin_install.setEnabled(not moddb.running)
+        self._plugin_from_file.setVisible(can_install)
+        self._plugin_from_file.setEnabled(not moddb.running)
+        self._plugin_open.setVisible(info is not None and not outdated and not moddb.busy)
+        self._plugin_open.setEnabled(not moddb.running)
+        self._plugin_cancel.setVisible(moddb.cancellable)
+        self._plugin_remove.setVisible(info is not None and not moddb.busy)
+        self._plugin_remove.setEnabled(not moddb.running)
+        downloads = bool(plugins.downloaded_files())
+        self._plugin_open_folder.setVisible(info is not None or downloads)
+        self._plugin_delete_downloads.setVisible(info is not None or downloads)
+        # A download in progress, or one being installed, would break.
+        self._plugin_delete_downloads.setEnabled(
+            downloads and not moddb.running and not self.window.install_busy
+        )
+
+    def _install_plugin_file(self) -> None:
+        name, _ = QFileDialog.getOpenFileName(
+            self, tr("Pick the plugin file"), str(Path.home()), tr("Plugin files") + " (*.tar.xz)"
+        )
+        if name:
+            self._moddb.install_file(Path(name))
+
+    def _delete_plugin_downloads(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            tr("Delete all ModDB downloads?"),
+            tr("This deletes every mod archive the ModDB browser plugin downloaded."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            info=tr("Mods you already installed stay installed."),
+            labels={QMessageBox.StandardButton.Yes: tr("Delete downloads"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            plugins.delete_downloads()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Couldn't delete the downloads"), str(exc))
+        self._render_plugins()
+
+    def _open_plugin_downloads(self) -> None:
+        folder = plugins.downloads_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        open_in_file_manager(folder)
 
     def _maintenance_tab(self) -> QWidget:
         page, layout = _panel()
@@ -1060,6 +1199,7 @@ class SettingsPage(QWidget):
 
     def refresh(self) -> None:
         state = gui_settings.load_gui_settings()
+        self._render_plugins()
 
         from .main_window import NAV_ITEMS  # deferred: avoids an import cycle
 

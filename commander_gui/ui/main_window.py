@@ -92,6 +92,7 @@ from .dialogs import MessageBox as QMessageBox
 from .dialogs import ProgressDialog
 from .install_page import InstallPage, _resume_state_matches
 from .mod_manager_page import ModManagerPage
+from .moddb_plugin import controller as moddb_controller
 from .multiplayer_page import MultiplayerPage
 from .play_page import PlayPage
 from .profiles_page import ProfilesPage
@@ -1560,7 +1561,9 @@ class MainWindow(QMainWindow):
         about apply_theme() itself is unsafe then, to keep the two pickers'
         behavior consistent and predictable for the user.
         """
-        if self.install_busy:
+        # The ModDB plugin's download isn't install_busy, but the rebuild
+        # would orphan its task the same way and leave it "busy" for good.
+        if self.install_busy or moddb_controller(self).busy:
             QMessageBox.warning(self, tr("Please wait"), busy_message)
         elif mo2_running():
             QMessageBox.warning(

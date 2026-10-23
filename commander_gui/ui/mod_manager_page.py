@@ -125,6 +125,7 @@ from .dialogs import InputDialog as QInputDialog
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import add_buttons, add_close_button, style_window
 from .fomod_dialog import FomodWizardDialog
+from .moddb_plugin import controller as moddb_controller
 
 #: Short timeout: these are metadata lookups, not installs.
 _QUERY_TIMEOUT = 30
@@ -940,6 +941,12 @@ class ModManagerPage(QWidget):
         )
         self.install_button.clicked.connect(self._install_mod)
         toolbar.addWidget(self.install_button)
+        self.moddb_button = QPushButton(tr("Get mods from ModDB"))
+        self.moddb_button.setToolTip(
+            tr("Browse ModDB and install what you download. Needs the ModDB browser plugin from Settings > Plugins.")
+        )
+        self.moddb_button.clicked.connect(lambda: moddb_controller(self.window).open())
+        toolbar.addWidget(self.moddb_button)
         self.new_category_button = QPushButton(tr("New Category"))
         self.new_category_button.setToolTip(
             tr("Add an MO2 separator category to this modlist.")

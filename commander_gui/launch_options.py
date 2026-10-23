@@ -7,15 +7,13 @@ to a built launch command. Qt-free.
 
 from __future__ import annotations
 
-import hashlib
-import io
+import functools
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
-import zipfile
 from pathlib import Path
 
 from .deck_launch import in_game_mode
@@ -72,9 +70,8 @@ _LSFG_LAYERS = {
 #: lsfg-vk 2 reads lsfg-vk.dll (Lossless Scaling's lsfg-vk beta branch),
 #: lsfg-vk 1 reads Lossless.dll (Lossless Scaling 3.1 and 3.2).
 _LOSSLESS_DLLS = ("lsfg-vk.dll", "Lossless.dll")
-#: lsfg-vk 1.0's release zip, pinned to the build install_lsfg1() was tested with.
-LSFG1_ZIP_URL = "https://github.com/PancakeTAS/lsfg-vk/releases/download/v1.0.0/lsfg-vk-1.0.0-x86_64.zip"
-_LSFG1_ZIP_SHA256 = "bb04733dfee270e9d035fa6b68d378a0614742bc0a3d5a450f2c03b617dd95bf"
+#: lsfg-vk 1.0's library, shipped in COMMANDER (MIT, from its v1.0.0 release).
+_BUNDLED_LSFG1 = Path(__file__).resolve().parent.parent / "cli" / "usr" / "lib" / "lsfg-vk-1" / "liblsfg-vk.so"
 #: (path, size, mtime) -> whether lsfg-vk 2 loads that DLL's shaders.
 _V2_CHECKS: dict[tuple[str, int, int], bool] = {}
 
@@ -89,10 +86,13 @@ def _data_home() -> Path:
 def lsfg_versions() -> set[str]:
     """Installed lsfg-vk major versions: "2", "1", both or neither."""
     dirs = [str(_data_home()), *os.environ.get("XDG_DATA_DIRS", "").split(":"), "/usr/local/share", "/usr/share"]
-    return {
+    versions = {
         version for version, layer in _LSFG_LAYERS.items()
         if any((Path(d) / layer).is_file() for d in dirs if d)
     }
+    if _BUNDLED_LSFG1.is_file():
+        versions.add("1")
+    return versions
 
 
 def native_dll(path: Path) -> bool:
@@ -154,38 +154,53 @@ def frame_gen_version(dll: Path | None = None) -> str | None:
     versions = lsfg_versions()
     if "2" in versions and works_with_v2(dll):
         return "2"
-    if "1" in versions and native_dll(dll):
+    # lsfg-vk.dll is the lsfg-vk 2 branch's: only lsfg-vk 2 runs it.
+    if "1" in versions and native_dll(dll) and dll.name.lower() != "lsfg-vk.dll":
         return "1"
     return None
 
 
-def install_lsfg1() -> None:
-    """Install lsfg-vk 1.0 for this user, from its release zip.
+@functools.cache  # once per run: the launch preview resolves this on every edit
+def _install_lsfg1() -> None:
+    """Set up the bundled lsfg-vk 1.0 for this user, if it isn't already.
 
-    Only the layer: its library, and a manifest that names the library by
-    full path (the zip's bare name only loads from system folders, so a
-    plain extract into ~/.local never loads) and that only loads when
-    LSFG_LEGACY is set. Without that every Vulkan app would load it, and
-    with no config file it writes a version 1 one over lsfg-vk 2's path.
+    Copied out of COMMANDER, whose path changes with each AppImage run and
+    may not be visible inside Proton's Steam Runtime container. The manifest
+    names the library by full path (a bare name only loads from system
+    folders) and only loads it when LSFG_LEGACY is set: without that every
+    Vulkan app would load it.
     """
     from .atomic import write_bytes
-    from .network import read_response_bytes, urlopen_with_retry
 
-    with urlopen_with_retry(LSFG1_ZIP_URL, timeout=30) as response:
-        data = read_response_bytes(response, 100 * 1024 * 1024)
-    if hashlib.sha256(data).hexdigest() != _LSFG1_ZIP_SHA256:
-        raise ValueError("The download doesn't match lsfg-vk 1.0.0. Try again later.")
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        library = archive.read("lib/liblsfg-vk.so")
-        manifest = json.loads(archive.read("share/" + _LSFG_LAYERS["1"].as_posix()))
+    if not _BUNDLED_LSFG1.is_file():
+        return
+    library = _BUNDLED_LSFG1.read_bytes()
     library_path = _data_home() / "lsfg-vk-1" / "liblsfg-vk.so"
-    library_path.parent.mkdir(parents=True, exist_ok=True)
-    write_bytes(library_path, library, lock=False)
-    manifest["layer"]["library_path"] = str(library_path)
-    manifest["layer"]["enable_environment"] = {"LSFG_LEGACY": "1"}
+    if not library_path.is_file() or library_path.read_bytes() != library:
+        library_path.parent.mkdir(parents=True, exist_ok=True)
+        write_bytes(library_path, library, lock=False)
+    manifest = {
+        "file_format_version": "1.0.0",
+        "layer": {
+            "name": "VK_LAYER_LS_frame_generation",
+            "type": "GLOBAL",
+            "api_version": "1.4.313",
+            "library_path": str(library_path),
+            "implementation_version": "1",
+            "description": "Lossless Scaling frame generation layer",
+            "functions": {
+                "vkGetInstanceProcAddr": "layer_vkGetInstanceProcAddr",
+                "vkGetDeviceProcAddr": "layer_vkGetDeviceProcAddr",
+            },
+            "enable_environment": {"LSFG_LEGACY": "1"},
+            "disable_environment": {"DISABLE_LSFG": "1"},
+        },
+    }
+    data = (json.dumps(manifest, indent=2) + "\n").encode()
     manifest_path = _data_home() / _LSFG_LAYERS["1"]
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    write_bytes(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode(), lock=False)
+    if not manifest_path.is_file() or manifest_path.read_bytes() != data:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        write_bytes(manifest_path, data, lock=False)
 
 
 def _lsfg1_config() -> Path:
@@ -213,6 +228,7 @@ def _resolve_frame_gen(env: dict[str, str]) -> None:
         env.update(names)
         env.setdefault("LSFGVK_DLL_PATH", str(dll))
     elif version == "1":
+        _install_lsfg1()
         env["LSFG_LEGACY"] = "1"
         env["LSFG_DLL_PATH"] = str(dll)
         env["LSFG_CONFIG"] = str(_lsfg1_config())

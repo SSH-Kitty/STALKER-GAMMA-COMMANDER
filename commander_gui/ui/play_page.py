@@ -584,7 +584,6 @@ class PlayPage(QWidget):
             lambda: self._debounce_timer.start()
         )
         self.custom_options_edit.textChanged.connect(self._sync_option_toggles)
-        self.custom_options_edit.textChanged.connect(self._sync_frame_gen_card)
         options_layout.addWidget(self.custom_options_edit)
         # One labelled row per group; equal-width columns line the chips up
         # across rows and fill the card.
@@ -804,81 +803,83 @@ class PlayPage(QWidget):
     #: A None value leaves the variable out, so lsfg-vk uses its default.
     _FRAME_GEN_ROWS = (
         ("Multiplier", launch_options.FG_MULTIPLIER, (("2x", "2"), ("3x", "3"), ("4x", "4"))),
-        ("Motion detail", launch_options.FG_FLOW_SCALE, (("100%", None), ("75%", "0.75"), ("50%", "0.5"))),
-        ("Model", launch_options.FG_PERFORMANCE, (("Quality", None), ("Performance", "1"))),
+        ("Detail", launch_options.FG_FLOW_SCALE, (("100%", None), ("75%", "0.75"), ("50%", "0.5"))),
+        ("Mode", launch_options.FG_PERFORMANCE, (("Quality", None), ("Performance", "1"))),
     )
+
+    def _frame_gen_button(self, text: str, key: str | None, value) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("segment")
+        button.setCheckable(True)
+        button.setFixedHeight(34)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda _=False: self._set_frame_gen(key, value))
+        return button
 
     def _build_frame_gen_card(self) -> QFrame:
         """lsfg-vk frame generation: on/off and its settings, all kept as
-        variables in the launch options text. Locked, with what to install,
-        until lsfg-vk and Lossless Scaling are both there."""
+        variables in the launch options text. Locked, with what's missing,
+        until there's a Lossless Scaling DLL lsfg-vk can run."""
         card, layout = make_card()
-        layout.setSpacing(10)
-        layout.addWidget(section_label(tr("Frame generation"), level=2))
-        layout.addWidget(info_label(tr(
-            "Smoother motion from lsfg-vk (Lossless Scaling frame generation). "
-            "Adds a little input lag and works best from 40 FPS up. Not with OpenGL."
-        )))
+        self._frame_gen_card = card
+        layout.setSpacing(12)
+        # (row's buttons with their values, variable or None for on/off)
+        self._frame_gen_rows: list[tuple[list[tuple[QPushButton, object]], str | None]] = []
+
+        header = QHBoxLayout()
+        header.addWidget(section_label(tr("Frame generation"), level=2))
+        header.addStretch(1)
+        toggle = []
+        for text, value in ((tr("Off"), False), (tr("On"), True)):
+            button = self._frame_gen_button(text, None, value)
+            button.setMinimumWidth(72)
+            header.addWidget(button)
+            toggle.append((button, value))
+        self._frame_gen_rows.append((toggle, None))
+        layout.addLayout(header)
+        layout.addWidget(info_label(tr("Extra generated frames for smoother motion. Best above 40 FPS, adds a little input lag.")))
         self._frame_gen_missing = info_label("")
         self._frame_gen_missing.setObjectName("warn")
         self._frame_gen_missing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self._frame_gen_missing)
-        self._get_lossless_button = QPushButton(tr("Get Lossless Scaling on Steam"))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+        for row, (label, key, choices) in enumerate(self._FRAME_GEN_ROWS):
+            grid.addWidget(info_label(tr(label), wrap=False), row, 0)
+            buttons = QHBoxLayout()
+            buttons.setSpacing(8)
+            row_buttons = []
+            for text, value in choices:
+                button = self._frame_gen_button(tr(text), key, value)
+                buttons.addWidget(button, 1)
+                row_buttons.append((button, value))
+            grid.addLayout(buttons, row, 1)
+            self._frame_gen_rows.append((row_buttons, key))
+        layout.addLayout(grid)
+        layout.addStretch(1)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        self._dll_label = info_label("", wrap=False)
+        self._dll_label.setObjectName("dim")
+        footer.addWidget(self._dll_label, 1)
+        self._get_lossless_button = QPushButton(tr("Get Lossless Scaling"))
         self._get_lossless_button.setObjectName("secondary")
-        self._get_lossless_button.setMinimumHeight(34)
+        self._get_lossless_button.setProperty("compact", True)
         self._get_lossless_button.clicked.connect(
             lambda: open_url("https://store.steampowered.com/app/993090/Lossless_Scaling/")
         )
-        self._choose_dll_button = QPushButton(tr("Choose DLL..."))
+        footer.addWidget(self._get_lossless_button)
+        self._choose_dll_button = QPushButton(tr("Choose DLL"))
         self._choose_dll_button.setObjectName("secondary")
-        self._choose_dll_button.setMinimumHeight(34)
-        self._choose_dll_button.setToolTip(tr("Pick Lossless Scaling's lsfg-vk.dll (or Lossless.dll) yourself, for a copy outside your Steam libraries."))
+        self._choose_dll_button.setProperty("compact", True)
+        self._choose_dll_button.setToolTip(tr("Pick Lossless Scaling's Lossless.dll or lsfg-vk.dll yourself."))
         self._choose_dll_button.clicked.connect(self._choose_lossless_dll)
-        dll_row = QHBoxLayout()
-        dll_row.setSpacing(12)
-        dll_row.addWidget(self._get_lossless_button, 1)
-        dll_row.addWidget(self._choose_dll_button, 1)
-        self._install_lsfg1_button = QPushButton(tr("Install lsfg-vk 1.0"))
-        self._install_lsfg1_button.setObjectName("secondary")
-        self._install_lsfg1_button.setMinimumHeight(34)
-        self._install_lsfg1_button.setToolTip(tr("Download lsfg-vk 1.0 from its GitHub release and set it up for your user, next to any lsfg-vk 2.0. It only loads for games COMMANDER starts with frame generation on."))
-        self._install_lsfg1_button.clicked.connect(self._install_lsfg1)
-        dll_row.addWidget(self._install_lsfg1_button, 1)
-        layout.addLayout(dll_row)
-        self._dll_label = info_label("")
-        self._dll_label.setObjectName("dim")
-        self._dll_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self._dll_label)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(8)
-        for column in (1, 2, 3):
-            grid.setColumnStretch(column, 1)
-        rows = (
-            ("Frame generation", None, ((tr("Off"), False), (tr("On"), True))),
-            *((label, key, tuple((tr(text), value) for text, value in choices))
-              for label, key, choices in self._FRAME_GEN_ROWS),
-        )
-        # (row's buttons with their values, variable or None for on/off)
-        self._frame_gen_rows: list[tuple[list[tuple[QPushButton, object]], str | None]] = []
-        for row, (label, key, choices) in enumerate(rows):
-            grid.addWidget(info_label(tr(label), wrap=False), row, 0)
-            buttons = []
-            for column, (text, value) in enumerate(choices, 1):
-                button = QPushButton(text)
-                button.setObjectName("segment")
-                button.setCheckable(True)
-                button.setFixedHeight(34)
-                button.setCursor(Qt.CursorShape.PointingHandCursor)
-                button.clicked.connect(
-                    lambda _=False, key=key, value=value: self._set_frame_gen(key, value)
-                )
-                grid.addWidget(button, row, column)
-                buttons.append((button, value))
-            self._frame_gen_rows.append((buttons, key))
-        layout.addLayout(grid)
-        layout.addStretch(1)
+        footer.addWidget(self._choose_dll_button)
+        layout.addLayout(footer)
         return card
 
     def _choose_lossless_dll(self) -> None:
@@ -890,23 +891,6 @@ class PlayPage(QWidget):
         if path:
             gui_settings.save_gui_settings(lossless_dll=path)
             self._refresh_preview()
-
-    def _install_lsfg1(self) -> None:
-        self._install_lsfg1_button.setEnabled(False)
-        self._install_lsfg1_button.setText(tr("Installing lsfg-vk 1.0..."))
-        task = BackgroundTask(launch_options.install_lsfg1, parent=self)
-        task.result.connect(lambda _r: self._lsfg1_install_done(None))
-        task.error.connect(self._lsfg1_install_done)
-        self._lsfg1_task = task
-        task.start()
-
-    def _lsfg1_install_done(self, error: str | None) -> None:
-        self._lsfg1_task = None
-        self._install_lsfg1_button.setEnabled(True)
-        self._install_lsfg1_button.setText(tr("Install lsfg-vk 1.0"))
-        if error:
-            QMessageBox.warning(self, tr("Couldn't install lsfg-vk 1.0"), error)
-        self._refresh_preview()
 
     def _set_frame_gen(self, key: str | None, value) -> None:
         text = self.custom_options_edit.text()
@@ -930,32 +914,30 @@ class PlayPage(QWidget):
         if not versions:
             steps.append(tr("Install lsfg-vk from your distro's packages (on Arch and CachyOS: sudo pacman -S lsfg-vk), or from lsfg-vk.dev."))
         dll = launch_options.lossless_dll()
-        dll_missing = dll is None
         version = launch_options.frame_gen_version(dll) if versions and dll else None
-        if dll_missing:
-            steps.append(tr("Buy and install Lossless Scaling on Steam. It's a Windows app, so first tick Properties > Compatibility > Force the use of a specific Steam Play compatibility tool. Then pick the lsfg-vk branch under Properties > Betas.")
-                         + " " + tr("Have the DLL somewhere else? Pick it with Choose DLL."))
+        if dll is None:
+            steps.append(tr("Get Lossless Scaling on Steam (paid). To install it, first set Properties > Compatibility to a Proton version. Have the DLL already? Use Choose DLL."))
         elif versions and version is None:
             if not launch_options.native_dll(dll):
-                steps.append(tr("This file isn't Lossless Scaling's frame generation DLL. Pick Lossless.dll or lsfg-vk.dll with Choose DLL."))
+                steps.append(tr("That file isn't Lossless Scaling's frame generation DLL. Pick Lossless.dll."))
             else:
-                steps.append(tr("lsfg-vk 2.0 can't use this DLL: it needs lsfg-vk.dll from Lossless Scaling's lsfg-vk branch on Steam. A Lossless.dll from Lossless Scaling 3.1 or 3.2 works with lsfg-vk 1.0 instead: click Install lsfg-vk 1.0."))
-        if dll:
-            self._dll_label.setText(
-                tr("DLL: {path} (runs on lsfg-vk {version}.0)", path=dll, version=version)
-                if version else tr("DLL: {path}", path=dll)
-            )
-        self._dll_label.setVisible(not dll_missing)
-        if steps:
-            lines = [tr("Needs lsfg-vk and Lossless Scaling (paid, on Steam). Still to do:")]
-            lines += [f"{n}. {step}" for n, step in enumerate(steps, 1)]
-            lines.append(tr("This card unlocks by itself once that's done."))
-            self._frame_gen_missing.setText("\n".join(lines))
+                steps.append(tr("lsfg-vk.dll needs lsfg-vk 2.0. Install it (on Arch and CachyOS: sudo pacman -S lsfg-vk), or pick Lossless.dll instead."))
+        if dll is None:
+            self._dll_label.setText(tr("No DLL found"))
+        elif version:
+            self._dll_label.setText(tr("{name} on lsfg-vk {version}.0", name=dll.name, version=version))
+        else:
+            self._dll_label.setText(dll.name)
+        self._dll_label.setToolTip(str(dll or ""))
+        self._frame_gen_missing.setText("\n".join(
+            steps if len(steps) == 1 else [f"{n}. {step}" for n, step in enumerate(steps, 1)]
+        ))
         self._frame_gen_missing.setVisible(bool(steps))
-        self._get_lossless_button.setVisible(dll_missing)
-        self._install_lsfg1_button.setVisible(
-            bool(dll) and version is None and "1" not in versions and launch_options.native_dll(dll)
-        )
+        self._get_lossless_button.setVisible(dll is None)
+        # lsfg-vk reads its settings once, at launch: no changing them mid-game.
+        running = self._launching
+        self._choose_dll_button.setEnabled(not running)
+        self._frame_gen_card.setToolTip(tr("Close the game to change frame generation.") if running else "")
         for buttons, key in self._frame_gen_rows:
             current = on if key is None else launch_options.var(text, key)
             if key == launch_options.FG_MULTIPLIER:
@@ -964,7 +946,7 @@ class PlayPage(QWidget):
                 button.setChecked(value == current)
                 # Left on (typed in, or set before an uninstall): Off stays
                 # clickable so it can still be switched off.
-                button.setEnabled(on and not steps if key else not steps or (on and value is False))
+                button.setEnabled(not running and (on and not steps if key else not steps or (on and value is False)))
         return not steps
 
     def _persist_dirs(self) -> None:
@@ -2651,6 +2633,7 @@ class PlayPage(QWidget):
         self.open_mo2_button.setEnabled(not launching)
         self.direct_button.setEnabled(not launching and (not self._coop_on() or self._plain_coop_on()))
         self.shortcut_button.setEnabled(not launching)
+        self._sync_frame_gen_card()
         self.launch_state_changed.emit(launching)
 
     def on_busy_changed(self, busy: bool) -> None:

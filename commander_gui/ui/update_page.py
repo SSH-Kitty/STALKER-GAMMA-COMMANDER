@@ -484,7 +484,7 @@ class UpdatePage(QWidget):
         self.window.refresh_settings()
         self._update_button_states()
         profile = self.window.settings.active_profile
-        if profile is not None and modded_exes.load_state(str(profile.anomaly)):
+        if profile is not None and str(profile.anomaly).strip() and modded_exes.load_state(profile.anomaly):
             # Exes COMMANDER installed: a GAMMA update must not swap them back.
             self.keep_exes_cb.setChecked(True)
         self.exes_card.refresh()

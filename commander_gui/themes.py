@@ -678,6 +678,11 @@ QPushButton#secondary[besidePrimary="true"] {
     font-size: %FONT_SIZE%;
     font-weight: bold;
 }
+/* A small secondary button in a card's footer (Choose DLL). */
+QPushButton#secondary[compact="true"] {
+    padding: 6px 14px;
+    font-size: 13px;
+}
 QPushButton#secondary:hover {
     background-color: $btn_hover;
     border-color: $secondary_hover_border;
@@ -768,6 +773,13 @@ QPushButton#segment:disabled {
     border-color: $border;
     border-style: dashed;
     color: $text_disabled;
+}
+/* Locked while picked (frame generation mid-game): still shows the pick. */
+QPushButton#segment:checked:disabled {
+    background-color: $chip;
+    border-color: $border_strong;
+    border-style: solid;
+    color: $text;
 }
 QPushButton#tertiary {
     background: transparent;

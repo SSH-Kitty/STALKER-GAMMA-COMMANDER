@@ -107,6 +107,12 @@ class InstallTest(unittest.TestCase):
             self.assertEqual((gamma / f"mods/{KEPT_MCM}/gamedata/configs/axr_options.ltx").read_text(), "player")
             self.assertIn(f"+{KEPT_MCM}", (profile / "modlist.txt").read_text().splitlines())
 
+            # Kept again: the newer copy wins (listed first) over the older one.
+            mcm.write_text("player 2")
+            install(release("v4", ["xx-A"]), ROOT, PROFILE, gamma, anomaly, keep_mcm=True)
+            lines = (profile / "modlist.txt").read_text().splitlines()
+            self.assertLess(lines.index(f"+{KEPT_MCM} 2"), lines.index(f"+{KEPT_MCM}"))
+
 
 if __name__ == "__main__":
     unittest.main()

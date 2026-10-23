@@ -16,6 +16,7 @@ htmlcov/
 
 # Build artifacts / release bundles - do not commit (hundreds of MB)
 *.tar.gz
+*.tar.xz
 *.zip
 *.AppImage
 *.sha512sum

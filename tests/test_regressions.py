@@ -14153,7 +14153,7 @@ class LaunchOptionChipTests(unittest.TestCase):
             data, library = Path(tmp, "data"), Path(tmp, "lib")
             with patch.dict(os.environ, {"XDG_DATA_HOME": str(data), "XDG_DATA_DIRS": ""}), patch(
                 "commander_gui.launcher._steam_library_paths", return_value=[library]
-            ):
+            ), patch.object(launch_options, "_BUNDLED_LSFG1", Path(tmp, "none.so")):
                 self.assertIsNone(launch_options.lossless_dll())
                 layer = data / "vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json"
                 layer.parent.mkdir(parents=True)
@@ -14211,42 +14211,36 @@ class LaunchOptionChipTests(unittest.TestCase):
                 env: dict[str, str] = {}
                 with patch.object(launch_options, "lossless_dll", return_value=dll), patch.object(
                     launch_options, "frame_gen_version", return_value=version
-                ), patch.object(launch_options, "_lsfg1_config", return_value=conf):
+                ), patch.object(launch_options, "_lsfg1_config", return_value=conf), patch.object(
+                    launch_options, "_install_lsfg1"
+                ):
                     launch_options.apply(["game"], env, text)
                 self.assertEqual(env, expected, version)
 
-    def test_install_lsfg1_points_the_manifest_at_the_library(self):
-        """The release zip names its library bare, which never loads from
-        ~/.local; the installed manifest names it by full path and only
-        loads with LSFG_LEGACY set."""
-        import hashlib
-        import zipfile
-
+    def test_bundled_lsfg1_is_set_up_with_its_library_by_full_path(self):
+        """A bare library name never loads from ~/.local; the manifest names
+        the copied library by full path and only loads with LSFG_LEGACY set.
+        lsfg-vk 2's lsfg-vk.dll never goes to the bundled lsfg-vk 1."""
         from commander_gui import launch_options
 
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("lib/liblsfg-vk.so", b"so")
-            archive.writestr(
-                "share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json",
-                json.dumps({"layer": {"library_path": "liblsfg-vk.so"}}),
-            )
-        data = buffer.getvalue()
-        response = Mock()
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ, {"XDG_DATA_HOME": tmp, "XDG_DATA_DIRS": ""}
-        ), patch("commander_gui.network.urlopen_with_retry", return_value=response), patch(
-            "commander_gui.network.read_response_bytes", return_value=data
-        ), patch.object(launch_options, "_LSFG1_ZIP_SHA256", hashlib.sha256(data).hexdigest()):
-            launch_options.install_lsfg1()
-            self.assertIn("1", launch_options.lsfg_versions())
-            layer = json.loads(Path(tmp, "vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json").read_text())["layer"]
-            self.assertEqual(Path(layer["library_path"]).read_bytes(), b"so")
-            self.assertEqual(layer["enable_environment"], {"LSFG_LEGACY": "1"})
-            with patch.object(launch_options, "_LSFG1_ZIP_SHA256", "0" * 64), self.assertRaises(ValueError):
-                launch_options.install_lsfg1()
+        ):
+            bundled = Path(tmp, "bundle", "liblsfg-vk.so")
+            bundled.parent.mkdir()
+            bundled.write_bytes(b"so")
+            with patch.object(launch_options, "_BUNDLED_LSFG1", bundled):
+                self.assertIn("1", launch_options.lsfg_versions())
+                launch_options._install_lsfg1.cache_clear()
+                launch_options._install_lsfg1()
+                launch_options._install_lsfg1.cache_clear()
+                layer = json.loads(Path(tmp, "vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json").read_text())["layer"]
+                self.assertEqual(Path(layer["library_path"]).read_bytes(), b"so")
+                self.assertEqual(layer["enable_environment"], {"LSFG_LEGACY": "1"})
+                with patch.object(launch_options, "native_dll", return_value=True):
+                    self.assertEqual(launch_options.frame_gen_version(Path(tmp, "Lossless.dll")), "1")
+                    self.assertIsNone(launch_options.frame_gen_version(Path(tmp, "lsfg-vk.dll")))
+        self.assertTrue(launch_options._BUNDLED_LSFG1.is_file())
 
     def test_quiet_wine_logs_and_proton_log_exclude_each_other(self):
         from commander_gui import launch_options

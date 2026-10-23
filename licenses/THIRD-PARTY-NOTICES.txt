@@ -78,6 +78,19 @@ curl-impersonate                   (cli/usr/bin/libcurl-impersonate.so)
     (LICENSE_LIBIDN2_LGPL3, LICENSE_LIBIDN2_GPL2, LICENSE_LIBIDN2_GPL3,
     LICENSE_LIBIDN2_UNICODE) - source: https://ftp.gnu.org/gnu/libidn/
 
+lsfg-vk 1.0.0                     (cli/usr/lib/lsfg-vk-1/liblsfg-vk.so)
+  Copyright (c) 2025 lsfg-vk.
+  License: MIT (lsfg-vk/LICENSE.md)
+  Source:  https://github.com/PancakeTAS/lsfg-vk/tree/v1.0.0
+  The library from the v1.0.0 release zip. It is statically built with:
+  - dxbc - Copyright (c) Philip Rebohle and others - zlib license
+    (lsfg-vk/LICENSE_DXBC.md)
+  - pe-parse - Copyright (c) 2013 Andrew Ruef - MIT (lsfg-vk/LICENSE_PE_PARSE)
+  - toml11 - Copyright (c) 2017 Toru Niina - MIT (lsfg-vk/LICENSE_TOML11)
+  - volk - Copyright (c) Arseny Kapoulkine - MIT (lsfg-vk/LICENSE_VOLK.md)
+  It holds no Lossless Scaling code: frame generation needs the user's own
+  Lossless.dll from Lossless Scaling.
+
 7-Zip 26.03                               (cli/usr/bin/resources/7zz)
   Copyright (C) 1999-2026 Igor Pavlov.
   License: GNU LGPL-2.1-or-later, BSD-3-Clause for some parts, and the
