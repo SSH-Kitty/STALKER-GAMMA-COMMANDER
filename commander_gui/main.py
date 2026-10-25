@@ -26,7 +26,13 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QCheckBox
 
 from . import gui_settings
-from .applog import install_crash_handler, install_excepthook
+from .applog import (
+    get_logger,
+    install_crash_handler,
+    install_excepthook,
+    log_shutdown,
+    log_startup,
+)
 from .config import (
     cli_binary_path,
     mark_secondary_instance,
@@ -115,6 +121,8 @@ def _quiet_qt_message_handler(mode: QtMsgType, context, message: str) -> None:
         or _is_window_opacity_noise(mode, message)
     ):
         return
+    if mode in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+        get_logger().warning("qt: %s", message)
     if _PREVIOUS_QT_HANDLER is not None:
         _PREVIOUS_QT_HANDLER(mode, context, message)
     else:
@@ -443,8 +451,16 @@ def main(argv: list[str] | None = None) -> int:
     def _shutdown() -> None:
         begin_shutdown()
         shutdown_active_runners(timeout_ms=30000)
+        log_shutdown()
 
     app.aboutToQuit.connect(_shutdown)
+    log_startup({
+        "Interface": "Deck Mode" if deck else "desktop",
+        "Theme": theme,
+        "Language": _gui.get("language") or "en",
+        "Font": f"{font_family} {font_size}",
+        "Game Mode": in_game_mode(),
+    })
     if deck:
         # The single place commander_gui reaches into the Steamdeck package.
         # Kept function-local so importing commander_gui never pulls in the

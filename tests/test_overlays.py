@@ -202,6 +202,14 @@ class OverlayTests(unittest.TestCase):
         window.set_options("LSFGVK_ENV=1 %command%")
         window.frame_gen._set("LSFGVK_MULTIPLIER", "3")
         self.assertIn("LSFGVK_MULTIPLIER=3", sent[-1])
+        # The key hint names the chosen key and leaves by itself.
+        gui_settings.save_gui_settings(graphics_overlay_key="kp_multiply")
+        hint = graphics_window._KeyHint()
+        self.assertIn("Numpad *", hint.label.text())
+        hint.show_hint()
+        self.assertTrue(hint.isVisible())
+        self.assertEqual(hint._timer.interval(), 10_000)
+        self.assertTrue(hint._timer.isActive())
 
 
     def test_overlay_takes_focus_unless_the_game_is_fullscreen(self):

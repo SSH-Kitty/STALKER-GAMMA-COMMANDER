@@ -3534,4 +3534,6 @@ TRANSLATIONS: dict[str, str] = {
     'built into COMMANDER': '',
     'installed on this system': '',
     'Custom look': '',
+    'Press {key} to open COMMANDER overlay': '',
+    'Shift+` (console key)': '',
 }

@@ -223,19 +223,40 @@ def readable_log_tail(text: str, limit: int = 12) -> str:
     return "\n".join(line if count == 1 else f"{line}  (x{count})" for line, count in lines[-limit:])
 
 
-def engine_closed_cleanly(anomaly, since: float) -> bool:
-    """The engine log written since *since* ends in its normal shutdown,
-    with no crash in it."""
+def _newest_engine_log(anomaly, since: float) -> Path | None:
     logs = Path(anomaly) / "appdata" / "logs"
     try:
-        newest = max(
+        return max(
             (log for log in logs.glob("*.log") if log.stat().st_mtime >= since),
             key=lambda log: log.stat().st_mtime,
         )
     except (OSError, ValueError):
+        return None
+
+
+def engine_closed_cleanly(anomaly, since: float) -> bool:
+    """The engine log written since *since* ends in its normal shutdown,
+    with no crash in it."""
+    newest = _newest_engine_log(anomaly, since)
+    if newest is None:
         return False
     tail = read_log_tail(newest)
     return "InternalCloseLog" in tail and not any(m in tail for m in ("FATAL ERROR", "stack trace:"))
+
+
+def engine_log_summary(anomaly, since: float, limit: int = 60) -> str:
+    """How the engine log written since *since* ends, for commander.log: its
+    FATAL ERROR block when it crashed, else whether it shut down normally."""
+    newest = _newest_engine_log(anomaly, since)
+    if newest is None:
+        return "none written this session"
+    lines = read_log_tail(newest).splitlines()
+    fatal = next((i for i, line in enumerate(lines) if "FATAL ERROR" in line), None)
+    if fatal is not None:
+        return f"{newest.name} crashed:\n  " + "\n  ".join(lines[fatal : fatal + limit])
+    if any("InternalCloseLog" in line for line in lines[-50:]):
+        return f"{newest.name} shut down normally"
+    return f"{newest.name} ends without a shutdown:\n  " + "\n  ".join(lines[-15:])
 
 
 def plain_game_exe(anomaly, *, avx: bool | None = None) -> Path:
@@ -631,6 +652,7 @@ class PlayPage(QWidget):
             self.custom_options_edit.text,
             self.custom_options_edit.setText,
             lambda: getattr(self.window.settings.active_profile, "anomaly", None),
+            lambda: getattr(self.window.settings.active_profile, "gamma", None),
         )
         cards_row.addWidget(self._frame_gen, 2)
         root.addLayout(cards_row)
@@ -1688,6 +1710,8 @@ class PlayPage(QWidget):
         self._game_seen = False
         self._crash_check_pending = crash_check_pending
         self._pre_launch_crash_dumps = pre_launch_crash_dumps
+        self._launch_wall_start = time.time()
+        self._game_seen_at = None
         applog.get_logger().info(
             "play: launch label=%s monitoring_mo2=%s game_exe_name=%s",
             label, monitoring_mo2, game_exe_name,
@@ -1889,6 +1913,10 @@ class PlayPage(QWidget):
         profile = self.window.settings.active_profile
         if profile is None:
             return
+        applog.get_logger().info(
+            "play: engine log %s",
+            engine_log_summary(profile.anomaly, getattr(self, "_launch_wall_start", 0.0)),
+        )
         self._cancel_crash_poll()
         self._crash_poll_anomaly = profile.anomaly
         self._crash_poll_baseline = self._pre_launch_crash_dumps
@@ -1901,6 +1929,7 @@ class PlayPage(QWidget):
         )
         if new_dumps:
             self._crash_poll_timer = None
+            applog.get_logger().info("play: new crash dump %s", ", ".join(sorted(new_dumps)))
             title = tr("The game crashed")
             message = tr(
                 "The game wrote a new crash log, so it looks like it crashed."
@@ -2093,14 +2122,16 @@ class PlayPage(QWidget):
                     )
                     if new_game_pids and not self._game_seen:
                         self._game_seen = True
+                        self._game_seen_at = time.monotonic()
                         applog.get_logger().info(
                             "play: game process detected exe=%s pids=%s",
                             self._game_exe_name, new_game_pids,
                         )
                     elif not new_game_pids and self._game_seen:
                         applog.get_logger().info(
-                            "play: game process gone exe=%s, recording playtime",
+                            "play: game process gone exe=%s after %.0fs, recording playtime",
                             self._game_exe_name,
+                            time.monotonic() - (self._game_seen_at or time.monotonic()),
                         )
                         self._record_playtime()
                         self._game_exe_name = None
@@ -2186,6 +2217,10 @@ class PlayPage(QWidget):
             else:
                 self._check_for_crash()
                 detail = self._log_tail(log_path)
+                applog.get_logger().warning(
+                    "play: %s closed with code %s, launcher.log ends:\n  %s",
+                    label, code, "\n  ".join(detail.splitlines()),
+                )
                 msg = tr("{name} closed with an error (code {code})", name=label, code=code)
                 details = tr("Command: {command}", command=shlex.join(command))
                 if detail:

@@ -110,8 +110,8 @@ def engine_started(log_dirs: list[Path], since: float) -> Path | None:
     return None
 
 
-def mo2_error(log: Path, since: float) -> bool:
-    """MO2 logged an error (and so shows its error box) after ``since``.
+def mo2_error(log: Path, since: float) -> list[str]:
+    """MO2's error lines (it shows an error box for them) after ``since``.
 
     Lines start "[2026-10-17 14:18:53.421 E]" in local time; comparing by
     timestamp, not file offset, survives MO2 rotating the log on start.
@@ -119,11 +119,11 @@ def mo2_error(log: Path, since: float) -> bool:
     stamp = time.strftime("[%Y-%m-%d %H:%M:%S", time.localtime(since))
     try:
         if log.stat().st_mtime < since:
-            return False
+            return []
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return False
-    return any(line[24:27] == " E]" and line[:20] >= stamp for line in lines)
+        return []
+    return [line for line in lines if line[24:27] == " E]" and line[:20] >= stamp]
 
 
 class GameSplash(QWidget):
@@ -208,9 +208,9 @@ class GameSplash(QWidget):
             now = self._clock.elapsed()
             self._done = (now, self._progress(now))
             QTimer.singleShot(FINISH_MS, self, self.close)
-        elif mo2_error(self._mo2_log, self._since):
+        elif errors := mo2_error(self._mo2_log, self._since):
             # MO2's error box would open under this always-on-top window.
-            applog.get_logger().info("splash: MO2 reported an error")
+            applog.get_logger().warning("splash: MO2 reported an error:\n  %s", "\n  ".join(errors[-20:]))
             self.close()
 
     def _progress(self, now: int) -> float:

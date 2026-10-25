@@ -63,24 +63,137 @@ def _section(title: str, body: str) -> str:
     return f"{'=' * 60}\n{title}\n{'=' * 60}\n{body.strip()}\n"
 
 
+def _first_line(path: str, prefix: str = "") -> str:
+    """First line of *path* starting with *prefix* (minus the prefix), or ''."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if line.startswith(prefix):
+                    return line[len(prefix):].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _distro() -> str:
+    name = _first_line("/etc/os-release", "PRETTY_NAME=").strip('"')
+    return name or "(unknown)"
+
+
+def _memory() -> str:
+    def gib(key: str) -> str:
+        value = _first_line("/proc/meminfo", key + ":").split()
+        return f"{int(value[0]) / 1048576:.1f} GiB" if value else "?"
+
+    return f"{gib('MemTotal')} total, {gib('MemAvailable')} available, swap {gib('SwapTotal')}"
+
+
+def _gpus() -> list[str]:
+    """Vulkan devices and their drivers; the DRM drivers when vulkaninfo is missing."""
+    try:
+        result = subprocess.run(
+            ["vulkaninfo", "--summary"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        keys = ("deviceName", "driverName", "driverInfo", "apiVersion")
+        groups: list[list[str]] = []
+        for line in result.stdout.splitlines():
+            if re.match(r"GPU\d+:", line.strip()):  # one block per device
+                groups.append([])
+            key, _, value = line.partition("=")
+            if groups and value and key.strip() in keys:
+                groups[-1].append(value.strip())
+        if any(groups):
+            return ["GPU: " + " | ".join(group) for group in groups if group]
+        vulkan = f"vulkaninfo found no device (exit {result.returncode})"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        vulkan = f"vulkaninfo unavailable ({exc.__class__.__name__})"
+    lines = [f"GPU: {vulkan}"]
+    for uevent in sorted(Path("/sys/class/drm").glob("card[0-9]*/device/uevent")):
+        driver = _first_line(str(uevent), "DRIVER=")
+        pci = _first_line(str(uevent), "PCI_ID=")
+        lines.append(f"GPU: {uevent.parent.parent.name} driver={driver or '?'} pci={pci or '?'}")
+    return lines
+
+
+def _install_kind() -> str:
+    if os.environ.get("APPIMAGE"):
+        return "AppImage"
+    from .config import project_root
+
+    return str(project_root())
+
+
+def _login_shape() -> str:
+    """What Wine and MO2 care about in the login name, without the name:
+    non-ASCII characters and spaces break some of their paths."""
+    name = Path.home().name
+    return ", ".join((
+        "ASCII" if name.isascii() else "non-ASCII",
+        "contains spaces" if " " in name else "no spaces",
+    ))
+
+
+def system_snapshot() -> list[str]:
+    """Version, system, hardware and limits: the startup banner in commander.log
+    and the top of every diagnostics export."""
+    import resource
+    import shutil
+
+    from .deck_launch import steam_deck_model
+
+    try:
+        nofile = "/".join(str(v) for v in resource.getrlimit(resource.RLIMIT_NOFILE))
+    except (OSError, ValueError):
+        nofile = "?"
+    proxies = [k for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") if os.environ.get(k) or os.environ.get(k.lower())]
+    lines = [
+        f"GUI version: {__version_label__}",
+        f"Install: {_install_kind()}",
+        f"Distro: {_distro()}",
+        f"Kernel: {platform.release()}",
+        f"Python: {sys.version.split()[0]}",
+        (
+            f"Desktop: {os.environ.get('XDG_CURRENT_DESKTOP', '(unset)')} "
+            f"session={os.environ.get('XDG_SESSION_TYPE', '(unset)')} "
+            f"DISPLAY={os.environ.get('DISPLAY', '(unset)')} "
+            f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY', '(unset)')}"
+        ),
+        f"Locale: {os.environ.get('LC_ALL') or os.environ.get('LANG') or '(unset)'}",
+        f"Login name: {_login_shape()}",
+        f"CPU: {_first_line('/proc/cpuinfo', 'model name').lstrip(': ') or platform.machine()} ({os.cpu_count()} threads)",
+        f"RAM: {_memory()}",
+        *_gpus(),
+        f"Steam Deck: {steam_deck_model() or 'no'}",
+        f"vm.max_map_count: {_first_line('/proc/sys/vm/max_map_count') or '?'}",
+        f"Open files limit (soft/hard): {nofile}",
+        f"gamemoderun: {'yes' if shutil.which('gamemoderun') else 'no'}",
+        f"ptrace_scope: {ptrace_scope()}",
+        f"Proxy: {', '.join(proxies) if proxies else 'none'}",
+    ]
+    try:
+        from PySide6 import QtCore
+
+        lines.append(f"PySide6: {QtCore.__version__} (Qt {QtCore.qVersion()})")
+    except ImportError:
+        pass
+    return lines
+
+
 def _system_info() -> str:
     lines = [
         f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        f"GUI version: {__version_label__}",
-        f"Python: {sys.version}",
-        f"Platform: {platform.platform()}",
+        *system_snapshot(),
         f"Executable: {sys.executable}",
         f"Frozen: {getattr(sys, 'frozen', False)}",
-        f"DISPLAY: {os.environ.get('DISPLAY', '(unset)')}",
-        f"WAYLAND_DISPLAY: {os.environ.get('WAYLAND_DISPLAY', '(unset)')}",
-        f"XDG_CURRENT_DESKTOP: {os.environ.get('XDG_CURRENT_DESKTOP', '(unset)')}",
-        f"XDG_SESSION_TYPE: {os.environ.get('XDG_SESSION_TYPE', '(unset)')}",
-        f"ptrace_scope: {ptrace_scope()}",
     ]
     try:
-        from PySide6 import QtCore, QtWidgets
+        from PySide6 import QtWidgets
 
-        lines.append(f"PySide6: {QtCore.__version__}")
         app = QtWidgets.QApplication.instance()
         if app is not None:
             screen = app.primaryScreen()
@@ -91,6 +204,29 @@ def _system_info() -> str:
     except (ImportError, RuntimeError):
         pass
     return "\n".join(lines)
+
+
+def _anomaly_settings() -> str:
+    """The game's user.ltx (renderer, resolution, every option) and the
+    size of its shader cache."""
+    from .settings import load_settings
+
+    profile = load_settings().active_profile
+    if profile is None:
+        return "No active profile"
+    appdata = Path(profile.anomaly).expanduser() / "appdata"
+    cache = appdata / "shaders_cache"
+    try:
+        size = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file())
+        cache_line = f"Shader cache: {size / 1048576:.1f} MiB"
+    except OSError as exc:
+        cache_line = f"Shader cache: unreadable ({exc.__class__.__name__})"
+    # The co-op player name is often the person's usual online handle.
+    ltx = "\n".join(
+        line for line in _read_file(appdata / "user.ltx").splitlines()
+        if not line.startswith("xrr_player_name")
+    )
+    return cache_line + "\n\n" + ltx
 
 
 def _cli_version() -> str:
@@ -146,6 +282,7 @@ def collect_diagnostics() -> str:
             "GUI Settings (gui-settings.json)",
             redact(_read_file(gui_settings_path())),
         ),
+        _section("Anomaly Settings (user.ltx)", redact(_anomaly_settings())),
         _section("Launcher Log", redact(_read_file(logs_dir() / "launcher.log"))),
         _section(
             "COMMANDER App Log", redact(_read_file(logs_dir() / "commander.log"))

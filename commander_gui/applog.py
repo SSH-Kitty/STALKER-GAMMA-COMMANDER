@@ -47,6 +47,9 @@ def _ensure_configured() -> None:
         )
         _logger.addHandler(handler)
         _logger.setLevel(logging.INFO)
+        # DeprecationWarning, ResourceWarning and friends, which went to stderr.
+        logging.captureWarnings(True)
+        logging.getLogger("py.warnings").addHandler(handler)
     except OSError:
         # No writable logs dir - logging becomes a no-op rather than a
         # startup failure.
@@ -121,3 +124,47 @@ def install_crash_handler() -> None:
         faulthandler.enable(file=_crash_file, all_threads=True)
     except OSError:
         pass
+
+
+#: The banner's and the clean-exit marker's prefixes: a startup line with no
+#: shutdown line after it means the previous run was killed or crashed.
+_STARTUP = "startup:"
+_SHUTDOWN = "shutdown:"
+
+
+def _previous_run_unclean() -> bool:
+    try:
+        with open(logs_dir() / "commander.log", "rb") as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - 65536))
+            tail = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    start, end = tail.rfind(" INFO " + _STARTUP), tail.rfind(" INFO " + _SHUTDOWN)
+    return start > end
+
+
+def log_startup(details: dict[str, object]) -> None:
+    """The startup banner: version, system, hardware and limits, plus
+    *details* (theme, language, ...). Run in a thread: vulkaninfo can take
+    a moment, and the window must not wait on it."""
+    from .diagnostics import system_snapshot
+    from .log_dump import _scrub
+
+    logger = get_logger()
+    if _previous_run_unclean():
+        logger.warning("previous run ended without a clean shutdown (killed or crashed)")
+    logger.info("%s COMMANDER starting", _STARTUP)
+
+    def _banner() -> None:
+        try:
+            lines = [*system_snapshot(), *(f"{key}: {value}" for key, value in details.items())]
+            logger.info("system:\n  %s", _scrub("\n  ".join(lines)))
+        except Exception:  # the banner must never take the app down
+            logger.exception("system: snapshot failed")
+
+    threading.Thread(target=_banner, name="startup-banner", daemon=True).start()
+
+
+def log_shutdown(reason: str = "clean exit") -> None:
+    get_logger().info("%s %s", _SHUTDOWN, reason)

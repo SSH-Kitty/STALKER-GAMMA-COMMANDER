@@ -718,9 +718,9 @@ class SettingsPage(QWidget):
         page, layout = _panel()
         layout.setSpacing(12)
         overlay, box = _card(tr("Graphics overlay"), tr("These settings in a window over the running game."))
-        self._overlay_key = _combo(180)
+        self._overlay_key = _combo(230)
         for key, (label, _keysym, _modifiers) in graphics_window.KEYS.items():
-            self._overlay_key.addItem(label or tr("Off"), key)
+            self._overlay_key.addItem(tr(label) if label else tr("Off"), key)
         self._overlay_key.currentIndexChanged.connect(self._on_overlay_key)
         _rows(box, _setting_row(
             tr("Key"),

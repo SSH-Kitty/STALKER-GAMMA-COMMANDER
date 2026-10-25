@@ -125,6 +125,9 @@ def relaunch_exec(
     if pre_exec is not None:
         pre_exec()
     release_lock()
+    from .applog import log_shutdown
+
+    log_shutdown(f"relaunching ({'Deck Mode' if deck else 'desktop'})")
     try:
         os.execve(argv[0], argv, env)
     except OSError:

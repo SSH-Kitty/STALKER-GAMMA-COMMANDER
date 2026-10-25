@@ -3512,4 +3512,6 @@ TRANSLATIONS: dict[str, str] = {
     'built into COMMANDER': 'incluído no COMMANDER',
     'installed on this system': 'instalado neste sistema',
     'Custom look': 'Aspeto próprio',
+    'Press {key} to open COMMANDER overlay': 'Pressione {key} para abrir o overlay do COMMANDER',
+    'Shift+` (console key)': 'Shift+` (tecla do console)',
 }

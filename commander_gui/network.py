@@ -50,7 +50,28 @@ def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
     scheme = urllib.parse.urlsplit(full_url).scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise ValueError(f"Refusing to open a non-http(s) URL: {full_url!r}")
-    return urllib.request.urlopen(url_or_request, timeout=timeout)  # nosec B310 - scheme checked above
+    try:
+        return urllib.request.urlopen(url_or_request, timeout=timeout)  # nosec B310 - scheme checked above
+    except (urllib.error.URLError, OSError) as exc:
+        _log_failure(full_url, exc)
+        raise
+
+
+def _log_failure(url: str, exc: Exception) -> None:
+    """Host, path and the failure into commander.log - never credentials or the query
+    string, which can carry a token."""
+    from .applog import get_logger
+    from .log_dump import _scrub
+
+    parts = urllib.parse.urlsplit(url)
+    if isinstance(exc, urllib.error.HTTPError):
+        what = f"HTTP {exc.code} {exc.reason}"
+        remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
+        if remaining is not None:
+            what += f" (rate limit remaining {remaining})"
+    else:
+        what = f"{exc.__class__.__name__}: {getattr(exc, 'reason', exc)}"
+    get_logger().warning("%s", _scrub(f"network: {parts.hostname}{parts.path} failed: {what}"))
 
 
 def urlopen_with_retry(

@@ -40,11 +40,13 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QWindow,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -57,9 +59,10 @@ from ..deck_launch import in_game_mode
 from ..i18n import tr
 
 #: Key choices: setting -> (label, X keysym, modifier mask). Shift is 1,
-#: Control 4. Plain ` opens Anomaly's console, so not that.
+#: Control 4. Plain ` opens Anomaly's console, so not that. Labels go
+#: through tr() where shown: ` is ^ or § on other layouts, hence "console key".
 KEYS = {
-    "shift+grave": ("Shift+`", "grave", 1),
+    "shift+grave": ("Shift+` (console key)", "grave", 1),
     "kp_multiply": ("Numpad *", "KP_Multiply", 0),
     "ctrl+shift+g": ("Ctrl+Shift+G", "g", 1 | 4),
     "off": ("", "", 0),
@@ -135,6 +138,8 @@ class GraphicsWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(_WIDTH, 860)
         self._options = ""
+        #: The game's window, while the panel is its transient (see toggle).
+        self._game: QWindow | None = None
         # Keeps the cards' handlers: the cards themselves go on the tabs.
         self.panel = GraphicsPanel(loose=True)
         self.frame_gen = FrameGenCard(lambda: self._options, self._set_options)
@@ -179,7 +184,7 @@ class GraphicsWindow(QWidget):
         self.tabs.button(0).setChecked(True)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 16, 0, 0)  # as the card's, in _page
+        layout.setContentsMargins(12, 16, 0, 0)  # the rail and the card share this top
         layout.setSpacing(0)
         layout.addWidget(rail, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.pages, 1)
@@ -256,16 +261,86 @@ class GraphicsWindow(QWidget):
         self._dock()
         # Without focus, a click mustn't take it either: changed while hidden.
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, not focus)
+        self._follow_game()
         self.show()
         _skip_taskbar(int(self.winId()))
+        # KWin keeps a new window out of the taskbar's strip; a move as from
+        # a pager isn't, so the panel starts at the very top.
+        ratio = self.devicePixelRatioF() or 1.0
+        _move_resize(int(self.winId()), *(round(v * ratio) for v in self.geometry().getRect()))
         self.raise_()
         if focus:
             self.activateWindow()
         self._pressed = True  # the click that opened it, if any, isn't one outside
         self._pointer.start()
 
+    def _follow_game(self) -> None:
+        """Made a transient of the window that has focus, the game's (the key
+        was pressed in it). KWin keeps a fullscreen window above the taskbar
+        only while it or a transient of it has focus: otherwise taking focus
+        would bring the taskbar up over the game."""
+        game = _active_window()
+        self.winId()  # the native window, for windowHandle()
+        if game and game != int(self.winId()):
+            if self._game is None or int(self._game.winId()) != game:
+                self._game = QWindow.fromWinId(game)
+            self.windowHandle().setTransientParent(self._game)
+        else:
+            self.windowHandle().setTransientParent(None)
+
 
 _WIDTH = 680
+
+
+class _KeyHint(QWidget):
+    """"Press Shift+` to open COMMANDER overlay" in the bottom-left corner
+    for a few seconds once the game is up, as Steam's overlay does. Never
+    takes focus or clicks: the game keeps both.
+
+    A tooltip window: on X11 the window manager leaves it alone
+    (override-redirect), so it shows above a fullscreen game too, which
+    KWin otherwise keeps above every "stay on top" window while it has focus."""
+
+    SHOWN_MS = 10_000
+
+    def __init__(self) -> None:
+        from html import escape
+
+        from ..themes import active_theme_tokens
+
+        super().__init__(
+            None,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.94)
+        tokens = active_theme_tokens()
+        key = escape(tr(KEYS[key_setting()][0]))
+        self.label = QLabel(tr("Press {key} to open COMMANDER overlay").format(
+            key=f"<b style='color: {tokens.get('accent', '#9fe96f')}'>{key}</b>"))
+        self.label.setObjectName("keyHint")
+        self.label.setStyleSheet(
+            f"QLabel#keyHint {{ background-color: {tokens['card']}; border: 1px solid {tokens['border']};"
+            " border-radius: 10px; padding: 12px 18px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+        self._timer = QTimer(self, singleShot=True, interval=self.SHOWN_MS, timeout=self.hide)
+
+    def show_hint(self) -> None:
+        self.adjustSize()
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        area = screen.geometry()
+        self.move(area.x() + 24, area.bottom() - self.height() - 24)
+        self.show()
+        self.raise_()
+        self._timer.start()
 
 
 def _page(card: QWidget) -> QScrollArea:
@@ -273,7 +348,7 @@ def _page(card: QWidget) -> QScrollArea:
     content = QWidget()
     content.setObjectName("pageContent")
     layout = QVBoxLayout(content)
-    layout.setContentsMargins(12, 16, 16, 16)
+    layout.setContentsMargins(12, 0, 16, 16)  # the top: the window's, as the rail's
     layout.addWidget(card)
     layout.addStretch(1)
     scroll = QScrollArea()
@@ -314,6 +389,12 @@ def _xlib():
     x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
     x.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
     x.XFlush.argtypes = [ctypes.c_void_p]
+    x.XGetWindowProperty.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long, ctypes.c_long, ctypes.c_int,
+        ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_void_p),
+    ]
+    x.XFree.argtypes = [ctypes.c_void_p]
     x.XSetErrorHandler(_IGNORE_X_ERRORS)
     return x
 
@@ -339,6 +420,40 @@ def _skip_taskbar(window: int) -> None:
         event.data[0], event.data[1], event.data[3] = 1, x.XInternAtom(display, name, 0), 1  # add; from an app
         root = x.XDefaultRootWindow(display)
         x.XSendEvent(display, root, 0, 1 << 19 | 1 << 20, ctypes.byref(event))  # Substructure(Redirect|Notify)
+    x.XFlush(display)
+
+
+def _active_window() -> int | None:
+    """The X window that has focus (_NET_ACTIVE_WINDOW); None without X or
+    when it's a Wayland window."""
+    display = _pointer_display()
+    if display is None:
+        return None
+    x = _xlib()
+    kind, size, count, rest, data = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+    atom = x.XInternAtom(display, b"_NET_ACTIVE_WINDOW", 0)
+    # XA_WINDOW (33), one 32-bit item (a long in Xlib's buffer).
+    if x.XGetWindowProperty(display, x.XDefaultRootWindow(display), atom, 0, 1, 0, 33,
+                            kind, size, count, rest, data) != 0 or not data.value:
+        return None
+    window = ctypes.c_ulong.from_address(data.value).value if count.value else 0
+    x.XFree(data)
+    return window or None
+
+
+def _move_resize(window: int, left: int, top: int, width: int, height: int) -> None:
+    """_NET_MOVERESIZE_WINDOW, sent as a pager would: the window manager
+    places it there even over a panel's reserved strip. X11 only."""
+    display = _pointer_display()
+    if display is None:
+        return
+    x = _xlib()
+    event = _ClientMessage(type=33, send_event=1, display=display, window=window,
+                           message_type=x.XInternAtom(display, b"_NET_MOVERESIZE_WINDOW", 0), format=32)
+    # NorthWest gravity (1), with x, y, width and height (bits 8-11), from a pager (2).
+    event.data[0] = 1 | 0xF << 8 | 2 << 12
+    event.data[1], event.data[2], event.data[3], event.data[4] = left, top, width, height
+    x.XSendEvent(display, x.XDefaultRootWindow(display), 0, 1 << 19 | 1 << 20, ctypes.byref(event))
     x.XFlush(display)
 
 
@@ -406,17 +521,21 @@ class _KeyGrab:
 _process: subprocess.Popen | None = None
 _reader: QSocketNotifier | None = None
 _grab: _KeyGrab | None = None
+#: Waits for the game to be on screen, then shows the key hint (see start_key).
+_hint_wait: QTimer | None = None
 #: The Play page's launch options text: read for the Frame generation tab,
 #: written when that tab changes it (see connect_options).
 _get_options = None
 _set_options = None
-#: The Anomaly folder, for the game's screen mode (see connect_options).
+#: The Anomaly folder, for the game's screen mode, and the GAMMA folder:
+#: both for the engine's log, which says when the game is up.
 _get_anomaly = None
+_get_gamma = None
 
 
-def connect_options(get, set_, anomaly=None) -> None:
-    global _get_options, _set_options, _get_anomaly
-    _get_options, _set_options, _get_anomaly = get, set_, anomaly
+def connect_options(get, set_, anomaly=None, gamma=None) -> None:
+    global _get_options, _set_options, _get_anomaly, _get_gamma
+    _get_options, _set_options, _get_anomaly, _get_gamma = get, set_, anomaly, gamma
 
 
 def game_fullscreen(anomaly: str | Path | None) -> bool:
@@ -525,11 +644,50 @@ def start_key() -> None:
         _grab = _KeyGrab(keysym, modifiers, toggle)
     except OSError:
         _grab = None
+        return
+    _wait_for_game()
+
+
+#: Seconds after the engine's "Starting engine...", for its first frame.
+_HINT_DELAY_MS = 2000
+#: A first start builds shaders, so well past the splash's three minutes.
+_HINT_TIMEOUT_S = 600
+
+
+def _wait_for_game() -> None:
+    """Show the key hint once the engine logs it has started: the game's
+    window is up then, not at launch (MO2 and the splash come first)."""
+    global _hint_wait
+    from .. import applog
+    from .game_splash import engine_started
+
+    anomaly = _get_anomaly() if _get_anomaly else None
+    gamma = _get_gamma() if _get_gamma else None
+    if not anomaly:
+        return
+    logs = [Path(anomaly) / "appdata" / "logs"]
+    if gamma:
+        logs.append(Path(gamma) / "overwrite" / "appdata" / "logs")
+    since = time.time() - 1
+    deadline = time.monotonic() + _HINT_TIMEOUT_S
+
+    def check() -> None:
+        if engine_started(logs, since):
+            _hint_wait.stop()
+            applog.get_logger().info("graphics overlay: game up, showing key hint")
+            QTimer.singleShot(_HINT_DELAY_MS, lambda: _running() and _send("hint"))
+        elif time.monotonic() > deadline:
+            _hint_wait.stop()
+
+    _hint_wait = QTimer(interval=1000, timeout=check)
+    _hint_wait.start()
 
 
 def stop_key() -> None:
     """Let the key go: the game ended. The panel's process goes with it."""
     global _grab
+    if _hint_wait is not None:
+        _hint_wait.stop()
     if _running():
         _reader.setEnabled(False)
         _process.terminate()
@@ -566,6 +724,7 @@ def _main() -> int:
     app.setPalette(build_palette(theme))
     app.setStyleSheet(build_stylesheet(theme, font_size=font_size, font_family=state.get("font_family") or "Exo 2"))
     window = GraphicsWindow()
+    hint = _KeyHint()
     window.options_changed.connect(lambda text: print(f"options {json.dumps(text)}", flush=True))
     if "--hidden" not in sys.argv:
         window.toggle(focus="toggle focus" in sys.argv)
@@ -575,7 +734,10 @@ def _main() -> int:
         if not line:  # COMMANDER is gone
             app.quit()
         elif line.startswith(b"toggle"):
+            hint.hide()
             window.toggle(focus=line == b"toggle focus")
+        elif line == b"hint":
+            hint.show_hint()
         elif line == b"hide":
             window.hide()
         elif line.startswith(b"options "):

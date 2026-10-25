@@ -19,6 +19,7 @@ simply becomes the "real" function those inner ``patch()`` calls save
 and restore around, so it changes nothing for them.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -28,6 +29,14 @@ import pytest
 
 # No real windows: same as CI, and nothing pops up on the desktop mid-run.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# commander.log attaches its file once, at first use - often before any
+# fixture has pointed XDG_CONFIG_HOME away - so tests that launch, fail a
+# download or end a play session wrote into the developer's real log.
+from commander_gui import applog
+
+applog._configured = True
+applog._logger.addHandler(logging.NullHandler())
 
 
 def _network_disabled_in_tests(*_args, **_kwargs):

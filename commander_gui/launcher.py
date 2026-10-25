@@ -1432,6 +1432,52 @@ def _rotate_log(path: Path) -> None:
         pass
 
 
+#: Variables shown in commander.log for every launch: the runner's, the
+#: graphics stack's and the overlays'/frame generation's.
+_LOGGED_ENV_PREFIXES = (
+    "PROTON", "WINE", "DXVK", "VKD3D", "STEAM_COMPAT", "UMU", "GAMEID", "STORE",
+    "VK_", "MANGOHUD", "ENABLE_VKBASALT", "VKBASALT", "MAKO", "COMMANDER_",
+    "DISABLE_", "LSFG", "SDL_", "__GL", "RADV", "MESA", "LD_PRELOAD",
+)
+
+
+def _log_launch(command: list[str], env: dict[str, str], cwd: str) -> None:
+    """What a launch ran with, into commander.log: command, runner variables,
+    overlays and frame generation, and whether their Vulkan layers exist."""
+    import json
+
+    from . import applog, launch_options
+    from .log_dump import _scrub
+
+    lines = [f"command: {shlex.join(command)}", f"cwd: {cwd}"]
+    lines += [
+        f"env {key}={env[key]}"
+        for key in sorted(env)
+        if key.upper().startswith(_LOGGED_ENV_PREFIXES)
+    ]
+    config = env.get("MAKO_CONFIG")
+    if config:
+        try:
+            lines.append("frame gen config: " + "; ".join(Path(config).read_text(encoding="utf-8").splitlines()))
+        except OSError as exc:
+            lines.append(f"frame gen config unreadable: {exc}")
+    else:
+        try:
+            dll = launch_options.lossless_dll()
+            lines.append(f"frame gen: not loaded (Lossless.dll={dll}, ready={launch_options.frame_gen_ready(dll)})")
+        except (OSError, ValueError) as exc:
+            lines.append(f"frame gen: not loaded ({exc})")
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    for manifest in sorted(data_home.glob("vulkan/*_layer.d/commander-*.json")):
+        try:
+            library = json.loads(manifest.read_text(encoding="utf-8"))["layer"]["library_path"]
+            state = "ok" if Path(library).is_file() else f"library missing: {library}"
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            state = f"unreadable ({exc.__class__.__name__})"
+        lines.append(f"layer {manifest.parent.name}/{manifest.name}: {state}")
+    applog.get_logger().info("launch:\n  %s", _scrub("\n  ".join(lines)))
+
+
 def launch_detached(
     command: list[str],
     env: dict[str, str],
@@ -1456,6 +1502,10 @@ def launch_detached(
         ):
             full_env.pop(key, None)
             stripped.append(key)
+    try:
+        _log_launch(command, full_env, cwd)
+    except Exception:  # noqa: BLE001, S110 - logging never stops a launch
+        pass
     # The log handle is closed as soon as Popen returns: the child has its own
     # inherited descriptor, so keeping ours open only leaks one per launch.
     with ExitStack() as stack:

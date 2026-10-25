@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import re
 import tempfile
 import zipfile
 from collections.abc import Callable
@@ -167,12 +168,27 @@ def _prefix_candidates(root: Path) -> list[Path]:
 
 
 def _scrub(text: str) -> str:
-    """Credential redaction plus the home path, which names the user."""
+    """Credential redaction plus the home path and login name, which name
+    the user - the login also as a path part anywhere else (/run/media/<login>,
+    Wine's Z:\\home\\<login>, any case)."""
     from .diagnostics import redact
 
     home = str(Path.home())
     redacted = redact(text)
-    return redacted.replace(home, "~") if len(home) > 1 else redacted
+    if len(home) > 1:
+        redacted = redacted.replace(home, "~")
+    try:
+        login = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name: nothing to hide
+        return redacted
+    if not login:
+        return redacted
+    return re.sub(
+        r"(?i)(?<=[/\\])" + re.escape(login) + r"(?=[/\\]|$|[\s\"':;,)\]])",
+        "user",
+        redacted,
+        flags=re.MULTILINE,
+    )
 
 
 def _unique_path(directory: Path, name: str) -> Path:
