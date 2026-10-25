@@ -198,7 +198,8 @@ back to the stable build** installs the latest stable release, even when its ver
 ### Also in this build
 
 - The bundled [stalker-gamma-cli](https://github.com/FaithBeam/stalker-gamma-cli) has been updated from **1.36.1** to
-  **1.38.0**.
+  **1.39.0**. Updates are much faster: `update apply` now only extracts the files that changed from the four GAMMA git
+  repos instead of unpacking all of them, and the update log now shows a timestamp on each line like the install log.
 - **Resume picks up where it stopped**: *Resume GAMMA Installation* (and *Resume install* in Deck Mode) now uses the
   CLI's `--resume`, so mods that were already installed are skipped instead of unpacked again. A failed or cancelled
   update shows **Resume update** on the Updates page and in Deck Mode, which does the same for `update apply`.
