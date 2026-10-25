@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import os
 import re
 import shlex
-import shutil
-import subprocess
 from pathlib import Path
 
 from . import overlays
@@ -67,6 +66,8 @@ FRAME_GEN = "LSFGVK_ENV=1"
 FG_MULTIPLIER = "LSFGVK_MULTIPLIER"
 FG_FLOW_SCALE = "LSFGVK_FLOW_SCALE"
 FG_PERFORMANCE = "LSFGVK_PERFORMANCE_MODE"
+#: Present mode: "mailbox" for less input lag; left out, lsfg-vk's own (vsync).
+FG_PRESENT = "LSFGVK_EXPERIMENTAL_PRESENT_MODE"
 #: Vulkan layer manifests of lsfg-vk 2 and lsfg-vk 1.
 _LSFG_LAYERS = {
     "2": Path("vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json"),
@@ -77,8 +78,6 @@ _LSFG_LAYERS = {
 _LOSSLESS_DLLS = ("lsfg-vk.dll", "Lossless.dll")
 #: lsfg-vk 1.0's library, shipped in COMMANDER (MIT, from its v1.0.0 release).
 _BUNDLED_LSFG1 = Path(__file__).resolve().parent.parent / "cli" / "usr" / "lib" / "lsfg-vk-1" / "liblsfg-vk.so"
-#: (path, size, mtime) -> whether lsfg-vk 2 loads that DLL's shaders.
-_V2_CHECKS: dict[tuple[str, int, int], bool] = {}
 
 _GAMESCOPE = ["gamescope", "-f", "--"]
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -121,33 +120,12 @@ def native_dll(path: Path) -> bool:
 
 
 def works_with_v2(dll: Path) -> bool:
-    """True when lsfg-vk 2 can load the shaders in dll. Lossless Scaling
-    3.1/3.2's Lossless.dll can't ("Unable to find base shader"): only the
-    lsfg-vk branch's lsfg-vk.dll can, and a launch with the wrong one shows
-    a black screen while lsfg-vk retries every frame."""
-    from .config import child_environment
-
-    try:
-        stat = dll.stat()
-    except OSError:
-        return False
-    key = (str(dll), stat.st_size, stat.st_mtime_ns)
-    if key not in _V2_CHECKS:
-        cli = shutil.which("lsfg-vk-cli")
-        if cli is None:
-            return native_dll(dll)
-        try:
-            result = subprocess.run(
-                [cli, "benchmark", "-d", str(dll), "-w", "64", "-h", "64"],
-                env=child_environment(), capture_output=True, timeout=3, check=False,
-            )
-            _V2_CHECKS[key] = result.returncode == 0
-        except subprocess.TimeoutExpired:
-            # Still benchmarking: it got past loading the shaders.
-            _V2_CHECKS[key] = True
-        except OSError:
-            return native_dll(dll)
-    return _V2_CHECKS[key]
+    """True when lsfg-vk 2 can load the shaders in dll: lsfg-vk.dll, from
+    Lossless Scaling's lsfg-vk beta. Its usual Lossless.dll can't ("Unable
+    to find base shader"), and a launch with it shows a black screen while
+    lsfg-vk retries every frame. By name: lsfg-vk-cli's benchmark took 3 s
+    on the GUI thread."""
+    return dll.name.lower() == "lsfg-vk.dll" and native_dll(dll)
 
 
 def frame_gen_version(dll: Path | None = None) -> str | None:
@@ -187,8 +165,9 @@ def install_layer(bundled: Path, library_path: Path, manifest: dict, manifest_pa
 def _install_lsfg1() -> None:
     """Set up the bundled lsfg-vk 1.0 for this user, if it isn't already.
 
-    Only loaded when LSFG_LEGACY is set: without that every Vulkan app
-    would load it.
+    Only loaded when COMMANDER_LSFG1 is set: without that every Vulkan app
+    would load it. Not LSFG_LEGACY, lsfg-vk's own: that reads the settings
+    from variables, once, where its config file is reread when it changes.
     """
     if not _BUNDLED_LSFG1.is_file():
         return
@@ -204,46 +183,168 @@ def _install_lsfg1() -> None:
                 "vkGetInstanceProcAddr": "layer_vkGetInstanceProcAddr",
                 "vkGetDeviceProcAddr": "layer_vkGetDeviceProcAddr",
             },
-            "enable_environment": {"LSFG_LEGACY": "1"},
+            "enable_environment": {"COMMANDER_LSFG1": "1"},
             "disable_environment": {"DISABLE_LSFG": "1"},
         },
     }, _data_home() / _LSFG_LAYERS["1"])
 
 
-def _lsfg1_config() -> Path:
-    """A config file of lsfg-vk 1's own: with none it reads lsfg-vk 2's
-    ~/.config/lsfg-vk/conf.toml, fails on its version and switches off."""
+def _multiplier(text: str) -> int:
+    """The frame generation multiplier in text, kept to 2-20: launch
+    options are typed by hand, and lsfg-vk refuses its whole config over
+    one bad value."""
+    try:
+        return min(max(int(var(text, FG_MULTIPLIER) or 2), 2), 20)
+    except ValueError:
+        return 2
+
+
+def _flow_scale(text: str) -> float:
+    """The detail (flow scale) in text, kept to 0.25-1.0, as _multiplier."""
+    try:
+        value = float(var(text, FG_FLOW_SCALE) or 1.0)
+    except ValueError:
+        return 1.0
+    return min(max(value, 0.25), 1.0) if math.isfinite(value) else 1.0
+
+
+#: The name lsfg-vk 1 gives the game (LSFG_PROCESS), for its config entry.
+_LSFG1_GAME = "commander"
+
+
+def _lsfg1_config(dll: Path, text: str) -> Path:
+    """lsfg-vk 1's config file, from the frame generation variables in text.
+    Of its own: with none it reads lsfg-vk 2's ~/.config/lsfg-vk/conf.toml,
+    fails on its version and switches off. lsfg-vk 1 rereads it when it
+    changes, so the Play page's card changes a running game; off is a
+    multiplier of 1, which it passes frames straight through at."""
     from .config import settings_dir
 
-    path = settings_dir() / "lsfg-vk-1.toml"
-    if not path.is_file():
+    on = is_on(text, FRAME_GEN)
+    lines = [
+        "version = 1",
+        "[global]",
+        f"dll = {json.dumps(str(dll))}",
+        "[[game]]",
+        f"exe = {json.dumps(_LSFG1_GAME)}",
+        f"multiplier = {_multiplier(text) if on else 1}",
+        f"flow_scale = {_flow_scale(text)}",
+        f"performance_mode = {'true' if var(text, FG_PERFORMANCE) == '1' else 'false'}",
+        f"experimental_present_mode = {json.dumps(var(text, FG_PRESENT) or 'fifo')}",
+    ]
+    return _write_config(settings_dir() / "lsfg-vk-1.toml", lines)
+
+
+#: lsfg-vk 2's profile in COMMANDER's config for it, and the games it is
+#: active in: matched by executable, so not Wine's own processes in the
+#: launch (explorer.exe stalls with lsfg-vk active in it).
+_LSFG2_PROFILE = "COMMANDER"
+_LSFG2_GAMES = tuple(f"AnomalyDX{dx}{avx}.exe" for dx in ("11", "10", "9", "8") for avx in ("AVX", ""))
+
+
+def _lsfg2_config(dll: Path, text: str) -> Path:
+    """lsfg-vk 2's config file (LSFGVK_CONFIG), from the frame generation
+    variables in text: one profile, none when off. lsfg-vk 2 rereads it
+    while the game runs, for the multiplier, detail and mode; it only loads
+    with a profile at the start, and fails every frame if one goes away, so
+    on and off apply from the next launch (see live_frame_gen).
+
+    The installed lsfg-vk 2, as it is: the current one is CC BY-NC-ND 4.0,
+    which allows no changed copy, and the older GPL one can't read today's
+    lsfg-vk.dll ("unable to find shader with id: 256")."""
+    from .config import settings_dir
+
+    lines = ["version = 2", "[global]", f"dll = {json.dumps(str(dll))}"]
+    if is_on(text, FRAME_GEN):
+        lines += [
+            "[[profile]]",
+            f"name = {json.dumps(_LSFG2_PROFILE)}",
+            f"active_in = {json.dumps(list(_LSFG2_GAMES))}",
+            f"multiplier = {_multiplier(text)}",
+            f"flow_scale = {_flow_scale(text)}",
+            f"performance_mode = {'true' if var(text, FG_PERFORMANCE) == '1' else 'false'}",
+        ]
+    return _write_config(settings_dir() / "lsfg-vk-2.toml", lines)
+
+
+def _write_config(path: Path, lines: list[str]) -> Path:
+    from .atomic import write_bytes
+
+    data = ("\n".join(lines) + "\n").encode()
+    # Unchanged, untouched: a new timestamp makes lsfg-vk rebuild its swapchain.
+    if not path.is_file() or path.read_bytes() != data:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("version = 1\n[global]\n", encoding="utf-8")
+        write_bytes(path, data, lock=False)
     return path
+
+
+def live_frame_gen(text: str) -> None:
+    """The Play page's frame generation settings, to a running game: lsfg-vk
+    rereads its config file. lsfg-vk 2 keeps running while switched off
+    (see _lsfg2_config), so off waits for the next launch there."""
+    dll = lossless_dll()
+    version = frame_gen_version(dll) if dll else None
+    if version == "1":
+        _lsfg1_config(dll, text)
+    elif version == "2" and is_on(text, FRAME_GEN):
+        _lsfg2_config(dll, text)
 
 
 def _resolve_frame_gen(env: dict[str, str]) -> None:
     """Frame generation's variables in env, made into ones the installed
     lsfg-vk runs with the DLL: lsfg-vk 2's own, lsfg-vk 1's legacy ones, or
-    none at all, so a DLL neither can use never launches to a black screen."""
-    if not env.get("LSFGVK_ENV"):
-        return
+    none at all, so a DLL neither can use never launches to a black screen.
+
+    lsfg-vk 1 is loaded even with frame generation off (frames then pass
+    straight through), so it can be switched on in a running game, and a
+    co-op shortcut never changes with it. lsfg-vk 2 reads the same file
+    either way, so the shortcut doesn't change with it either."""
     names = {key: env.pop(key) for key in [k for k in env if k.startswith("LSFGVK_")]}
     dll = lossless_dll()
     version = frame_gen_version(dll)
+    text = shlex.join(f"{k}={v}" for k, v in names.items())
     if version == "2":
-        env.update(names)
-        env.setdefault("LSFGVK_DLL_PATH", str(dll))
+        # From its config file: LSFGVK_ENV's variables it reads only once.
+        env["LSFGVK_CONFIG"] = str(_lsfg2_config(dll, text))
+        # vkBasalt between the game and lsfg-vk 2 leaves the screen black
+        # (sound plays on), so it sits this launch out; 1.0 works with it.
+        if is_on(text, FRAME_GEN):
+            env.pop("ENABLE_VKBASALT", None)
     elif version == "1":
         _install_lsfg1()
-        env["LSFG_LEGACY"] = "1"
-        env["LSFG_DLL_PATH"] = str(dll)
-        env["LSFG_CONFIG"] = str(_lsfg1_config())
-        for name in ("MULTIPLIER", "FLOW_SCALE", "PERFORMANCE_MODE"):
-            if f"LSFGVK_{name}" in names:
-                env[f"LSFG_{name}"] = names[f"LSFGVK_{name}"]
+        env["COMMANDER_LSFG1"] = "1"
+        env["LSFG_PROCESS"] = _LSFG1_GAME
+        env["LSFG_CONFIG"] = str(_lsfg1_config(dll, text))
         # lsfg-vk 2 next to it stays out of the way.
         env["DISABLE_LSFGVK"] = "1"
+
+
+def dll_label(dll: Path) -> str:
+    """The DLL as the Play page shows it: where it is (~ for home) and the
+    Lossless Scaling version inside it, e.g. ~/Documents/Lossless.dll 3.2.2."""
+    try:
+        where = "~/" + str(dll.relative_to(Path.home()))
+    except ValueError:
+        where = str(dll)
+    version = _dll_version(str(dll), dll.stat().st_mtime if dll.is_file() else 0)
+    return f"{where} {version}" if version else where
+
+
+@functools.lru_cache(maxsize=8)
+def _dll_version(path: str, _mtime: float) -> str:
+    """FileVersion from the DLL's version resource (UTF-16), trailing .0s
+    dropped; "" without one. Cached per file and modification time."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return ""
+    found = re.search(rb"F\0i\0l\0e\0V\0e\0r\0s\0i\0o\0n\0(?:\0\0)+((?:[0-9.]\0)+)", data)
+    if not found:
+        return ""
+    version = found.group(1).decode("utf-16-le")
+    while version.endswith(".0") and version.count(".") > 1:
+        version = version[:-2]
+    return version
 
 
 def lossless_dll() -> Path | None:

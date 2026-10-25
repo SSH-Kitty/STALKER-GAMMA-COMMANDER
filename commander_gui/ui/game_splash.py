@@ -405,6 +405,10 @@ if __name__ == "__main__":
     flags = sys.argv[6:]
     splash = GameSplash(*sys.argv[1:5], on_top="--below" not in flags, still="--still" in flags)
     splash.setWindowTitle(sys.argv[5])
+    # A Tool window never counts as the last one closed, so closing it
+    # (game started, timeout) wouldn't end this process: quit with it.
+    splash.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    splash.destroyed.connect(app.quit)
     splash.show()
     if popup_open:
         splash.stay_on_top(False)

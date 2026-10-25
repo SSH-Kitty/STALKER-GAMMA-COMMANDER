@@ -81,13 +81,130 @@ class OverlayTests(unittest.TestCase):
         with patch("commander_gui.ui.settings_page.probe_discord", return_value=False):
             page = SettingsPage(FakeWindow())
         page._render_graphics()
-        page._mangohud_position.setCurrentIndex(page._mangohud_position.findData("top-right"))
-        self.assertEqual(page._mangohud_layout.currentData(), "box")
+        page._graphics._mangohud_position.setCurrentIndex(page._graphics._mangohud_position.findData("top-right"))
+        self.assertEqual(page._graphics._mangohud_layout.currentData(), "box")
         saved = overlays.settings()
         self.assertEqual((saved["mangohud_layout"], saved["mangohud_position"]), ("box", "top-right"))
         # And back: a bar moves the HUD to the left corner.
-        page._mangohud_layout.setCurrentIndex(page._mangohud_layout.findData("bar"))
-        self.assertEqual(page._mangohud_position.currentData(), "top-left")
+        page._graphics._mangohud_layout.setCurrentIndex(page._graphics._mangohud_layout.findData("bar"))
+        self.assertEqual(page._graphics._mangohud_position.currentData(), "top-left")
+
+    def test_graphics_overlay_window_and_key(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui import graphics_window
+
+        QApplication.instance() or QApplication([])
+        self.assertEqual(graphics_window.key_setting(), "shift+grave")
+        gui_settings.save_gui_settings(graphics_overlay_key="off")
+        graphics_window.start_key()
+        self.assertIsNone(graphics_window._grab)  # Off grabs nothing
+        window = graphics_window.GraphicsWindow()
+        window.toggle()
+        self.assertTrue(window.isVisible())
+        window.toggle()
+        self.assertFalse(window.isVisible())
+        # MangoHud, vkBasalt and Frame generation tabs; the last passes the
+        # launch options text it changes back to COMMANDER.
+        self.assertEqual(len(window.tabs.buttons()), 3)
+        # A new click outside (in the game) closes it; one inside, or a
+        # button held from a drag that started inside, doesn't.
+        from PySide6.QtCore import QPointF
+
+        window.toggle()
+        inside = QPointF(window.frameGeometry().center())
+        outside = QPointF(window.frameGeometry().right() + 50, 10)
+        window.on_pointer(inside, False)
+        window.on_pointer(inside, True)
+        window.on_pointer(outside, True)
+        self.assertTrue(window.isVisible())
+        window.on_pointer(outside, False)
+        window.on_pointer(outside, True)
+        self.assertFalse(window.isVisible())
+        sent = []
+        window.options_changed.connect(sent.append)
+        window.set_options("LSFGVK_ENV=1 %command%")
+        window.frame_gen._set("LSFGVK_MULTIPLIER", "3")
+        self.assertIn("LSFGVK_MULTIPLIER=3", sent[-1])
+
+
+    def test_overlay_takes_focus_unless_the_game_is_fullscreen(self):
+        from commander_gui.ui import graphics_window
+
+        ltx = self.tmp / "anomaly" / "appdata" / "user.ltx"
+        ltx.parent.mkdir(parents=True)
+        for mode, fullscreen in (("fullscreen", True), ("borderless", False), ("windowed", False)):
+            ltx.write_text(f"rs_render_static off\nrs_screenmode {mode}\n")
+            self.assertEqual(graphics_window.game_fullscreen(self.tmp / "anomaly"), fullscreen, mode)
+        self.assertFalse(graphics_window.game_fullscreen(self.tmp / "missing"))
+        # Before launch, fullscreen becomes borderless; the rest stays.
+        ltx.write_text("rs_screenmode fullscreen\nvid_mode 2560x1440\n")
+        graphics_window.use_borderless(self.tmp / "anomaly")
+        self.assertEqual(ltx.read_text(), "rs_screenmode borderless\nvid_mode 2560x1440\n")
+
+    def test_dll_label_shows_folder_and_version(self):
+        dll = self.tmp / "Lossless.dll"
+        dll.write_bytes(b"MZ" + "FileVersion".encode("utf-16-le") + b"\0\0" + "3.2.2.0".encode("utf-16-le") + b"\0\0")
+        self.assertEqual(launch_options.dll_label(dll), f"{dll} 3.2.2")
+        dll.write_bytes(b"MZ no version here")
+        self.assertEqual(launch_options.dll_label(dll), str(dll))
+
+    def test_typed_frame_gen_values_never_break_the_config(self):
+        # Hand-typed launch options: junk falls back, numbers are clamped.
+        with patch("commander_gui.config.settings_dir", return_value=self.tmp):
+            path = launch_options._lsfg2_config(self.tmp / "x.dll", "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=abc LSFGVK_FLOW_SCALE=nan")
+            self.assertIn("multiplier = 2\nflow_scale = 1.0", path.read_text())
+            path = launch_options._lsfg1_config(self.tmp / "x.dll", "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=99 LSFGVK_FLOW_SCALE=0.01")
+            self.assertIn("multiplier = 20\nflow_scale = 0.25", path.read_text())
+
+    def test_both_dlls_pick_the_lsfg_vk(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui import frame_gen_card
+
+        QApplication.instance() or QApplication([])
+        folder = self.tmp / "ls"
+        folder.mkdir()
+        for name in ("Lossless.dll", "lsfg-vk.dll"):
+            (folder / name).write_bytes(b"MZ")
+        gui_settings.save_gui_settings(lossless_dll=str(folder / "Lossless.dll"))
+        versions = {"Lossless.dll": "1", "lsfg-vk.dll": "2"}
+        text = ["LSFGVK_ENV=1 %command%"]
+        with patch.object(launch_options, "frame_gen_version", side_effect=lambda dll=None: versions.get(Path(dll).name)), \
+                patch.object(launch_options, "lsfg_versions", return_value={"1", "2"}), \
+                patch.object(frame_gen_card, "game_has_frame_gen", return_value=None):
+            card = frame_gen_card.FrameGenCard(lambda: text[0], lambda value: text.__setitem__(0, value))
+            card.sync()
+            self.assertFalse(card._engine_label.isHidden())
+            card._engines[1][0].click()  # 2.0
+            self.assertEqual(gui_settings.load_gui_settings()["lossless_dll"], str(folder / "lsfg-vk.dll"))
+            self.assertTrue(card._row_labels[launch_options.FG_PRESENT].isHidden())  # no Latency on 2.0
+            (folder / "Lossless.dll").unlink()
+            card.sync()
+            # One DLL: the other version stays in view, greyed, saying what it needs.
+            self.assertFalse(card._engine_label.isHidden())
+            self.assertFalse(card._engines[0][0].isEnabled())
+            self.assertIn("Lossless.dll", card._engines[0][0].toolTip())
+
+    def test_mouse_grab_set_in_the_prefix(self):
+        # Off, so the overlay gets clicks over a fullscreen game; only the
+        # X11 Driver section's GrabPointer changes.
+        from commander_gui import launcher
+
+        pfx = self.tmp / "prefix" / "pfx"
+        pfx.mkdir(parents=True)
+        reg = pfx / "user.reg"
+        reg.write_text('WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\X11 Driver] 1\n"KeyboardLayoutList"="x"\n\n[Other] 2\n"a"="b"\n')
+        runner = launcher.Runner(kind="proton", label="t", env={"STEAM_COMPAT_DATA_PATH": str(self.tmp / "prefix")})
+        launcher.set_mouse_grab(runner, False)
+        self.assertIn('"KeyboardLayoutList"="x"\n"GrabPointer"="N"\n\n[Other] 2', reg.read_text())
+        launcher.set_mouse_grab(runner, True)
+        self.assertEqual(reg.read_text().count("GrabPointer"), 1)
+        self.assertIn('"GrabPointer"="Y"', reg.read_text())
+        reg.write_text("WINE REGISTRY Version 2\n")
+        launcher.set_mouse_grab(runner, False)
+        self.assertIn('[Software\\\\Wine\\\\X11 Driver]', reg.read_text())
+        self.assertIn('"GrabPointer"="N"', reg.read_text())
 
     def test_installed_ones_are_used_and_own_config_kept(self):
         gui_settings.save_gui_settings(mangohud_preset="own")

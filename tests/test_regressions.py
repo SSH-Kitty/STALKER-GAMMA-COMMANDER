@@ -14209,23 +14209,62 @@ class LaunchOptionChipTests(unittest.TestCase):
             self.assertFalse(launch_options.native_dll(dotnet))
             conf = Path(tmp, "lsfg-vk-1.toml")
             for version, expected in (
-                ("2", {"LSFGVK_ENV": "1", "LSFGVK_MULTIPLIER": "3", "LSFGVK_PERFORMANCE_MODE": "1", "LSFGVK_DLL_PATH": str(dll)}),
-                ("1", {"LSFG_LEGACY": "1", "LSFG_MULTIPLIER": "3", "LSFG_PERFORMANCE_MODE": "1", "LSFG_DLL_PATH": str(dll),
-                       "LSFG_CONFIG": str(conf), "DISABLE_LSFGVK": "1"}),
+                ("2", {"LSFGVK_CONFIG": str(Path(tmp, "lsfg-vk-2.toml"))}),
+                ("1", {"COMMANDER_LSFG1": "1", "LSFG_PROCESS": "commander", "LSFG_CONFIG": str(conf), "DISABLE_LSFGVK": "1"}),
                 (None, {}),
             ):
                 env: dict[str, str] = {}
                 with patch.object(launch_options, "lossless_dll", return_value=dll), patch.object(
                     launch_options, "frame_gen_version", return_value=version
-                ), patch.object(launch_options, "_lsfg1_config", return_value=conf), patch.object(
+                ), patch("commander_gui.config.settings_dir", return_value=Path(tmp)), patch.object(
                     launch_options, "_install_lsfg1"
                 ):
                     launch_options.apply(["game"], env, text)
                 self.assertEqual(env, expected, version)
+            # lsfg-vk 2 too, from a profile of COMMANDER's own, active only in
+            # the game's executable (not Wine's explorer.exe and the like).
+            config2 = Path(tmp, "lsfg-vk-2.toml").read_text()
+            self.assertIn('[[profile]]\nname = "COMMANDER"\nactive_in = ["AnomalyDX11AVX.exe", ', config2)
+            self.assertIn("multiplier = 3\n", config2)
+            # lsfg-vk 1 reads its settings from the file, so a running game
+            # picks a change up; off is a multiplier of 1.
+            config = conf.read_text()
+            self.assertIn('[[game]]\nexe = "commander"\nmultiplier = 3\n', config)
+            self.assertIn("performance_mode = true\n", config)
+            self.assertIn(f"dll = {json.dumps(str(dll))}\n", config)
+            with patch.object(launch_options, "lossless_dll", return_value=dll), patch.object(
+                launch_options, "frame_gen_version", return_value="1"
+            ), patch("commander_gui.config.settings_dir", return_value=Path(tmp)):
+                launch_options.live_frame_gen("LSFGVK_MULTIPLIER=4 %command%")
+            self.assertIn("multiplier = 1\n", conf.read_text())
+            # Off at launch, lsfg-vk 1 still loads (at 1x), so it can be
+            # switched on in the running game; lsfg-vk 2 doesn't.
+            for version, loaded in (("1", "COMMANDER_LSFG1"), ("2", "LSFGVK_CONFIG"), (None, None)):
+                env = {}
+                with patch.object(launch_options, "lossless_dll", return_value=dll), patch.object(
+                    launch_options, "frame_gen_version", return_value=version
+                ), patch("commander_gui.config.settings_dir", return_value=Path(tmp)), patch.object(
+                    launch_options, "_install_lsfg1"
+                ):
+                    launch_options.apply(["game"], env, "LSFGVK_EXPERIMENTAL_PRESENT_MODE=mailbox %command%")
+                self.assertEqual([key for key in env if key in ("COMMANDER_LSFG1", "LSFGVK_CONFIG")], [loaded] if loaded else [], version)
+            # lsfg-vk 2 off: its config without a profile, so it passes frames through.
+            self.assertNotIn("[[profile]]", Path(tmp, "lsfg-vk-2.toml").read_text())
+            self.assertIn('multiplier = 1\nflow_scale = 1.0\nperformance_mode = false\nexperimental_present_mode = "mailbox"\n', conf.read_text())
+            # lsfg-vk 2 on: vkBasalt sits the launch out (together: a black screen).
+            for version, kept in (("1", True), ("2", False)):
+                env = {}
+                with patch.object(launch_options, "lossless_dll", return_value=dll), patch.object(
+                    launch_options, "frame_gen_version", return_value=version
+                ), patch("commander_gui.config.settings_dir", return_value=Path(tmp)), patch.object(
+                    launch_options, "_install_lsfg1"
+                ), patch("commander_gui.overlays.resolve", side_effect=lambda env, prefix: prefix):
+                    launch_options.apply(["game"], env, "ENABLE_VKBASALT=1 LSFGVK_ENV=1 %command%")
+                self.assertEqual("ENABLE_VKBASALT" in env, kept, version)
 
     def test_bundled_lsfg1_is_set_up_with_its_library_by_full_path(self):
         """A bare library name never loads from ~/.local; the manifest names
-        the copied library by full path and only loads with LSFG_LEGACY set.
+        the copied library by full path and only loads with COMMANDER_LSFG1 set.
         lsfg-vk 2's lsfg-vk.dll never goes to the bundled lsfg-vk 1."""
         from commander_gui import launch_options
 
@@ -14242,10 +14281,14 @@ class LaunchOptionChipTests(unittest.TestCase):
                 launch_options._install_lsfg1.cache_clear()
                 layer = json.loads(Path(tmp, "vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json").read_text())["layer"]
                 self.assertEqual(Path(layer["library_path"]).read_bytes(), b"so")
-                self.assertEqual(layer["enable_environment"], {"LSFG_LEGACY": "1"})
+                self.assertEqual(layer["enable_environment"], {"COMMANDER_LSFG1": "1"})
                 with patch.object(launch_options, "native_dll", return_value=True):
                     self.assertEqual(launch_options.frame_gen_version(Path(tmp, "Lossless.dll")), "1")
-                    self.assertIsNone(launch_options.frame_gen_version(Path(tmp, "lsfg-vk.dll")))
+                    # lsfg-vk.dll is lsfg-vk 2's, never 1's.
+                    with patch.object(launch_options, "lsfg_versions", return_value={"1", "2"}):
+                        self.assertEqual(launch_options.frame_gen_version(Path(tmp, "lsfg-vk.dll")), "2")
+                    with patch.object(launch_options, "lsfg_versions", return_value={"1"}):
+                        self.assertIsNone(launch_options.frame_gen_version(Path(tmp, "lsfg-vk.dll")))
         self.assertTrue(launch_options._BUNDLED_LSFG1.is_file())
 
     def test_quiet_wine_logs_and_proton_log_exclude_each_other(self):

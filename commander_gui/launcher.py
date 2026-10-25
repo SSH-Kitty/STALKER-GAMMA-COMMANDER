@@ -578,6 +578,56 @@ def ensure_runner_prefix(runner: Runner) -> None:
         raise LaunchError(f"Could not prepare runner prefix {prefix}: {exc}") from exc
 
 
+def _wineserver_running(pfx: Path) -> bool:
+    """Whether a wineserver serves pfx: it rewrites user.reg when it exits."""
+    target = os.path.realpath(pfx)
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            if not (proc / "comm").read_text().startswith("wineserver"):
+                continue
+            env = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        for item in env:
+            if item.startswith(b"WINEPREFIX=") and os.path.realpath(item[11:].decode(errors="replace")) == target:
+                return True
+    return False
+
+
+def set_mouse_grab(runner: Runner, grab: bool) -> None:
+    """Wine's GrabPointer in the runner's prefix. On, a fullscreen game keeps
+    the mouse to itself, so the graphics overlay over it never gets a click;
+    off, the overlay works over fullscreen too. Aiming still reads raw mouse
+    movement either way. Skipped while the prefix's wineserver runs (it
+    would write user.reg over this): then from the next launch."""
+    if raw := runner.env.get("STEAM_COMPAT_DATA_PATH"):
+        pfx = Path(raw).expanduser() / "pfx"
+    elif raw := runner.env.get("WINEPREFIX"):
+        pfx = Path(raw).expanduser()
+    else:
+        return
+    user_reg = pfx / "user.reg"
+    if not user_reg.is_file() or _wineserver_running(pfx):
+        return
+    text = user_reg.read_text(encoding="utf-8", errors="surrogateescape")
+    header = "[Software\\\\Wine\\\\X11 Driver]"
+    value = f'"GrabPointer"="{"Y" if grab else "N"}"'
+    lines = text.split("\n")
+    start = next((i for i, line in enumerate(lines) if line.startswith(header)), None)
+    if start is None:
+        lines += [f"{header} {int(time.time())}", value, ""]
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
+        found = next((i for i in range(start + 1, end) if lines[i].startswith('"GrabPointer"=')), None)
+        if found is None:
+            lines.insert(end, value)
+        elif lines[found] == value:
+            return
+        else:
+            lines[found] = value
+    write_bytes(user_reg, "\n".join(lines).encode(errors="surrogateescape"), lock=False)
+
+
 def build_runner_tool_command(
     runner: Runner,
     executable: str,

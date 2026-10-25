@@ -24,6 +24,27 @@ class GameSplashTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
 
+    def test_splash_process_ends_when_the_game_starts(self):
+        # A Tool window closing doesn't quit Qt on its own: splashes used to
+        # stay running for good once COMMANDER was gone.
+        import subprocess
+        import sys
+
+        from commander_gui.ui.game_splash import MARKERS
+
+        logs = self.tmp / "anomaly" / "appdata" / "logs"
+        logs.mkdir(parents=True)
+        process = subprocess.Popen(
+            [sys.executable, "-m", "commander_gui.ui.game_splash", str(self.tmp / "anomaly"),
+             str(self.tmp / "gamma"), "#00ff00", "LOADING", "title", "--still"],
+            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(process.kill)
+        time.sleep(1.5)
+        (logs / "xray_test.log").write_bytes(MARKERS[0])
+        self.assertEqual(process.wait(timeout=10), 0)
+
     def test_flag_rides_on_the_real_command_line_after_saved_arguments(self):
         gamma = self.tmp / "gamma"
         (gamma / "profiles" / "Default").mkdir(parents=True)

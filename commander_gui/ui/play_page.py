@@ -76,6 +76,7 @@ from ..launcher import (
     runner_prefix_error,
     runner_unsupported_error,
     set_mo2_selected_title,
+    set_mouse_grab,
     steam_shortcut_appid,
     unblock_mo2_python,
     write_desktop_shortcut,
@@ -100,7 +101,7 @@ from ..steam_shortcuts import (
     setup_coop_shortcut,
     steam_root_for,
 )
-from . import game_splash
+from . import game_splash, graphics_window
 from .common import (
     ACCENT,
     WARN,
@@ -121,7 +122,6 @@ from .common import (
     normalize_path,
     notice,
     notify_desktop,
-    open_url,
     pick_shortcuts_vdf,
     play_click_sound,
     populate_runner_combo,
@@ -132,6 +132,7 @@ from .common import (
     tr,
 )
 from .dialogs import MessageBox as QMessageBox
+from .frame_gen_card import FrameGenCard
 from .game_splash import is_launcher
 from .install_page import _PathEdit, _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
@@ -559,10 +560,22 @@ class PlayPage(QWidget):
         self.direct_button.clicked.connect(lambda: self._launch_direct())
         self.direct_button.clicked.connect(play_click_sound)
         secondary_row.addWidget(self.direct_button, 1)
+        self.graphics_button = QPushButton(tr("Graphics overlay"))
+        self.graphics_button.setObjectName("secondary")
+        self.graphics_button.setToolTip(
+            tr("MangoHud and vkBasalt settings in a window over the game. Its key in Settings > Graphics opens it in-game.")
+        )
+        self.graphics_button.clicked.connect(lambda: graphics_window.toggle())
+        secondary_row.addWidget(self.graphics_button, 1)
+        # The overlay key is only taken while the game runs.
+        self.launch_state_changed.connect(
+            lambda running: graphics_window.start_key() if running else graphics_window.stop_key()
+        )
         root.addLayout(secondary_row)
 
         # -- custom launch options -------------------------------------------
         options_card, options_layout = make_card()
+        self._options_card = options_card
         options_layout.setSpacing(10)
         options_layout.addWidget(section_label(tr("Launch options"), level=2))
         # One labelled row per group; equal-width columns line the chips up
@@ -618,7 +631,15 @@ class PlayPage(QWidget):
         cards_row = QHBoxLayout()
         cards_row.setSpacing(16)
         cards_row.addWidget(options_card, 3)
-        cards_row.addWidget(self._build_frame_gen_card(), 2)
+        self._frame_gen = FrameGenCard(self.custom_options_edit.text, self.custom_options_edit.setText)
+        self._frame_gen.dll_changed.connect(self._refresh_preview)
+        # The overlay's Frame generation tab works on this text.
+        graphics_window.connect_options(
+            self.custom_options_edit.text,
+            self.custom_options_edit.setText,
+            lambda: getattr(self.window.settings.active_profile, "anomaly", None),
+        )
+        cards_row.addWidget(self._frame_gen, 2)
         root.addLayout(cards_row)
 
         # -- folders card -----------------------------------------------------
@@ -800,157 +821,6 @@ class PlayPage(QWidget):
             toggle.setChecked(launch_options.is_on(text, option))
             toggle.blockSignals(False)
 
-    # ------------------------------------------------------ frame generation
-    #: Each settings row: (row label, variable, ((button text, value), ...)).
-    #: A None value leaves the variable out, so lsfg-vk uses its default.
-    _FRAME_GEN_ROWS = (
-        ("Multiplier", launch_options.FG_MULTIPLIER, (("2x", "2"), ("3x", "3"), ("4x", "4"))),
-        ("Detail", launch_options.FG_FLOW_SCALE, (("100%", None), ("75%", "0.75"), ("50%", "0.5"))),
-        ("Mode", launch_options.FG_PERFORMANCE, (("Quality", None), ("Performance", "1"))),
-    )
-
-    def _frame_gen_button(self, text: str, key: str | None, value) -> QPushButton:
-        button = QPushButton(text)
-        button.setObjectName("segment")
-        button.setCheckable(True)
-        button.setFixedHeight(34)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.clicked.connect(lambda _=False: self._set_frame_gen(key, value))
-        return button
-
-    def _build_frame_gen_card(self) -> QFrame:
-        """lsfg-vk frame generation: on/off and its settings, all kept as
-        variables in the launch options text. Locked, with what's missing,
-        until there's a Lossless Scaling DLL lsfg-vk can run."""
-        card, layout = make_card()
-        self._frame_gen_card = card
-        layout.setSpacing(12)
-        # (row's buttons with their values, variable or None for on/off)
-        self._frame_gen_rows: list[tuple[list[tuple[QPushButton, object]], str | None]] = []
-
-        header = QHBoxLayout()
-        header.addWidget(section_label(tr("Frame generation"), level=2))
-        header.addStretch(1)
-        toggle = []
-        for text, value in ((tr("Off"), False), (tr("On"), True)):
-            button = self._frame_gen_button(text, None, value)
-            button.setMinimumWidth(72)
-            header.addWidget(button)
-            toggle.append((button, value))
-        self._frame_gen_rows.append((toggle, None))
-        layout.addLayout(header)
-        layout.addWidget(info_label(tr("Lossless Scaling Frame Generation for smoother gameplay. Plays best above 40 FPS but adds a little input lag.")))
-        self._frame_gen_missing = info_label("")
-        self._frame_gen_missing.setObjectName("warn")
-        self._frame_gen_missing.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self._frame_gen_missing)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
-        grid.setColumnStretch(1, 1)
-        for row, (label, key, choices) in enumerate(self._FRAME_GEN_ROWS):
-            grid.addWidget(info_label(tr(label), wrap=False), row, 0)
-            buttons = QHBoxLayout()
-            buttons.setSpacing(8)
-            row_buttons = []
-            for text, value in choices:
-                button = self._frame_gen_button(tr(text), key, value)
-                buttons.addWidget(button, 1)
-                row_buttons.append((button, value))
-            grid.addLayout(buttons, row, 1)
-            self._frame_gen_rows.append((row_buttons, key))
-        layout.addLayout(grid)
-        layout.addStretch(1)
-
-        footer = QHBoxLayout()
-        footer.setSpacing(8)
-        self._dll_label = info_label("", wrap=False)
-        self._dll_label.setObjectName("dim")
-        footer.addWidget(self._dll_label, 1)
-        self._get_lossless_button = QPushButton(tr("Get Lossless Scaling"))
-        self._get_lossless_button.setObjectName("secondary")
-        self._get_lossless_button.setProperty("compact", True)
-        self._get_lossless_button.clicked.connect(
-            lambda: open_url("https://store.steampowered.com/app/993090/Lossless_Scaling/")
-        )
-        footer.addWidget(self._get_lossless_button)
-        self._choose_dll_button = QPushButton(tr("Choose DLL"))
-        self._choose_dll_button.setObjectName("secondary")
-        self._choose_dll_button.setProperty("compact", True)
-        self._choose_dll_button.setToolTip(tr("Pick Lossless Scaling's Lossless.dll or lsfg-vk.dll yourself."))
-        self._choose_dll_button.clicked.connect(self._choose_lossless_dll)
-        footer.addWidget(self._choose_dll_button)
-        layout.addLayout(footer)
-        return card
-
-    def _choose_lossless_dll(self) -> None:
-        dll = launch_options.lossless_dll()
-        start = str(dll.parent if dll else Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("Select Lossless Scaling's DLL"), start, "DLL (*.dll)"
-        )
-        if path:
-            gui_settings.save_gui_settings(lossless_dll=path)
-            self._refresh_preview()
-
-    def _set_frame_gen(self, key: str | None, value) -> None:
-        text = self.custom_options_edit.text()
-        if key is None:
-            text = launch_options.frame_gen(text, value)
-        else:
-            text = launch_options.set_var(text, key, value)
-        self.custom_options_edit.setText(text)
-        # Clicking the picked button again unticks it and leaves the text
-        # as it was, so no textChanged: tick it back here.
-        self._sync_frame_gen_card()
-
-    def _sync_frame_gen_card(self) -> bool:
-        """Show the card's state from the options text, and lock it with what
-        to install until lsfg-vk and Lossless Scaling are both there. True
-        when they are."""
-        text = self.custom_options_edit.text()
-        on = launch_options.is_on(text, launch_options.FRAME_GEN)
-        steps = []
-        versions = launch_options.lsfg_versions()
-        if not versions:
-            steps.append(tr("Install lsfg-vk from your distro's packages (on Arch and CachyOS: sudo pacman -S lsfg-vk), or from lsfg-vk.dev."))
-        dll = launch_options.lossless_dll()
-        version = launch_options.frame_gen_version(dll) if versions and dll else None
-        if dll is None:
-            steps.append(tr("Get Lossless Scaling on Steam (paid). To install it, first set Properties > Compatibility to a Proton version. Have the DLL already? Use Choose DLL."))
-        elif versions and version is None:
-            if not launch_options.native_dll(dll):
-                steps.append(tr("That file isn't Lossless Scaling's frame generation DLL. Pick Lossless.dll."))
-            else:
-                steps.append(tr("lsfg-vk.dll needs lsfg-vk 2.0. Install it (on Arch and CachyOS: sudo pacman -S lsfg-vk), or pick Lossless.dll instead."))
-        if dll is None:
-            self._dll_label.setText(tr("No DLL found"))
-        elif version:
-            self._dll_label.setText(tr("{name} on lsfg-vk {version}.0", name=dll.name, version=version))
-        else:
-            self._dll_label.setText(dll.name)
-        self._dll_label.setToolTip(str(dll or ""))
-        self._frame_gen_missing.setText("\n".join(
-            steps if len(steps) == 1 else [f"{n}. {step}" for n, step in enumerate(steps, 1)]
-        ))
-        self._frame_gen_missing.setVisible(bool(steps))
-        self._get_lossless_button.setVisible(dll is None)
-        # lsfg-vk reads its settings once, at launch: no changing them mid-game.
-        running = self._launching
-        self._choose_dll_button.setEnabled(not running)
-        self._frame_gen_card.setToolTip(tr("Close the game to change frame generation.") if running else "")
-        for buttons, key in self._frame_gen_rows:
-            current = on if key is None else launch_options.var(text, key)
-            if key == launch_options.FG_MULTIPLIER:
-                current = current or "2"
-            for button, value in buttons:
-                button.setChecked(value == current)
-                # Left on (typed in, or set before an uninstall): Off stays
-                # clickable so it can still be switched off.
-                button.setEnabled(not running and (on and not steps if key else not steps or (on and value is False)))
-        return not steps
-
     def _persist_dirs(self) -> None:
         if self._persisting:
             return
@@ -1081,7 +951,7 @@ class PlayPage(QWidget):
         self.shortcut_button.setEnabled(self.open_mo2_button.isEnabled())
 
     def _refresh_preview_inner(self) -> None:
-        self._frame_gen_ready = self._sync_frame_gen_card()
+        self._frame_gen_ready = self._frame_gen.sync()
         # Resolve the runner once: each resolution probes the filesystem for
         # Steam libraries and Proton builds, and this runs on every edit.
         profile = self.window.settings.active_profile
@@ -1288,9 +1158,28 @@ class PlayPage(QWidget):
         else:
             self.runner_hint.setText("")
 
+    def _prepare_overlay(self, runner) -> None:
+        """Before a launch: the graphics overlay gets the mouse over the game.
+        Wine leaves it unlocked, and the game runs borderless, so the overlay
+        can take focus from it. Undone with the overlay key set to Off (the
+        lock; the screen mode stays as picked)."""
+        on = gui_settings.load_gui_settings().get("graphics_overlay_key") != "off"
+        # Nice to have: a read-only prefix or user.ltx never stops the launch.
+        try:
+            set_mouse_grab(runner, not on)
+            if on:
+                graphics_window.use_borderless(getattr(self.window.settings.active_profile, "anomaly", None))
+        except OSError:
+            pass
+
     def _on_change(self, *_args) -> None:
         self._save_state()
         self._refresh_preview()
+        if self._launching:  # the frame generation card, live in the game
+            try:
+                launch_options.live_frame_gen(self.custom_options_edit.text())
+            except OSError:
+                pass  # the setting still applies from the next launch
 
     def _on_gamemode_toggled(self, checked: bool) -> None:
         gui_settings.save_gui_settings(always_gamemoderun=bool(checked))
@@ -1434,6 +1323,11 @@ class PlayPage(QWidget):
             return
         steam_root = steam_root_for(vdf_path)
         snapshot = self._session_snapshot(True, False, no_mo2=no_mo2)
+        # Steam's Proton runs in this runner's prefix too (see _track_steam_session).
+        try:
+            self._prepare_overlay(self._runner())
+        except LaunchError:
+            pass
         if coop_shortcut_current(vdf_path, **fields):
             self._set_launch_button_state(True)
             try:
@@ -1675,6 +1569,7 @@ class PlayPage(QWidget):
                 open_mo2=open_mo2, direct=direct, runner=runner, coop_launch=coop_launch
             )
             ensure_runner_prefix(runner)
+            self._prepare_overlay(runner)
             label = (
                 "STALKER ANOMALY"
                 if direct
@@ -2638,7 +2533,9 @@ class PlayPage(QWidget):
         self.open_mo2_button.setEnabled(not launching)
         self.direct_button.setEnabled(not launching and (not self._coop_on() or self._plain_coop_on()))
         self.shortcut_button.setEnabled(not launching)
-        self._sync_frame_gen_card()
+        # Launch options only apply at launch: no editing them mid-game.
+        self._options_card.setEnabled(not launching)
+        self._options_card.setToolTip(tr("Close the game to change launch options.") if launching else "")
         self.launch_state_changed.emit(launching)
 
     def on_busy_changed(self, busy: bool) -> None:

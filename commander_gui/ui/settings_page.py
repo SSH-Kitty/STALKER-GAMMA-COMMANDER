@@ -53,6 +53,7 @@ from ..steam_shortcuts import (
 )
 from ..themes import THEME_INFO, active_theme
 from ..updates import is_unstable_version, newer_unstable_tag
+from . import graphics_window
 from .common import (
     OK_GREEN,
     WARN,
@@ -179,6 +180,301 @@ _TABS = (
     ("Plugins", "plugins"),
     ("Maintenance", "maintenance"),
 )
+
+
+class GraphicsPanel(QWidget):
+    """Settings > Graphics: MangoHud and vkBasalt. The graphics overlay shows
+    the two cards (mangohud_card, vkbasalt_card) on tabs of its own."""
+
+    def __init__(self, *, loose: bool = False) -> None:
+        super().__init__()
+        self._loose = loose  # cards left out of the panel, for the overlay's tabs
+        self.setObjectName("panelTransparent")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._graphics_tab())
+        self.render()
+
+    def _graphics_tab(self) -> QWidget:
+        page, layout = _panel()
+        layout.setSpacing(12)
+
+        mangohud, box = _card(
+            tr("MangoHud"),
+            tr("The performance overlay. Switch it on with MangoHud on the Play page."),
+        )
+        box.addWidget(_live_hint())
+        self._mangohud_preset = _combo(180)
+        for label, key in (
+            (tr("FPS only"), "fps"), (tr("Basic"), "basic"), (tr("Full"), "full"),
+            (tr("Custom selection"), "custom"), (tr("My own MangoHud.conf"), "own"),
+        ):
+            self._mangohud_preset.addItem(label, key)
+        self._mangohud_preset.currentIndexChanged.connect(self._on_mangohud_preset)
+        items = QWidget()
+        items.setObjectName("panelTransparent")
+        items_layout = QVBoxLayout(items)
+        items_layout.setContentsMargins(0, 0, 0, 0)
+        self._mangohud_items: dict[str, QCheckBox] = {}
+        # In the overlay's own order, top to bottom.
+        for key, label in (
+            ("time", tr("Clock")),
+            ("gpu", tr("GPU load and temperature")),
+            ("cpu", tr("CPU load and temperature")),
+            ("memory", tr("RAM and VRAM use")),
+            ("procmem", tr("Game's memory use")),
+            ("battery", tr("Battery")),
+            ("fps", tr("FPS")),
+            ("frametime", tr("Frame time (ms)")),
+            ("graph", tr("Frame time graph")),
+        ):
+            check = QCheckBox(label)
+            check.toggled.connect(self._on_mangohud_item)
+            items_layout.addWidget(check)
+            self._mangohud_items[key] = check
+        self._mangohud_position = _combo(180)
+        for label, key in zip(
+            (tr("Top left"), tr("Top right"), tr("Bottom left"), tr("Bottom right")),
+            overlays.MANGOHUD_POSITIONS,
+        ):
+            self._mangohud_position.addItem(label, key)
+        self._mangohud_size = _combo(180)
+        for label, key in zip((tr("Small"), tr("Medium"), tr("Large")), overlays.MANGOHUD_SIZES):
+            self._mangohud_size.addItem(label, key)
+        self._mangohud_key = _combo(180)
+        for key in overlays.MANGOHUD_KEYS:
+            self._mangohud_key.addItem(key.replace("_", " "), key)
+        self._mangohud_layout = _combo(180)
+        for label, key in zip((tr("Box"), tr("Bar")), overlays.MANGOHUD_LAYOUTS):
+            self._mangohud_layout.addItem(label, key)
+        for combo in (self._mangohud_size, self._mangohud_key):
+            combo.currentIndexChanged.connect(self._save_graphics)
+        self._mangohud_position.currentIndexChanged.connect(self._on_mangohud_position)
+        self._mangohud_layout.currentIndexChanged.connect(self._on_mangohud_layout)
+        background_row, self._mangohud_background = self._slider(0, 100)
+        overlay_row, self._mangohud_transparency = self._slider(0, 90)
+        _rows(
+            box,
+            _setting_row(tr("Preset"), tr("My own MangoHud.conf uses the file in ~/.config/MangoHud."), self._mangohud_preset),
+            _setting_row(tr("Show"), "", items),
+            _setting_row(tr("Layout"), tr("Bar puts everything on one line across the screen, at the top or bottom."), self._mangohud_layout),
+            _setting_row(tr("Position"), tr("A bar can only sit on the left, so a right corner switches Layout to Box."), self._mangohud_position),
+            _setting_row(tr("Size"), "", self._mangohud_size),
+            _setting_row(tr("Background transparency"), tr("0% is solid."), background_row),
+            _setting_row(tr("Overlay transparency"), tr("The text and graphs too."), overlay_row),
+            _setting_row(tr("On/off key"), tr("Switches the overlay off and on in-game."), self._mangohud_key),
+        )
+        box.addStretch(1)
+
+        vkbasalt, box = _card(
+            tr("vkBasalt"),
+            tr("Sharpening and colour effects. Switch it on with vkBasalt on the Play page."),
+        )
+        box.addWidget(_live_hint())
+        self._vkbasalt_preset = _combo(180)
+        for label, key in zip(
+            (tr("Natural"), tr("Vibrant"), tr("Cinematic"), tr("Bleak"), tr("Warm"), tr("Cold"),
+             tr("High contrast"), tr("Old film"), tr("Zone"), tr("Custom look")),
+            overlays.VKBASALT_PRESETS,
+        ):
+            self._vkbasalt_preset.addItem(label, key)
+        self._vkbasalt_aa = _combo(180)
+        for label, key in zip((tr("Off"), "FXAA", "SMAA"), overlays.VKBASALT_AA):
+            self._vkbasalt_aa.addItem(label, key)
+        self._vkbasalt_sharpener = _combo(180)
+        for label, key in zip(("CAS", "DLS"), overlays.VKBASALT_SHARPENERS):
+            self._vkbasalt_sharpener.addItem(label, key)
+        self._vkbasalt_sharpness = _combo(180)
+        for label, key in zip((tr("Off"), tr("Light"), tr("Medium"), tr("Strong")), overlays.VKBASALT_SHARPNESS):
+            self._vkbasalt_sharpness.addItem(label, key)
+        self._vkbasalt_key = _combo(180)
+        for key in overlays.VKBASALT_KEYS:
+            self._vkbasalt_key.addItem(key, key)
+        self._vkbasalt_preset.currentIndexChanged.connect(self._on_vkbasalt_look)
+        for combo in (self._vkbasalt_aa, self._vkbasalt_sharpener, self._vkbasalt_sharpness, self._vkbasalt_key):
+            combo.currentIndexChanged.connect(self._save_graphics)
+        self._vkbasalt_colours: dict[str, QSlider] = {}
+        colour_rows = []
+        for name, label in zip(
+            overlays.VKBASALT_COLOURS,
+            (tr("Saturation"), tr("Contrast"), tr("Brightness"), tr("Warmth"), tr("Tint")),
+        ):
+            row, self._vkbasalt_colours[name] = self._slider(-50, 50, "", self._on_vkbasalt_colour)
+            colour_rows.append(_setting_row(label, "", row))
+        self._vkbasalt_start_off = QCheckBox(tr("Start with the effects off"))
+        self._vkbasalt_start_off.toggled.connect(self._save_graphics)
+        _rows(
+            box,
+            _setting_row(
+                tr("Look"),
+                tr("A starting point for the colours. The sliders below fine-tune it."),
+                self._vkbasalt_preset,
+            ),
+            *colour_rows,
+            _setting_row(tr("Anti-aliasing"), tr("Smooths jagged edges. SMAA looks better, FXAA costs less."), self._vkbasalt_aa),
+            _setting_row(tr("Sharpening method"), tr("DLS also cleans up grain and noise."), self._vkbasalt_sharpener),
+            _setting_row(tr("Sharpening"), "", self._vkbasalt_sharpness),
+            _setting_row(
+                tr("On/off key"),
+                tr("Switches the effects off and on in-game."),
+                self._vkbasalt_key,
+            ),
+            _check_row(self._vkbasalt_start_off, tr("Press the on/off key in-game to bring them in.")),
+        )
+        box.addStretch(1)
+        self.mangohud_card, self.vkbasalt_card = mangohud, vkbasalt
+        if not self._loose:
+            _columns(layout, mangohud, vkbasalt)
+        return page
+
+    def _slider(self, minimum: int, maximum: int, suffix: str = "%", on_change=None) -> tuple[QWidget, QSlider]:
+        """A slider with its value beside it."""
+        row = QWidget()
+        row.setObjectName("panelTransparent")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(minimum, maximum)
+        slider.setProperty("signed", minimum < 0)
+        slider.setSingleStep(5)
+        slider.setPageStep(10)
+        slider.setFixedWidth(130)
+        value = QLabel()
+        value.setMinimumWidth(42)
+        # Signed sliders show +10 / -10; the label also follows render.
+        slider.show_value = lambda v: value.setText(f"{v:+d}" if minimum < 0 and v else f"{v}{suffix}")
+        slider.valueChanged.connect(slider.show_value)
+        slider.valueChanged.connect(on_change or self._save_graphics)
+        layout.addWidget(slider)
+        layout.addWidget(value)
+        return row, slider
+
+    def render(self) -> None:
+        data = overlays.settings()
+        for combo, key in (
+            (self._mangohud_preset, "mangohud_preset"),
+            (self._mangohud_position, "mangohud_position"),
+            (self._mangohud_size, "mangohud_size"),
+            (self._mangohud_key, "mangohud_key"),
+            (self._mangohud_layout, "mangohud_layout"),
+            (self._vkbasalt_preset, "vkbasalt_preset"),
+            (self._vkbasalt_sharpness, "vkbasalt_sharpness"),
+            (self._vkbasalt_sharpener, "vkbasalt_sharpener"),
+            (self._vkbasalt_aa, "vkbasalt_aa"),
+            (self._vkbasalt_key, "vkbasalt_key"),
+        ):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(combo.findData(data[key]), 0))
+            combo.blockSignals(False)
+        for key, check in self._mangohud_items.items():
+            check.blockSignals(True)
+            check.setChecked(key in data["mangohud_items"])
+            check.blockSignals(False)
+        for slider, key in (
+            (self._mangohud_background, "mangohud_background_transparency"),
+            (self._mangohud_transparency, "mangohud_transparency"),
+            *((slider, f"vkbasalt_{name}") for name, slider in self._vkbasalt_colours.items()),
+        ):
+            slider.blockSignals(True)
+            slider.setValue(data[key])
+            slider.blockSignals(False)
+            slider.show_value(data[key])
+        self._vkbasalt_start_off.blockSignals(True)
+        self._vkbasalt_start_off.setChecked(data["vkbasalt_start_off"])
+        self._vkbasalt_start_off.blockSignals(False)
+        self._sync_mangohud_enabled()
+        self._sync_mangohud_positions()
+
+    def _sync_mangohud_positions(self) -> None:
+        # A bar is as wide as the screen: MangoHud can't put it on the right.
+        position = self._mangohud_position.currentData()
+        if self._mangohud_layout.currentData() == "bar" and "right" in position:
+            self._mangohud_position.blockSignals(True)
+            self._mangohud_position.setCurrentIndex(self._mangohud_position.findData(position.replace("right", "left")))
+            self._mangohud_position.blockSignals(False)
+
+    def _on_mangohud_position(self) -> None:
+        # The newer choice wins: a right corner needs the box layout.
+        if "right" in self._mangohud_position.currentData() and self._mangohud_layout.currentData() == "bar":
+            self._mangohud_layout.blockSignals(True)
+            self._mangohud_layout.setCurrentIndex(self._mangohud_layout.findData("box"))
+            self._mangohud_layout.blockSignals(False)
+        self._save_graphics()
+
+    def _on_mangohud_layout(self) -> None:
+        self._sync_mangohud_positions()
+        self._save_graphics()
+
+    def _sync_mangohud_enabled(self) -> None:
+        # MangoHud.conf decides all of it then.
+        own = self._mangohud_preset.currentData() == "own"
+        for widget in (
+            *self._mangohud_items.values(), self._mangohud_position, self._mangohud_size,
+            self._mangohud_key, self._mangohud_layout, self._mangohud_background, self._mangohud_transparency,
+        ):
+            widget.setEnabled(not own)
+
+    def _on_mangohud_preset(self) -> None:
+        items = overlays.MANGOHUD_PRESETS.get(self._mangohud_preset.currentData())
+        if items is not None:
+            for key, check in self._mangohud_items.items():
+                check.blockSignals(True)
+                check.setChecked(key in items)
+                check.blockSignals(False)
+        self._sync_mangohud_enabled()
+        self._save_graphics()
+
+    def _on_vkbasalt_look(self) -> None:
+        look = self._vkbasalt_preset.currentData()
+        values = overlays.VKBASALT_LOOKS.get(look) or overlays.settings()["vkbasalt_custom"]
+        for slider, value in zip(self._vkbasalt_colours.values(), values):
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+            slider.show_value(value)
+        self._save_graphics()
+
+    def _on_vkbasalt_colour(self) -> None:
+        # Moving a slider by hand makes it a custom look.
+        self._vkbasalt_preset.blockSignals(True)
+        self._vkbasalt_preset.setCurrentIndex(self._vkbasalt_preset.findData("custom"))
+        self._vkbasalt_preset.blockSignals(False)
+        self._save_graphics()
+
+    def _on_mangohud_item(self) -> None:
+        # Ticking by hand makes it a custom set.
+        self._mangohud_preset.blockSignals(True)
+        self._mangohud_preset.setCurrentIndex(self._mangohud_preset.findData("custom"))
+        self._mangohud_preset.blockSignals(False)
+        self._save_graphics()
+
+    def _save_graphics(self) -> None:
+        # Only the custom look's slider values are saved: a named look's come
+        # from VKBASALT_LOOKS, and saving them would overwrite the custom look.
+        colours = (
+            {f"vkbasalt_{name}": slider.value() for name, slider in self._vkbasalt_colours.items()}
+            if self._vkbasalt_preset.currentData() == "custom" else {}
+        )
+        gui_settings.save_gui_settings(
+            mangohud_preset=self._mangohud_preset.currentData(),
+            mangohud_items=[key for key, check in self._mangohud_items.items() if check.isChecked()],
+            mangohud_position=self._mangohud_position.currentData(),
+            mangohud_size=self._mangohud_size.currentData(),
+            mangohud_key=self._mangohud_key.currentData(),
+            mangohud_layout=self._mangohud_layout.currentData(),
+            mangohud_background_transparency=self._mangohud_background.value(),
+            mangohud_transparency=self._mangohud_transparency.value(),
+            vkbasalt_preset=self._vkbasalt_preset.currentData(),
+            vkbasalt_sharpness=self._vkbasalt_sharpness.currentData(),
+            vkbasalt_key=self._vkbasalt_key.currentData(),
+            vkbasalt_sharpener=self._vkbasalt_sharpener.currentData(),
+            vkbasalt_aa=self._vkbasalt_aa.currentData(),
+            vkbasalt_start_off=self._vkbasalt_start_off.isChecked(),
+            **colours,
+        )
+        if self._mangohud_preset.currentData() != "own":
+            overlays.write_mangohud_config()  # a running game reloads it
+        overlays.write_vkbasalt_config()  # and so does the bundled vkBasalt
 
 
 class SettingsPage(QWidget):
@@ -421,157 +717,26 @@ class SettingsPage(QWidget):
     def _graphics_tab(self) -> QWidget:
         page, layout = _panel()
         layout.setSpacing(12)
-
-        mangohud, box = _card(
-            tr("MangoHud"),
-            tr("The performance overlay. Switch it on with MangoHud on the Play page."),
-        )
-        box.addWidget(_live_hint())
-        self._mangohud_preset = _combo(180)
-        for label, key in (
-            (tr("FPS only"), "fps"), (tr("Basic"), "basic"), (tr("Full"), "full"),
-            (tr("Custom selection"), "custom"), (tr("My own MangoHud.conf"), "own"),
-        ):
-            self._mangohud_preset.addItem(label, key)
-        self._mangohud_preset.currentIndexChanged.connect(self._on_mangohud_preset)
-        items = QWidget()
-        items.setObjectName("panelTransparent")
-        items_layout = QVBoxLayout(items)
-        items_layout.setContentsMargins(0, 0, 0, 0)
-        self._mangohud_items: dict[str, QCheckBox] = {}
-        # In the overlay's own order, top to bottom.
-        for key, label in (
-            ("time", tr("Clock")),
-            ("gpu", tr("GPU load and temperature")),
-            ("cpu", tr("CPU load and temperature")),
-            ("memory", tr("RAM and VRAM use")),
-            ("procmem", tr("Game's memory use")),
-            ("battery", tr("Battery")),
-            ("fps", tr("FPS")),
-            ("frametime", tr("Frame time (ms)")),
-            ("graph", tr("Frame time graph")),
-        ):
-            check = QCheckBox(label)
-            check.toggled.connect(self._on_mangohud_item)
-            items_layout.addWidget(check)
-            self._mangohud_items[key] = check
-        self._mangohud_position = _combo(180)
-        for label, key in zip(
-            (tr("Top left"), tr("Top right"), tr("Bottom left"), tr("Bottom right")),
-            overlays.MANGOHUD_POSITIONS,
-        ):
-            self._mangohud_position.addItem(label, key)
-        self._mangohud_size = _combo(180)
-        for label, key in zip((tr("Small"), tr("Medium"), tr("Large")), overlays.MANGOHUD_SIZES):
-            self._mangohud_size.addItem(label, key)
-        self._mangohud_key = _combo(180)
-        for key in overlays.MANGOHUD_KEYS:
-            self._mangohud_key.addItem(key.replace("_", " "), key)
-        self._mangohud_layout = _combo(180)
-        for label, key in zip((tr("Box"), tr("Bar")), overlays.MANGOHUD_LAYOUTS):
-            self._mangohud_layout.addItem(label, key)
-        for combo in (self._mangohud_size, self._mangohud_key):
-            combo.currentIndexChanged.connect(self._save_graphics)
-        self._mangohud_position.currentIndexChanged.connect(self._on_mangohud_position)
-        self._mangohud_layout.currentIndexChanged.connect(self._on_mangohud_layout)
-        background_row, self._mangohud_background = self._slider(0, 100)
-        overlay_row, self._mangohud_transparency = self._slider(0, 90)
-        _rows(
-            box,
-            _setting_row(tr("Preset"), tr("My own MangoHud.conf uses the file in ~/.config/MangoHud."), self._mangohud_preset),
-            _setting_row(tr("Show"), "", items),
-            _setting_row(tr("Layout"), tr("Bar puts everything on one line across the screen, at the top or bottom."), self._mangohud_layout),
-            _setting_row(tr("Position"), tr("A bar can only sit on the left, so a right corner switches Layout to Box."), self._mangohud_position),
-            _setting_row(tr("Size"), "", self._mangohud_size),
-            _setting_row(tr("Background transparency"), tr("0% is solid."), background_row),
-            _setting_row(tr("Overlay transparency"), tr("The text and graphs too."), overlay_row),
-            _setting_row(tr("On/off key"), tr("Switches the overlay off and on in-game."), self._mangohud_key),
-        )
-        box.addStretch(1)
-
-        vkbasalt, box = _card(
-            tr("vkBasalt"),
-            tr("Sharpening and colour effects. Switch it on with vkBasalt on the Play page."),
-        )
-        box.addWidget(_live_hint())
-        self._vkbasalt_preset = _combo(180)
-        for label, key in zip(
-            (tr("Natural"), tr("Vibrant"), tr("Cinematic"), tr("Bleak"), tr("Warm"), tr("Cold"),
-             tr("High contrast"), tr("Old film"), tr("Zone"), tr("Custom look")),
-            overlays.VKBASALT_PRESETS,
-        ):
-            self._vkbasalt_preset.addItem(label, key)
-        self._vkbasalt_aa = _combo(180)
-        for label, key in zip((tr("Off"), "FXAA", "SMAA"), overlays.VKBASALT_AA):
-            self._vkbasalt_aa.addItem(label, key)
-        self._vkbasalt_sharpener = _combo(180)
-        for label, key in zip(("CAS", "DLS"), overlays.VKBASALT_SHARPENERS):
-            self._vkbasalt_sharpener.addItem(label, key)
-        self._vkbasalt_sharpness = _combo(180)
-        for label, key in zip((tr("Off"), tr("Light"), tr("Medium"), tr("Strong")), overlays.VKBASALT_SHARPNESS):
-            self._vkbasalt_sharpness.addItem(label, key)
-        self._vkbasalt_key = _combo(180)
-        for key in overlays.VKBASALT_KEYS:
-            self._vkbasalt_key.addItem(key, key)
-        self._vkbasalt_preset.currentIndexChanged.connect(self._on_vkbasalt_look)
-        for combo in (self._vkbasalt_aa, self._vkbasalt_sharpener, self._vkbasalt_sharpness, self._vkbasalt_key):
-            combo.currentIndexChanged.connect(self._save_graphics)
-        self._vkbasalt_colours: dict[str, QSlider] = {}
-        colour_rows = []
-        for name, label in zip(
-            overlays.VKBASALT_COLOURS,
-            (tr("Saturation"), tr("Contrast"), tr("Brightness"), tr("Warmth"), tr("Tint")),
-        ):
-            row, self._vkbasalt_colours[name] = self._slider(-50, 50, "", self._on_vkbasalt_colour)
-            colour_rows.append(_setting_row(label, "", row))
-        self._vkbasalt_start_off = QCheckBox(tr("Start with the effects off"))
-        self._vkbasalt_start_off.toggled.connect(self._save_graphics)
-        _rows(
-            box,
-            _setting_row(
-                tr("Look"),
-                tr("A starting point for the colours. The sliders below fine-tune it."),
-                self._vkbasalt_preset,
-            ),
-            *colour_rows,
-            _setting_row(tr("Anti-aliasing"), tr("Smooths jagged edges. SMAA looks better, FXAA costs less."), self._vkbasalt_aa),
-            _setting_row(tr("Sharpening method"), tr("DLS also cleans up grain and noise."), self._vkbasalt_sharpener),
-            _setting_row(tr("Sharpening"), "", self._vkbasalt_sharpness),
-            _setting_row(
-                tr("On/off key"),
-                tr("Switches the effects off and on in-game."),
-                self._vkbasalt_key,
-            ),
-            _check_row(self._vkbasalt_start_off, tr("Press the on/off key in-game to bring them in.")),
-        )
-        box.addStretch(1)
-        _columns(layout, mangohud, vkbasalt)
+        overlay, box = _card(tr("Graphics overlay"), tr("These settings in a window over the running game."))
+        self._overlay_key = _combo(180)
+        for key, (label, _keysym, _modifiers) in graphics_window.KEYS.items():
+            self._overlay_key.addItem(label or tr("Off"), key)
+        self._overlay_key.currentIndexChanged.connect(self._on_overlay_key)
+        _rows(box, _setting_row(
+            tr("Key"),
+            tr("Works while the game runs, not in Steam Deck Game Mode. Esc closes the window."),
+            self._overlay_key,
+        ))
+        layout.addWidget(overlay)
+        self._graphics = GraphicsPanel()
+        layout.addWidget(self._graphics)
         return page
 
-    def _slider(self, minimum: int, maximum: int, suffix: str = "%", on_change=None) -> tuple[QWidget, QSlider]:
-        """A slider with its value beside it."""
-        row = QWidget()
-        row.setObjectName("panelTransparent")
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(minimum, maximum)
-        slider.setProperty("signed", minimum < 0)
-        slider.setSingleStep(5)
-        slider.setPageStep(10)
-        slider.setFixedWidth(130)
-        value = QLabel()
-        value.setMinimumWidth(42)
-        # Signed sliders show +10 / -10; the label also follows _render_graphics.
-        slider.show_value = lambda v: value.setText(f"{v:+d}" if minimum < 0 and v else f"{v}{suffix}")
-        slider.valueChanged.connect(slider.show_value)
-        slider.valueChanged.connect(on_change or self._save_graphics)
-        layout.addWidget(slider)
-        layout.addWidget(value)
-        return row, slider
+    def _on_overlay_key(self) -> None:
+        gui_settings.save_gui_settings(graphics_overlay_key=self._overlay_key.currentData())
+        graphics_window.restart_key()
 
     def _render_graphics(self) -> None:
-        data = overlays.settings()
         self._graphics_source.setText("\n".join(
             f"{name}: " + (tr("installed on this system") if installed else tr("built into COMMANDER"))
             for name, installed in (
@@ -579,130 +744,10 @@ class SettingsPage(QWidget):
                 ("vkBasalt", overlays.vkbasalt_installed() and not overlays.BUNDLED_VKBASALT.is_file()),
             )
         ))
-        for combo, key in (
-            (self._mangohud_preset, "mangohud_preset"),
-            (self._mangohud_position, "mangohud_position"),
-            (self._mangohud_size, "mangohud_size"),
-            (self._mangohud_key, "mangohud_key"),
-            (self._mangohud_layout, "mangohud_layout"),
-            (self._vkbasalt_preset, "vkbasalt_preset"),
-            (self._vkbasalt_sharpness, "vkbasalt_sharpness"),
-            (self._vkbasalt_sharpener, "vkbasalt_sharpener"),
-            (self._vkbasalt_aa, "vkbasalt_aa"),
-            (self._vkbasalt_key, "vkbasalt_key"),
-        ):
-            combo.blockSignals(True)
-            combo.setCurrentIndex(max(combo.findData(data[key]), 0))
-            combo.blockSignals(False)
-        for key, check in self._mangohud_items.items():
-            check.blockSignals(True)
-            check.setChecked(key in data["mangohud_items"])
-            check.blockSignals(False)
-        for slider, key in (
-            (self._mangohud_background, "mangohud_background_transparency"),
-            (self._mangohud_transparency, "mangohud_transparency"),
-            *((slider, f"vkbasalt_{name}") for name, slider in self._vkbasalt_colours.items()),
-        ):
-            slider.blockSignals(True)
-            slider.setValue(data[key])
-            slider.blockSignals(False)
-            slider.show_value(data[key])
-        self._vkbasalt_start_off.blockSignals(True)
-        self._vkbasalt_start_off.setChecked(data["vkbasalt_start_off"])
-        self._vkbasalt_start_off.blockSignals(False)
-        self._sync_mangohud_enabled()
-        self._sync_mangohud_positions()
-
-    def _sync_mangohud_positions(self) -> None:
-        # A bar is as wide as the screen: MangoHud can't put it on the right.
-        position = self._mangohud_position.currentData()
-        if self._mangohud_layout.currentData() == "bar" and "right" in position:
-            self._mangohud_position.blockSignals(True)
-            self._mangohud_position.setCurrentIndex(self._mangohud_position.findData(position.replace("right", "left")))
-            self._mangohud_position.blockSignals(False)
-
-    def _on_mangohud_position(self) -> None:
-        # The newer choice wins: a right corner needs the box layout.
-        if "right" in self._mangohud_position.currentData() and self._mangohud_layout.currentData() == "bar":
-            self._mangohud_layout.blockSignals(True)
-            self._mangohud_layout.setCurrentIndex(self._mangohud_layout.findData("box"))
-            self._mangohud_layout.blockSignals(False)
-        self._save_graphics()
-
-    def _on_mangohud_layout(self) -> None:
-        self._sync_mangohud_positions()
-        self._save_graphics()
-
-    def _sync_mangohud_enabled(self) -> None:
-        # MangoHud.conf decides all of it then.
-        own = self._mangohud_preset.currentData() == "own"
-        for widget in (
-            *self._mangohud_items.values(), self._mangohud_position, self._mangohud_size,
-            self._mangohud_key, self._mangohud_layout, self._mangohud_background, self._mangohud_transparency,
-        ):
-            widget.setEnabled(not own)
-
-    def _on_mangohud_preset(self) -> None:
-        items = overlays.MANGOHUD_PRESETS.get(self._mangohud_preset.currentData())
-        if items is not None:
-            for key, check in self._mangohud_items.items():
-                check.blockSignals(True)
-                check.setChecked(key in items)
-                check.blockSignals(False)
-        self._sync_mangohud_enabled()
-        self._save_graphics()
-
-    def _on_vkbasalt_look(self) -> None:
-        look = self._vkbasalt_preset.currentData()
-        values = overlays.VKBASALT_LOOKS.get(look) or overlays.settings()["vkbasalt_custom"]
-        for slider, value in zip(self._vkbasalt_colours.values(), values):
-            slider.blockSignals(True)
-            slider.setValue(value)
-            slider.blockSignals(False)
-            slider.show_value(value)
-        self._save_graphics()
-
-    def _on_vkbasalt_colour(self) -> None:
-        # Moving a slider by hand makes it a custom look.
-        self._vkbasalt_preset.blockSignals(True)
-        self._vkbasalt_preset.setCurrentIndex(self._vkbasalt_preset.findData("custom"))
-        self._vkbasalt_preset.blockSignals(False)
-        self._save_graphics()
-
-    def _on_mangohud_item(self) -> None:
-        # Ticking by hand makes it a custom set.
-        self._mangohud_preset.blockSignals(True)
-        self._mangohud_preset.setCurrentIndex(self._mangohud_preset.findData("custom"))
-        self._mangohud_preset.blockSignals(False)
-        self._save_graphics()
-
-    def _save_graphics(self) -> None:
-        # Only the custom look's slider values are saved: a named look's come
-        # from VKBASALT_LOOKS, and saving them would overwrite the custom look.
-        colours = (
-            {f"vkbasalt_{name}": slider.value() for name, slider in self._vkbasalt_colours.items()}
-            if self._vkbasalt_preset.currentData() == "custom" else {}
-        )
-        gui_settings.save_gui_settings(
-            mangohud_preset=self._mangohud_preset.currentData(),
-            mangohud_items=[key for key, check in self._mangohud_items.items() if check.isChecked()],
-            mangohud_position=self._mangohud_position.currentData(),
-            mangohud_size=self._mangohud_size.currentData(),
-            mangohud_key=self._mangohud_key.currentData(),
-            mangohud_layout=self._mangohud_layout.currentData(),
-            mangohud_background_transparency=self._mangohud_background.value(),
-            mangohud_transparency=self._mangohud_transparency.value(),
-            vkbasalt_preset=self._vkbasalt_preset.currentData(),
-            vkbasalt_sharpness=self._vkbasalt_sharpness.currentData(),
-            vkbasalt_key=self._vkbasalt_key.currentData(),
-            vkbasalt_sharpener=self._vkbasalt_sharpener.currentData(),
-            vkbasalt_aa=self._vkbasalt_aa.currentData(),
-            vkbasalt_start_off=self._vkbasalt_start_off.isChecked(),
-            **colours,
-        )
-        if self._mangohud_preset.currentData() != "own":
-            overlays.write_mangohud_config()  # a running game reloads it
-        overlays.write_vkbasalt_config()  # and so does the bundled vkBasalt
+        self._graphics.render()
+        self._overlay_key.blockSignals(True)
+        self._overlay_key.setCurrentIndex(self._overlay_key.findData(graphics_window.key_setting()))
+        self._overlay_key.blockSignals(False)
 
     def _appearance_tab(self) -> QWidget:
         page, layout = _panel()
