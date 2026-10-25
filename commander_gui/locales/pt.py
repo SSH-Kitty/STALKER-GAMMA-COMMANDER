@@ -3514,4 +3514,9 @@ TRANSLATIONS: dict[str, str] = {
     'Custom look': 'Aspeto próprio',
     'Press {key} to open COMMANDER overlay': 'Pressione {key} para abrir o overlay do COMMANDER',
     'Shift+` (console key)': 'Shift+` (tecla do console)',
+    'Every mod is turned off': 'Todos os mods estão desativados',
+    'Every mod in this profile is switched off. This can happen when the PC crashes or loses power while the game is running. COMMANDER can put back your mod list from {when} before launching.': 'Todos os mods deste perfil estão desativados. Isso pode acontecer quando o PC trava ou perde energia com o jogo aberto. O COMMANDER pode restaurar sua lista de mods de {when} antes de iniciar.',
+    'A backup of the current list is saved first.': 'Uma cópia da lista atual é salva antes.',
+    'Restore and launch': 'Restaurar e iniciar',
+    "Couldn't restore the mod list": 'Não foi possível restaurar a lista de mods',
 }

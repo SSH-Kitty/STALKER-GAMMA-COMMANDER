@@ -3514,4 +3514,9 @@ TRANSLATIONS: dict[str, str] = {
     'Custom look': 'Aspect propriu',
     'Press {key} to open COMMANDER overlay': 'Apasă {key} pentru a deschide suprapunerea COMMANDER',
     'Shift+` (console key)': 'Shift+` (tasta consolei)',
+    'Every mod is turned off': 'Toate modurile sunt dezactivate',
+    'Every mod in this profile is switched off. This can happen when the PC crashes or loses power while the game is running. COMMANDER can put back your mod list from {when} before launching.': 'Toate modurile din acest profil sunt dezactivate. Se poate întâmpla când PC-ul se blochează sau rămâne fără curent în timp ce jocul rulează. COMMANDER poate pune la loc lista ta de moduri din {when} înainte de pornire.',
+    'A backup of the current list is saved first.': 'Mai întâi se salvează o copie a listei curente.',
+    'Restore and launch': 'Restaurează și pornește',
+    "Couldn't restore the mod list": 'Lista de moduri nu a putut fi restaurată',
 }

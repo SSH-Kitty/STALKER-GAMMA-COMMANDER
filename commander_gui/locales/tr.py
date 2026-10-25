@@ -3514,4 +3514,9 @@ TRANSLATIONS: dict[str, str] = {
     'Custom look': 'Özel görünüm',
     'Press {key} to open COMMANDER overlay': 'COMMANDER katmanını açmak için {key} tuşuna bas',
     'Shift+` (console key)': 'Shift+` (konsol tuşu)',
+    'Every mod is turned off': 'Tüm modlar kapalı',
+    'Every mod in this profile is switched off. This can happen when the PC crashes or loses power while the game is running. COMMANDER can put back your mod list from {when} before launching.': 'Bu profildeki tüm modlar kapalı. Bu, oyun açıkken bilgisayar çöktüğünde veya elektrik kesildiğinde olabilir. COMMANDER başlatmadan önce {when} tarihli mod listeni geri yükleyebilir.',
+    'A backup of the current list is saved first.': 'Önce mevcut listenin bir yedeği kaydedilir.',
+    'Restore and launch': 'Geri yükle ve başlat',
+    "Couldn't restore the mod list": 'Mod listesi geri yüklenemedi',
 }

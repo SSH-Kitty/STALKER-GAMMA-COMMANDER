@@ -84,10 +84,13 @@ from ..launcher import (
 from ..log_dump import create_log_dump
 from ..modlist import (
     backup_before_change,
+    enabled_mod_count,
     looks_flipped,
     modlist_path_for,
+    newest_backup_with_mods,
     read_lines,
     save_lines,
+    snapshot_if_changed,
     unflip,
 )
 from ..steam_shortcuts import (
@@ -1241,7 +1244,15 @@ class PlayPage(QWidget):
             lines = read_lines(path)
         except (OSError, ValueError):
             return True
+        if not enabled_mod_count(lines):
+            backup = newest_backup_with_mods(path)
+            if backup is not None:
+                return self._confirm_restore_modlist(path, backup)
         if not looks_flipped(lines):
+            try:  # a restore point in case MO2 wipes the list mid-game
+                snapshot_if_changed(path)
+            except OSError:
+                pass
             return True
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
@@ -1275,6 +1286,50 @@ class PlayPage(QWidget):
             save_lines(path, unflip(lines))
         except OSError as exc:
             QMessageBox.warning(self, tr("Couldn't fix the load order"), str(exc))
+            return False
+        return True
+
+    def _confirm_restore_modlist(self, path: Path, backup: Path) -> bool:
+        """Offer the newest backup when every mod in the list is switched off.
+
+        Reported after a PC crash mid-game: Mod Organizer came back with the
+        whole list disabled. False cancels the launch.
+        """
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(backup.stat().st_mtime))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(tr("Every mod is turned off"))
+        box.setText(
+            tr(
+                "Every mod in this profile is switched off. This can happen "
+                "when the PC crashes or loses power while the game is running. "
+                "COMMANDER can put back your mod list from {when} before launching.",
+                when=when,
+            )
+        )
+        box.setInformativeText(tr("A backup of the current list is saved first."))
+        fix = box.addButton(tr("Restore and launch"), QMessageBox.ButtonRole.AcceptRole)
+        anyway = box.addButton(tr("Launch anyway"), QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(fix)
+        box.exec()
+        if box.clickedButton() is anyway:
+            return True
+        if box.clickedButton() is not fix:
+            return False
+        if mo2_running(force=True):
+            QMessageBox.warning(
+                self,
+                tr("Close Mod Organizer first"),
+                tr("Mod Organizer is open and would undo this change when it closes. Close it, then try again."),
+            )
+            return False
+        try:
+            restored = read_lines(backup)
+            backup_before_change(path)
+            save_lines(path, restored)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, tr("Couldn't restore the mod list"), str(exc))
             return False
         return True
 

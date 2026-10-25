@@ -10,7 +10,12 @@ from types import SimpleNamespace
 from commander_gui.fomod import find_fomod
 from commander_gui.integrity import scan_mods_md5
 from commander_gui.keep_state import capture, restore
-from commander_gui.modlist import entries, merge_after_update
+from commander_gui.modlist import (
+    entries,
+    merge_after_update,
+    newest_backup_with_mods,
+    snapshot_if_changed,
+)
 
 
 class MergeAfterUpdateTest(unittest.TestCase):
@@ -35,6 +40,58 @@ class MergeAfterUpdateTest(unittest.TestCase):
             self.assertEqual(states["6- New Mod"], "Enabled")
             self.assertNotIn("5- Old GAMMA Mod", states)
 
+    def test_user_mods_go_back_to_their_old_spot(self):
+        # Reported: an update moved a mod the user had filed inside a GAMMA
+        # category down to "Custom Mods" at the very bottom.
+        with tempfile.TemporaryDirectory() as tmp:
+            mods = Path(tmp)
+            for name in ("Atmospherics", "Mine A", "Mine B"):
+                (mods / name).mkdir()
+            old = [
+                "# header",
+                "+Mine A",
+                "-Mine B",
+                "-Custom Mods_separator",
+                "+1- Fix",
+                "+Atmospherics",
+                "+2- Shaders",
+                "-Fixes_separator",
+                "+3- Audio",
+            ]
+            new = ["# header", "+4- Fix", "+5- Shaders", "-Fixes_separator", "+6- Audio"]
+            merged = merge_after_update(
+                old, new, official_before={"1- Fix", "2- Shaders", "3- Audio"}, mods_dir=mods
+            )
+            self.assertEqual(
+                merged,
+                [
+                    "# header",
+                    "+Mine A",
+                    "-Mine B",
+                    "-Custom Mods_separator",
+                    "+4- Fix",
+                    "+Atmospherics",
+                    "+5- Shaders",
+                    "-Fixes_separator",
+                    "+6- Audio",
+                ],
+            )
+
+    def test_wiped_modlist_finds_last_backup_with_mods(self):
+        # Reported: after a PC crash mid-game MO2 rewrote the list with
+        # every mod disabled; the pre-launch snapshot must bring it back.
+        with tempfile.TemporaryDirectory() as tmp:
+            modlist = Path(tmp) / "modlist.txt"
+            modlist.write_text("+1- Pack\n-Sep_separator\n")
+            snapshot_if_changed(modlist)
+            snapshot_if_changed(modlist)  # unchanged: no second copy
+            self.assertEqual(len(list(Path(tmp).glob("modlist-*.bak"))), 1)
+            modlist.write_text("-1- Pack\n-Sep_separator\n")
+            time.sleep(0.01)
+            snapshot_if_changed(modlist)
+            found = newest_backup_with_mods(modlist)
+            self.assertEqual(found.read_text(), "+1- Pack\n-Sep_separator\n")
+
     def test_capture_restore_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             gamma = Path(tmp) / "gamma"
@@ -58,7 +115,7 @@ class MergeAfterUpdateTest(unittest.TestCase):
             restore(state)
             self.assertEqual(
                 {n: s for s, n in entries(modlist.read_text().splitlines())},
-                {"My Mod": "Enabled", "1- Pack": "Enabled", "Custom Mods_separator": "Disabled"},
+                {"My Mod": "Enabled", "1- Pack": "Enabled"},
             )
             text = ini.read_text()
             self.assertIn("style=dark.qss", text)

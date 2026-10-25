@@ -3536,4 +3536,9 @@ TRANSLATIONS: dict[str, str] = {
     'Custom look': '',
     'Press {key} to open COMMANDER overlay': '',
     'Shift+` (console key)': '',
+    'Every mod is turned off': '',
+    'Every mod in this profile is switched off. This can happen when the PC crashes or loses power while the game is running. COMMANDER can put back your mod list from {when} before launching.': '',
+    'A backup of the current list is saved first.': '',
+    'Restore and launch': '',
+    "Couldn't restore the mod list": '',
 }

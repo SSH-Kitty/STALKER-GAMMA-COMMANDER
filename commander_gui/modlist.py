@@ -949,6 +949,53 @@ def backup_before_change(modlist: Path) -> None:
     snapshot_modlist_backup(modlist)
 
 
+def enabled_mod_count(lines: list[str]) -> int:
+    """Enabled mods in ``lines``, separators not counted."""
+    return sum(
+        1
+        for status, name in entries(lines)
+        if status == "Enabled" and separator_name(name) is None
+    )
+
+
+def _backups_newest_first(modlist: Path) -> list[Path]:
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    found = [p for p in modlist.parent.glob(f"{modlist.stem}-*.bak") if p.is_file()]
+    pristine = modlist.with_name(modlist.name + BACKUP_SUFFIX)
+    if pristine.is_file():
+        found.append(pristine)
+    return sorted(found, key=_mtime, reverse=True)
+
+
+def newest_backup_with_mods(modlist: Path) -> Path | None:
+    """The newest backup of ``modlist`` that has at least one mod enabled.
+
+    What to offer when modlist.txt comes back with every mod switched off -
+    reported after a PC crash mid-game: Mod Organizer found its list empty
+    or cut short and rewrote it with every mod disabled.
+    """
+    for backup in _backups_newest_first(modlist):
+        try:
+            if enabled_mod_count(read_lines(backup)):
+                return backup
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def snapshot_if_changed(modlist: Path) -> None:
+    """Take a timestamped backup unless the newest one already matches."""
+    backups = [p for p in _backups_newest_first(modlist) if p.stem.startswith(f"{modlist.stem}-")]
+    if backups and backups[0].read_bytes() == modlist.read_bytes():
+        return
+    snapshot_modlist_backup(modlist)
+
+
 #: A numbered GAMMA category separator ("224- Newly added addons").
 _NUMBERED_CATEGORY_RE = re.compile(r"(\d+)- ")
 
@@ -1319,13 +1366,16 @@ def merge_after_update(
     * A mod in both lists gets its old enabled state back. GAMMA folder
       names start with a list counter that shifts between versions, so the
       match ignores that counter (and is skipped when it is ambiguous).
-    * A mod only in *old* is re-added under "Custom Mods" with its old state
-      when its folder is still in *mods_dir* and it was not one of GAMMA's
-      own mods before the update (*official_before*: folder names from the
-      pre-update modpack list) - those were dropped or renamed on purpose.
+    * A mod only in *old* is re-added with its old state when its folder is
+      still in *mods_dir* and it was not one of GAMMA's own mods before the
+      update (*official_before*: folder names from the pre-update modpack
+      list) - those were dropped or renamed on purpose. It goes back where
+      it was: right above the next entry that followed it in *old* and is
+      still in the list. A mod the user kept under "Custom Mods" goes back
+      there instead, since the CLI's list has no such category.
 
-    ponytail: re-added mods land in "Custom Mods", not their old category or
-    position; carry the user's own separators over if that matters.
+    ponytail: the user's own separators are not carried over; a mod filed
+    under one lands next to the entry that followed that separator.
     """
     from .repair import _name_only
 
@@ -1344,12 +1394,37 @@ def merge_after_update(
     present = {_name_only(name) for _status, name in entries(out)}
     official = {_name_only(name) for name in official_before}
     mods = Path(mods_dir)
-    for status, name in entries(old):
+    custom = custom_mod_names(old)
+    old_entries = entries(old)
+
+    def wanted(name: str) -> bool:
         key = _name_only(name)
-        if separator_name(name) is not None or key in present or key in official:
+        return (
+            separator_name(name) is None
+            and key not in present
+            and key not in official
+            and (mods / name).is_dir()
+        )
+
+    for status, name in old_entries:
+        if name in custom and wanted(name):
+            out = add_custom_mod(out, name, enabled=status == "Enabled")
+            present.add(_name_only(name))
+    # Bottom-up, so a mod re-added here can anchor the one above it.
+    for position in range(len(old_entries) - 1, -1, -1):
+        status, name = old_entries[position]
+        if not wanted(name):
             continue
-        if not (mods / name).is_dir():
-            continue
-        out = add_custom_mod(out, name, enabled=status == "Enabled")
-        present.add(key)
+        later = (_name_only(n) for _s, n in old_entries[position + 1 :])
+        anchor = next((k for k in later if k in present), None)
+        index = next(
+            (
+                i
+                for i, line in enumerate(out)
+                if (info := _line_info(line)) and _name_only(info[1]) == anchor
+            ),
+            len(out),
+        )
+        out.insert(index, ("+" if status == "Enabled" else "-") + name)
+        present.add(_name_only(name))
     return out

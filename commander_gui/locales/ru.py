@@ -3514,4 +3514,9 @@ TRANSLATIONS: dict[str, str] = {
     'Custom look': 'Свой стиль',
     'Press {key} to open COMMANDER overlay': 'Нажми {key}, чтобы открыть оверлей COMMANDER',
     'Shift+` (console key)': 'Shift+` (клавиша консоли)',
+    'Every mod is turned off': 'Все моды выключены',
+    'Every mod in this profile is switched off. This can happen when the PC crashes or loses power while the game is running. COMMANDER can put back your mod list from {when} before launching.': 'Все моды в этом профиле выключены. Так бывает, если ПК зависает или теряет питание во время игры. COMMANDER может перед запуском вернуть ваш список модов от {when}.',
+    'A backup of the current list is saved first.': 'Сначала сохраняется копия текущего списка.',
+    'Restore and launch': 'Восстановить и запустить',
+    "Couldn't restore the mod list": 'Не удалось восстановить список модов',
 }
