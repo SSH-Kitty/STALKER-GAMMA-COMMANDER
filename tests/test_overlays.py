@@ -197,6 +197,25 @@ class OverlayTests(unittest.TestCase):
         window.on_pointer(outside, False)
         window.on_pointer(outside, True)
         self.assertFalse(window.isVisible())
+        # Switched to fullscreen in the game: it minimized when the panel
+        # took focus, so it's brought back and the panel stops taking focus.
+        from unittest import mock
+
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QWindow
+
+        window.toggle()
+        window._game = QWindow()
+        with mock.patch.object(graphics_window, "_minimized", return_value=True), \
+                mock.patch.object(graphics_window, "_activate") as activate, \
+                mock.patch.object(graphics_window.QTimer, "singleShot"):
+            window._check_minimized(0)
+        activate.assert_called_once()
+        self.assertFalse(window.isVisible())
+        self.assertTrue(window._fullscreen)
+        window.toggle(focus=True)
+        self.assertTrue(window.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+        window.toggle()
         sent = []
         window.options_changed.connect(sent.append)
         window.set_options("LSFGVK_ENV=1 %command%")

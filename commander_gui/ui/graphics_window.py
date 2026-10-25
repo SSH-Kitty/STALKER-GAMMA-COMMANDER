@@ -140,6 +140,10 @@ class GraphicsWindow(QWidget):
         self._options = ""
         #: The game's window, while the panel is its transient (see toggle).
         self._game: QWindow | None = None
+        #: The game minimized when the panel took focus: it was switched to
+        #: fullscreen in the game, which user.ltx only says once it quits.
+        #: No focus from then on, for this game (see _check_minimized).
+        self._fullscreen = False
         # Keeps the cards' handlers: the cards themselves go on the tabs.
         self.panel = GraphicsPanel(loose=True)
         self.frame_gen = FrameGenCard(lambda: self._options, self._set_options)
@@ -256,13 +260,23 @@ class GraphicsWindow(QWidget):
         if self.isVisible():
             self.hide()
             return
+        focus = focus and not self._fullscreen
         self.panel.render()  # Settings may have changed it meanwhile
         self.frame_gen.sync()
         self._dock()
         # Without focus, a click mustn't take it either: changed while hidden.
+        # Out of the window manager's hands too (as the key hint): KWin
+        # activates a window clicked even when it takes no focus, and the
+        # game minimizes all the same.
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, not focus)
+        self.setWindowFlag(Qt.WindowType.BypassWindowManagerHint, not focus)
         self._follow_game()
+        # Unseen until its first frame is drawn: before that, the window
+        # manager shows the whole full-height window black.
+        self.setWindowOpacity(0.0)
         self.show()
+        # ponytail: fixed wait for the first frame, hook the compositor's frame callback if it still flashes
+        QTimer.singleShot(80, lambda: self.setWindowOpacity(0.94))
         _skip_taskbar(int(self.winId()))
         # KWin keeps a new window out of the taskbar's strip; a move as from
         # a pager isn't, so the panel starts at the very top.
@@ -271,8 +285,25 @@ class GraphicsWindow(QWidget):
         self.raise_()
         if focus:
             self.activateWindow()
+            QTimer.singleShot(100, lambda: self._check_minimized(5))
         self._pressed = True  # the click that opened it, if any, isn't one outside
         self._pointer.start()
+
+    def _check_minimized(self, tries: int) -> None:
+        """A game set to fullscreen in its menu after launch minimizes when
+        the panel takes focus. Then it's brought back and the panel shows
+        over it without focus, as for a fullscreen game from the start."""
+        if not self.isVisible() or self._game is None:
+            return
+        game = int(self._game.winId())
+        if _minimized(game):
+            self._fullscreen = True
+            self.hide()
+            _activate(game)
+            # ponytail: fixed wait for the game to come back, poll its state if 0.5 s is short somewhere
+            QTimer.singleShot(500, lambda: self.isVisible() or self.toggle(focus=False))
+        elif tries:
+            QTimer.singleShot(100, lambda: self._check_minimized(tries - 1))
 
     def _follow_game(self) -> None:
         """Made a transient of the window that has focus, the game's (the key
@@ -439,6 +470,37 @@ def _active_window() -> int | None:
     window = ctypes.c_ulong.from_address(data.value).value if count.value else 0
     x.XFree(data)
     return window or None
+
+
+def _minimized(window: int) -> bool:
+    """Whether the window manager has the window minimized
+    (_NET_WM_STATE_HIDDEN). X11 only."""
+    display = _pointer_display()
+    if display is None:
+        return False
+    x = _xlib()
+    kind, size, count, rest, data = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+    # XA_ATOM (4), up to 32 of them.
+    if x.XGetWindowProperty(display, window, x.XInternAtom(display, b"_NET_WM_STATE", 0), 0, 32, 0, 4,
+                            kind, size, count, rest, data) != 0 or not data.value:
+        return False
+    atoms = (ctypes.c_ulong * count.value).from_address(data.value)[:]
+    x.XFree(data)
+    return x.XInternAtom(display, b"_NET_WM_STATE_HIDDEN", 0) in atoms
+
+
+def _activate(window: int) -> None:
+    """_NET_ACTIVE_WINDOW, sent as a pager would: the window manager brings
+    the window back from minimized and gives it focus. X11 only."""
+    display = _pointer_display()
+    if display is None:
+        return
+    x = _xlib()
+    event = _ClientMessage(type=33, send_event=1, display=display, window=window,
+                           message_type=x.XInternAtom(display, b"_NET_ACTIVE_WINDOW", 0), format=32)
+    event.data[0] = 2  # from a pager; time 0 (CurrentTime)
+    x.XSendEvent(display, x.XDefaultRootWindow(display), 0, 1 << 19 | 1 << 20, ctypes.byref(event))
+    x.XFlush(display)
 
 
 def _move_resize(window: int, left: int, top: int, width: int, height: int) -> None:
