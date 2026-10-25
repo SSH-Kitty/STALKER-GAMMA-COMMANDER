@@ -183,10 +183,16 @@ def _query_winetricks_status(prefix: str) -> dict[str, bool] | None:
 
 
 class DashboardPage(QWidget):
+    @property
+    def settings(self) -> CliSettings:
+        # The window swaps in a fresh object on every refresh_settings(): a
+        # copy kept here went stale, and a change saved through it (e.g. the
+        # MO2 profile switch) never reached the window's topbar mod counter.
+        return self.window.settings
+
     def __init__(self, window) -> None:
         super().__init__()
         self.window = window
-        self.settings: CliSettings = window.settings
         self._sizes: dict[str, int] = {}
         self._update_checking = False
         self._update_card_args: tuple | None = None
@@ -266,7 +272,6 @@ class DashboardPage(QWidget):
     def refresh(self) -> None:
         self._refresh_generation += 1
         self.window.refresh_settings()
-        self.settings = self.window.settings
         self._render_profile()
         self._render_install_status()
         self._build_actions()

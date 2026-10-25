@@ -24,7 +24,7 @@ GROUPS = (
     ("Display", (
         ("Gamescope", "gamescope -f --", "Run the game fullscreen inside Gamescope. Helps with resolution and alt-tab problems."),
         ("FSR upscaling", "WINE_FULLSCREEN_FSR=1", "Sharpen and upscale with AMD FSR when the game runs below your screen's resolution. Proton-GE only."),
-        ("vkBasalt", "ENABLE_VKBASALT=1", "Sharpening and colour effects. Choose the look in Settings > Graphics."),
+        ("Image effects", "ENABLE_VKBASALT=1", "Sharpening, anti-aliasing and colour looks (vkBasalt). Choose the look in Settings > Graphics."),
         ("OpenGL", "PROTON_USE_WINED3D=1", "Use OpenGL instead of Vulkan (DXVK). Try it if the game won't start or looks broken on an older GPU."),
     )),
     ("Fixes", (
@@ -34,7 +34,7 @@ GROUPS = (
         ("No Steam overlay", "LD_PRELOAD=", "Keep the Steam overlay out of the game when COMMANDER was started from Steam. Can fix stutter. Co-op keeps the overlay for Steam invites."),
     )),
     ("Overlay and logs", (
-        ("MangoHud", "mangohud", "Show the MangoHud overlay (FPS, frame times, temperatures). Choose what it shows in Settings > Graphics."),
+        ("Performance overlay", "mangohud", "Show FPS, frame times and temperatures over the game (MangoHud). Choose what it shows in Settings > Graphics."),
         ("FPS counter", "DXVK_HUD=fps", "Show DXVK's small FPS counter in the corner."),
         ("Proton log", "PROTON_LOG=1", "Write a Proton log file to your home folder. Useful for crash reports."),
         ("Quiet Wine logs", "WINEDEBUG=-all", "Turn off Wine's debug messages. Slightly less CPU work. Switches Proton log off, since it would leave the log empty."),
@@ -58,26 +58,28 @@ NATIVE_WAYLAND = "PROTON_ENABLE_WAYLAND=1"
 #: Options co-op drops.
 COOP_DROPS = (NO_STEAM_OVERLAY, NATIVE_WAYLAND)
 
-#: The Play page's Frame generation card: lsfg-vk set up from variables in
-#: the options text alone, so it needs no lsfg-vk profile for the game.
-#: The text always holds lsfg-vk 2's names; apply() turns them into what the
-#: installed lsfg-vk and the DLL can actually run (see _resolve_frame_gen).
+#: The Play page's Frame generation card: frame generation set up from
+#: variables in the options text alone. The text keeps lsfg-vk's variable
+#: names, as older COMMANDERs wrote them; apply() turns them into the
+#: bundled frame generation's config (see _resolve_frame_gen).
 FRAME_GEN = "LSFGVK_ENV=1"
 FG_MULTIPLIER = "LSFGVK_MULTIPLIER"
 FG_FLOW_SCALE = "LSFGVK_FLOW_SCALE"
 FG_PERFORMANCE = "LSFGVK_PERFORMANCE_MODE"
-#: Present mode: "mailbox" for less input lag; left out, lsfg-vk's own (vsync).
-FG_PRESENT = "LSFGVK_EXPERIMENTAL_PRESENT_MODE"
-#: Vulkan layer manifests of lsfg-vk 2 and lsfg-vk 1.
-_LSFG_LAYERS = {
-    "2": Path("vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json"),
-    "1": Path("vulkan/implicit_layer.d/VkLayer_LS_frame_generation.json"),
-}
-#: lsfg-vk 2 reads lsfg-vk.dll (Lossless Scaling's lsfg-vk beta branch),
-#: lsfg-vk 1 reads Lossless.dll (Lossless Scaling 3.1 and 3.2).
-_LOSSLESS_DLLS = ("lsfg-vk.dll", "Lossless.dll")
-#: lsfg-vk 1.0's library, shipped in COMMANDER (MIT, from its v1.0.0 release).
-_BUNDLED_LSFG1 = Path(__file__).resolve().parent.parent / "cli" / "usr" / "lib" / "lsfg-vk-1" / "liblsfg-vk.so"
+#: Frame generation runs on Lossless Scaling's usual Lossless.dll.
+#: lsfg-vk.dll is its lsfg-vk beta branch's, which it doesn't run.
+LOSSLESS_DLL = "Lossless.dll"
+BETA_DLL = "lsfg-vk.dll"
+#: The frame generation layer, shipped in COMMANDER: MAKO Renderer
+#: (GPL-3.0-or-later, its render-v4.6.0 release, unmodified; licenses in
+#: licenses/MAKO). lsfg-vk 2's code, run with Lossless.dll.
+_BUNDLED_FRAME_GEN = Path(__file__).resolve().parent.parent / "cli" / "usr" / "lib" / "mako" / "libmako-render.so"
+#: Its explicit layer: enabled through VK_INSTANCE_LAYERS, under the
+#: implicit ones. As an implicit layer, Mesa's device_select above it
+#: crashes the game at its first frame.
+FRAME_GEN_LAYER = "VK_LAYER_COMMANDER_mako"
+#: Its multipliers stop at 5x.
+MAX_MULTIPLIER = 5
 
 _GAMESCOPE = ["gamescope", "-f", "--"]
 _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -85,18 +87,6 @@ _ENV_VAR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 def _data_home() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-
-
-def lsfg_versions() -> set[str]:
-    """Installed lsfg-vk major versions: "2", "1", both or neither."""
-    dirs = [str(_data_home()), *os.environ.get("XDG_DATA_DIRS", "").split(":"), "/usr/local/share", "/usr/share"]
-    versions = {
-        version for version, layer in _LSFG_LAYERS.items()
-        if any((Path(d) / layer).is_file() for d in dirs if d)
-    }
-    if _BUNDLED_LSFG1.is_file():
-        versions.add("1")
-    return versions
 
 
 def native_dll(path: Path) -> bool:
@@ -119,28 +109,12 @@ def native_dll(path: Path) -> bool:
     return len(head) >= clr + 8 and int.from_bytes(head[clr + 4 : clr + 8], "little") == 0
 
 
-def works_with_v2(dll: Path) -> bool:
-    """True when lsfg-vk 2 can load the shaders in dll: lsfg-vk.dll, from
-    Lossless Scaling's lsfg-vk beta. Its usual Lossless.dll can't ("Unable
-    to find base shader"), and a launch with it shows a black screen while
-    lsfg-vk retries every frame. By name: lsfg-vk-cli's benchmark took 3 s
-    on the GUI thread."""
-    return dll.name.lower() == "lsfg-vk.dll" and native_dll(dll)
-
-
-def frame_gen_version(dll: Path | None = None) -> str | None:
-    """The lsfg-vk ("2" or "1") that can run frame generation with dll
-    (by default lossless_dll()), or None when neither can."""
+def frame_gen_ready(dll: Path | None = None) -> bool:
+    """True when frame generation can run with dll (by default
+    lossless_dll()): COMMANDER has it, and dll is a Lossless.dll."""
     dll = dll or lossless_dll()
-    if dll is None:
-        return None
-    versions = lsfg_versions()
-    if "2" in versions and works_with_v2(dll):
-        return "2"
-    # lsfg-vk.dll is the lsfg-vk 2 branch's: only lsfg-vk 2 runs it.
-    if "1" in versions and native_dll(dll) and dll.name.lower() != "lsfg-vk.dll":
-        return "1"
-    return None
+    return (dll is not None and _BUNDLED_FRAME_GEN.is_file()
+            and dll.name.lower() != BETA_DLL.lower() and native_dll(dll))
 
 
 def install_layer(bundled: Path, library_path: Path, manifest: dict, manifest_path: Path) -> None:
@@ -161,40 +135,12 @@ def install_layer(bundled: Path, library_path: Path, manifest: dict, manifest_pa
         write_bytes(manifest_path, data, lock=False)
 
 
-@functools.cache  # once per run: the launch preview resolves this on every edit
-def _install_lsfg1() -> None:
-    """Set up the bundled lsfg-vk 1.0 for this user, if it isn't already.
-
-    Only loaded when COMMANDER_LSFG1 is set: without that every Vulkan app
-    would load it. Not LSFG_LEGACY, lsfg-vk's own: that reads the settings
-    from variables, once, where its config file is reread when it changes.
-    """
-    if not _BUNDLED_LSFG1.is_file():
-        return
-    install_layer(_BUNDLED_LSFG1, _data_home() / "lsfg-vk-1" / "liblsfg-vk.so", {
-        "file_format_version": "1.0.0",
-        "layer": {
-            "name": "VK_LAYER_LS_frame_generation",
-            "type": "GLOBAL",
-            "api_version": "1.4.313",
-            "implementation_version": "1",
-            "description": "Lossless Scaling frame generation layer",
-            "functions": {
-                "vkGetInstanceProcAddr": "layer_vkGetInstanceProcAddr",
-                "vkGetDeviceProcAddr": "layer_vkGetDeviceProcAddr",
-            },
-            "enable_environment": {"COMMANDER_LSFG1": "1"},
-            "disable_environment": {"DISABLE_LSFG": "1"},
-        },
-    }, _data_home() / _LSFG_LAYERS["1"])
-
-
 def _multiplier(text: str) -> int:
-    """The frame generation multiplier in text, kept to 2-20: launch
-    options are typed by hand, and lsfg-vk refuses its whole config over
-    one bad value."""
+    """The frame generation multiplier in text, kept to 2-MAX_MULTIPLIER:
+    launch options are typed by hand, and a bad value fails the whole
+    config."""
     try:
-        return min(max(int(var(text, FG_MULTIPLIER) or 2), 2), 20)
+        return min(max(int(var(text, FG_MULTIPLIER) or 2), 2), MAX_MULTIPLIER)
     except ValueError:
         return 2
 
@@ -208,63 +154,13 @@ def _flow_scale(text: str) -> float:
     return min(max(value, 0.25), 1.0) if math.isfinite(value) else 1.0
 
 
-#: The name lsfg-vk 1 gives the game (LSFG_PROCESS), for its config entry.
-_LSFG1_GAME = "commander"
 
 
-def _lsfg1_config(dll: Path, text: str) -> Path:
-    """lsfg-vk 1's config file, from the frame generation variables in text.
-    Of its own: with none it reads lsfg-vk 2's ~/.config/lsfg-vk/conf.toml,
-    fails on its version and switches off. lsfg-vk 1 rereads it when it
-    changes, so the Play page's card changes a running game; off is a
-    multiplier of 1, which it passes frames straight through at."""
-    from .config import settings_dir
-
-    on = is_on(text, FRAME_GEN)
-    lines = [
-        "version = 1",
-        "[global]",
-        f"dll = {json.dumps(str(dll))}",
-        "[[game]]",
-        f"exe = {json.dumps(_LSFG1_GAME)}",
-        f"multiplier = {_multiplier(text) if on else 1}",
-        f"flow_scale = {_flow_scale(text)}",
-        f"performance_mode = {'true' if var(text, FG_PERFORMANCE) == '1' else 'false'}",
-        f"experimental_present_mode = {json.dumps(var(text, FG_PRESENT) or 'fifo')}",
-    ]
-    return _write_config(settings_dir() / "lsfg-vk-1.toml", lines)
-
-
-#: lsfg-vk 2's profile in COMMANDER's config for it, and the games it is
-#: active in: matched by executable, so not Wine's own processes in the
-#: launch (explorer.exe stalls with lsfg-vk active in it).
-_LSFG2_PROFILE = "COMMANDER"
-_LSFG2_GAMES = tuple(f"AnomalyDX{dx}{avx}.exe" for dx in ("11", "10", "9", "8") for avx in ("AVX", ""))
-
-
-def _lsfg2_config(dll: Path, text: str) -> Path:
-    """lsfg-vk 2's config file (LSFGVK_CONFIG), from the frame generation
-    variables in text: one profile, none when off. lsfg-vk 2 rereads it
-    while the game runs, for the multiplier, detail and mode; it only loads
-    with a profile at the start, and fails every frame if one goes away, so
-    on and off apply from the next launch (see live_frame_gen).
-
-    The installed lsfg-vk 2, as it is: the current one is CC BY-NC-ND 4.0,
-    which allows no changed copy, and the older GPL one can't read today's
-    lsfg-vk.dll ("unable to find shader with id: 256")."""
-    from .config import settings_dir
-
-    lines = ["version = 2", "[global]", f"dll = {json.dumps(str(dll))}"]
-    if is_on(text, FRAME_GEN):
-        lines += [
-            "[[profile]]",
-            f"name = {json.dumps(_LSFG2_PROFILE)}",
-            f"active_in = {json.dumps(list(_LSFG2_GAMES))}",
-            f"multiplier = {_multiplier(text)}",
-            f"flow_scale = {_flow_scale(text)}",
-            f"performance_mode = {'true' if var(text, FG_PERFORMANCE) == '1' else 'false'}",
-        ]
-    return _write_config(settings_dir() / "lsfg-vk-2.toml", lines)
+#: The profile in the frame generation config, and the games it is active
+#: in: matched by executable, so not Wine's own processes in the launch
+#: (explorer.exe stalls with frame generation active in it).
+_PROFILE = "COMMANDER"
+_GAMES = tuple(f"AnomalyDX{dx}{avx}.exe" for dx in ("11", "10", "9", "8") for avx in ("AVX", ""))
 
 
 def _write_config(path: Path, lines: list[str]) -> Path:
@@ -278,45 +174,70 @@ def _write_config(path: Path, lines: list[str]) -> Path:
     return path
 
 
+@functools.cache  # once per run: the launch preview resolves this on every edit
+def _install_frame_gen() -> None:
+    """Set up the bundled frame generation for this user, as an explicit layer."""
+    install_layer(_BUNDLED_FRAME_GEN, _data_home() / "commander" / "mako" / _BUNDLED_FRAME_GEN.name, {
+        "file_format_version": "1.2.1",
+        "layer": {
+            "name": FRAME_GEN_LAYER,
+            "type": "GLOBAL",
+            "api_version": "1.4.365",
+            "implementation_version": "2",
+            "description": "MAKO Renderer bundled with COMMANDER",
+            "instance_extensions": [{"name": "VK_EXT_swapchain_colorspace", "spec_version": "4"}],
+        },
+    }, _data_home() / "vulkan" / "explicit_layer.d" / "commander-mako.json")
+
+
+def _frame_gen_config(dll: Path, text: str) -> Path:
+    """The frame generation config file (MAKO_CONFIG), from the variables in
+    text. It is reread while the game runs, on and off included: off is
+    frame_generation_enabled = false, which passes frames through."""
+    from .config import settings_dir
+
+    lines = [
+        "version = 2",
+        "[global]",
+        f"dll = {json.dumps(str(dll))}",
+        "[[profile]]",
+        f"name = {json.dumps(_PROFILE)}",
+        f"active_in = {json.dumps(list(_GAMES))}",
+        f"frame_generation_enabled = {'true' if is_on(text, FRAME_GEN) else 'false'}",
+        f"multiplier = {_multiplier(text)}",
+        f"flow_scale = {_flow_scale(text)}",
+        f"performance_mode = {'true' if var(text, FG_PERFORMANCE) == '1' else 'false'}",
+    ]
+    return _write_config(settings_dir() / "frame-gen.toml", lines)
+
+
 def live_frame_gen(text: str) -> None:
-    """The Play page's frame generation settings, to a running game: lsfg-vk
-    rereads its config file. lsfg-vk 2 keeps running while switched off
-    (see _lsfg2_config), so off waits for the next launch there."""
+    """The Play page's frame generation settings, to a running game: it
+    rereads its config file, on and off included."""
     dll = lossless_dll()
-    version = frame_gen_version(dll) if dll else None
-    if version == "1":
-        _lsfg1_config(dll, text)
-    elif version == "2" and is_on(text, FRAME_GEN):
-        _lsfg2_config(dll, text)
+    if frame_gen_ready(dll):
+        _frame_gen_config(dll, text)
 
 
 def _resolve_frame_gen(env: dict[str, str]) -> None:
-    """Frame generation's variables in env, made into ones the installed
-    lsfg-vk runs with the DLL: lsfg-vk 2's own, lsfg-vk 1's legacy ones, or
-    none at all, so a DLL neither can use never launches to a black screen.
+    """Frame generation's variables in env, made into its config file, or
+    left out when it can't run, so a launch never shows a black screen.
 
-    lsfg-vk 1 is loaded even with frame generation off (frames then pass
-    straight through), so it can be switched on in a running game, and a
-    co-op shortcut never changes with it. lsfg-vk 2 reads the same file
-    either way, so the shortcut doesn't change with it either."""
+    Loaded even with frame generation off (frames then pass straight
+    through), so it can be switched on in a running game, and a co-op
+    shortcut never changes with it. First in VK_INSTANCE_LAYERS: nearest
+    the game, over vkBasalt and MangoHud (see overlays._under_frame_gen)."""
     names = {key: env.pop(key) for key in [k for k in env if k.startswith("LSFGVK_")]}
     dll = lossless_dll()
-    version = frame_gen_version(dll)
-    text = shlex.join(f"{k}={v}" for k, v in names.items())
-    if version == "2":
-        # From its config file: LSFGVK_ENV's variables it reads only once.
-        env["LSFGVK_CONFIG"] = str(_lsfg2_config(dll, text))
-        # vkBasalt between the game and lsfg-vk 2 leaves the screen black
-        # (sound plays on), so it sits this launch out; 1.0 works with it.
-        if is_on(text, FRAME_GEN):
-            env.pop("ENABLE_VKBASALT", None)
-    elif version == "1":
-        _install_lsfg1()
-        env["COMMANDER_LSFG1"] = "1"
-        env["LSFG_PROCESS"] = _LSFG1_GAME
-        env["LSFG_CONFIG"] = str(_lsfg1_config(dll, text))
-        # lsfg-vk 2 next to it stays out of the way.
-        env["DISABLE_LSFGVK"] = "1"
+    if not frame_gen_ready(dll):
+        return
+    _install_frame_gen()
+    env["MAKO_CONFIG"] = str(_frame_gen_config(dll, shlex.join(f"{k}={v}" for k, v in names.items())))
+    others = [layer for layer in env.get("VK_INSTANCE_LAYERS", "").split(":") if layer and layer != FRAME_GEN_LAYER]
+    env["VK_INSTANCE_LAYERS"] = ":".join([FRAME_GEN_LAYER, *others])
+    # As MAKO's own launcher: no lsfg-vk installed on the system next to
+    # it, and Gamescope's WSI layer pacing over it slows the game to a crawl.
+    env["DISABLE_LSFG"] = env["DISABLE_LSFGVK"] = env["DISABLE_GAMESCOPE_WSI"] = "1"
 
 
 def dll_label(dll: Path) -> str:
@@ -348,20 +269,25 @@ def _dll_version(path: str, _mtime: float) -> str:
 
 
 def lossless_dll() -> Path | None:
-    """Lossless Scaling's frame generation DLL: the one picked on the Play
-    page, else one from a Steam library, else None."""
+    """Lossless Scaling's Lossless.dll: the one picked on the Play page,
+    else one from a Steam library, else None. A picked lsfg-vk.dll (the
+    beta branch's) gives way to a Lossless.dll next to it, else stays, for
+    the Play page to say what to do."""
     from . import gui_settings
     from .launcher import _steam_library_paths
 
     chosen = gui_settings.load_gui_settings().get("lossless_dll") or ""
     if chosen and Path(chosen).is_file():
-        return Path(chosen)
+        chosen = Path(chosen)
+        if chosen.name.lower() != BETA_DLL.lower():
+            return chosen
+        if (chosen.parent / LOSSLESS_DLL).is_file():
+            return chosen.parent / LOSSLESS_DLL
     for library in _steam_library_paths():
-        for name in _LOSSLESS_DLLS:
-            dll = library / "steamapps" / "common" / "Lossless Scaling" / name
-            if dll.is_file():
-                return dll
-    return None
+        dll = library / "steamapps" / "common" / "Lossless Scaling" / LOSSLESS_DLL
+        if dll.is_file():
+            return dll
+    return chosen or None
 
 
 def var(text: str, key: str) -> str | None:
@@ -428,10 +354,13 @@ def toggle(text: str, option: str, on: bool) -> str:
     return shlex.join(tokens)
 
 
-def apply(command: list[str], env: dict[str, str], text: str, *, game_mode: bool | None = None) -> list[str]:
+def apply(command: list[str], env: dict[str, str], text: str, *, game_mode: bool | None = None,
+          resolve: bool = True) -> list[str]:
     """command with the options text applied; variables go into env.
 
-    ``game_mode`` overrides in_game_mode() for the Gamescope option."""
+    ``game_mode`` overrides in_game_mode() for the Gamescope option. Without
+    ``resolve`` the text is taken as it is: no frame generation, MangoHud or
+    vkBasalt set up from it (for text COMMANDER wrote itself, see for_steam)."""
     tokens = split(text.strip())
     if not tokens:
         return command
@@ -450,8 +379,9 @@ def apply(command: list[str], env: dict[str, str], text: str, *, game_mode: bool
             env[key] = value
         else:
             prefix.append(token)
-    _resolve_frame_gen(env)
-    prefix = overlays.resolve(env, prefix)
+    if resolve:
+        _resolve_frame_gen(env)
+        prefix = overlays.resolve(env, prefix)
     # Game Mode already is a gamescope session; a nested one from the
     # Gamescope option only adds a second compositor.
     at = _find(prefix, _GAMESCOPE)
@@ -483,9 +413,9 @@ def extends(steam: str, base: str) -> bool:
     """True when Steam LaunchOptions ``steam`` is ``base`` plus some launch
     options (see for_steam)."""
     base_env: dict[str, str] = {}
-    base_command = apply(["%command%"], base_env, base, game_mode=True)
+    base_command = apply(["%command%"], base_env, base, game_mode=True, resolve=False)
     env: dict[str, str] = {}
-    command = apply(["%command%"], env, steam, game_mode=True)
+    command = apply(["%command%"], env, steam, game_mode=True, resolve=False)
     return all(env.get(key) == value for key, value in base_env.items()) and (
         _find(command, base_command) >= 0
     )
@@ -499,10 +429,12 @@ def for_steam(text: str, base: str) -> str:
     come second and win, since a shortcut can't run without them.
     Gamescope is left out in every mode: Steam runs the shortcut in Game
     Mode's own gamescope too, and a shortcut that changed with the mode
-    would need a Steam restart on every switch.
+    would need a Steam restart on every switch. base is COMMANDER's own,
+    taken as it is: set up again, its frame generation layer list would
+    replace the one with vkBasalt and MangoHud in it.
     """
     base_env: dict[str, str] = {}
-    command = apply(["%command%"], base_env, base, game_mode=True)
+    command = apply(["%command%"], base_env, base, game_mode=True, resolve=False)
     env: dict[str, str] = {}
     command = apply(command, env, text, game_mode=True)
     env.update(base_env)

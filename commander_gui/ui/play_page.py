@@ -560,13 +560,6 @@ class PlayPage(QWidget):
         self.direct_button.clicked.connect(lambda: self._launch_direct())
         self.direct_button.clicked.connect(play_click_sound)
         secondary_row.addWidget(self.direct_button, 1)
-        self.graphics_button = QPushButton(tr("Graphics overlay"))
-        self.graphics_button.setObjectName("secondary")
-        self.graphics_button.setToolTip(
-            tr("MangoHud and vkBasalt settings in a window over the game. Its key in Settings > Graphics opens it in-game.")
-        )
-        self.graphics_button.clicked.connect(lambda: graphics_window.toggle())
-        secondary_row.addWidget(self.graphics_button, 1)
         # The overlay key is only taken while the game runs.
         self.launch_state_changed.connect(
             lambda running: graphics_window.start_key() if running else graphics_window.stop_key()

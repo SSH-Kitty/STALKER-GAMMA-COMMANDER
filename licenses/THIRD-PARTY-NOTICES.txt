@@ -78,18 +78,17 @@ curl-impersonate                   (cli/usr/bin/libcurl-impersonate.so)
     (LICENSE_LIBIDN2_LGPL3, LICENSE_LIBIDN2_GPL2, LICENSE_LIBIDN2_GPL3,
     LICENSE_LIBIDN2_UNICODE) - source: https://ftp.gnu.org/gnu/libidn/
 
-lsfg-vk 1.0.0                     (cli/usr/lib/lsfg-vk-1/liblsfg-vk.so)
-  Copyright (c) 2025 lsfg-vk.
-  License: MIT (lsfg-vk/LICENSE.md)
-  Source:  https://github.com/PancakeTAS/lsfg-vk/tree/v1.0.0
-  The library from the v1.0.0 release zip. It is statically built with:
-  - dxbc - Copyright (c) Philip Rebohle and others - zlib license
-    (lsfg-vk/LICENSE_DXBC.md)
-  - pe-parse - Copyright (c) 2013 Andrew Ruef - MIT (lsfg-vk/LICENSE_PE_PARSE)
-  - toml11 - Copyright (c) 2017 Toru Niina - MIT (lsfg-vk/LICENSE_TOML11)
-  - volk - Copyright (c) Arseny Kapoulkine - MIT (lsfg-vk/LICENSE_VOLK.md)
-  It holds no Lossless Scaling code: frame generation needs the user's own
-  Lossless.dll from Lossless Scaling.
+MAKO Renderer 4.6.0               (cli/usr/lib/mako/libmako-render.so)
+  Copyright (C) 2025-2026 Eugenio Segala and contributors.
+  License: GPL-3.0-or-later (MAKO/LICENSE.md, also texts/GPL-3.0-only.txt);
+  third-party parts it contains are listed in MAKO/THIRD_PARTY_NOTICES.md.
+  Source:  https://github.com/eugeniosegala/MAKO/tree/render-v4.6.0
+           and in COMMANDER's repository, licenses/MAKO/MAKO-render-v4.6.0-source.tar.gz
+           (https://github.com/SSH-Kitty/STALKER-GAMMA-COMMANDER/tree/main/licenses/MAKO)
+  The 64-bit Vulkan layer from the render-v4.6.0 release archive
+  (MAKO-Renderer-v4.6.0-linux.tar.xz). It descends from the GPL-3.0-or-later
+  lsfg-vk version 2 tree. It holds no Lossless Scaling code: frame
+  generation needs the user's own Lossless.dll from Lossless Scaling.
 
 MangoHud 0.8.4                    (cli/usr/lib/mangohud/libMangoHud.so)
   Copyright (c) 2020 flightlessmango.

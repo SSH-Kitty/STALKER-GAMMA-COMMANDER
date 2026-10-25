@@ -363,6 +363,9 @@ cp -r "$PROJECT_DIR/cli" "$PAYLOAD/"
 # component's license; the About page opens these local copies.
 cp "$PROJECT_DIR/LICENSE" "$PAYLOAD/"
 cp -r "$PROJECT_DIR/licenses" "$PAYLOAD/"
+# Bundled layers' source archives are offered from the repo, not shipped
+# in every AppImage (see licenses/THIRD-PARTY-NOTICES.txt).
+find "$PAYLOAD/licenses" -name '*-source.tar.gz' -delete
 cp "$PYLIB/LICENSE.txt" "$PAYLOAD/licenses/Python-LICENSE.txt"
 find "$PAYLOAD/commander_gui" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$PAYLOAD/assistant" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true

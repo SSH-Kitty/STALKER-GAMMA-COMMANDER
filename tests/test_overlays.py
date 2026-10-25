@@ -22,6 +22,8 @@ class OverlayTests(unittest.TestCase):
             self.addCleanup(stub.stop)
         overlays._install_bundled.cache_clear()
         self.addCleanup(overlays._install_bundled.cache_clear)
+        launch_options._install_frame_gen.cache_clear()
+        self.addCleanup(launch_options._install_frame_gen.cache_clear)
 
     def test_bundled_layers_replace_missing_ones(self):
         gui_settings.save_gui_settings(mangohud_preset="fps", vkbasalt_preset="bleak", vkbasalt_sharpness="off", vkbasalt_aa="smaa")
@@ -43,6 +45,80 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(manifest["layer"]["enable_environment"], {"COMMANDER_MANGOHUD": "1"})
         self.assertIn("disable_environment", manifest["layer"])  # the loader skips an implicit layer without one
         self.assertTrue(Path(manifest["layer"]["library_path"]).is_file())
+
+    def test_vkbasalt_and_mangohud_go_under_frame_gen(self):
+        """Implicit, vkBasalt would sit between the game and frame generation
+        and MangoHud count only the game's frames. With frame generation they
+        load as explicit layers, after it in VK_INSTANCE_LAYERS; vkBasalt
+        above MangoHud, so it never colours the HUD."""
+        env = {"ENABLE_VKBASALT": "1", "MAKO_CONFIG": "x", "VK_INSTANCE_LAYERS": "VK_LAYER_mine"}
+        with patch.object(overlays, "mangohud_installed", return_value=True):
+            prefix = overlays.resolve(env, [overlays.MANGOHUD])
+        self.assertEqual(prefix, [])
+        self.assertEqual(env["VK_INSTANCE_LAYERS"],
+                         "VK_LAYER_mine:VK_LAYER_COMMANDER_vkbasalt_explicit:VK_LAYER_COMMANDER_mangohud_explicit")
+        for name in ("COMMANDER_VKBASALT", "ENABLE_VKBASALT", "COMMANDER_MANGOHUD"):
+            self.assertNotIn(name, env)
+        for name in ("vkbasalt", "mangohud"):
+            manifest = json.loads((self.tmp / f"data/vulkan/explicit_layer.d/commander-{name}.json").read_text())
+            self.assertEqual(manifest["layer"]["name"], f"VK_LAYER_COMMANDER_{name}_explicit")
+            self.assertNotIn("enable_environment", manifest["layer"])
+            self.assertTrue(Path(manifest["layer"]["library_path"]).is_file())
+
+    def test_frame_gen_goes_first_with_vkbasalt_and_mangohud_under_it(self):
+        """Frame generation as an explicit layer, nearest the game (implicit, Mesa's
+        device_select crashes it); vkBasalt and MangoHud under it, so they
+        see the generated frames. Loaded with frame generation off too, to be
+        switched on live; multipliers stop at 5x."""
+        dll = self.tmp / "Lossless.dll"
+        dll.write_bytes(b"MZ")
+        for text, enabled in (("LSFGVK_ENV=1 LSFGVK_MULTIPLIER=8 ENABLE_VKBASALT=1 mangohud %command%", "true"),
+                              ("ENABLE_VKBASALT=1 mangohud %command%", "false")):
+            env = {}
+            with patch.object(launch_options, "lossless_dll", return_value=dll), \
+                    patch.object(launch_options, "frame_gen_ready", return_value=True), \
+                    patch("commander_gui.config.settings_dir", return_value=self.tmp), \
+                    patch.object(overlays, "mangohud_installed", return_value=True):
+                command = launch_options.apply(["game"], env, text)
+            self.assertEqual(command, ["game"])
+            self.assertEqual(env["VK_INSTANCE_LAYERS"], ":".join((
+                launch_options.FRAME_GEN_LAYER, "VK_LAYER_COMMANDER_vkbasalt_explicit", "VK_LAYER_COMMANDER_mangohud_explicit")))
+            for name in ("DISABLE_LSFG", "DISABLE_LSFGVK", "DISABLE_GAMESCOPE_WSI"):
+                self.assertEqual(env[name], "1")
+            config = Path(env["MAKO_CONFIG"]).read_text()
+            self.assertIn(f"frame_generation_enabled = {enabled}\n", config)
+            self.assertIn(f'dll = "{dll}"', config)
+        self.assertIn("multiplier = 2\n", config)
+        manifest = json.loads((self.tmp / "data/vulkan/explicit_layer.d/commander-mako.json").read_text())
+        self.assertEqual(manifest["layer"]["name"], launch_options.FRAME_GEN_LAYER)
+        self.assertNotIn("enable_environment", manifest["layer"])
+        self.assertTrue(Path(manifest["layer"]["library_path"]).is_file())
+        with patch("commander_gui.config.settings_dir", return_value=self.tmp):
+            self.assertIn("multiplier = 5\n", launch_options._frame_gen_config(dll, "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=8").read_text())
+
+    def test_coop_shortcut_keeps_vkbasalt_and_mangohud_under_frame_gen(self):
+        """Co-op runs through Steam's shortcut, its launch options merged
+        from COMMANDER's base: the base, set up again, used to replace the
+        layer list with frame generation alone (twice over), so vkBasalt
+        and MangoHud never loaded."""
+        dll = self.tmp / "Lossless.dll"
+        dll.write_bytes(b"MZ")
+        text = "LSFGVK_ENV=1 ENABLE_VKBASALT=1 mangohud %command%"
+        with patch.object(launch_options, "lossless_dll", return_value=dll), \
+                patch.object(launch_options, "frame_gen_ready", return_value=True), \
+                patch("commander_gui.config.settings_dir", return_value=self.tmp), \
+                patch.object(overlays, "mangohud_installed", return_value=True):
+            base = launch_options.for_steam("", "STEAM_COMPAT_X=1 %command% -p GAMMA")
+            steam = launch_options.for_steam(text, base)
+            # Synced again: the shortcut's own text is the next base.
+            again = launch_options.for_steam(text, steam)
+            self.assertTrue(launch_options.extends(steam, base))
+        for options in (steam, again):
+            env: dict[str, str] = {}
+            launch_options.apply(["%command%"], env, options, resolve=False)
+            self.assertEqual(env["VK_INSTANCE_LAYERS"], ":".join((
+                launch_options.FRAME_GEN_LAYER, "VK_LAYER_COMMANDER_vkbasalt_explicit", "VK_LAYER_COMMANDER_mangohud_explicit")))
+            self.assertEqual(env["STEAM_COMPAT_X"], "1")
 
     def test_settings_changes_rewrite_the_live_config(self):
         gui_settings.save_gui_settings(mangohud_preset="custom", mangohud_items=["fps", "time"],
@@ -152,12 +228,14 @@ class OverlayTests(unittest.TestCase):
     def test_typed_frame_gen_values_never_break_the_config(self):
         # Hand-typed launch options: junk falls back, numbers are clamped.
         with patch("commander_gui.config.settings_dir", return_value=self.tmp):
-            path = launch_options._lsfg2_config(self.tmp / "x.dll", "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=abc LSFGVK_FLOW_SCALE=nan")
+            path = launch_options._frame_gen_config(self.tmp / "x.dll", "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=abc LSFGVK_FLOW_SCALE=nan")
             self.assertIn("multiplier = 2\nflow_scale = 1.0", path.read_text())
-            path = launch_options._lsfg1_config(self.tmp / "x.dll", "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=99 LSFGVK_FLOW_SCALE=0.01")
-            self.assertIn("multiplier = 20\nflow_scale = 0.25", path.read_text())
+            path = launch_options._frame_gen_config(self.tmp / "x.dll", "LSFGVK_ENV=1 LSFGVK_MULTIPLIER=99 LSFGVK_FLOW_SCALE=0.01")
+            self.assertIn("multiplier = 5\nflow_scale = 0.25", path.read_text())
 
-    def test_both_dlls_pick_the_lsfg_vk(self):
+    def test_beta_dll_gives_way_to_lossless_dll(self):
+        """lsfg-vk.dll (the lsfg-vk beta branch's) can't run: a Lossless.dll
+        next to it is used instead, else the card says how to get one."""
         from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui import frame_gen_card
@@ -167,24 +245,24 @@ class OverlayTests(unittest.TestCase):
         folder.mkdir()
         for name in ("Lossless.dll", "lsfg-vk.dll"):
             (folder / name).write_bytes(b"MZ")
-        gui_settings.save_gui_settings(lossless_dll=str(folder / "Lossless.dll"))
-        versions = {"Lossless.dll": "1", "lsfg-vk.dll": "2"}
+        gui_settings.save_gui_settings(lossless_dll=str(folder / "lsfg-vk.dll"))
         text = ["LSFGVK_ENV=1 %command%"]
-        with patch.object(launch_options, "frame_gen_version", side_effect=lambda dll=None: versions.get(Path(dll).name)), \
-                patch.object(launch_options, "lsfg_versions", return_value={"1", "2"}), \
+        with patch("commander_gui.launcher._steam_library_paths", return_value=[]), \
+                patch.object(launch_options, "native_dll", return_value=True), \
                 patch.object(frame_gen_card, "game_has_frame_gen", return_value=None):
+            self.assertEqual(launch_options.lossless_dll(), folder / "Lossless.dll")
             card = frame_gen_card.FrameGenCard(lambda: text[0], lambda value: text.__setitem__(0, value))
-            card.sync()
-            self.assertFalse(card._engine_label.isHidden())
-            card._engines[1][0].click()  # 2.0
-            self.assertEqual(gui_settings.load_gui_settings()["lossless_dll"], str(folder / "lsfg-vk.dll"))
-            self.assertTrue(card._row_labels[launch_options.FG_PRESENT].isHidden())  # no Latency on 2.0
+            self.assertTrue(card.sync())
             (folder / "Lossless.dll").unlink()
+            self.assertFalse(card.sync())
+            self.assertIn("Properties > Betas > None", card._missing.text())
+            on, off = (button for button, _value in card._rows[0][0])
+            self.assertTrue(off.isEnabled())  # left on: it can still go off
+            self.assertFalse(any(button.isEnabled() for button, _value in card._rows[1][0]))
+            # Off: the settings show no pick, so they don't look live.
+            text[0] = launch_options.frame_gen(text[0], False)
             card.sync()
-            # One DLL: the other version stays in view, greyed, saying what it needs.
-            self.assertFalse(card._engine_label.isHidden())
-            self.assertFalse(card._engines[0][0].isEnabled())
-            self.assertIn("Lossless.dll", card._engines[0][0].toolTip())
+            self.assertFalse(any(button.isChecked() for button, _value in card._rows[1][0]))
 
     def test_mouse_grab_set_in_the_prefix(self):
         # Off, so the overlay gets clicks over a fullscreen game; only the

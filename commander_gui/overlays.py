@@ -4,7 +4,7 @@ Graphics, and the copies COMMANDER bundles for systems without them.
 Both are Vulkan layers, and Anomaly runs on Vulkan through DXVK. An
 installed MangoHud or vkBasalt is used when there is one; otherwise the
 bundled one (cli/usr/lib, see build-vulkan-layers.sh) is set up like
-lsfg-vk 1.0 is (launch_options._install_lsfg1), under its own layer name
+frame generation is (launch_options._install_frame_gen), under its own layer name
 and switch, so it never clashes with one installed later. Qt-free.
 """
 
@@ -271,20 +271,39 @@ def _install_bundled(name: str) -> bool:
     library, switch, functions = _BUNDLED[name]
     if not library.is_file():
         return False
-    install_layer(library, _data_home() / "commander" / library.name, {
-        "file_format_version": "1.0.0",
-        "layer": {
-            "name": f"VK_LAYER_COMMANDER_{name}",
+
+    def manifest(layer: dict) -> dict:
+        return {"file_format_version": "1.0.0", "layer": {
             "type": "GLOBAL",
             "api_version": "1.3.0",
             "implementation_version": "1",
             "description": f"{name} bundled with COMMANDER",
             "functions": functions,
-            "enable_environment": {switch: "1"},
-            "disable_environment": {f"DISABLE_{switch}": "1"},
-        },
-    }, _data_home() / "vulkan" / "implicit_layer.d" / f"commander-{name}.json")
+            **layer,
+        }}
+
+    install_layer(library, _data_home() / "commander" / library.name, manifest({
+        "name": f"VK_LAYER_COMMANDER_{name}",
+        "enable_environment": {switch: "1"},
+        "disable_environment": {f"DISABLE_{switch}": "1"},
+    }), _data_home() / "vulkan" / "implicit_layer.d" / f"commander-{name}.json")
+    # The same layer as an explicit one, for _under_frame_gen.
+    install_layer(library, _data_home() / "commander" / library.name, manifest({
+        "name": f"VK_LAYER_COMMANDER_{name}_explicit",
+    }), _data_home() / "vulkan" / "explicit_layer.d" / f"commander-{name}.json")
     return True
+
+
+def _under_frame_gen(env: dict[str, str], name: str) -> None:
+    """The bundled layer name under frame generation. Vulkan's loader puts
+    implicit layers nearest the game, so there vkBasalt would sit between
+    the game and frame generation (with lsfg-vk 2: a black screen) and
+    MangoHud would count only the game's frames. Enabled through
+    VK_INSTANCE_LAYERS after it, the explicit one goes under it: vkBasalt
+    works on the generated frames too, and MangoHud counts them."""
+    layer = f"VK_LAYER_COMMANDER_{name}_explicit"
+    layers = [other for other in env.get("VK_INSTANCE_LAYERS", "").split(":") if other and other != layer]
+    env["VK_INSTANCE_LAYERS"] = ":".join([*layers, layer])
 
 
 def resolve(env: dict[str, str], prefix: list[str]) -> list[str]:
@@ -295,16 +314,27 @@ def resolve(env: dict[str, str], prefix: list[str]) -> list[str]:
     if not (mangohud or vkbasalt):
         return prefix
     data = settings()
-    if mangohud:
-        if data["mangohud_preset"] != "own":
-            env["MANGOHUD_CONFIGFILE"] = str(write_mangohud_config(data))
-        if not mangohud_installed() and _install_bundled("mangohud"):
-            prefix = [token for token in prefix if token != MANGOHUD]
-            env["COMMANDER_MANGOHUD"] = "1"
+    frame_gen = "MAKO_CONFIG" in env  # frame generation loads
+    # vkBasalt first: listed first is nearer the game, so it never colours
+    # MangoHud's text.
     if vkbasalt:
         env["VKBASALT_CONFIG_FILE"] = str(write_vkbasalt_config(data))
         # The bundled one even over an installed one: only it reloads live.
         if _install_bundled("vkbasalt"):
             del env["ENABLE_VKBASALT"]
-            env["COMMANDER_VKBASALT"] = "1"
+            if frame_gen:
+                _under_frame_gen(env, "vkbasalt")
+            else:
+                env["COMMANDER_VKBASALT"] = "1"
+    if mangohud:
+        if data["mangohud_preset"] != "own":
+            env["MANGOHUD_CONFIGFILE"] = str(write_mangohud_config(data))
+        # With frame generation the bundled one even over an installed one,
+        # to count the generated frames too.
+        if (frame_gen or not mangohud_installed()) and _install_bundled("mangohud"):
+            prefix = [token for token in prefix if token != MANGOHUD]
+            if frame_gen:
+                _under_frame_gen(env, "mangohud")
+            else:
+                env["COMMANDER_MANGOHUD"] = "1"
     return prefix

@@ -200,8 +200,8 @@ class GraphicsPanel(QWidget):
         layout.setSpacing(12)
 
         mangohud, box = _card(
-            tr("MangoHud"),
-            tr("The performance overlay. Switch it on with MangoHud on the Play page."),
+            tr("Performance overlay"),
+            tr("MangoHud: FPS, temperatures and more over the game. Switch it on with Performance overlay on the Play page."),
         )
         box.addWidget(_live_hint())
         self._mangohud_preset = _combo(180)
@@ -267,8 +267,8 @@ class GraphicsPanel(QWidget):
         box.addStretch(1)
 
         vkbasalt, box = _card(
-            tr("vkBasalt"),
-            tr("Sharpening and colour effects. Switch it on with vkBasalt on the Play page."),
+            tr("Image effects"),
+            tr("vkBasalt: sharpening, anti-aliasing and colour looks. Switch it on with Image effects on the Play page."),
         )
         box.addWidget(_live_hint())
         self._vkbasalt_preset = _combo(180)

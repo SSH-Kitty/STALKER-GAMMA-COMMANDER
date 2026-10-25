@@ -103,7 +103,7 @@ def _clear_background(frame: QFrame) -> None:
 
 
 class _GlassPanel(QFrame):
-    """A rounded panel painted in the live theme's card colour."""
+    """A square panel painted in the live theme's card colour."""
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -113,7 +113,7 @@ class _GlassPanel(QFrame):
             fill.setAlpha(_PANEL_ALPHA)
             painter.setBrush(fill)
             painter.setPen(QPen(_token("border_strong", "#3a4a36"), 2))
-            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
+            painter.drawRect(QRectF(self.rect()).adjusted(1, 1, -1, -1))
         finally:
             painter.end()
         super().paintEvent(event)

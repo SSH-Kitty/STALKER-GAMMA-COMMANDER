@@ -429,7 +429,7 @@ def play_click_sound() -> None:
             if not path.is_file():
                 return
             _click_sound_output = QAudioOutput()
-            _click_sound_output.setVolume(0.5)
+            _click_sound_output.setVolume(0.35)
             _click_sound_player = QMediaPlayer()
             _click_sound_player.setAudioOutput(_click_sound_output)
             _click_sound_player.setSource(QUrl.fromLocalFile(str(path)))

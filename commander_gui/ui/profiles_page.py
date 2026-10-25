@@ -774,10 +774,16 @@ class CompareView(QWidget):
 
 
 class ProfilesPage(QWidget):
+    @property
+    def settings(self):
+        # The window swaps in a fresh object on every refresh_settings(): a
+        # copy kept here went stale, and changes saved through it never
+        # reached the window (e.g. its topbar mod counter).
+        return self.window.settings
+
     def __init__(self, window) -> None:
         super().__init__()
         self.window = window
-        self.settings = window.settings
         self._task: BackgroundTask | None = None
         # Name of the saved profile on screen, "" while creating one.
         self._form_state = ""
@@ -1143,7 +1149,6 @@ class ProfilesPage(QWidget):
         save/create/delete.
         """
         self.window.refresh_settings()
-        self.settings = self.window.settings
         self.profile_list.blockSignals(True)
         self.profile_list.clear()
         for profile in self.settings.profiles:

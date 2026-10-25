@@ -38,7 +38,6 @@ from PySide6.QtGui import (
     QGuiApplication,
     QIcon,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
 )
@@ -84,23 +83,25 @@ def _tab_icon(kind: str, colour: str, size: int = 28) -> QPixmap:
     pen = QPen(QColor(colour), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     if kind == "mangohud":
-        # A frame time graph in a screen.
-        painter.drawRoundedRect(QRectF(3, 5, 22, 18), 3, 3)
-        painter.drawPolyline([QPointF(7, 18), QPointF(11, 13), QPointF(14, 16), QPointF(18, 9), QPointF(21, 12)])
+        # Performance: a frame time pulse.
+        painter.drawPolyline([QPointF(2, 15), QPointF(8, 15), QPointF(11, 7), QPointF(15.5, 23),
+                              QPointF(18.5, 12), QPointF(20.5, 15), QPointF(26, 15)])
     elif kind == "vkbasalt":
-        # Colour: a circle half filled, like a contrast control.
-        painter.drawEllipse(QPointF(14, 14), 10, 10)
-        half = QPainterPath()
-        half.moveTo(14, 4)
-        half.arcTo(QRectF(4, 4, 20, 20), 90, 180)
-        half.closeSubpath()
-        painter.fillPath(half, QColor(colour))
+        # Effects: a wand with sparkles.
+        painter.drawLine(QPointF(4, 24), QPointF(17, 11))
+
+        def sparkle(x: float, y: float, r: float) -> None:
+            painter.drawLine(QPointF(x - r, y), QPointF(x + r, y))
+            painter.drawLine(QPointF(x, y - r), QPointF(x, y + r))
+
+        sparkle(21, 7, 3.5)
+        sparkle(10, 6, 2)
+        sparkle(23, 17, 2)
     else:
-        # Frame generation: frames stacked behind the one shown.
-        painter.drawRoundedRect(QRectF(10, 4, 15, 12), 2, 2)
-        painter.drawRoundedRect(QRectF(6.5, 8, 15, 12), 2, 2)
-        painter.setBrush(QColor(colour))
-        painter.drawRoundedRect(QRectF(3, 12, 15, 12), 2, 2)
+        # Frame generation: a frame, fast-forwarded.
+        painter.drawRoundedRect(QRectF(3, 5, 22, 18), 3, 3)
+        for x in (9, 15):
+            painter.drawPolyline([QPointF(x, 10), QPointF(x + 4, 14), QPointF(x, 18)])
     painter.end()
     return pixmap
 
@@ -130,6 +131,8 @@ class GraphicsWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle(f"{tr('Graphics overlay')} - STALKER COMMANDER")
         self.setWindowOpacity(0.94)  # the game shows through a little
+        # No window background: only the rail and the card float on the game.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(_WIDTH, 860)
         self._options = ""
         # Keeps the cards' handlers: the cards themselves go on the tabs.
@@ -137,13 +140,13 @@ class GraphicsWindow(QWidget):
         self.frame_gen = FrameGenCard(lambda: self._options, self._set_options)
 
         tokens = active_theme_tokens()
-        # The theme's own window and card colours: this is a window of its
-        # own, without the main window's background behind it.
+        # The theme's card colours for the rail: this is a window of its own,
+        # without the main window's background behind it.
         self.setObjectName("graphicsOverlay")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setStyleSheet(
-            f"QWidget#graphicsOverlay {{ background-color: {tokens['bg']}; }}"
-            f"QWidget#graphicsRail {{ background-color: {tokens['card']}; border-right: 1px solid {tokens['border']}; }}"
+            "QWidget#graphicsOverlay, QStackedWidget { background: transparent; }"
+            f"QWidget#graphicsRail {{ background-color: {tokens['card']}; border: 1px solid {tokens['border']};"
+            " border-radius: 10px; }"
         )
         rail = QWidget()
         rail.setObjectName("graphicsRail")
@@ -154,8 +157,8 @@ class GraphicsWindow(QWidget):
         self.pages = QStackedWidget()
         self.tabs = QButtonGroup(self)
         for index, (kind, name, card) in enumerate((
-            ("mangohud", "MangoHud", self.panel.mangohud_card),
-            ("vkbasalt", "vkBasalt", self.panel.vkbasalt_card),
+            ("mangohud", tr("Performance overlay"), self.panel.mangohud_card),
+            ("vkbasalt", tr("Image effects"), self.panel.vkbasalt_card),
             ("framegen", tr("Frame generation"), self.frame_gen),
         )):
             icon = QIcon()
@@ -172,14 +175,13 @@ class GraphicsWindow(QWidget):
             self.tabs.addButton(tab, index)
             rail_layout.addWidget(tab)
             self.pages.addWidget(_page(card))
-        rail_layout.addStretch(1)
         self.tabs.idClicked.connect(self.pages.setCurrentIndex)
         self.tabs.button(0).setChecked(True)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 16, 0, 0)  # as the card's, in _page
         layout.setSpacing(0)
-        layout.addWidget(rail)
+        layout.addWidget(rail, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.pages, 1)
         # App-wide: a focused combo box or slider would take the key first.
         QApplication.instance().installEventFilter(self)
