@@ -3793,6 +3793,9 @@ class RegressionTests(unittest.TestCase):
                 "keep_engine_exes": Mock(isChecked=Mock(return_value=False)),
                 "offline": Mock(isChecked=Mock(return_value=False)),
             }
+            page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
+            }
             page._resume_state = None
             page.full_progress = Mock()
             page.install_button = Mock()
@@ -3850,6 +3853,7 @@ class RegressionTests(unittest.TestCase):
             page.install_button = Mock()
             page.anomaly_button = Mock()
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3916,6 +3920,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=True)),
             }
@@ -3933,6 +3938,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3955,6 +3961,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=True)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -3978,6 +3985,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -4006,6 +4014,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -4024,6 +4033,7 @@ class RegressionTests(unittest.TestCase):
 
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }
@@ -4051,6 +4061,7 @@ class RegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = self._make_bare_install_page(tmp)
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=True)),
             }
@@ -4082,6 +4093,7 @@ class RegressionTests(unittest.TestCase):
             # Checkboxes both off - if the auto-chain were wrongly gated
             # by them, this would fail to chain.
             page.anomaly_checkboxes = {
+                "anomaly_mirror": Mock(isChecked=Mock(return_value=False)),
                 "verify_after_install": Mock(isChecked=Mock(return_value=False)),
                 "auto_continue_gamma": Mock(isChecked=Mock(return_value=False)),
             }

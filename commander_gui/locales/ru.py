@@ -3519,4 +3519,6 @@ TRANSLATIONS: dict[str, str] = {
     'A backup of the current list is saved first.': 'Сначала сохраняется копия текущего списка.',
     'Restore and launch': 'Восстановить и запустить',
     "Couldn't restore the mod list": 'Не удалось восстановить список модов',
+    'Faster Anomaly download (mirror)': 'Ускоренная загрузка Anomaly (зеркало)',
+    "Download Anomaly from the GAMMA installer author's mirror instead of ModDB. It unpacks about 9 times faster but needs about 5 GB of free memory while unpacking. If the mirror fails, ModDB is used.": 'Загружает Anomaly с зеркала автора установщика GAMMA вместо ModDB. Распаковка примерно в 9 раз быстрее, но требует около 5 ГБ свободной памяти. Если зеркало не работает, используется ModDB.',
 }

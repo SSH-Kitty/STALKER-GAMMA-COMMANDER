@@ -177,7 +177,7 @@ _OFFLINE_DISABLES = ("minimal", "redownload_github", "auto_retry_large_files")
 #: only the initial state each time the page is constructed, same as
 #: every other checkbox here; the user can still uncheck for the current
 #: session.
-_DEFAULT_CHECKED_OPTIONS = {"auto_retry_large_files", "auto_continue_gamma"}
+_DEFAULT_CHECKED_OPTIONS = {"auto_retry_large_files", "auto_continue_gamma", "anomaly_mirror"}
 
 _ANOMALY_CHECKBOXES = [
     (
@@ -189,6 +189,11 @@ _ANOMALY_CHECKBOXES = [
         "auto_continue_gamma",
         "Automatically install GAMMA after Anomaly",
         "Start the GAMMA install as soon as Anomaly finishes.",
+    ),
+    (
+        "anomaly_mirror",
+        "Faster Anomaly download (mirror)",
+        "Download Anomaly from the GAMMA installer author's mirror instead of ModDB. It unpacks about 9 times faster but needs about 5 GB of free memory while unpacking. If the mirror fails, ModDB is used.",
     ),
 ]
 
@@ -237,6 +242,7 @@ def _full_install_args(
     skip_extract_on_hash_match: bool = False,
     skip_github_downloads: bool = True,
     offline_lists: tuple[str, str] | None = None,
+    anomaly_mirror: bool = False,
 ) -> list[str]:
     """Build the full-install argv.
 
@@ -259,6 +265,9 @@ def _full_install_args(
     reappearing. Callers must only pass ``True`` when GAMMA's own install
     is already known to genuinely exist (see ``gamma_installed()``), not
     just because Anomaly is present.
+
+    ``--use-anomaly-mirror`` (CLI 1.40+) only matters when the Anomaly
+    archive is downloaded, so an offline install leaves it out.
     """
     args = ["full-install"]
     if minimal:
@@ -274,6 +283,8 @@ def _full_install_args(
     if offline_lists:
         modpack_list, mod_list = offline_lists
         args += ["--offline", "--mod-pack-maker-path", modpack_list, "--mod-list-path", mod_list]
+    elif anomaly_mirror:
+        args.append("--use-anomaly-mirror")
     return args
 
 
@@ -677,6 +688,16 @@ def _repair_install_args() -> list[str]:
         "--preserve-user-settings",
         "--preserve-mcm-settings",
     ]
+
+
+def _anomaly_check_ran(rc: int, output: str, parsed: int) -> bool:
+    """Whether ``anomaly check`` ran to the end.
+
+    CLI 1.40+ exits 1 when any file is CORRUPT or NOT FOUND, and GAMMA's
+    own overlay files always are. With status lines printed, exit code 1
+    is that verdict, not a failed check.
+    """
+    return cli_ok(0 if rc == 1 and parsed else rc, output, "")
 
 
 def _note_md5_redownload(tracked: set[str], event: ProgressEvent) -> str | None:
@@ -1158,10 +1179,10 @@ class InstallPage(QWidget):
         # -- "Install options" (Anomaly) / "Install options" (GAMMA) -
         # same row, same size (QGridLayout stretches same-row
         # Preferred-policy widgets to the shared row height when nothing
-        # else occupies that row). Anomaly's own `anomaly install` CLI
-        # command has no user-facing flags at all, so these two
-        # checkboxes are GUI-level orchestration, not CLI arguments -
-        # see _start_anomaly_install/_on_anomaly_finished. --
+        # else occupies that row). The first two checkboxes are GUI-level
+        # orchestration, not CLI arguments - see
+        # _start_anomaly_install/_on_anomaly_finished. The mirror one is
+        # the CLI's --use-anomaly-mirror. --
         anomaly_opts_group = QGroupBox(tr("Install options"))
         anomaly_opts_layout = QVBoxLayout()
         anomaly_opts_layout.setSpacing(6)
@@ -1625,6 +1646,7 @@ class InstallPage(QWidget):
         # online `anomaly install`: off (and put back later) while offline.
         boxes = {key: self.checkboxes[key] for key in _OFFLINE_DISABLES}
         boxes["auto_continue_gamma"] = self.anomaly_checkboxes["auto_continue_gamma"]
+        boxes["anomaly_mirror"] = self.anomaly_checkboxes["anomaly_mirror"]
         usable = self.checkboxes["offline"].isEnabled() and not offline
         for key, cb in boxes.items():
             if offline and key not in self._offline_saved:
@@ -1747,7 +1769,14 @@ class InstallPage(QWidget):
             skip_extract_on_hash_match,
             not self.checkboxes["redownload_github"].isChecked(),
             self._offline_lists(),
+            self.anomaly_checkboxes["anomaly_mirror"].isChecked(),
         )
+
+    def _anomaly_install_args(self) -> list[str]:
+        args = ["anomaly", "install"]
+        if self.anomaly_checkboxes["anomaly_mirror"].isChecked():
+            args.append("--use-anomaly-mirror")
+        return args
 
     def _start_full_install(
         self,
@@ -2242,7 +2271,7 @@ class InstallPage(QWidget):
         self.full_progress.reset()
         self.anomaly_button.setEnabled(False)
         self.install_button.setEnabled(False)
-        cmd = cli_command(["anomaly", "install"], progress_interval_ms=200)
+        cmd = cli_command(self._anomaly_install_args(), progress_interval_ms=200)
         self._anomaly_runner = CommandRunner(cmd, parent=self)
         self._anomaly_runner.line.connect(self.full_progress.on_line)
         self._anomaly_runner.finished.connect(self._on_anomaly_finished)
@@ -2576,8 +2605,8 @@ class InstallPage(QWidget):
         # The CLI exits 0 on some failures, so trust it only when no failure
         # markers appear and at least one status line was actually parsed.
         # Anything else is "could not be checked" - never a pass.
-        self._anomaly_checked = cli_ok(rc, output, "") and parsed > 0
-        if not cli_ok(rc, output, ""):
+        self._anomaly_checked = _anomaly_check_ran(rc, output, parsed) and parsed > 0
+        if not _anomaly_check_ran(rc, output, parsed):
             self.verify_progress.log.append_line("Anomaly check failed.")
             self._verify_anomaly_ok = False
         elif parsed == 0:
@@ -2942,7 +2971,7 @@ class InstallPage(QWidget):
         self.verify_progress.status_message(tr("Re-installing Anomaly..."))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Repairing Anomaly ==")
-        runner = CommandRunner(cli_command(["anomaly", "install"]), parent=self)
+        runner = CommandRunner(cli_command(self._anomaly_install_args()), parent=self)
         runner.line.connect(self._on_verify_line)
         runner.finished.connect(self._on_anomaly_repair_finished)
         runner.cancelled.connect(
@@ -2984,7 +3013,7 @@ class InstallPage(QWidget):
             return
         counts = self._verify_counts
         parsed = sum(counts.values())
-        self._anomaly_checked = cli_ok(rc, output, "") and parsed > 0
+        self._anomaly_checked = _anomaly_check_ran(rc, output, parsed) and parsed > 0
         ok = (
             self._anomaly_checked
             and counts["CORRUPT"] == 0

@@ -1922,14 +1922,14 @@ class ProgressTable(QTableWidget):
             self._rows[event.name] = row
             self.setItem(row, 0, QTableWidgetItem(event.name))
             self.setItem(row, 1, QTableWidgetItem(event.operation))
-            self.setItem(row, 2, QTableWidgetItem(f"{event.percent:.1%}"))
+            self.setItem(row, 2, QTableWidgetItem(event.amount))
         else:
             op = self.item(row, 1)
             pct = self.item(row, 2)
             if op is None or pct is None:
                 return
             op.setText(event.operation)
-            pct.setText(f"{event.percent:.1%}")
+            pct.setText(event.amount)
             self._rows.move_to_end(event.name)
 
         if event.operation == "Skipped" or event.percent >= 1.0:
@@ -2385,7 +2385,8 @@ class ProgressArea(QWidget):
                     pct = max(0, min(100, round(event.percent * 100)))
                     self.bar.setRange(0, 100)
                     self.bar.setValue(pct)
-                    self.bar.setFormat(f"{pct}%")
+                    # Size unknown: the bytes so far are all there is.
+                    self.bar.setFormat(event.size or f"{pct}%")
                     self.status_label.setText("")
                 elif event.operation == "Skipped":
                     self.bar.setRange(0, 1)
@@ -2417,7 +2418,7 @@ class ProgressArea(QWidget):
                     self.status_label.setText(
                         done
                         if self.table is None
-                        else f"{event.name} — {event.operation} — {event.percent:.0%}  ·  {done}"
+                        else f"{event.name} — {event.operation} — {event.size or format(event.percent, '.0%')}  ·  {done}"
                     )
                 if self.table is None:
                     # One overall bar across every archive (e.g. Update

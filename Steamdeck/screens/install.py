@@ -253,6 +253,7 @@ class InstallScreen(DeckScreen):
         self.preserve_user_row = DeckToggleRow(tr("Preserve user.ltx settings"), True)
         self.preserve_mcm_row = DeckToggleRow(tr("Preserve MCM settings"), True)
         self.offline_row = DeckToggleRow(tr("Offline install (cache only)"), False)
+        self.anomaly_mirror_row = DeckToggleRow(tr("Faster Anomaly download (mirror)"), True)
         self.offline_row.toggled.connect(lambda _on: self._update_buttons())
         # Deck has only a folder picker: pick the folder holding both lists.
         self.offline_lists_row = DeckRow(tr("Offline list folder"))
@@ -265,6 +266,7 @@ class InstallScreen(DeckScreen):
             self.minimal_row,
             self.preserve_user_row,
             self.preserve_mcm_row,
+            self.anomaly_mirror_row,
             self.offline_row,
             self.offline_lists_row,
             self.offline_guide_row,
@@ -357,6 +359,7 @@ class InstallScreen(DeckScreen):
         for row in (self.preserve_user_row, self.preserve_mcm_row, self.offline_row):
             row.setEnabled(idle)
         self.minimal_row.setEnabled(idle and not offline)
+        self.anomaly_mirror_row.setEnabled(idle and not offline)
         self.offline_lists_row.setEnabled(idle and offline)
         self.offline_lists_row.setVisible(offline)
         self.offline_guide_row.setVisible(offline)
@@ -477,8 +480,11 @@ class InstallScreen(DeckScreen):
             except OSError as exc:
                 self.window.notify(str(exc), 6000)
                 return
+        args = ["anomaly", "install"]
+        if self.anomaly_mirror_row.is_checked():
+            args.append("--use-anomaly-mirror")
         self._begin_run(
-            cli_command(["anomaly", "install"], progress_interval_ms=200),
+            cli_command(args, progress_interval_ms=200),
             operation="anomaly",
             status=tr("Installing Anomaly..."),
         )
@@ -595,6 +601,7 @@ class InstallScreen(DeckScreen):
             self.preserve_mcm_row.is_checked(),
             skip_extract,
             offline_lists=self._offline_lists(),
+            anomaly_mirror=self.anomaly_mirror_row.is_checked(),
         )
         if self._resuming:
             args += cli_resume_args(profile.gamma, "full-install")

@@ -198,8 +198,15 @@ back to the stable build** installs the latest stable release, even when its ver
 ### Also in this build
 
 - The bundled [stalker-gamma-cli](https://github.com/FaithBeam/stalker-gamma-cli) has been updated from **1.36.1** to
-  **1.39.0**. Updates are much faster: `update apply` now only extracts the files that changed from the four GAMMA git
+  **1.40.0**. Updates are much faster: `update apply` now only extracts the files that changed from the four GAMMA git
   repos instead of unpacking all of them, and the update log now shows a timestamp on each line like the install log.
+  Git repos also unpack on several threads, which saves a minute or two on an install.
+- **Faster Anomaly download (mirror)** on the Install page (and in Deck Mode) is on by default: Anomaly downloads from
+  the CLI author's [mirror](https://github.com/FaithBeam/stalker-gamma-cli/wiki/Anomaly-Mirror), which unpacks about 9
+  times faster than the ModDB archive (about 20 s instead of 3 min) but needs about 5 GB of free memory while unpacking.
+  If the mirror fails, ModDB is used. An Anomaly archive already in your cache is still used.
+- Downloads whose size the server doesn't report (GitHub addon archives) now show how many MB have downloaded instead of
+  a wrong percentage like 1,000,000%.
 - **Resume picks up where it stopped**: *Resume GAMMA Installation* (and *Resume install* in Deck Mode) now uses the
   CLI's `--resume`, so mods that were already installed are skipped instead of unpacked again. A failed or cancelled
   update shows **Resume update** on the Updates page and in Deck Mode, which does the same for `update apply`.
