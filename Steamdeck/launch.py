@@ -13,19 +13,21 @@ timer and reports through signals, so the Play screen stays a layout.
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from commander_gui import coop, gui_settings, launch_options
+from commander_gui import applog, coop, gui_settings, launch_options
 from commander_gui.config import logs_dir
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
     PTRACE_FIX_COMMAND,
     ProcessGroupRegistry,
     anomaly_launcher_target,
+    available_commands,
     build_command,
     build_direct_command,
     default_launch_target,
@@ -40,10 +42,15 @@ from commander_gui.launcher import (
     runner_crash_loop,
     runner_graphics_error,
     runner_prefix_error,
+    runner_unsupported_error,
 )
 from commander_gui.ui import game_splash
 from commander_gui.ui.common import BackgroundTask, crash_dump_names, exe_pids, mo2_pids
-from commander_gui.ui.play_page import _CRASH_POLL_INTERVAL_MS, _CRASH_POLL_MAX_ATTEMPTS
+from commander_gui.ui.play_page import (
+    _CRASH_POLL_INTERVAL_MS,
+    _CRASH_POLL_MAX_ATTEMPTS,
+    engine_log_summary,
+)
 
 #: How often the launch watchdog looks at the log and the process table:
 #: fast while the game is starting (a crash loop must be caught within
@@ -85,6 +92,11 @@ def runner_label(kind: str) -> str:
 def _prepare_launch(profile, kind, prefix, target, direct, watch_exe, arguments) -> dict:
     """The disk-bound half of a launch, run on a worker thread."""
     runner = resolve_runner(kind, prefix)
+    if gui_settings.load_gui_settings().get("always_gamemoderun"):
+        # Settings' Always use GameMode, as the desktop Play page applies it.
+        gamemoderun = available_commands().get("gamemoderun")
+        if gamemoderun and (not runner.wrapper or runner.wrapper[0] != gamemoderun):
+            runner.wrapper.insert(0, gamemoderun)
     if direct is not None:
         command, env, cwd = build_direct_command(direct, runner)
     else:
@@ -100,6 +112,10 @@ def _prepare_launch(profile, kind, prefix, target, direct, watch_exe, arguments)
     options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
     if coop.is_active(profile.anomaly):
         options = launch_options.for_coop(options)
+    if direct is None and not target and "%command%" in (tokens := launch_options.split(options)):
+        # MO2 on its own: no game to hand the words after %command% to,
+        # and MO2 quits on a word it doesn't know.
+        options = shlex.join(tokens[: tokens.index("%command%") + 1])
     command = launch_options.apply(command, env, options)
     ensure_runner_prefix(runner)
     return {
@@ -484,6 +500,17 @@ class DeckLaunchController(QObject):
                 ),
             )
             return
+        if runner_unsupported_error(log):
+            self._stop_watching()
+            self.failed.emit(
+                tr("This runner can't run the game"),
+                tr(
+                    "The selected runner is missing something the game needs, "
+                    "so it stopped right away. Pick an older Proton-GE in "
+                    "Settings and try again."
+                ),
+            )
+            return
         if elapsed > _WATCH_TIMEOUT_S:
             self._stop_watching()
             self.status.emit(tr("Ready"))
@@ -494,6 +521,9 @@ class DeckLaunchController(QObject):
         self.status.emit(tr("Ready"))
         # Only a natural exit: a Force Stop is the user's own doing.
         if self._anomaly:
+            applog.get_logger().info(
+                "deck: engine log %s", engine_log_summary(self._anomaly, self._game_started_at - 60)
+            )
             self._crash_attempts_left = _CRASH_POLL_MAX_ATTEMPTS
             self._poll_crash()
 

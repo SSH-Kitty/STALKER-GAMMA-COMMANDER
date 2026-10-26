@@ -86,6 +86,7 @@ _DEFAULTS = {
     "deck_runner_confirmed": False,  # user picked a runner once in Deck Mode
     "deck_finish_sound": True,  # play the PDA chime when a long Deck task ends
     "deck_finish_rumble": True,  # buzz the controller when a long Deck task ends
+    "deck_overlay_shortcut": "l4r4",  # back grips held to open the overlay over a running game, or "off"
     "welcome_hidden": False,  # "Don't show again" on the Welcome screen (desktop and Deck Mode)
     "welcome_seen_version": "",  # COMMANDER version the Welcome screen last showed for (always shown after an update)
     "update_channel": "stable",  # "stable" | "unstable" - COMMANDER self-update channel (unstable includes pre-releases)
@@ -187,6 +188,8 @@ def load_gui_settings() -> dict:
         "settings",
     }:
         data["deck_start_screen"] = "play"
+    if data.get("deck_overlay_shortcut") not in {"l4r4", "l5r5", "l4l5", "r4r5", "off"}:
+        data["deck_overlay_shortcut"] = "l4r4"
     try:
         font_size = int(data.get("font_size", 13))
     except (TypeError, ValueError, OverflowError):

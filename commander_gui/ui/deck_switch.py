@@ -13,9 +13,13 @@ execve, the loop guard) live in ``commander_gui.deck_launch``.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ..deck_launch import DeckRelaunchError, relaunch_exec
+from ..config import child_environment
+from ..deck_launch import DECK_FLAG, DeckRelaunchError, relaunch_exec
 from ..i18n import tr
 from .common import cancel_active_runners, mo2_running, resume_after_shutdown
 from .dialogs import MessageBox as QMessageBox
@@ -73,7 +77,17 @@ def switch_mode(window, *, deck: bool) -> None:
     _restart(window, deck=deck)
 
 
-def _restart(window, *, deck: bool) -> None:
+def restart_into_appimage(window, path) -> None:
+    """Restart Deck Mode into a COMMANDER AppImage just updated in place.
+
+    Execs the AppImage file itself, not this interpreter: the old AppImage
+    stays mounted for this process and would start the old version again.
+    exec keeps the process, so Steam's Game Mode session carries on.
+    """
+    _restart(window, deck=True, appimage=Path(path))
+
+
+def _restart(window, *, deck: bool, appimage: Path | None = None) -> None:
     """The unconditional half of :func:`switch_mode`, after its guards."""
     # close() runs the window's own closeEvent, which may veto (MainWindow
     # refuses while an install is running) and which persists the desktop
@@ -101,8 +115,13 @@ def _restart(window, *, deck: bool) -> None:
     from ..main import release_instance_lock
 
     try:
+        if appimage is not None:
+            release_instance_lock()
+            os.execve(appimage, [str(appimage), DECK_FLAG], child_environment())
         relaunch_exec(deck=deck, release_lock=release_instance_lock)
         failure = tr("the interpreter could not be restarted")
+    except OSError as exc:
+        failure = str(exc)
     except DeckRelaunchError as exc:
         failure = str(exc)
 

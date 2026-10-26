@@ -15,6 +15,7 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
+from commander_gui import modded_exes
 from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.game_backup import backup_settings_before
 from commander_gui.i18n import tr
@@ -38,6 +39,7 @@ from commander_gui.updates import (
 )
 
 from .. import gamepad as pad
+from ..exes_card import DeckExesCard
 from ..scale import px
 from ..widgets import (
     ROW_GAP,
@@ -139,10 +141,13 @@ class UpdateScreen(DeckScreen):
         self.body.addLayout(self.notes_box)
         self.notes_empty = deck_label("", role="caption", wrap=True)
         self.notes_box.addWidget(self.notes_empty)
+        self.exes = DeckExesCard(self)
+        self.body.addWidget(self.exes.card)
         self.body.addStretch(1)
 
     # -- state ------------------------------------------------------------
     def refresh(self) -> None:
+        self.exes.refresh()
         profile = self.profile()
         if profile is None:
             self.summary_label.setText(
@@ -184,6 +189,7 @@ class UpdateScreen(DeckScreen):
 
     def on_busy_changed(self, busy: bool) -> None:
         self.action_button.setEnabled(not busy and self._runner is None)
+        self.exes.refresh()
 
     def _on_action(self) -> None:
         if self._resume_args() or (self._status is not None and self._status.update_available):
@@ -434,7 +440,10 @@ class UpdateScreen(DeckScreen):
             self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
         # Kept across a failed run and its resume, like the desktop page.
         if getattr(self, "_kept", None) is None:
-            self._kept = capture(self.profile())
+            profile = self.profile()
+            # Exes COMMANDER installed: the update must not swap them back
+            # (the desktop page ticks "Keep my current engine executables").
+            self._kept = capture(profile, keep_exes=bool(profile and modded_exes.load_state(profile.anomaly)))
         self._heavy = {}
         self.window.set_install_busy(True, "gamma")
         self.progress.reset()
@@ -466,7 +475,7 @@ class UpdateScreen(DeckScreen):
                 event.operation,
             )
         )
-        self.progress.status_message(f"{event.operation}  {event.name}")
+        self.progress.status_message(f"{event.operation}  {event.name}  {event.size}".rstrip())
 
     def _on_applied(self, rc: int, output: str) -> None:
         cancelled = self._runner is not None and self._runner.was_cancelled

@@ -18,6 +18,8 @@ else in Deck Mode reports it.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import QHBoxLayout
 from commander_gui import gui_settings
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.i18n import tr
+from commander_gui.self_update import commander_appimage_path
 from commander_gui.ui.common import (
     BackgroundTask,
     anomaly_installed,
@@ -38,6 +41,7 @@ from commander_gui.ui.common import (
     notice,
 )
 from commander_gui.ui.install_page import _resume_state_matches
+from commander_gui.ui.update_page import _format_relative_time
 from commander_gui.updates import check_updates, format_version
 
 from .. import gamepad as pad
@@ -136,6 +140,9 @@ class DashboardScreen(DeckScreen):
         row_layout.insertWidget(2, self.updates_status_label)
         self.update_row.activated.connect(lambda: self.window.set_page("update"))
         self.body.addWidget(self.update_row)
+        # When each one last changed, as the desktop Updates card lists it.
+        self.history_label = deck_label("", role="caption")
+        self.body.addWidget(self.history_label)
 
         # Mods | Storage usage
         self.mods_row = DeckRow(tr("Mods"))
@@ -200,6 +207,7 @@ class DashboardScreen(DeckScreen):
                 label.setText("")
             self.updates_status_label.setText("")
             self.update_row.set_value("")
+            self.history_label.setText("")
             self.mods_row.set_value("")
             self.storage_row.set_value("")
             self.footer.setText(
@@ -225,10 +233,27 @@ class DashboardScreen(DeckScreen):
         )
 
         self._render_footer(profile)
+        self._render_history(profile)
         self._sync_captions()
         self._start_dependency_check()
         self._start_update_check(profile)
         self._start_size_check(profile)
+
+    def _render_history(self, profile) -> None:
+        def ago(path) -> str:
+            try:
+                return _format_relative_time(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
+            except (OSError, AttributeError):
+                return tr("Unknown")
+
+        version_file = Path(profile.gamma, "version.txt") if profile.gamma else None
+        # The AppImage is swapped whole on a self-update; a source run has no
+        # install step, so its own package stands in.
+        commander_file = commander_appimage_path() or Path(__file__).resolve().parents[2] / "commander_gui" / "__init__.py"
+        self.history_label.setText(
+            f"{tr('GAMMA last updated')}: {ago(version_file)}   ·   "
+            f"{tr('COMMANDER last updated')}: {ago(commander_file)}"
+        )
 
     def _sync_captions(self) -> None:
         # An empty caption still takes a line of layout, which left a blank

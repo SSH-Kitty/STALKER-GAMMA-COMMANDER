@@ -32,6 +32,7 @@ from commander_gui import coop, gui_settings
 from commander_gui.i18n import tr
 from commander_gui.launcher import (
     Mo2Executable,
+    anomaly_launcher_target,
     parse_mo2_executables,
     resolve_runner,
     steam_shortcut_appid,
@@ -59,7 +60,7 @@ from commander_gui.ui.common import (
 from commander_gui.ui.play_page import (
     coop_options_only_change,
     coop_shortcut_fields,
-    plain_game_exe,
+    plain_coop_exe,
     with_coop_options,
 )
 
@@ -250,6 +251,8 @@ class MultiplayerScreen(DeckScreen):
         self._address = ""
         self._op_label_text = ""
         self._was_host: bool | None = None
+        #: GAMMA or plain Anomaly for a first install (desktop's pills).
+        self._kind_pick = coop.KIND_GAMMA
         self._toggles: dict[str, DeckToggleRow] = {}
         self._steppers: dict[str, tuple] = {}
         self._bridge = _Bridge(self)
@@ -292,7 +295,15 @@ class MultiplayerScreen(DeckScreen):
     # ------------------------------------------------------ not installed
     def _build_install(self) -> None:
         self.install_box, setup = _panel()
-        setup.addWidget(_caption(tr("Play GAMMA with up to 4 friends. You can switch back to singleplayer any time.")))
+        self.intro_label = _caption()
+        setup.addWidget(self.intro_label)
+        self.kind_row, self.kind_choice = _choice_row(
+            tr("Play co-op on"), [(tr("GAMMA"), coop.KIND_GAMMA), (tr("Anomaly"), coop.KIND_ANOMALY)]
+        )
+        self.kind_choice.changed.connect(self._pick_kind)
+        setup.addWidget(self.kind_row)
+        self.kind_hint = _caption()
+        setup.addWidget(self.kind_hint)
         self.download_button = deck_button(
             tr("Download from moddb"), on_click=lambda: open_url(self.window, coop.MODDB_PAGE)
         )
@@ -327,6 +338,15 @@ class MultiplayerScreen(DeckScreen):
         # screen is visited for most, so it sits above the fold.
         self.reverted_label = _warn(tr("A GAMMA update or repair put the original game files back. Re-apply co-op to play together again."))
         dash.addWidget(self.reverted_label)
+        # Installed for GAMMA, but this profile has no GAMMA: the mod's
+        # files would never load.
+        self.mismatch_label = _warn(tr("This co-op install was made for GAMMA, but this profile has no GAMMA. Reinstall it for Anomaly to play."))
+        dash.addWidget(self.mismatch_label)
+        self.mismatch_button = deck_button(
+            tr("Reinstall for Anomaly"),
+            on_click=lambda: self._install_zip(self._found) if self._found else self._pick_zip(),
+        )
+        dash.addWidget(self.mismatch_button)
 
         # One big button that always does the next step: switch to co-op,
         # launch it, or quit it while it runs (the Play screen's hero).
@@ -372,6 +392,14 @@ class MultiplayerScreen(DeckScreen):
         )
         dash.addWidget(self.app_note)
 
+        self.dash_kind_row, self.dash_kind_choice = _choice_row(
+            tr("Play co-op on"), [(tr("GAMMA"), coop.KIND_GAMMA), (tr("Anomaly"), coop.KIND_ANOMALY)]
+        )
+        self.dash_kind_choice.changed.connect(self._switch_kind)
+        dash.addWidget(self.dash_kind_row)
+        self.dash_kind_hint = _caption(tr("Move co-op between GAMMA and Anomaly. No zip needed, and co-op stays on or off as it is."))
+        dash.addWidget(self.dash_kind_hint)
+
         # xrRazom version | Player slots, like the Play screen's stat grid.
         stats = DeckCard()
         stats.body.setContentsMargins(px(20), px(8), px(20), px(8))
@@ -387,6 +415,8 @@ class MultiplayerScreen(DeckScreen):
             grid.addLayout(cell, 1)
         stats.body.addLayout(grid)
         dash.addWidget(stats)
+        self.zip_label = _caption()
+        dash.addWidget(self.zip_label)
 
         self.body.addWidget(self.dash_box)
 
@@ -553,6 +583,14 @@ class MultiplayerScreen(DeckScreen):
             self._pick_zip, button_text=tr("Update"),
         )
         layout.addWidget(tile)
+        # Plain Anomaly co-op starts the game exe the launcher last saved
+        # (play_page.plain_game_exe), so the launcher is where it's changed.
+        self.launcher_tile, self.launcher_button = _tool_row(
+            tr("Renderer and game options"),
+            tr("Co-op starts the game with the renderer saved in the Anomaly Launcher, such as DX11 or DX9. Change it there, press Save Settings, then close the launcher."),
+            self._open_anomaly_launcher, button_text=tr("Open"),
+        )
+        layout.addWidget(self.launcher_tile)
         tile, _check = _tool_row(
             tr("New releases"), tr("Everyone in a session must use the same version."),
             lambda: open_url(self.window, coop.MODDB_PAGE), button_text=tr("Open"),
@@ -661,6 +699,9 @@ class MultiplayerScreen(DeckScreen):
         self.status_chip.setObjectName({"ok": "deckChipOk", "warn": "deckChipWarn", "bad": "deckChipBad"}[level])
         repolish(self.status_chip)
         self.version_value.setText(((state or {}).get("release") or {}).get("version") or "?")
+        zip_name = coop.installed_zip(profile.anomaly, profile.gamma) if state else ""
+        self.zip_label.setText(tr("Installed xrRazom version: {name}", name=zip_name))
+        self.zip_label.setVisible(bool(zip_name))
         self._lan_ip = coop.lan_ip()
         self._ip_failed = False
         if profile is not None:
@@ -704,9 +745,78 @@ class MultiplayerScreen(DeckScreen):
         except OSError:
             return coop.NOT_INSTALLED
 
+    def _has_gamma(self) -> bool:
+        profile = self.profile()
+        return profile is not None and gamma_installed(profile.gamma, profile.mo2_profile)
+
+    def _install_kind(self) -> str:
+        """How the next install (or update) of the zip goes for this profile."""
+        profile = self.profile()
+        if not self._has_gamma():
+            return coop.KIND_ANOMALY
+        if self._status != coop.NOT_INSTALLED:
+            return coop.install_kind(profile.anomaly)  # an update keeps it
+        return self._kind_pick
+
+    def _pick_kind(self, kind: object) -> None:
+        self._kind_pick = str(kind)
+        self._sync()
+
+    def _switch_kind(self, kind: object) -> None:
+        profile = self._ready() if kind != self._install_kind() else None
+        if profile is None:
+            self._sync()  # puts the chips back
+            return
+        to_plain = kind == coop.KIND_ANOMALY
+        self._start(
+            tr("Switching co-op to Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
+            coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, str(kind),
+            done=tr("Co-op is set up for Anomaly") if to_plain else tr("Co-op is set up for GAMMA"),
+        )
+
+    def _open_anomaly_launcher(self) -> None:
+        profile = self.profile()
+        launcher = anomaly_launcher_target(profile.anomaly) if profile is not None else None
+        if launcher is None:
+            self.window.notify(tr("Not installed"))
+            return
+        self._play().controller.launch(profile, target=None, direct=launcher)
+
+    def _sync_kind(self, installed: bool, idle: bool) -> bool:
+        """The install kind's rows; True when the install doesn't fit the profile."""
+        has_gamma = self._has_gamma()
+        kind = self._install_kind()
+        plain = kind == coop.KIND_ANOMALY
+        self.intro_label.setText(
+            tr("Play Anomaly with up to 4 friends. You can switch back to singleplayer any time.") if plain
+            else tr("Play GAMMA with up to 4 friends. You can switch back to singleplayer any time.")
+        )
+        self.kind_row.setVisible(has_gamma)
+        self.kind_choice.set_value(kind)
+        if not has_gamma:
+            hint = tr("No GAMMA found, so co-op is set up for Anomaly. Everything goes into your Anomaly folder.")
+        elif plain:
+            hint = tr("Everything goes into your Anomaly folder. While co-op is on, GAMMA can't start: switch to singleplayer first to play GAMMA.")
+        else:
+            hint = tr("The co-op files are added to GAMMA as a Mod Organizer mod.")
+        self.kind_hint.setText(hint)
+        for widget in (self.dash_kind_row, self.dash_kind_hint):
+            widget.setVisible(installed and has_gamma)
+        self.launcher_tile.setVisible(installed and plain)
+        self.launcher_button.setEnabled(idle and not self._play().controller.is_active())
+        self.dash_kind_choice.set_value(kind)
+        self.dash_kind_choice.setEnabled(idle)
+        profile = self.profile()
+        mismatch = installed and not has_gamma and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
+        self.mismatch_label.setVisible(mismatch)
+        self.mismatch_button.setVisible(mismatch)
+        self.mismatch_button.setEnabled(idle)
+        return mismatch
+
     def _sync(self) -> None:
         installed = self._status != coop.NOT_INSTALLED
         idle = not self._busy and not self.window.install_busy
+        mismatch = self._sync_kind(installed, idle)
         self.install_box.setVisible(not installed)
         self.dash_box.setVisible(installed)
         self.settings_box.setVisible(installed)
@@ -735,7 +845,7 @@ class MultiplayerScreen(DeckScreen):
             self.hero.setText("▶   " + text)
             self.hero.setObjectName("deckHero")
         repolish(self.hero)
-        self.hero.setEnabled(quit_coop or (idle and not running and self._steam_task is None))
+        self.hero.setEnabled(quit_coop or (idle and not running and self._steam_task is None and not mismatch))
         self.sp_button.setVisible(self._status in (coop.COOP, coop.REVERTED))
         self.sp_button.setEnabled(idle and not running)
         steam = bool(self._values["xrr_host_steam"])
@@ -1025,14 +1135,7 @@ class MultiplayerScreen(DeckScreen):
         )
 
     def _install_job(self, path: Path, profile):
-        # No GAMMA: plain Anomaly. With GAMMA, an update keeps the kind; the
-        # GAMMA-or-plain choice for a first install is the desktop page's.
-        if not gamma_installed(profile.gamma, profile.mo2_profile):
-            kind = coop.KIND_ANOMALY
-        elif coop.load_state(profile.anomaly) is not None:
-            kind = coop.install_kind(profile.anomaly)
-        else:
-            kind = coop.KIND_GAMMA
+        kind = self._install_kind()
         return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit, kind=kind)
 
     def _run_switch(self, to_coop: bool) -> None:
@@ -1204,13 +1307,11 @@ class MultiplayerScreen(DeckScreen):
             if os.name != "nt" and steam:
                 self._launch_steam(profile, target)
             elif coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY:
-                # The game itself, as the Steam shortcut runs it: the
-                # launcher can't pass the switch that hides the engine's splash.
-                game = Mo2Executable(
-                    title="Anomaly", binary=str(plain_game_exe(profile.anomaly)),
-                    arguments=game_splash.SPLASH_FLAG, working_directory=str(profile.anomaly),
-                )
-                self._play().controller.launch(profile, target=None, direct=game)
+                # The selected game exe, as the desktop runs it; the launcher
+                # becomes the game it would start (plain_coop_exe).
+                controller = self._play().controller
+                exe = next((e for e in controller.executables(profile) if e.title == target), Mo2Executable())
+                controller.launch(profile, target=None, direct=plain_coop_exe(exe, profile.anomaly))
             else:
                 self._play().controller.launch(profile, target=target)
 

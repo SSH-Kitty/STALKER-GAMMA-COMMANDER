@@ -11,9 +11,17 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 
-from commander_gui import __version_label__, coop, gui_settings, launch_options
+from commander_gui import (
+    __version__,
+    __version_label__,
+    coop,
+    gui_settings,
+    launch_options,
+)
 from commander_gui.deck_launch import in_game_mode, steam_deck_model
 from commander_gui.i18n import LANGUAGE_INFO, set_active_language, tr
+from commander_gui.launcher import available_commands
+from commander_gui.self_update import commander_appimage_path
 from commander_gui.steam_shortcuts import (
     add_to_steam,
     find_shortcuts_vdf,
@@ -23,6 +31,7 @@ from commander_gui.steam_shortcuts import (
 from commander_gui.themes import THEME_INFO
 from commander_gui.ui.common import BackgroundTask, mo2_running, play_click_sound
 from commander_gui.ui.deck_switch import switch_mode
+from commander_gui.updates import is_unstable_version, newer_unstable_tag
 
 from ..launch import runner_label, runner_options
 from ..scale import px
@@ -50,6 +59,15 @@ _SCALE_MIN, _SCALE_MAX, _SCALE_STEP = 80, 150, 10
 #: short labels the inline switcher shows. "ask" is still a stored value
 #: (the default, and what a Deck's first launch asks about) but not a
 #: choice here: the switcher shows what "ask" currently resolves to.
+#: deck_overlay_shortcut values, as gui_settings validates them.
+_OVERLAY_SHORTCUTS = (
+    ("L4 + R4 (upper back grips)", "l4r4"),
+    ("L5 + R5 (lower back grips)", "l5r5"),
+    ("L4 + L5 (left back grips)", "l4l5"),
+    ("R4 + R5 (right back grips)", "r4r5"),
+    ("Off", "off"),
+)
+
 _STARTUP_CHOICES = (
     ("always", "Steam Deck"),
     ("never", "Desktop"),
@@ -91,6 +109,15 @@ class SettingsScreen(DeckScreen):
         self.runner_row = DeckRow(tr("Runner"))
         self.runner_row.activated.connect(self._pick_runner)
         self.body.addWidget(self.runner_row)
+        self.gamemode_row = DeckToggleRow(tr("Always use GameMode"))
+        self.gamemode_row.toggled.connect(
+            lambda on: gui_settings.save_gui_settings(always_gamemoderun=bool(on))
+        )
+        self.body.addWidget(self.gamemode_row)
+        # Frame generation, the performance overlay and image effects.
+        self.graphics_row = DeckRow(tr("Graphics"))
+        self.graphics_row.activated.connect(lambda: self.window.set_page("graphics"))
+        self.body.addWidget(self.graphics_row)
 
         # The desktop Play page's one-click launch options, as switches.
         self.body.addWidget(deck_label(tr("Launch options"), role="rowTitle"))
@@ -123,6 +150,14 @@ class SettingsScreen(DeckScreen):
         self.startup_row.setFixedHeight(px(ROW_H))
         self.body.addWidget(self.startup_row)
 
+        self.overlay_row = DeckRow(tr("In-game overlay shortcut"))
+        self.overlay_row.activated.connect(self._pick_overlay_shortcut)
+        self.body.addWidget(self.overlay_row)
+        self.body.addWidget(deck_label(
+            tr("Hold it for half a second while a game runs to open Graphics over the game. Hold it again, or press B, to go back to the game."),
+            role="caption", wrap=True,
+        ))
+
         self.steam_row = DeckRow(tr("Add COMMANDER to Steam"))
         self.steam_row.activated.connect(self._add_to_steam)
         self.body.addWidget(self.steam_row)
@@ -139,6 +174,23 @@ class SettingsScreen(DeckScreen):
         )
         self.body.addWidget(self.welcome_row)
 
+
+        # Stable or Unstable COMMANDER, and the way to the other one. Only
+        # the AppImage can swap itself.
+        self._unstable_offer: str | None = None
+        self._unstable_task: BackgroundTask | None = None
+        self.build_row = DeckRow(tr("COMMANDER build"))
+        self.build_row.activated.connect(self._switch_build)
+        self._appimage = commander_appimage_path() is not None
+        self.build_row.setVisible(self._appimage)
+        self.body.addWidget(self.build_row)
+        self.build_note = deck_label("", role="caption", wrap=True)
+        self.build_note.setVisible(self._appimage)
+        self.body.addWidget(self.build_note)
+
+        self.help_row = DeckRow(tr("Help"))
+        self.help_row.activated.connect(lambda: self.window.set_page("help"))
+        self.body.addWidget(self.help_row)
 
         self.body.addSpacing(16)
         self.body.addWidget(
@@ -206,6 +258,13 @@ class SettingsScreen(DeckScreen):
             # in Game Mode; anywhere else it opens the desktop interface.
             preference = "always" if steam_deck_model() is not None else "never"
         self.startup_choice.set_value(preference)
+        shortcut = state.get("deck_overlay_shortcut") or "l4r4"
+        self.overlay_row.set_value(next((tr(label) for label, key in _OVERLAY_SHORTCUTS if key == shortcut), ""))
+        self.gamemode_row.set_checked(bool(state.get("always_gamemoderun")))
+        # Not installed: nothing to switch on, but a switch left on can go off.
+        self.gamemode_row.setEnabled(
+            bool(state.get("always_gamemoderun") or available_commands().get("gamemoderun"))
+        )
         self.chime_row.set_checked(state.get("deck_finish_sound", True) is not False)
         self.rumble_row.set_checked(state.get("deck_finish_rumble", True) is not False)
         self.welcome_row.set_checked(not state.get("welcome_hidden", False))
@@ -219,6 +278,47 @@ class SettingsScreen(DeckScreen):
         self.steam_row.set_value(
             tr("Adding...") if self._steam_task is not None else ""
         )
+        self._render_build()
+
+    # -- COMMANDER build --------------------------------------------------
+    def _render_build(self) -> None:
+        if not self._appimage:
+            return
+        unstable = is_unstable_version(__version__)
+        self.build_row.set_value(tr("Unstable") if unstable else tr("Stable"))
+        if unstable:
+            note = tr("You're on an unstable build: new features sooner, less tested. Going back installs the latest stable release.")
+        elif self._unstable_offer:
+            note = tr(
+                "Unstable build {tag} is available: new features sooner, less "
+                "tested. You can go back to the stable build at any time.",
+                tag=self._unstable_offer.removeprefix("v"),
+            )
+        elif self._unstable_task is None and not getattr(self, "_unstable_checked", False):
+            note = tr("Checking for an unstable build...")
+            self._unstable_task = BackgroundTask(newer_unstable_tag, __version__, parent=self)
+            self._unstable_task.result.connect(self._unstable_found)
+            self._unstable_task.error.connect(lambda _m: self._unstable_found(None))
+            self._unstable_task.start()
+        elif self._unstable_task is not None:
+            note = tr("Checking for an unstable build...")
+        else:
+            note = tr("There's no unstable build newer than the stable one right now.")
+        self.build_note.setText(note)
+
+    def _unstable_found(self, tag: object) -> None:
+        self._unstable_task = None
+        self._unstable_checked = True
+        self._unstable_offer = tag if isinstance(tag, str) and tag else None
+        self._render_build()
+
+    def _switch_build(self) -> None:
+        if is_unstable_version(__version__):
+            self.window.switch_commander_build("stable")
+        elif self._unstable_offer:
+            self.window.switch_commander_build("unstable", self._unstable_offer)
+        else:
+            self.window.notify(self.build_note.text(), 5000)
 
     # -- theme ------------------------------------------------------------
     # Switching one of these on plays what it will do, so the choice is
@@ -328,6 +428,18 @@ class SettingsScreen(DeckScreen):
     def _apply_start_screen(self, key: object) -> None:
         self.window.dismiss_overlay()
         gui_settings.save_gui_settings(deck_start_screen=str(key))
+        self.refresh()
+
+    def _pick_overlay_shortcut(self) -> None:
+        current = gui_settings.load_gui_settings().get("deck_overlay_shortcut") or "l4r4"
+        picker = DeckPicker("", [(tr(label), key) for label, key in _OVERLAY_SHORTCUTS], current)
+        picker.chosen.connect(self._apply_overlay_shortcut)
+        self.window.show_overlay(self._overlay_for(picker, tr("In-game overlay shortcut")))
+
+    def _apply_overlay_shortcut(self, key: object) -> None:
+        self.window.dismiss_overlay()
+        gui_settings.save_gui_settings(deck_overlay_shortcut=str(key))
+        self.window.apply_overlay_shortcut()
         self.refresh()
 
     def _apply_startup(self, key: object) -> None:

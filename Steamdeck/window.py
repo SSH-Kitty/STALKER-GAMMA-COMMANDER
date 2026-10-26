@@ -109,6 +109,10 @@ _MIN_W, _MIN_H = 1024, 640
 #: lands, and where the Profile screen's "New profile" leads.
 SETUP_KEY = "setup"
 
+#: Screens with no nav tab of their own, opened from another screen: key ->
+#: the tab that stays lit while it shows. B goes back (their on_back).
+SUBPAGES = {"graphics": "settings", "help": None}
+
 #: How often the clock and battery refresh.
 _CLOCK_MS = 30_000
 
@@ -140,6 +144,7 @@ _OPERATION_REASONS = {
     "proton": "Installing Proton-GE",
     "move": "Moving the installation",
     "mod_install": "Installing a mod",
+    "commander_update": "Updating COMMANDER",
 }
 
 
@@ -228,11 +233,27 @@ class DeckWindow(QMainWindow):
             app.installEventFilter(self._focus)
 
         self.gamepad = pad.GamepadMonitor(self)
-        self.gamepad.action.connect(self._focus.on_pad_action)
+        # While the in-game overlay is up the back-grip reader drives it
+        # instead: Steam's virtual pad follows the game's layout then.
+        self.gamepad.action.connect(
+            lambda action: None if self.back_grips.navigating else self._focus.on_pad_action(action)
+        )
         self.gamepad.scroll_axis.connect(self._focus.on_pad_scroll)
         self.gamepad.hold_gate = self._accept_hold_wanted
         if os.environ.get(NO_GAMEPAD_ENV) != "1":
             self.gamepad.start()
+
+        # The in-game overlay: the back grips held, read from hidraw.
+        from .back_grips import BackGripMonitor
+
+        self.back_grips = BackGripMonitor(self)
+        self.back_grips.shortcut.connect(self.toggle_game_overlay)
+        self.back_grips.action.connect(self._focus.on_pad_action)
+        self._game_overlay_from: str | None = None
+        self._hint_wait = None
+        self.apply_overlay_shortcut()
+        if os.environ.get(NO_GAMEPAD_ENV) != "1" and is_steam_deck():
+            self.back_grips.start()
 
         # A stuck user needs a keyboard escape hatch that does not depend on
         # reaching the Settings screen.
@@ -509,6 +530,8 @@ class DeckWindow(QMainWindow):
         # Imported lazily and per-key so one screen failing to import cannot
         # stop the window from opening on the others.
         from .screens.dashboard import DashboardScreen
+        from .screens.graphics import GraphicsScreen
+        from .screens.help import HelpScreen
         from .screens.install import InstallScreen
         from .screens.mods import ModsScreen
         from .screens.multiplayer import MultiplayerScreen
@@ -530,6 +553,8 @@ class DeckWindow(QMainWindow):
             "utilities": UtilitiesScreen,
             "settings": SettingsScreen,
             SETUP_KEY: SetupScreen,
+            "graphics": GraphicsScreen,
+            "help": HelpScreen,
         }
         return classes[key](self)
 
@@ -545,6 +570,9 @@ class DeckWindow(QMainWindow):
             return page
         page = self._create_page(key)
         self._pages[key] = page
+        if key == "play":
+            # The key hint as a game starts, Deck Mode back when it ends.
+            page.controller.state_changed.connect(self._on_session_state)
         self.stack.addWidget(page)
         page.on_busy_changed(self.install_busy)
         page.on_install_activity_changed(self.install_operation)
@@ -554,13 +582,16 @@ class DeckWindow(QMainWindow):
         """Switch to a screen by nav key (or the setup wizard)."""
         if self._fatal is not None:
             return
-        if key not in self._screen_keys and key != SETUP_KEY:
+        if key not in self._screen_keys and key != SETUP_KEY and key not in SUBPAGES:
             return
         page = self._ensure_page(key)
+        if key in SUBPAGES and self._current_key not in SUBPAGES:
+            page.came_from = self._current_key
         self._current_key = key
         self.stack.setCurrentWidget(page)
+        lit = (SUBPAGES.get(key) or getattr(page, "came_from", None)) if key in SUBPAGES else key
         for nav_key, button in self._nav_buttons.items():
-            button.setProperty("current", "true" if nav_key == key else "false")
+            button.setProperty("current", "true" if nav_key == lit else "false")
             button.style().unpolish(button)
             button.style().polish(button)
         self.update_mod_counter()
@@ -999,6 +1030,7 @@ class DeckWindow(QMainWindow):
 
             buttons.append(("\u25b6  " + play_label(self.settings.active_profile), self._quick_play, "primary"))
         buttons += [
+            (tr("Help"), self._quick_help, "normal"),
             (tr("Exit Deck Mode"), self.exit_deck_mode, "normal"),
             (tr("Quit COMMANDER"), self._quit, "danger"),
             (tr("Back"), self.dismiss_overlay, "normal"),
@@ -1006,6 +1038,67 @@ class DeckWindow(QMainWindow):
         self.show_overlay(
             DeckOverlay(tr("Menu"), body, buttons, default_index=len(buttons) - 1)
         )
+
+    # ------------------------------------------------- in-game overlay
+    def apply_overlay_shortcut(self) -> None:
+        from .back_grips import SHORTCUTS
+
+        key = gui_settings.load_gui_settings().get("deck_overlay_shortcut")
+        self.back_grips.chord = SHORTCUTS.get(key, 0)
+
+    def toggle_game_overlay(self) -> None:
+        """The back grips held: Graphics over the running game, or back to it."""
+        if self._game_overlay_from is not None:
+            self.close_game_overlay()
+            return
+        if self._fatal is not None or not self.session_active():
+            return
+        self._game_overlay_from = self._current_key
+        self.dismiss_overlay()
+        self.set_page("graphics")
+        self.back_grips.navigating = True
+        # Mapped again so gamescope, which shows the newest window of the
+        # running app, puts this one over the game.
+        # ponytail: unverified on hardware; if gamescope keeps the game in
+        # front, switch focus through gamescope's own atoms instead.
+        self.hide()
+        self.show_for_environment()
+        self.raise_()
+        self.activateWindow()
+
+    def close_game_overlay(self) -> None:
+        key, self._game_overlay_from = self._game_overlay_from, None
+        self.back_grips.navigating = False
+        self.dismiss_overlay()
+        self.set_page(key or self.start_screen())
+        if self.session_active():
+            self.hide()  # the game takes the screen back
+
+    def _on_session_state(self, active: bool) -> None:
+        from .back_grips import SHORTCUTS
+        from .key_hint import show_when_game_is_up
+
+        if self._hint_wait is not None:
+            self._hint_wait.stop()
+            self._hint_wait = None
+        profile = self.settings.active_profile
+        play = self._pages.get("play")
+        shortcut = gui_settings.load_gui_settings().get("deck_overlay_shortcut") or "l4r4"
+        if (
+            active and profile is not None and profile.anomaly and self.back_grips.listening()
+            and shortcut in SHORTCUTS and not (play and play.controller.mo2_only())
+        ):
+            key = {"l4r4": "L4 + R4", "l5r5": "L5 + R5", "l4l5": "L4 + L5", "r4r5": "R4 + R5"}[shortcut]
+            self._hint_wait = show_when_game_is_up(self, profile.anomaly, profile.gamma, key)
+        if not active:
+            self._game_overlay_from = None
+            self.back_grips.navigating = False
+            if not self.isVisible():
+                self.show_for_environment()
+
+    def _quick_help(self) -> None:
+        self.dismiss_overlay()
+        self.set_page("help")
 
     # ------------------------------------------------ welcome and updates
     def show_welcome(self) -> None:
@@ -1062,18 +1155,123 @@ class DeckWindow(QMainWindow):
         tag = getattr(self, "_commander_update", None)
         if not tag:
             return
+        from commander_gui.self_update import commander_appimage_path
+
         from .welcome import RELEASES_URL, open_url
 
+        if commander_appimage_path() is None:
+            # A source checkout or the AUR package can't swap itself.
+            self.confirm(
+                tr("COMMANDER update available"),
+                tr(
+                    "COMMANDER {tag} is available. Open the Releases page to "
+                    "download it?",
+                    tag=tag,
+                ),
+                lambda: open_url(self, RELEASES_URL),
+                confirm_text=tr("Open Releases"),
+            )
+            return
         self.confirm(
             tr("COMMANDER update available"),
-            tr(
-                "COMMANDER {tag} is available. Open the Releases page to "
-                "download it?",
-                tag=tag,
-            ),
-            lambda: open_url(self, RELEASES_URL),
-            confirm_text=tr("Open Releases"),
+            tr("COMMANDER {tag} is out.", tag=tag) + "\n\n"
+            + tr("COMMANDER downloads the build and restarts."),
+            lambda: self._run_commander_update(tag),
+            confirm_text=tr("Update"),
         )
+
+    def switch_commander_build(self, target: str, tag: str | None = None) -> None:
+        """Settings' build switch: the newest ``target`` build ("unstable" or
+        "stable") over this AppImage, then a restart."""
+        from commander_gui.self_update import switch_commander_build
+
+        if target == "unstable":
+            title = tr("Try the unstable build?")
+            message = tr("New features arrive here first, but they may have bugs.") + "\n\n" + tr(
+                "COMMANDER restarts when it's done. You can switch back in Settings."
+            )
+            install = tr("Install unstable build")
+        else:
+            title = tr("Go back to the stable build?")
+            message = "\n\n".join((
+                tr("The stable build may be older than the unstable one you're using now."),
+                tr("COMMANDER downloads the build and restarts."),
+                tr("Some settings changed by the newer build may not carry over."),
+            ))
+            install = tr("Install stable build")
+
+        def work(cancel, progress):
+            return switch_commander_build(target, cancel_event=cancel, progress_cb=progress)[0]
+
+        self.confirm(
+            title, message,
+            lambda: self._run_commander_update(
+                tag or "", work,
+                # The update channel follows the build that is now installed.
+                on_installed=lambda: gui_settings.save_gui_settings(update_channel=target),
+            ),
+            confirm_text=install,
+        )
+
+    def _run_commander_update(self, tag: str, work=None, on_installed=None) -> None:
+        """Download and swap in the new AppImage (``work(cancel, progress)``,
+        by default the update to ``tag``), then restart into it."""
+        from commander_gui.self_update import download_and_install_commander_update
+        from commander_gui.ui.common import BackgroundTask, human_size
+        from commander_gui.ui.deck_switch import restart_into_appimage
+
+        from .welcome import RELEASES_URL, open_url
+
+        self.dismiss_overlay()
+        if self.install_busy:
+            self.notify(tr("An install, update or download is still running. Wait for it to finish, then update COMMANDER."), 6000)
+            return
+        if work is None:
+            def work(cancel, progress):
+                return download_and_install_commander_update(tag, cancel_event=cancel, progress_cb=progress)
+
+        heading = tr("Downloading COMMANDER {tag}...", tag=tag) if tag else tr("Updating COMMANDER")
+        status = deck_label(heading, role="body", wrap=True)
+        task = BackgroundTask(lambda: work(task.cancel_event, report), parent=self)
+
+        def report(done: int, total: int) -> None:
+            # Runs on the worker thread: hand the text to the GUI thread.
+            text = (
+                tr("Checking and installing the new version...") if total > 1 and done >= total
+                else f"{human_size(done)} / {human_size(total)}" if total > 1 else human_size(done)
+            )
+            QTimer.singleShot(0, status, lambda: status.setText(heading + "\n" + text))
+
+        def done(path: object) -> None:
+            self.set_install_busy(False)
+            self.dismiss_overlay()
+            if on_installed is not None:
+                on_installed()
+            self.confirm(
+                tr("{tag} is ready", tag=tag) if tag else tr("The new version is ready"),
+                tr("Restart COMMANDER now to start using it?"),
+                lambda: restart_into_appimage(self, path),
+                confirm_text=tr("Restart now"),
+            )
+
+        def failed(message: str) -> None:
+            self.set_install_busy(False)
+            self.dismiss_overlay()
+            if not task.cancel_event.is_set():
+                self.confirm(
+                    tr("COMMANDER couldn't update"),
+                    message + "\n\n" + tr("You can download the new version yourself from the releases page."),
+                    lambda: open_url(self, RELEASES_URL),
+                    confirm_text=tr("Open releases page"),
+                )
+
+        task.result.connect(done)
+        task.error.connect(failed)
+        self.set_install_busy(True, "commander_update")
+        self.show_overlay(DeckOverlay(
+            tr("Updating COMMANDER"), status, [(tr("Cancel"), task.cancel_event.set, "normal")],
+        ))
+        task.start()
 
     def _quick_play(self) -> None:
         self.dismiss_overlay()
@@ -1302,6 +1500,7 @@ class DeckWindow(QMainWindow):
         if app is not None:
             app.removeEventFilter(self._focus)
         self.gamepad.stop()
+        self.back_grips.stop()
         self._clock_timer.stop()
         self._inhibitor.release()
         super().closeEvent(event)

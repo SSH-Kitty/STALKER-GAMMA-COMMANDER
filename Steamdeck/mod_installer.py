@@ -17,26 +17,46 @@ released, through the Mods screen's guarded writer.
 from __future__ import annotations
 
 import shutil
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QLineEdit, QScroller, QVBoxLayout, QWidget
 
+from commander_gui.coop import looks_like_xrrazom
 from commander_gui.fomod import apply_options, find_installer
 from commander_gui.i18n import tr
 from commander_gui.integrity import invalidate_baseline
+from commander_gui.launcher import select_mo2_profile
 from commander_gui.mod_install import (
     ModInstallError,
+    _list_archive_paths,
     default_mod_name,
     extract_archive,
+    find_archiver,
     make_staging_dir,
     move_payload,
     sanitize_name,
     write_basic_meta_ini,
 )
 from commander_gui.modlist import add_custom_mod, install_conflict, read_lines
-from commander_gui.ui.common import BackgroundTask, StreamTask, mo2_running, notice
+from commander_gui.romeo import (
+    KEPT_MCM,
+    MCM_MOD,
+    find_romeo,
+    mcm_changed,
+    old_mods,
+    unpacked_size,
+)
+from commander_gui.romeo import install as install_romeo
+from commander_gui.ui.common import (
+    BackgroundTask,
+    StreamTask,
+    gamma_installed,
+    mo2_running,
+    notice,
+)
 
 from . import gamepad as pad
 from .folder_picker import candidate_roots, list_subfolders
@@ -54,14 +74,15 @@ def _is_hidden(path: Path) -> bool:
     return path.name.startswith(".")
 
 
-def list_archives(directory: Path) -> list[Path]:
-    """Mod archives directly in ``directory``, sorted by name."""
+def list_archives(directory: Path, suffixes: tuple[str, ...] = ARCHIVE_SUFFIXES) -> list[Path]:
+    """Files with one of ``suffixes`` (mod archives by default) directly in
+    ``directory``, sorted by name."""
     try:
         return sorted(
             (
                 p
                 for p in directory.iterdir()
-                if p.is_file() and not p.is_symlink() and p.suffix.lower() in ARCHIVE_SUFFIXES
+                if p.is_file() and not p.is_symlink() and p.suffix.lower() in suffixes
             ),
             key=lambda p: p.name.lower(),
         )
@@ -78,8 +99,13 @@ class DeckArchivePicker(QWidget):
     folder holds dozens of them and none is where a mod archive lands.
     """
 
-    def __init__(self, start: Path, on_archive: Callable[[Path], None]) -> None:
+    def __init__(
+        self, start: Path, on_archive: Callable[[Path], None],
+        suffixes: tuple[str, ...] = ARCHIVE_SUFFIXES, empty: str | None = None,
+    ) -> None:
         super().__init__()
+        self._suffixes = suffixes
+        self._empty = empty
         self._current = start if start.is_dir() else Path.home()
         #: Where browsing began (or "Other places" jumped to): B climbs back
         #: up to here, then closes.
@@ -105,14 +131,14 @@ class DeckArchivePicker(QWidget):
         if self._current.parent != self._current:
             options.append((tr(".. (up)"), _UP))
         folders = list_subfolders(self._current)
-        archives = list_archives(self._current)
+        archives = list_archives(self._current, self._suffixes)
         if not self._show_hidden:
             folders = [f for f in folders if not _is_hidden(f)]
             archives = [a for a in archives if not _is_hidden(a)]
         options += [("▸  " + f.name, f) for f in folders]
         options += [(a.name, a) for a in archives]
         if not archives and len(options) <= 1:
-            options.append((tr("No mod archives here"), None))
+            options.append((self._empty or tr("No mod archives here"), None))
         self.picker.set_options(options, select)
         if select is None:
             self.jump_to_top()
@@ -175,6 +201,20 @@ class DeckArchivePicker(QWidget):
             self.open(path)
         else:
             self._on_archive(path)
+
+
+def pick_file(window, title: str, start: Path, suffixes: tuple[str, ...], on_file: Callable[[Path], None]) -> None:
+    """A file browser overlay for one kind of file (``suffixes``)."""
+
+    def _chosen(path: Path) -> None:
+        window.dismiss_overlay()
+        on_file(path)
+
+    body = DeckArchivePicker(start, _chosen, suffixes, tr("No matching files here"))
+    overlay = DeckOverlay(title, body, [(tr("Cancel"), window.dismiss_overlay, "normal")], panel_width=1100)
+    overlay.default_button = body.picker.list
+    overlay.back_handler = body.back
+    window.show_overlay(overlay)
 
 
 class DeckModInstaller(QObject):
@@ -265,6 +305,8 @@ class DeckModInstaller(QObject):
 
     # -- 2. name ----------------------------------------------------------------
     def _chosen(self, archive: Path) -> None:
+        if self._refuse_xrrazom(archive) or self._offer_romeo(archive):
+            return
         try:
             name = default_mod_name(archive)
         except ModInstallError as exc:
@@ -539,6 +581,201 @@ class DeckModInstaller(QObject):
             ),
             8000,
         )
+
+    # -- archives that are more than a mod ----------------------------------------------
+    def _refuse_xrrazom(self, archive: Path) -> bool:
+        """xrRazom Co-op's engine goes in the Anomaly folder, so only the
+        Multiplayer screen installs it. True if refused. Zips only, the one
+        format that screen takes: their listing is instant."""
+        if archive.suffix.lower() != ".zip":
+            return False
+        try:
+            with zipfile.ZipFile(archive) as opened:
+                names = opened.namelist()
+        except (OSError, zipfile.BadZipFile):
+            return False  # extraction reports the real problem
+        if not looks_like_xrrazom(names):
+            return False
+
+        def _open() -> None:
+            self.window.dismiss_overlay()
+            self.window.set_page("multiplayer")
+
+        self.window.confirm(
+            tr("Install xrRAZOM from the Multiplayer page"),
+            tr("This is xrRAZOM Co-op. It can't be installed as a mod, because the Multiplayer page also sets up the game files co-op needs."),
+            _open,
+            confirm_text=tr("Open Multiplayer"),
+        )
+        return True
+
+    def _offer_romeo(self, archive: Path) -> bool:
+        """CLIKRΔD's ROMEO repack: ~170 mods, an MO2 profile and Anomaly
+        files, installed the way its guide says (the desktop Mod Manager's
+        _install_romeo). True if the archive was ROMEO."""
+        try:
+            archiver = find_archiver()
+            found = find_romeo(_list_archive_paths(archiver, archive))
+        except ModInstallError:
+            return False  # extraction reports the real problem
+        if found is None:
+            return False
+        wrapper, mo2_profile = found
+        profile = self.screen.profile()
+        if profile is None or not str(profile.anomaly).strip() or not gamma_installed(profile.gamma):
+            self.window.notify(tr("ROMEO goes on top of GAMMA. Install GAMMA for this profile, then install ROMEO."), 8000)
+            return True
+        gamma, anomaly = Path(profile.gamma), Path(profile.anomaly)
+        need = unpacked_size(archiver, archive)
+        free = shutil.disk_usage(gamma).free
+        if need and need > free:
+            self.window.notify(
+                tr(
+                    "ROMEO needs {need} GB free on the GAMMA folder's drive, but only {free} GB is free.",
+                    need=round(need / 1e9), free=round(free / 1e9),
+                ),
+                8000,
+            )
+            return True
+        requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")
+        update = (gamma / "profiles" / mo2_profile).is_dir()
+
+        def _go(keep_mcm: bool) -> None:
+            self.window.dismiss_overlay()
+            self._install_romeo(archive, wrapper, mo2_profile, gamma, anomaly, keep_mcm, update)
+
+        if not update:
+            self.window.confirm(
+                tr("Install ROMEO?"),
+                tr("This is CLIKRΔD's ROMEO repack. COMMANDER adds its mods and its own Mod Organizer profile to GAMMA. Your G.A.M.M.A mod list isn't changed.")
+                + "\n\n" + tr("Both profiles share the Anomaly folder, so as ROMEO's guide asks, GAMMA's Atmos weather files and the shader cache are removed there. A GAMMA update puts the Atmos files back for G.A.M.M.A.")
+                + "\n\n" + requirements,
+                lambda: _go(False),
+                confirm_text=tr("Install ROMEO"),
+            )
+            return True
+
+        def _confirm_update(keep_mcm: bool) -> None:
+            self.window.dismiss_overlay(refocus=False)
+            message = tr("COMMANDER removes the {count} old xx- mods, as ROMEO's guide says, then installs the new version.", count=len(old_mods(gamma)))
+            if keep_mcm:
+                message += "\n\n" + tr("Your MCM settings are kept as '{name}', turned on in place of ROMEO's.", name=KEPT_MCM)
+            self.window.confirm(
+                tr("Update ROMEO?"), message + "\n\n" + requirements,
+                lambda: _go(keep_mcm), confirm_text=tr("Update ROMEO"),
+            )
+
+        changed = mcm_changed(gamma, mo2_profile)
+        if changed is None and (gamma / "mods" / MCM_MOD).is_dir():
+            # Installed by hand: no record of ROMEO's own settings to compare
+            # with, so ask. Cancel never silently drops the player's settings.
+            self.window.show_overlay(
+                DeckOverlay(
+                    tr("Keep your MCM settings?"),
+                    deck_label(
+                        tr("Updating replaces ROMEO's MCM settings. If you changed any MCM settings, COMMANDER can keep yours and turn ROMEO's new ones off."),
+                        role="body", wrap=True,
+                    ),
+                    [
+                        (tr("Keep mine"), lambda: _confirm_update(True), "primary"),
+                        (tr("Use ROMEO's new ones"), lambda: _confirm_update(False), "normal"),
+                        (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                    ],
+                    panel_width=1000,
+                )
+            )
+        else:
+            _confirm_update(bool(changed))
+        return True
+
+    def _install_romeo(
+        self, archive: Path, wrapper: str, mo2_profile: str, gamma: Path, anomaly: Path,
+        keep_mcm: bool, update: bool,
+    ) -> None:
+        reason = self._blocked()
+        if reason:
+            self.window.notify(reason, 6000)
+            return
+        self._archive = archive
+        self._name = mo2_profile
+        self._progress_hidden = False
+        self.window.set_install_busy(True, "mod_install")
+        self._staging_root = make_staging_dir(gamma)
+        staging = self._staging_root / "archive"
+        self._show_progress(tr("Extracting {name}...", name=archive.name))
+        task: StreamTask | None = None
+
+        def worker(report):
+            extract_archive(
+                archive, staging, task.cancel_event,
+                lambda percent, text: report(
+                    tr("Extracting {name}...", name=archive.name) + (f" {percent}%" if percent is not None else "")
+                ),
+            )
+            install_romeo(
+                staging, wrapper, mo2_profile, gamma, anomaly, task.cancel_event,
+                lambda done, total: report(tr("Installing ROMEO mods... {done}/{total}", done=done, total=total)),
+                keep_mcm,
+            )
+            return mo2_profile
+
+        task = StreamTask(worker, parent=self)
+        task.line.connect(self._set_status)
+        task.result.connect(lambda name: self._romeo_installed(str(name), update))
+        task.error.connect(self._fail)
+        self._task = task
+        task.start()
+
+    def _romeo_installed(self, name: str, update: bool) -> None:
+        self._task = None
+        self._cleanup()
+        self._close_progress()
+        try:
+            invalidate_baseline(self.screen.profile().gamma)
+        except (OSError, AttributeError):
+            pass
+        if update:
+            self.window.announce_finished(
+                tr("ROMEO updated"),
+                tr("The new version of ROMEO is installed.") + "\n\n"
+                + tr("Your previous mod list is saved as modlist.txt.before-update in the ROMEO profile folder."),
+            )
+            return
+        checklist = "\n\n".join((
+            tr("Two things to do once in the game:"),
+            "•  " + tr("Start a new save. ROMEO doesn't work with old saves."),
+            "•  " + tr("Open the console (~) and run: cfg_load atmos_neutral"),
+        ))
+        profile = self.screen.profile()
+        if profile is None or profile.mo2_profile == name:
+            self.window.show_overlay(DeckOverlay(
+                tr("Finish setting up ROMEO in the game"), deck_label(checklist, role="body", wrap=True),
+                [(tr("OK"), self.window.dismiss_overlay, "primary")], panel_width=1000,
+            ))
+            return
+
+        def _switch() -> None:
+            self.window.dismiss_overlay()
+            rc, out = select_mo2_profile(profile.gamma, name)
+            if rc != 0:
+                self.window.notify(tr("Couldn't change the MO2 profile") + ": " + out.strip(), 8000)
+                return
+            profile.mo2_profile = name
+            self.window.settings.save()
+            self.screen.refresh()
+            self.window.update_mod_counter()
+
+        self.window.show_overlay(DeckOverlay(
+            tr("Switch to ROMEO?"),
+            deck_label(
+                tr("ROMEO is installed as the Mod Organizer profile '{name}'. Switch this COMMANDER profile to it now?", name=name)
+                + "\n\n" + tr("You can switch back to G.A.M.M.A on the Dashboard at any time.")
+                + "\n\n" + checklist,
+                role="body", wrap=True,
+            ),
+            [(tr("Switch to ROMEO"), _switch, "primary"), (tr("Not now"), self.window.dismiss_overlay, "normal")],
+            panel_width=1000,
+        ))
 
     # -- ending early --------------------------------------------------------------
     def _cancel(self) -> None:

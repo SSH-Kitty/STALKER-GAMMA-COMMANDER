@@ -25,12 +25,22 @@ from commander_gui.game_stats import (
 from commander_gui.i18n import tr
 from commander_gui.launcher import Mo2Executable, set_mo2_selected_title
 from commander_gui.log_dump import create_log_dump
-from commander_gui.modlist import looks_flipped, modlist_path_for, read_lines, unflip
+from commander_gui.modlist import (
+    enabled_mod_count,
+    looks_flipped,
+    modlist_path_for,
+    newest_backup_with_mods,
+    read_lines,
+    snapshot_if_changed,
+    unflip,
+)
 from commander_gui.ui.common import (
     BackgroundTask,
     format_last_played,
     format_playtime,
+    game_running,
     gamma_installed,
+    mo2_running,
     notice,
     play_click_sound,
 )
@@ -72,12 +82,6 @@ def play_label(profile) -> str:
 def _has_mo2(profile) -> bool:
     """False for a plain Anomaly profile: every launch then skips MO2."""
     return gamma_installed(profile.gamma, profile.mo2_profile)
-
-
-def _anomaly_allowed(profile) -> bool:
-    """Play Anomaly (no MO2) can run: co-op off, or co-op set up for plain
-    Anomaly. GAMMA's co-op without MO2 would run its engine without its mod."""
-    return not coop.is_active(profile.anomaly) or coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
 
 
 class PlayScreen(DeckScreen):
@@ -186,7 +190,7 @@ class PlayScreen(DeckScreen):
         # Quit Game stays pressable while a game runs, whatever else is busy.
         self.hero.setEnabled((bool(current) and not busy) or self.controller.is_active())
         self.mo2_button.setEnabled(not busy and _has_mo2(profile))
-        self.anomaly_button.setEnabled(bool(current) and not busy and _anomaly_allowed(profile))
+        self.anomaly_button.setEnabled(bool(current) and not busy)
         if not self.controller.is_active():
             self.hero.setText("\u25b6   " + self._play_text())
         self.update_hints()
@@ -217,7 +221,7 @@ class PlayScreen(DeckScreen):
         profile = self.profile()
         self.mo2_button.setEnabled(not busy and profile is not None and _has_mo2(profile))
         self.anomaly_button.setEnabled(
-            not busy and bool(self._targets) and profile is not None and _anomaly_allowed(profile)
+            not busy and bool(self._targets) and profile is not None
         )
         self.update_hints()
 
@@ -287,10 +291,62 @@ class PlayScreen(DeckScreen):
                 lines = read_lines(path)
             except (OSError, ValueError):
                 lines = []
+        if path is not None and lines and not enabled_mod_count(lines):
+            backup = newest_backup_with_mods(path)
+            if backup is not None:
+                self._confirm_restore_modlist(profile, target, path, backup)
+                return
         if looks_flipped(lines):
             self._confirm_flipped(profile, target, path, lines)
             return
+        if path is not None and lines:
+            try:  # a restore point in case MO2 wipes the list mid-game
+                snapshot_if_changed(path)
+            except OSError:
+                pass
         self._launch(profile, target)
+
+    def _confirm_restore_modlist(self, profile, target: str, path, backup) -> None:
+        """Every mod is switched off (MO2 after a crash mid-game): offer the
+        newest backup that has mods enabled before launching."""
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(backup.stat().st_mtime))
+
+        def _restore() -> None:
+            self.window.dismiss_overlay()
+            try:
+                write_lines(self.window, path, read_lines(backup), snapshot=True)
+            except (ModlistWriteBlocked, OSError, ValueError) as exc:
+                self.window.notify(str(exc), 6000)
+                return
+            self._launch(profile, target)
+
+        def _anyway() -> None:
+            self.window.dismiss_overlay()
+            self._launch(profile, target)
+
+        self.window.show_overlay(
+            DeckOverlay(
+                tr("Every mod is turned off"),
+                deck_label(
+                    tr(
+                        "Every mod in this profile is switched off. This can happen "
+                        "when the PC crashes or loses power while the game is running. "
+                        "COMMANDER can put back your mod list from {when} before launching.",
+                        when=when,
+                    )
+                    + "\n\n"
+                    + tr("A backup of the current list is saved first."),
+                    role="body",
+                    wrap=True,
+                ),
+                [
+                    (tr("Restore and launch"), _restore, "primary"),
+                    (tr("Launch anyway"), _anyway, "normal"),
+                    (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                ],
+                panel_width=1000,
+            )
+        )
 
     def _launch(self, profile, target: str) -> None:
         """Start ``target`` in the installed mode: co-op on means a co-op
@@ -368,6 +424,11 @@ class PlayScreen(DeckScreen):
         profile = self.profile()
         if profile is None or self.window.install_busy:
             return
+        if coop.is_active(profile.anomaly) and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA:
+            # GAMMA co-op keeps half of xrRazom in an MO2 mod, so move it to
+            # Anomaly first (Multiplayer's "Play co-op on" switch).
+            self._switch_coop_to_anomaly(profile)
+            return
         if coop.is_active(profile.anomaly):
             # Plain Anomaly co-op: the player name and a Steam session are
             # the Multiplayer screen's (see _launch).
@@ -387,6 +448,32 @@ class PlayScreen(DeckScreen):
         if sound:
             play_click_sound()
         self.controller.launch(profile, target=None, direct=exe)
+
+    def _switch_coop_to_anomaly(self, profile) -> None:
+        if mo2_running(force=True) or game_running(force=True):
+            self.window.notify(tr("Mod Organizer 2 or the game is still open. Close both, then try again."), 6000)
+            return
+        play_click_sound()
+        self.window.set_install_busy(True, "coop")
+        self.window.notify(tr("Switching co-op to Anomaly…"), 0)
+
+        def finish(error: str | None) -> None:
+            self._coop_switch_task = None
+            self.window.set_install_busy(False)
+            self.window.update_mod_counter()  # the co-op mod left MO2's list
+            if error is not None:
+                self.window.notify(tr("Failed: {error}", error=tr(error)), 8000)
+                return
+            self.window.notify(tr("Co-op is set up for Anomaly"), 3000)
+            self._launch(profile, gui_settings.load_gui_settings().get("target") or "")
+
+        task = BackgroundTask(
+            coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, coop.KIND_ANOMALY, parent=self
+        )
+        task.result.connect(lambda _result: finish(None))
+        task.error.connect(finish)
+        self._coop_switch_task = task
+        task.start()
 
     def _pick_target(self) -> None:
         if not self._targets:
@@ -527,7 +614,7 @@ class PlayScreen(DeckScreen):
         profile = self.profile()
         self.mo2_button.setEnabled(not active and profile is not None and _has_mo2(profile))
         self.anomaly_button.setEnabled(
-            not active and bool(self._targets) and profile is not None and _anomaly_allowed(profile)
+            not active and bool(self._targets) and profile is not None
         )
         if self.window.current_page() is self:
             self.window.update_hints()

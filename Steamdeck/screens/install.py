@@ -20,7 +20,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout
 
-from commander_gui import gui_settings
+from commander_gui import gui_settings, modded_exes
 from commander_gui.cli_runner import cli_command, cli_resume_args
 from commander_gui.dependencies import check_all_dependencies
 from commander_gui.game_backup import (
@@ -55,6 +55,7 @@ from commander_gui.ui.common import (
 from commander_gui.ui.install_page import (
     OFFLINE_GUIDE_URL,
     _full_install_args,
+    _install_failure_message,
     _resume_state_matches,
     offline_install_problem,
     offline_list_paths,
@@ -63,6 +64,7 @@ from commander_gui.ui.proton_manager import build_status, release_installed
 from commander_gui.winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
+    forget_verbs,
     umu_install_command,
     winetricks_binary,
     winetricks_install_command,
@@ -342,8 +344,12 @@ class InstallScreen(DeckScreen):
         self.anomaly_button.setEnabled(
             idle
             and has_profile
-            and not self._anomaly_installed
+            and (not self._anomaly_installed or getattr(self, "_anomaly_failed", False))
             and not self.offline_row.is_checked()
+        )
+        # A failed run can leave a folder that looks installed but isn't.
+        self.anomaly_button.setText(
+            tr("Retry Anomaly") if getattr(self, "_anomaly_failed", False) else tr("Install Anomaly")
         )
         self.install_button.setEnabled(idle and has_profile)
         self.deps_button.setEnabled(idle and has_profile)
@@ -423,6 +429,12 @@ class InstallScreen(DeckScreen):
         status = status or {}
         installed = sum(1 for ok in status.values() if ok)
         total = len(status)
+        # Any verb already there: winetricks would skip it, so the button
+        # becomes a forced reinstall, like the desktop page.
+        self._deps_force = installed > 0
+        self.deps_button.setText(
+            tr("Reinstall Dependencies") if self._deps_force else tr("Install Dependencies")
+        )
         self._deps_count_text = tr(
             "{installed}/{total} dependencies installed",
             installed=installed,
@@ -596,7 +608,7 @@ class InstallScreen(DeckScreen):
                 self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
             # Kept across failed and resumed runs, like the desktop page.
             if getattr(self, "_kept", None) is None:
-                self._kept = capture(profile)
+                self._kept = capture(profile, keep_exes=bool(modded_exes.load_state(profile.anomaly)))
         args = _full_install_args(
             self.minimal_row.is_checked(),
             self.preserve_user_row.is_checked(),
@@ -649,15 +661,16 @@ class InstallScreen(DeckScreen):
         if mo2_running():
             self.window.notify(tr("Mod Organizer is running"))
             return
+        force = getattr(self, "_deps_force", False)
         self.window.confirm(
-            tr("Install Dependencies"),
+            tr("Reinstall Dependencies") if force else tr("Install Dependencies"),
             tr(
                 "Installs winetricks, umu-run and the Visual C++ / DirectX "
                 "runtimes Mod Organizer and the game need:\n\n{verbs}",
                 verbs=" ".join(WINETRICKS_VERBS),
             ),
             lambda: self._confirmed(self._start_dependencies),
-            confirm_text=tr("Install"),
+            confirm_text=tr("Reinstall now") if force else tr("Install"),
         )
 
     def _start_dependencies(self) -> None:
@@ -683,10 +696,19 @@ class InstallScreen(DeckScreen):
             # Through the game's own runner - bare winetricks would run the
             # host's wine inside the Proton prefix and corrupt it.
             try:
-                command, env = winetricks_install_command(configured_runner())
+                runner = configured_runner()
+                command, env = winetricks_install_command(runner)
                 failure = tr("Winetricks is not available.")
             except LaunchError as exc:
                 command, failure = [], str(exc)
+            if command and getattr(self, "_deps_force", False):
+                if runner.kind == "umu":
+                    # umu-run rejects --force as "not a verb"; it only looks
+                    # at winetricks.log, so clear our verbs from it instead.
+                    forget_verbs(runner.env.get("WINEPREFIX") or configured_wine_prefix())
+                else:
+                    # winetricks skips verbs already in winetricks.log without this.
+                    command.insert(len(command) - len(WINETRICKS_VERBS), "--force")
             status = tr("Installing runtimes...")
         if not command:
             self._finish_run()
@@ -746,7 +768,7 @@ class InstallScreen(DeckScreen):
                 event.operation,
             )
         )
-        self.progress.status_message(f"{event.operation}  {event.name}")
+        self.progress.status_message(f"{event.operation}  {event.name}  {event.size}".rstrip())
 
     def _on_finished(self, rc: int, output: str) -> None:
         cancelled = self._runner is not None and self._runner.was_cancelled
@@ -767,7 +789,30 @@ class InstallScreen(DeckScreen):
                 self._run_stage()
                 return
 
+        if getattr(self, "_anomaly_failure", None) is not None:
+            # The file check after a bad exit: only files that check out and
+            # are really there overrule the exit code. A cancelled check
+            # proves nothing, so the failure still stands.
+            profile = self.profile()
+            ok = not cancelled and ok and profile is not None and anomaly_installed(profile.anomaly)
+            if not ok:
+                rc, output = self._anomaly_failure
+            self._anomaly_failure = None
+            cancelled = False
+        elif getattr(self, "_operation", None) == "anomaly" and not cancelled and not ok:
+            # The installer can crash on exit after it finished: check the
+            # files before calling it a failure, like the desktop page.
+            self._anomaly_failure = (rc, output)
+            self._begin_run(
+                cli_command(["anomaly", "check"]),
+                operation="anomaly",
+                status=tr("Verifying Anomaly files..."),
+            )
+            return
+
         restore_note = None
+        if getattr(self, "_operation", None) == "anomaly" and not cancelled:
+            self._anomaly_failed = not ok
         self._last_operation = getattr(self, "_operation", None)
         self._last_stage = self._stage
         if getattr(self, "_operation", None) == "gamma":
@@ -799,6 +844,14 @@ class InstallScreen(DeckScreen):
                 message += "\n\n" + restore_note
             self.window.announce_finished(
                 tr("{operation} finished", operation=operation), message
+            )
+        elif self._last_operation == "anomaly":
+            summary, _detail = _install_failure_message(rc, output, None)
+            self.window.confirm(
+                tr("Anomaly didn't install correctly"),
+                summary,
+                self._start_anomaly_install,
+                confirm_text=tr("Retry Anomaly"),
             )
         else:
             self.window.announce_finished(
