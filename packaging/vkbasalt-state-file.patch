@@ -1,0 +1,33 @@
+diff --git a/src/basalt.cpp b/src/basalt.cpp
+index 9474017..9597638 100644
+--- a/src/basalt.cpp
++++ b/src/basalt.cpp
+@@ -8,6 +8,7 @@
+ #include <string>
+ #include <memory>
+ #include <cstring>
++#include <cstdio>
+ #include <algorithm>
+ #include <sys/stat.h>
+ 
+@@ -627,6 +628,20 @@ namespace vkBasalt
+             pressed = false;
+         }
+ 
++        // COMMANDER: the effects on (1) or off (0) in this file, for
++        // COMMANDER's pop-up.
++        static const char* statePath = std::getenv("COMMANDER_VKBASALT_STATE");
++        static int         written   = -1;
++        if (statePath && presentEffect != written)
++        {
++            written = presentEffect;
++            if (FILE* f = std::fopen(statePath, "w"))
++            {
++                std::fputs(presentEffect ? "1\n" : "0\n", f);
++                std::fclose(f);
++            }
++        }
++
+         LogicalDevice* pLogicalDevice = deviceMap[GetKey(queue)].get();
+ 
+         std::vector<VkSemaphore> presentSemaphores;

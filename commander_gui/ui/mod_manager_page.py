@@ -7,7 +7,6 @@ category) are done directly on the file with automatic backups.
 
 from __future__ import annotations
 
-import re
 import shutil
 import uuid
 import zipfile
@@ -48,7 +47,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings
+from .. import gui_settings, modded_exes
 from ..cli_runner import run_sync
 from ..config import logs_dir
 from ..coop import looks_like_xrrazom
@@ -104,7 +103,7 @@ from ..modlist import (
     timestamped_backup_path,
     unflip,
 )
-from ..romeo import KEPT_MCM, MCM_MOD, find_romeo, is_romeo_profile, mcm_changed, old_mods, unpacked_size
+from ..romeo import EXES_NEEDED, KEPT_MCM, MCM_MOD, find_romeo, is_romeo_profile, mcm_changed, old_mods, unpacked_size
 from ..romeo import install as install_romeo
 from ..themes import active_theme_tokens
 from ..updates import local_modpack_records
@@ -1079,7 +1078,7 @@ class ModManagerPage(QWidget):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        self.install_progress = ProgressArea(show_table=False, show_log=True)
+        self.install_progress = ProgressArea(show_table=False, show_log=False)
         self.install_progress.cancel_button.clicked.connect(self._cancel_install)
         self.install_progress.hide()
         layout.addWidget(self.install_progress)
@@ -2309,6 +2308,18 @@ class ModManagerPage(QWidget):
                 ),
             )
             return True
+        if not modded_exes.at_least(anomaly, EXES_NEEDED):
+            # Players click through the requirements note, so this blocks.
+            answer = QMessageBox.question(
+                self,
+                tr("Update the modded exes first"),
+                tr("ROMEO needs modded exes from {version} or newer, and this Anomaly folder has older ones. Update them on the Updates page, then install ROMEO again.", version=EXES_NEEDED),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                labels={QMessageBox.StandardButton.Yes: tr("Open updates"), QMessageBox.StandardButton.No: tr("Cancel")},
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.window.set_page("update")
+            return True
         requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")
         update = (gamma / "profiles" / mo2_profile).is_dir()
         keep_mcm = False
@@ -2365,7 +2376,6 @@ class ModManagerPage(QWidget):
         self._install_source = archive
         self._install_name = mo2_profile
         self._romeo_update = update
-        self._romeo_phase = ""
         self._install_staging = None
         self._install_active = True
         self.window.set_install_busy(True, "mod_install")
@@ -2422,11 +2432,6 @@ class ModManagerPage(QWidget):
         progress.bar.setValue(int(percent))
         progress.bar.setFormat(tr("Installing ROMEO") + f" {percent}%")
         progress.status_message(text)
-        # Once per phase: the per-mod count would flood the console.
-        phase = re.sub(r"\d", "", text)
-        if progress.log is not None and phase != self._romeo_phase:
-            self._romeo_phase = phase
-            progress.log.append_line(text)
 
     def _on_romeo_installed(self, name: str, generation: int) -> None:
         if not self._install_active or generation != self._install_generation:

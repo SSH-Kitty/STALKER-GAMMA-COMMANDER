@@ -97,6 +97,20 @@ def build_date(anomaly: str | Path) -> str | None:
     return datetime.fromtimestamp(stamp, timezone.utc).date().isoformat()
 
 
+def at_least(anomaly: str | Path, tag: str) -> bool:
+    """True if the installed exes are release ``tag`` (``YYYY.M.D``) or newer.
+
+    Uses COMMANDER's record when it installed a release, else the exe's build
+    date (the 2026.9.12 exe is stamped 2026-09-12, the release day)."""
+    def _key(text: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in re.split(r"[.-]", text))
+
+    version = (load_state(anomaly) or {}).get("version")
+    if not (isinstance(version, str) and _TAG_RE.match(version)):
+        version = build_date(anomaly)
+    return version is not None and _key(version) >= _key(tag)
+
+
 def load_state(anomaly: str | Path) -> dict | None:
     """``{"version", "previous"}`` when COMMANDER installed the exes.
 

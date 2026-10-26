@@ -187,6 +187,20 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
+def state_file(name: str) -> Path:
+    """Where the bundled MangoHud or vkBasalt writes 1 (on) or 0 (off)
+    whenever it changes, for COMMANDER's pop-up (COMMANDER_<NAME>_STATE,
+    packaging/*-state-file.patch)."""
+    return settings_dir() / f"{name}.state"
+
+
+def _state_to(env: dict[str, str], name: str) -> None:
+    path = state_file(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)  # the last game's
+    env[f"COMMANDER_{name.upper()}_STATE"] = str(path)
+
+
 def write_mangohud_config(data: dict | None = None) -> Path:
     """COMMANDER's MangoHud.conf, from Settings > Graphics. MangoHud watches
     the file, so a running game picks a change up within a moment."""
@@ -351,6 +365,7 @@ def resolve(env: dict[str, str], prefix: list[str]) -> list[str]:
         # The bundled one even over an installed one: only it reloads live.
         if _install_bundled("vkbasalt"):
             del env["ENABLE_VKBASALT"]
+            _state_to(env, "vkbasalt")
             if frame_gen:
                 _under_frame_gen(env, "vkbasalt")
             else:
@@ -363,6 +378,7 @@ def resolve(env: dict[str, str], prefix: list[str]) -> list[str]:
         # config changes mid-game; packaging/mangohud-reload-lock.patch).
         if _install_bundled("mangohud"):
             prefix = [token for token in prefix if token != MANGOHUD]
+            _state_to(env, "mangohud")
             if frame_gen:
                 _under_frame_gen(env, "mangohud")
             else:

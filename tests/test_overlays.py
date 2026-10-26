@@ -34,6 +34,11 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(env["COMMANDER_MANGOHUD"], "1")
         self.assertEqual(env["COMMANDER_VKBASALT"], "1")
         self.assertNotIn("ENABLE_VKBASALT", env)
+        # Where the layers say on or off, for the pop-up; the last game's state gone.
+        for name in ("mangohud", "vkbasalt"):
+            state = Path(env[f"COMMANDER_{name.upper()}_STATE"])
+            self.assertEqual(state, overlays.state_file(name))
+            self.assertFalse(state.exists())
         config = Path(env["MANGOHUD_CONFIGFILE"]).read_text()
         self.assertIn("legacy_layout=0\n", config)
         self.assertIn("\nfps\n", config)

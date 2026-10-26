@@ -446,8 +446,9 @@ class _KeyHint(QWidget):
         self.setWindowOpacity(0.94)
         tokens = active_theme_tokens()
         key = escape(tr(KEYS[key_setting()][0]))
-        self.label = QLabel(tr("Press {key} to open COMMANDER overlay").format(
-            key=f"<b style='color: {tokens.get('accent', '#9fe96f')}'>{key}</b>"))
+        self._key_text = tr("Press {key} to open COMMANDER overlay").format(
+            key=f"<b style='color: {tokens.get('accent', '#9fe96f')}'>{key}</b>")
+        self.label = QLabel(self._key_text)
         self.label.setObjectName("keyHint")
         self.label.setStyleSheet(
             f"QLabel#keyHint {{ background-color: {tokens['card']}; border: 1px solid {tokens['border']};"
@@ -458,14 +459,48 @@ class _KeyHint(QWidget):
         layout.addWidget(self.label)
         self._timer = QTimer(self, singleShot=True, interval=self.SHOWN_MS, timeout=self.hide)
 
-    def show_hint(self) -> None:
+    def show_hint(self, text: str | None = None, shown_ms: int = SHOWN_MS) -> None:
+        """The key hint, or ``text`` in its place."""
+        self.label.setText(text or self._key_text)
         self.adjustSize()
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         area = screen.geometry()
         self.move(area.x() + 24, area.bottom() - self.height() - 24)
         self.show()
         self.raise_()
+        self._timer.start(shown_ms)
+
+
+class _ToggleWatch:
+    """Shows "Image effects on/off" (vkBasalt) or "Performance overlay
+    on/off" (MangoHud) in the hint's place when that one goes on or off.
+    The bundled layers write their state to a file for this
+    (packaging/*-state-file.patch); the first state is the game starting,
+    so no pop-up for it."""
+
+    def __init__(self, hint: _KeyHint, which: str) -> None:
+        from ..overlays import state_file
+
+        name, self._texts = {
+            "hud": ("mangohud", (tr("Performance overlay off"), tr("Performance overlay on"))),
+            "effects": ("vkbasalt", (tr("Image effects off"), tr("Image effects on"))),
+        }[which]
+        self._path = state_file(name)
+        self._hint = hint
+        self._state = None
+        self._timer = QTimer(interval=50, timeout=self._poll)
         self._timer.start()
+
+    def _poll(self) -> None:
+        try:
+            state = self._path.read_text().strip()
+        except OSError:
+            return
+        if state not in ("0", "1"):  # caught mid-write
+            return
+        if self._state is not None and state != self._state:
+            self._hint.show_hint(self._texts[state == "1"], 2000)
+        self._state = state
 
 
 def _page(card: QWidget) -> QScrollArea:
@@ -793,7 +828,16 @@ def start_key() -> None:
     stop_key()
     _label, keysym, modifiers = KEYS[key_setting()]
     # Steam Deck Game Mode: gamescope shows one window, so not this one.
-    if not keysym or in_game_mode() or not os.environ.get("DISPLAY"):
+    if in_game_mode() or not os.environ.get("DISPLAY"):
+        return
+    from ..overlays import MANGOHUD, VKBASALT
+
+    options = _get_options().split() if _get_options else []
+    for layer, which in ((VKBASALT, "effects"), (MANGOHUD, "hud")):
+        if layer in options:
+            prestart()
+            _send(f"watch {which}")
+    if not keysym:
         return
     prestart()
     try:
@@ -881,6 +925,7 @@ def _main() -> int:
     app.setStyleSheet(build_stylesheet(theme, font_size=font_size, font_family=state.get("font_family") or "Exo 2"))
     window = GraphicsWindow()
     hint = _KeyHint()
+    watches = []
     window.options_changed.connect(lambda text: print(f"options {json.dumps(text)}", flush=True))
     if "--hidden" not in sys.argv:
         window.toggle(focus="toggle focus" in sys.argv)
@@ -894,6 +939,8 @@ def _main() -> int:
             window.toggle(focus=line == b"toggle focus")
         elif line == b"hint":
             hint.show_hint()
+        elif line.startswith(b"watch "):
+            watches.append(_ToggleWatch(hint, line[6:].decode()))
         elif line == b"hide":
             window.hide()
         elif line.startswith(b"options "):

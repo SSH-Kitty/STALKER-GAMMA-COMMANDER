@@ -1,0 +1,31 @@
+diff --git a/src/keybinds.cpp b/src/keybinds.cpp
+index 28b4f55..2869ab0 100644
+--- a/src/keybinds.cpp
++++ b/src/keybinds.cpp
+@@ -3,6 +3,8 @@
+ #include <array>
+ #include <algorithm>
+ #include <unistd.h>
++#include <cstdio>
++#include <cstdlib>
+ #include "hud_elements.h"
+ #include "overlay.h"
+ #include "timing.hpp"
+@@ -97,4 +99,17 @@ void check_keybinds(struct overlay_params& params){
+       if (fpsmetrics)
+          fpsmetrics->reset_metrics();
+    }
++
++   // COMMANDER: the HUD shown (1) or hidden (0) in this file, whatever
++   // switched it (the key, a config reload), for COMMANDER's pop-up.
++   static const char* state_path = getenv("COMMANDER_MANGOHUD_STATE");
++   static int written = -1;
++   int shown = !real_params->no_display;
++   if (state_path && shown != written) {
++      written = shown;
++      if (FILE* f = fopen(state_path, "w")) {
++         fputs(shown ? "1\n" : "0\n", f);
++         fclose(f);
++      }
++   }
+ }

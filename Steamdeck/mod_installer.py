@@ -24,6 +24,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QLineEdit, QScroller, QVBoxLayout, QWidget
 
+from commander_gui import modded_exes
 from commander_gui.coop import looks_like_xrrazom
 from commander_gui.fomod import apply_options, find_installer
 from commander_gui.i18n import tr
@@ -43,6 +44,7 @@ from commander_gui.mod_install import (
 )
 from commander_gui.modlist import add_custom_mod, install_conflict, read_lines
 from commander_gui.romeo import (
+    EXES_NEEDED,
     KEPT_MCM,
     MCM_MOD,
     find_romeo,
@@ -641,6 +643,19 @@ class DeckModInstaller(QObject):
                     need=round(need / 1e9), free=round(free / 1e9),
                 ),
                 8000,
+            )
+            return True
+        if not modded_exes.at_least(anomaly, EXES_NEEDED):
+            # Players click through the requirements note, so this blocks.
+            def _open_updates() -> None:
+                self.window.dismiss_overlay()
+                self.window.set_page("update")
+
+            self.window.confirm(
+                tr("Update the modded exes first"),
+                tr("ROMEO needs modded exes from {version} or newer, and this Anomaly folder has older ones. Update them on the Updates page, then install ROMEO again.", version=EXES_NEEDED),
+                _open_updates,
+                confirm_text=tr("Open updates"),
             )
             return True
         requirements = tr("ROMEO needs GAMMA 0.9.5 and modded exes from 2026.9.12 or newer. Unpacking takes a while.")

@@ -149,6 +149,23 @@ class ModdedExesTest(unittest.TestCase):
             self.assertEqual((anomaly / "bin/AnomalyDX11AVX.exe").read_text(), "2026.10.11")
             self.assertEqual((anomaly / "bin/AnomalyDX11.exe").read_text(), "2026.10.11")
 
+    def test_at_least_uses_record_then_build_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            anomaly = Path(tmp)
+            self.assertFalse(exes.at_least(anomaly, "2026.9.12"))
+            # Hand-installed exes: only the PE header's build date to go on.
+            pe = bytearray(4096)
+            pe[0x3C:0x40] = (0x80).to_bytes(4, "little")
+            pe[0x80:0x84] = b"PE\0\0"
+            pe[0x88:0x8C] = (1_789_200_000).to_bytes(4, "little")  # 2026-09-12
+            (anomaly / "bin").mkdir()
+            (anomaly / "bin/AnomalyDX11.exe").write_bytes(pe)
+            self.assertTrue(exes.at_least(anomaly, "2026.9.12"))
+            self.assertFalse(exes.at_least(anomaly, "2026.9.13"))
+            # COMMANDER's own record wins over the build date.
+            _write(anomaly / "commander-exes/state.json", '{"version": "2026.9.1"}')
+            self.assertFalse(exes.at_least(anomaly, "2026.9.12"))
+
 
 if __name__ == "__main__":
     unittest.main()

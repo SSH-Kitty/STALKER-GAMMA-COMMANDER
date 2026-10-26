@@ -13,7 +13,10 @@
 # when VKBASALT_CONFIG_FILE changes, so Settings > Graphics shows in a
 # running game. MangoHud gets packaging/mangohud-reload-lock.patch: it
 # reloads its config under the lock its HUD is drawn under, so a change in
-# a running game can't crash it (std::bad_function_call).
+# a running game can't crash it (std::bad_function_call). Both get a
+# *-state-file.patch: they write 1 (on) or 0 (off) to the file in
+# COMMANDER_MANGOHUD_STATE / COMMANDER_VKBASALT_STATE whenever they go on
+# or off, for COMMANDER's pop-up.
 #
 # Usage:  ./build-vulkan-layers.sh
 #
@@ -34,12 +37,12 @@ dnf -y -q install gcc-c++ libstdc++-static git python3-pip glslang libX11-devel 
 pip3 install -q meson ninja mako
 cd /tmp
 git clone -q --depth 1 -b "$MANGOHUD_VERSION" https://github.com/flightlessmango/MangoHud.git
-( cd MangoHud && git apply /patches/mangohud-reload-lock.patch && meson setup build --buildtype=release -Dstrip=true \
+( cd MangoHud && git apply /patches/mangohud-reload-lock.patch && git apply /patches/mangohud-state-file.patch && meson setup build --buildtype=release -Dstrip=true \
     -Dwith_xnvctrl=disabled -Dwith_dbus=disabled -Dmangoapp=false -Dmangohudctl=false \
     -Dmangoplot=disabled -Dtests=disabled -Dinclude_doc=false -Duse_system_spdlog=disabled \
   && ninja -C build src/libMangoHud.so )
 git clone -q --depth 1 -b "$VKBASALT_VERSION" https://github.com/DadSchoorse/vkBasalt.git
-( cd vkBasalt && git apply /patches/vkbasalt-live-reload.patch && meson setup build --buildtype=release -Dstrip=true && ninja -C build )
+( cd vkBasalt && git apply /patches/vkbasalt-live-reload.patch && git apply /patches/vkbasalt-state-file.patch && meson setup build --buildtype=release -Dstrip=true && ninja -C build )
 mkdir -p /out/mangohud /out/vkbasalt
 install -m644 MangoHud/build/src/libMangoHud.so /out/mangohud/
 install -m644 vkBasalt/build/src/libvkbasalt.so /out/vkbasalt/

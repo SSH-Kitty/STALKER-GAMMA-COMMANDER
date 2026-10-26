@@ -35,6 +35,7 @@ from .mod_install import ModInstallError
 from .modlist import read_lines, save_lines
 
 MCM_MOD = "xx-CLIKRΔD MCM Values"
+EXES_NEEDED = "2026.9.12"  # oldest modded exes ROMEO runs on
 KEPT_MCM = "CLIKRΔD MCM Values (my settings)"
 #: In the ROMEO profile folder; MO2 ignores files it doesn't know.
 _STATE = "commander-romeo.json"
