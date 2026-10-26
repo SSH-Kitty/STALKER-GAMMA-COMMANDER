@@ -44,6 +44,9 @@ from ..parsers import (
     strip_ansi,
 )
 from ..repair import expected_archive_md5s, fetch_modpack_records
+from ..romeo import GAMMA_PROFILE, back_to_gamma
+from ..romeo import installed as romeo_installed
+from ..romeo import uninstall as uninstall_romeo
 from .common import (
     BackgroundTask,
     CommandRunner,
@@ -774,6 +777,7 @@ class UtilitiesPage(QWidget):
         self._move_sources: list[tuple[str, str]] = []
         self._log_dump_task: StreamTask | None = None
         self._repair_task: BackgroundTask | None = None
+        self._romeo_task: BackgroundTask | None = None
         self._repair_running = False
         self._assistant_process = None
         self._assistant_timer = QTimer(self)
@@ -802,6 +806,7 @@ class UtilitiesPage(QWidget):
         # always safe to call from refresh(), same as before.
         self._move_dialog = self._build_move_dialog()
         root.addWidget(self._tools_card())
+        root.addWidget(self._romeo_card())
         root.addWidget(self._destructive_card())
         root.addStretch(1)
 
@@ -1146,6 +1151,24 @@ class UtilitiesPage(QWidget):
         self.buttons.append(button)
         row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
         return container
+
+    def _romeo_card(self) -> QWidget:
+        """Only shown while ROMEO is installed (_update_fresh_reset_enabled)."""
+        card, layout = make_card()
+        header = QHBoxLayout()
+        header.addWidget(section_label(tr("Uninstall ROMEO"), level=2))
+        header.addStretch(1)
+        self.romeo_uninstall_button = QPushButton(tr("Uninstall"))
+        self.romeo_uninstall_button.setObjectName("danger")
+        self.romeo_uninstall_button.clicked.connect(self._start_romeo_uninstall)
+        header.addWidget(self.romeo_uninstall_button)
+        layout.addLayout(header)
+        layout.addWidget(
+            info_label(tr("Removes ROMEO's mods and Mod Organizer profile, then switches COMMANDER back to G.A.M.M.A."))
+        )
+        layout.addWidget(info_label(tr("Your G.A.M.M.A mod list and saves aren't touched.")))
+        self.romeo_panel = card
+        return card
 
     def _destructive_card(self) -> QWidget:
         card, layout = make_card()
@@ -1634,9 +1657,71 @@ class UtilitiesPage(QWidget):
         self.fresh_reset_button.setEnabled(fresh_reset_enabled)
         self.gamma_reset_button.setEnabled(gamma_reset_enabled)
         self.full_uninstall_button.setEnabled(full_uninstall_enabled)
+        romeo = gamma_present and romeo_installed(Path(profile.gamma).expanduser())
+        self.romeo_panel.setVisible(romeo)
+        self.romeo_uninstall_button.setEnabled(romeo and not busy and self._romeo_task is None)
         self.fresh_reset_hint.setVisible(
             not (fresh_reset_enabled or full_uninstall_enabled)
         )
+
+    def _start_romeo_uninstall(self) -> None:
+        if self._romeo_task is not None or self.window.install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
+            return
+        if not self._require_profile():
+            return
+        if mo2_running(force=True):
+            QMessageBox.warning(
+                self, tr("Close the game first"), tr("Mod Organizer or the game is still open. Close it, then uninstall ROMEO.")
+            )
+            return
+        profile = self.window.settings.active_profile
+        gamma = Path(profile.gamma).expanduser()
+        if not (gamma / "profiles" / GAMMA_PROFILE / "modlist.txt").is_file():
+            QMessageBox.warning(
+                self, tr("Couldn't uninstall ROMEO"), tr("The G.A.M.M.A profile is missing. Run a GAMMA update first, then uninstall ROMEO.")
+            )
+            return
+        reply = QMessageBox.warning(
+            self,
+            tr("Uninstall ROMEO?"),
+            tr("COMMANDER deletes ROMEO's mods and its Mod Organizer profile, then switches back to G.A.M.M.A."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+            points=(
+                tr("Your G.A.M.M.A mod list and saves aren't touched."),
+                tr("Saves made with ROMEO won't load in G.A.M.M.A."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Uninstall ROMEO"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.window.set_install_busy(True)
+        task = BackgroundTask(
+            uninstall_romeo, gamma, Path(profile.anomaly).expanduser(), Path(profile.cache).expanduser(), parent=self
+        )
+        task.result.connect(lambda result: self._on_romeo_uninstalled(gamma, *result))
+        task.error.connect(self._on_romeo_uninstall_error)
+        self._romeo_task = task
+        task.start()
+
+    def _on_romeo_uninstalled(self, gamma: Path, removed: list[str], atmos: bool) -> None:
+        self._romeo_task = None
+        self.window.set_install_busy(False)
+        back_to_gamma(self.window.settings, gamma, removed)
+        self.refresh()
+        QMessageBox.information(
+            self,
+            tr("ROMEO uninstalled"),
+            tr("You're back on G.A.M.M.A."),
+            note="" if atmos else tr("GAMMA's Atmos weather files couldn't be put back. Run a GAMMA update to restore them."),
+        )
+
+    def _on_romeo_uninstall_error(self, message: str) -> None:
+        self._romeo_task = None
+        self.window.set_install_busy(False)
+        self.refresh()
+        QMessageBox.warning(self, tr("Couldn't uninstall ROMEO"), message)
 
     def _require_profile(self) -> bool:
         if self.window.settings.active_profile is None:

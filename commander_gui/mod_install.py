@@ -54,6 +54,13 @@ def sanitize_name(name: str) -> str:
     return cleaned[:180]
 
 
+def drop_romeo_prefix(name: str) -> str:
+    """A new mod's name without a leading "xx-". That prefix marks ROMEO's
+    mods, and Uninstall ROMEO deletes by it (romeo.old_mods), so a mod
+    added to any other MO2 profile never gets it."""
+    return re.sub(r"^(?:\s*xx-)+", "", name, flags=re.IGNORECASE)
+
+
 def default_mod_name(archive: Path) -> str:
     """Use the archive filename as the initial MO2 mod name."""
     name = archive.name
@@ -225,13 +232,15 @@ def extract_archive(
         output: list[str] = []
         if process.stdout is None:
             raise ModInstallError("Archive extractor produced no output stream")
-        for line in process.stdout:
+        for line in _output_pieces(process.stdout):
             clean = line.strip()
             if clean:
                 output.append(clean)
-                if progress is not None:
-                    match = re.search(r"(\d{1,3})%", clean)
-                    progress(int(match.group(1)) if match else None, clean)
+                # Only percent lines: 7-Zip's header ("Blocks = 12",
+                # "Physical Size = ...") means nothing to a player.
+                match = re.match(r"(\d{1,3})%", clean)
+                if progress is not None and match:
+                    progress(int(match.group(1)), clean)
             if cancel_event is not None and cancel_event.is_set():
                 process.terminate()
                 try:
@@ -263,6 +272,21 @@ def extract_archive(
         raise
     finally:
         stop_watching.set()
+
+
+def _output_pieces(stream):
+    """Yield 7-Zip output split on newlines and on the backspaces/carriage
+    returns its ``-bsp1`` progress uses, so percents arrive as they happen."""
+    piece = ""
+    while char := stream.read(1):
+        if char in "\b\r\n":
+            if piece:
+                yield piece
+            piece = ""
+        else:
+            piece += char
+    if piece:
+        yield piece
 
 
 def _make_owner_writable(root: Path) -> None:

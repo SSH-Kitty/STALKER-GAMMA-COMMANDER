@@ -84,7 +84,7 @@ class _FakeScreen(QObject):
         self.revealed = None
 
     def profile(self):
-        return SimpleNamespace(gamma=str(self._gamma))
+        return SimpleNamespace(gamma=str(self._gamma), mo2_profile="G.A.M.M.A")
 
     def refresh(self):
         self._lines = self._path.read_text(encoding="utf-8").splitlines()

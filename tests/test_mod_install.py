@@ -17,6 +17,7 @@ from commander_gui.mod_install import (
     ModInstallError,
     _validate_archive_entries,
     default_mod_name,
+    drop_romeo_prefix,
     install_archive,
     make_staging_dir,
     sanitize_name,
@@ -77,6 +78,15 @@ class ModInstallTests(unittest.TestCase):
             sanitize_name("...")
         with self.assertRaises(ModInstallError):
             sanitize_name("unsafe\nname")
+
+    def test_drop_romeo_prefix(self):
+        self.assertEqual(sanitize_name(drop_romeo_prefix("xx-My Mod")), "My Mod")
+        self.assertEqual(sanitize_name(drop_romeo_prefix("XX- xx-My Mod")), "My Mod")
+        self.assertEqual(drop_romeo_prefix("My xx-Mod"), "My xx-Mod")
+        # Reinstalling an existing ROMEO mod keeps its folder name.
+        self.assertEqual(sanitize_name("xx-My Mod"), "xx-My Mod")
+        with self.assertRaises(ModInstallError):
+            sanitize_name(drop_romeo_prefix("xx-"))
 
     def test_add_mod_appends_disabled_entry(self):
         lines = ["# GAMMA", "+Existing"]

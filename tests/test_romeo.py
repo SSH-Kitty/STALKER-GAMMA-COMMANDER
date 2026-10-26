@@ -1,10 +1,23 @@
 """CLIKRΔD's ROMEO repack: detection and install layout."""
 
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from commander_gui.romeo import KEPT_MCM, MCM_MOD, find_romeo, install, mcm_changed
+from commander_gui.romeo import (
+    KEPT_MCM,
+    MCM_MOD,
+    back_to_gamma,
+    find_romeo,
+    install,
+    installed,
+    is_romeo_profile,
+    mcm_changed,
+    uninstall,
+)
 
 ROOT = "CLIKRΔD - ROMEO"
 PROFILE = "CLIKRΔD - ROMEO"
@@ -112,6 +125,73 @@ class InstallTest(unittest.TestCase):
             install(release("v4", ["xx-A"]), ROOT, PROFILE, gamma, anomaly, keep_mcm=True)
             lines = (profile / "modlist.txt").read_text().splitlines()
             self.assertLess(lines.index(f"+{KEPT_MCM} 2"), lines.index(f"+{KEPT_MCM}"))
+
+
+class UninstallTest(unittest.TestCase):
+    def test_uninstall_puts_gamma_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            gamma, anomaly, cache = tmp / "gamma", tmp / "anomaly", tmp / "cache"
+            src = tmp / "staging" / ROOT
+            _write(src / "GAMMA/mods/xx-A/a.ltx")
+            _write(src / f"GAMMA/mods/{MCM_MOD}/gamedata/configs/axr_options.ltx")
+            _write(src / f"GAMMA/profiles/{PROFILE}/modlist.txt", f"+xx-A\n+{MCM_MOD}\n")
+            _write(src / "GAMMA/splash.png", "romeo")
+            _write(src / "Anomaly/appdata/clikrad_lean_presets.ltx")
+            _write(gamma / "mods/10- GAMMA mod/a.ltx")
+            _write(gamma / f"mods/{KEPT_MCM}/a.ltx")
+            _write(gamma / "profiles/G.A.M.M.A/modlist.txt", "+10- GAMMA mod\n")
+            _write(gamma / "splash.png", "gamma")
+            _write(gamma / "ModOrganizer.ini", "[General]\nselected_profile=@ByteArray(G.A.M.M.A)\n")
+            _write(anomaly / "appdata/Atmos_Neutral.ltx", "old")
+            _write(anomaly / "appdata/user.ltx", "player")
+            git = shutil.which("git")
+            if git:
+                work = tmp / "work"
+                _write(work / "G.A.M.M.A/modpack_patches/appdata/Atmos_Neutral.ltx", "gamma atmos")
+                _write(work / "G.A.M.M.A/modpack_patches/appdata/other.ltx")
+                run = lambda *a: subprocess.run([git, "-C", str(work), *a], check=True, capture_output=True)
+                run("init", "-q")
+                run("add", ".")
+                run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
+                subprocess.run([git, "clone", "-q", "--bare", str(work), str(cache / "Stalker_GAMMA.git")], check=True)
+
+            install(tmp / "staging", ROOT, PROFILE, gamma, anomaly)
+            self.assertTrue(installed(gamma))
+            self.assertTrue(is_romeo_profile(gamma, PROFILE))
+            self.assertFalse(is_romeo_profile(gamma, "G.A.M.M.A"))
+            removed, atmos = uninstall(gamma, anomaly, cache)
+
+            self.assertEqual(removed, [PROFILE])
+            self.assertFalse(installed(gamma))
+            self.assertEqual(sorted(p.name for p in (gamma / "mods").iterdir()), ["10- GAMMA mod"])
+            self.assertEqual(sorted(p.name for p in (gamma / "profiles").iterdir()), ["G.A.M.M.A"])
+            self.assertEqual((gamma / "splash.png").read_text(), "gamma")
+            self.assertFalse((gamma / "splash.png.before-romeo").exists())
+            self.assertFalse((anomaly / "appdata/clikrad_lean_presets.ltx").exists())
+            self.assertEqual((anomaly / "appdata/user.ltx").read_text(), "player")
+            self.assertIn("G.A.M.M.A", (gamma / "ModOrganizer.ini").read_text())
+            if git:
+                self.assertTrue(atmos)
+                self.assertEqual((anomaly / "appdata/Atmos_Neutral.ltx").read_text(), "gamma atmos")
+                self.assertFalse((anomaly / "appdata/other.ltx").exists())
+
+            other = tmp / "other-gamma"
+            profiles = [
+                SimpleNamespace(gamma=str(gamma), mo2_profile=PROFILE),
+                SimpleNamespace(gamma=str(other), mo2_profile=PROFILE),
+            ]
+            settings = SimpleNamespace(profiles=profiles, save=lambda: None)
+            back_to_gamma(settings, gamma, removed)
+            self.assertEqual([p.mo2_profile for p in profiles], ["G.A.M.M.A", PROFILE])
+
+    def test_refuses_without_gamma_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma"
+            _write(gamma / "mods/xx-A/a.ltx")
+            with self.assertRaises(Exception):
+                uninstall(gamma, Path(tmp) / "anomaly", Path(tmp) / "cache")
+            self.assertTrue((gamma / "mods/xx-A/a.ltx").exists())
 
 
 if __name__ == "__main__":

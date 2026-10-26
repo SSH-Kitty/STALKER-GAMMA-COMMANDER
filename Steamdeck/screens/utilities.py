@@ -43,6 +43,9 @@ from commander_gui.launcher import LaunchError
 from commander_gui.log_dump import create_log_dump
 from commander_gui.parsers import parse_prune_archive, strip_ansi
 from commander_gui.repair import foreign_prefix_dlls, repair_prefix_foreign_dlls
+from commander_gui.romeo import GAMMA_PROFILE, back_to_gamma
+from commander_gui.romeo import installed as romeo_installed
+from commander_gui.romeo import uninstall as uninstall_romeo
 from commander_gui.ui.backup_dialog import backup_summary, backup_title
 from commander_gui.ui.common import (
     BackgroundTask,
@@ -128,6 +131,7 @@ class UtilitiesScreen(DeckScreen):
         self._move_task: StreamTask | None = None
         self._log_dump_task: StreamTask | None = None
         self._repair_task: BackgroundTask | None = None
+        self._romeo_task: BackgroundTask | None = None
         self._backup_task: StreamTask | None = None
         self._action_buttons: list = []
         self._prune_mb = 0
@@ -362,6 +366,14 @@ class UtilitiesScreen(DeckScreen):
             role="danger",
         )
         tiles.addWidget(box)
+        # Only there while ROMEO is installed (_update_destructive_enabled).
+        self.romeo_tile, self.romeo_uninstall_button = _tool_row(
+            tr("Uninstall ROMEO"),
+            tr("Removes ROMEO's mods and Mod Organizer profile, then switches COMMANDER back to G.A.M.M.A."),
+            self._start_romeo_uninstall,
+            role="danger",
+        )
+        tiles.addWidget(self.romeo_tile)
         card.body.addLayout(tiles)
         return card
 
@@ -388,6 +400,7 @@ class UtilitiesScreen(DeckScreen):
             and self._log_dump_task is None
             and self._repair_task is None
             and self._backup_task is None
+            and self._romeo_task is None
         )
 
     def _reject_if_mo2_running(self) -> bool:
@@ -415,6 +428,64 @@ class UtilitiesScreen(DeckScreen):
         self.full_uninstall_button.setEnabled(
             idle and (anomaly_present or gamma_present or cache_present)
         )
+        romeo = gamma_present and romeo_installed(Path(profile.gamma).expanduser())
+        self.romeo_tile.setVisible(romeo)
+        self.romeo_uninstall_button.setEnabled(idle and romeo)
+
+    def _start_romeo_uninstall(self) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        if self._reject_if_mo2_running():
+            return
+        gamma = Path(profile.gamma).expanduser()
+        if not (gamma / "profiles" / GAMMA_PROFILE / "modlist.txt").is_file():
+            self.window.notify(tr("The G.A.M.M.A profile is missing. Run a GAMMA update first, then uninstall ROMEO."), 8000)
+            return
+
+        def _go() -> None:
+            if self.window.install_busy or self._reject_if_mo2_running():
+                return
+            self.window.set_install_busy(True)
+            self._set_actions_enabled(False)
+            task = BackgroundTask(
+                uninstall_romeo, gamma, Path(profile.anomaly).expanduser(), Path(profile.cache).expanduser(), parent=self
+            )
+            task.result.connect(lambda result: self._on_romeo_uninstalled(gamma, *result))
+            task.error.connect(self._on_romeo_uninstall_error)
+            self._romeo_task = task
+            task.start()
+            self.window.notify(tr("Uninstalling ROMEO…"), 5000)
+
+        self.window.confirm(
+            tr("Uninstall ROMEO?"),
+            tr("COMMANDER deletes ROMEO's mods and its Mod Organizer profile, then switches back to G.A.M.M.A.")
+            + "\n\n•  " + tr("Your G.A.M.M.A mod list and saves aren't touched.")
+            + "\n•  " + tr("Saves made with ROMEO won't load in G.A.M.M.A."),
+            _go,
+            confirm_text=tr("Uninstall ROMEO"),
+            confirm_role="danger",
+        )
+
+    def _on_romeo_uninstalled(self, gamma: Path, removed: list[str], atmos: bool) -> None:
+        self._romeo_task = None
+        self.window.set_install_busy(False)
+        back_to_gamma(self.window.settings, gamma, removed)
+        self._set_actions_enabled(True)
+        self.window.update_mod_counter()
+        message = tr("You're back on G.A.M.M.A.")
+        if not atmos:
+            message += "\n\n" + tr("GAMMA's Atmos weather files couldn't be put back. Run a GAMMA update to restore them.")
+        self.window.announce_finished(tr("ROMEO uninstalled"), message)
+
+    def _on_romeo_uninstall_error(self, message: str) -> None:
+        self._romeo_task = None
+        self.window.set_install_busy(False)
+        self._set_actions_enabled(True)
+        self.window.announce_finished(tr("Couldn't uninstall ROMEO"), message, ok=False)
 
     # -- simple CLI-backed tools --------------------------------------------
     def _run_cli(

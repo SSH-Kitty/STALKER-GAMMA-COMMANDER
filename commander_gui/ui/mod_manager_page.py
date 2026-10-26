@@ -7,6 +7,7 @@ category) are done directly on the file with automatic backups.
 
 from __future__ import annotations
 
+import re
 import shutil
 import uuid
 import zipfile
@@ -65,6 +66,7 @@ from ..mod_install import (
     ModInstallError,
     _list_archive_paths,
     default_mod_name,
+    drop_romeo_prefix,
     extract_archive,
     find_archiver,
     make_staging_dir,
@@ -102,7 +104,7 @@ from ..modlist import (
     timestamped_backup_path,
     unflip,
 )
-from ..romeo import KEPT_MCM, MCM_MOD, find_romeo, mcm_changed, old_mods, unpacked_size
+from ..romeo import KEPT_MCM, MCM_MOD, find_romeo, is_romeo_profile, mcm_changed, old_mods, unpacked_size
 from ..romeo import install as install_romeo
 from ..themes import active_theme_tokens
 from ..updates import local_modpack_records
@@ -1735,7 +1737,7 @@ class ModManagerPage(QWidget):
 
     def _install_archive(self, archive: Path) -> None:
         """Name, check and install one archive (picked or dropped)."""
-        if self._refuse_xrrazom(archive) or self._install_romeo(archive):
+        if self._install_romeo(archive) or self._refuse_xrrazom(archive):
             return
         try:
             default_name = default_mod_name(archive)
@@ -1760,6 +1762,10 @@ class ModManagerPage(QWidget):
         name = text_field.text()
         if not name.strip():
             return
+        # "xx-" is kept only on a ROMEO profile, where it marks ROMEO's mods.
+        profile = self.window.settings.active_profile
+        if profile is None or not is_romeo_profile(Path(profile.gamma), self.profile_combo.currentText()):
+            name = drop_romeo_prefix(name)
         try:
             safe_name = sanitize_name(name)
         except ModInstallError as exc:
@@ -2359,6 +2365,7 @@ class ModManagerPage(QWidget):
         self._install_source = archive
         self._install_name = mo2_profile
         self._romeo_update = update
+        self._romeo_phase = ""
         self._install_staging = None
         self._install_active = True
         self.window.set_install_busy(True, "mod_install")
@@ -2367,9 +2374,12 @@ class ModManagerPage(QWidget):
         self.install_progress.show()
         self.install_progress.on_started()
         self.install_progress.pause_button.hide()
+        self.install_progress.bar.setFormat(tr("Installing ROMEO"))
 
         cancel_event = None
 
+        # Each line is "<overall percent>\t<status>": unpacking is nearly all
+        # of the time, moving the mods in the last 5%.
         def worker(report):
             staging_parent = make_staging_dir(gamma)
             try:
@@ -2378,13 +2388,16 @@ class ModManagerPage(QWidget):
                     archive,
                     staging,
                     cancel_event,
-                    lambda percent, text: report(
-                        f"Extracting {archive.name}... {percent}%" if percent is not None else text
+                    lambda percent, _text: report(
+                        f"{percent * 95 // 100}\t" + tr("Extracting {name}", name=archive.name)
                     ),
                 )
                 install_romeo(
                     staging, wrapper, mo2_profile, gamma, anomaly, cancel_event,
-                    lambda done, total: report(f"Installing ROMEO mods... {done}/{total}"),
+                    lambda done, total: report(
+                        f"{95 + done * 5 // total}\t"
+                        + tr("Installing ROMEO mods {done}/{total}", done=done, total=total)
+                    ),
                     keep_mcm,
                 )
                 return mo2_profile
@@ -2393,7 +2406,7 @@ class ModManagerPage(QWidget):
 
         self._install_task = StreamTask(worker, parent=self)
         cancel_event = self._install_task.cancel_event
-        self._install_task.line.connect(self.install_progress.status_message)
+        self._install_task.line.connect(self._on_romeo_progress)
         self._install_task.result.connect(
             lambda name, generation=generation: self._on_romeo_installed(name, generation)
         )
@@ -2401,6 +2414,19 @@ class ModManagerPage(QWidget):
             lambda message, generation=generation: self._on_install_error(message, generation)
         )
         self._install_task.start()
+
+    def _on_romeo_progress(self, line: str) -> None:
+        percent, text = line.split("\t", 1)
+        progress = self.install_progress
+        progress.bar.setRange(0, 100)
+        progress.bar.setValue(int(percent))
+        progress.bar.setFormat(tr("Installing ROMEO") + f" {percent}%")
+        progress.status_message(text)
+        # Once per phase: the per-mod count would flood the console.
+        phase = re.sub(r"\d", "", text)
+        if progress.log is not None and phase != self._romeo_phase:
+            self._romeo_phase = phase
+            progress.log.append_line(text)
 
     def _on_romeo_installed(self, name: str, generation: int) -> None:
         if not self._install_active or generation != self._install_generation:

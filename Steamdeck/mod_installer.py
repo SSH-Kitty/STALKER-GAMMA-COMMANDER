@@ -33,6 +33,7 @@ from commander_gui.mod_install import (
     ModInstallError,
     _list_archive_paths,
     default_mod_name,
+    drop_romeo_prefix,
     extract_archive,
     find_archiver,
     make_staging_dir,
@@ -45,6 +46,7 @@ from commander_gui.romeo import (
     KEPT_MCM,
     MCM_MOD,
     find_romeo,
+    is_romeo_profile,
     mcm_changed,
     old_mods,
     unpacked_size,
@@ -305,7 +307,7 @@ class DeckModInstaller(QObject):
 
     # -- 2. name ----------------------------------------------------------------
     def _chosen(self, archive: Path) -> None:
-        if self._refuse_xrrazom(archive) or self._offer_romeo(archive):
+        if self._offer_romeo(archive) or self._refuse_xrrazom(archive):
             return
         try:
             name = default_mod_name(archive)
@@ -357,6 +359,10 @@ class DeckModInstaller(QObject):
         self.window.show_overlay(overlay)
 
     def _confirm_target(self, name: str) -> None:
+        # "xx-" is kept only on a ROMEO profile, where it marks ROMEO's mods.
+        profile = self.screen.profile()
+        if profile is None or not is_romeo_profile(Path(profile.gamma), profile.mo2_profile):
+            name = drop_romeo_prefix(name)
         try:
             safe = sanitize_name(name)
         except ModInstallError as exc:
@@ -702,19 +708,19 @@ class DeckModInstaller(QObject):
         self.window.set_install_busy(True, "mod_install")
         self._staging_root = make_staging_dir(gamma)
         staging = self._staging_root / "archive"
-        self._show_progress(tr("Extracting {name}...", name=archive.name))
+        self._show_progress(tr("Extracting {name}", name=archive.name))
         task: StreamTask | None = None
 
         def worker(report):
             extract_archive(
                 archive, staging, task.cancel_event,
                 lambda percent, text: report(
-                    tr("Extracting {name}...", name=archive.name) + (f" {percent}%" if percent is not None else "")
+                    tr("Extracting {name}", name=archive.name) + (f" {percent}%" if percent is not None else "")
                 ),
             )
             install_romeo(
                 staging, wrapper, mo2_profile, gamma, anomaly, task.cancel_event,
-                lambda done, total: report(tr("Installing ROMEO mods... {done}/{total}", done=done, total=total)),
+                lambda done, total: report(tr("Installing ROMEO mods {done}/{total}", done=done, total=total)),
                 keep_mcm,
             )
             return mo2_profile

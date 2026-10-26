@@ -7201,6 +7201,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page.fresh_reset_button = QPushButton()
             page.gamma_reset_button = QPushButton()
             page.full_uninstall_button = QPushButton()
+            page.romeo_panel = QLabel()
+            page.romeo_uninstall_button = QPushButton()
+            page._romeo_task = None
             page.fresh_reset_hint = QLabel()
             page._runner = None
             page._wipe_task = None
@@ -7457,6 +7460,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page.fresh_reset_button = QPushButton()
             page.gamma_reset_button = QPushButton()
             page.full_uninstall_button = QPushButton()
+            page.romeo_panel = QLabel()
+            page.romeo_uninstall_button = QPushButton()
+            page._romeo_task = None
             page.fresh_reset_hint = QLabel()
 
             page._update_fresh_reset_enabled()
@@ -7492,6 +7498,9 @@ class UserModsTrackerTests(unittest.TestCase):
             page.fresh_reset_button = QPushButton()
             page.gamma_reset_button = QPushButton()
             page.full_uninstall_button = QPushButton()
+            page.romeo_panel = QLabel()
+            page.romeo_uninstall_button = QPushButton()
+            page._romeo_task = None
             page.fresh_reset_hint = QLabel()
 
             page._update_fresh_reset_enabled()

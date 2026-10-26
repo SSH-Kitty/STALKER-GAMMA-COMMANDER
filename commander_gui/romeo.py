@@ -11,6 +11,12 @@ first, since a mod a new release dropped would otherwise linger. The player's
 MCM settings live in ``xx-CLIKRΔD MCM Values`` (MO2 saves a changed file back
 into the mod it came from), so a changed copy is renamed out of the ``xx-``
 range and put back in its place, with ROMEO's own turned off.
+
+Uninstalling undoes the install: ROMEO's mods and MO2 profile go, its
+appdata presets and splash screen go, GAMMA's Atmos files come back from the
+download cache, and every COMMANDER profile on ROMEO goes back to G.A.M.M.A.
+The overwrite files it filled in are left: they can't be told apart from the
+player's own.
 """
 
 from __future__ import annotations
@@ -32,6 +38,13 @@ MCM_MOD = "xx-CLIKRΔD MCM Values"
 KEPT_MCM = "CLIKRΔD MCM Values (my settings)"
 #: In the ROMEO profile folder; MO2 ignores files it doesn't know.
 _STATE = "commander-romeo.json"
+GAMMA_PROFILE = "G.A.M.M.A"
+#: GAMMA's own splash, put aside by install() and back by uninstall().
+_SPLASH_BACKUP = "splash.png.before-romeo"
+# ponytail: the 2026.10.12 release's Anomaly files; record them at install
+# if a later release adds more.
+_APPDATA_FILES = ("clikrad_lean_presets.ltx", "dhf_weapon_presets.ltx", "dvm_weapon_presets.ltx")
+_ATMOS_SOURCE = "G.A.M.M.A/modpack_patches/appdata/"
 
 
 def find_romeo(names: list[str]) -> tuple[str, str] | None:
@@ -163,6 +176,9 @@ def install(
             progress(count, len(mods))
         _swap_dir(mod, gamma / "mods" / mod.name)
     _swap_dir(src / "GAMMA" / "profiles" / profile, gamma / "profiles" / profile)
+    # First install only: on an update splash.png is already ROMEO's.
+    if old_modlist is None and (gamma / "splash.png").is_file() and not (gamma / _SPLASH_BACKUP).exists():
+        os.replace(gamma / "splash.png", gamma / _SPLASH_BACKUP)
     # overwrite/ is shared by every MO2 profile and holds the player's own
     # MCM saves; only fill in what is missing. Everything else (the splash)
     # replaces, as the guide says.
@@ -196,3 +212,96 @@ def clean_appdata(appdata: Path) -> None:
         name = path.name.lower()
         if name.startswith("atmos") and name.endswith(".ltx") and path.is_file():
             os.unlink(path)
+
+
+def romeo_profiles(gamma: Path) -> list[str]:
+    """MO2 profiles that run ROMEO: installed by COMMANDER, or listing
+    ROMEO's MCM mod. Never G.A.M.M.A itself."""
+    root = gamma / "profiles"
+    return [path.name for path in sorted(root.iterdir()) if is_romeo_profile(gamma, path.name)] if root.is_dir() else []
+
+
+def is_romeo_profile(gamma: Path, profile: str) -> bool:
+    path = gamma / "profiles" / profile
+    if profile == GAMMA_PROFILE or not path.is_dir():
+        return False
+    try:
+        listed = {line[1:] for line in read_lines(path / "modlist.txt")}
+    except (OSError, ValueError):
+        listed = set()
+    return (path / _STATE).is_file() or MCM_MOD in listed
+
+
+def installed(gamma: Path) -> bool:
+    return bool(romeo_profiles(gamma) or old_mods(gamma))
+
+
+def _restore_atmos(appdata: Path, cache: Path) -> bool:
+    """Put GAMMA's Atmos .ltx files (which install removed) back from the
+    Stalker_GAMMA repository in the download cache. False if it couldn't."""
+    from .config import child_environment
+    from .integrity import _gamma_repo
+
+    git, repo = shutil.which("git"), _gamma_repo(cache)
+    if git is None or repo is None:
+        return False
+    base = [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo)]
+    env = {**child_environment(), "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        names = subprocess.run(
+            [*base, "ls-tree", "--name-only", "HEAD", _ATMOS_SOURCE],
+            capture_output=True, text=True, timeout=60, env=env, check=True,
+        ).stdout.splitlines()
+        appdata.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            filename = name.rsplit("/", 1)[-1]
+            if filename.lower().startswith("atmos") and filename.lower().endswith(".ltx"):
+                data = subprocess.run(
+                    [*base, "show", f"HEAD:{name}"], capture_output=True, timeout=60, env=env, check=True,
+                ).stdout
+                (appdata / filename).write_bytes(data)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def uninstall(gamma: Path, anomaly: Path, cache: Path) -> tuple[list[str], bool]:
+    """Remove ROMEO from GAMMA and Anomaly; G.A.M.M.A is left as it was.
+
+    Returns the MO2 profiles removed and whether GAMMA's Atmos files came
+    back (if not, a GAMMA update restores them). The profiles go last, so a
+    failure part-way leaves ROMEO findable for another try.
+    """
+    if not (gamma / "profiles" / GAMMA_PROFILE / "modlist.txt").is_file():
+        raise ModInstallError("The G.A.M.M.A profile is missing. Run a GAMMA update first, then uninstall ROMEO.")
+    profiles = romeo_profiles(gamma)
+    mods = gamma / "mods"
+    kept = [p for p in mods.iterdir() if p.name.startswith(KEPT_MCM) and p.is_dir()] if mods.is_dir() else []
+    for mod in old_mods(gamma) + kept:
+        shutil.rmtree(mod)
+    appdata = anomaly / "appdata"
+    for name in _APPDATA_FILES:
+        (appdata / name).unlink(missing_ok=True)
+    # Built from ROMEO's shaders.
+    shutil.rmtree(appdata / "shaders_cache", ignore_errors=True)
+    if (gamma / _SPLASH_BACKUP).is_file():
+        os.replace(gamma / _SPLASH_BACKUP, gamma / "splash.png")
+    else:
+        # GAMMA ships no splash.png; MO2 falls back to its own.
+        (gamma / "splash.png").unlink(missing_ok=True)
+    atmos = _restore_atmos(appdata, cache)
+    for name in profiles:
+        shutil.rmtree(gamma / "profiles" / name)
+    from .launcher import set_mo2_selected_profile
+
+    set_mo2_selected_profile(str(gamma), GAMMA_PROFILE)
+    return profiles, atmos
+
+
+def back_to_gamma(settings, gamma: Path, removed: list[str]) -> None:
+    """Point every COMMANDER profile that used a removed ROMEO profile at
+    G.A.M.M.A, and save."""
+    for profile in settings.profiles:
+        if profile.mo2_profile in removed and Path(profile.gamma or "").expanduser() == gamma:
+            profile.mo2_profile = GAMMA_PROFILE
+    settings.save()
