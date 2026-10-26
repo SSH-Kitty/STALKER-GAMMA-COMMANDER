@@ -147,6 +147,10 @@ class GraphicsWindow(QWidget):
         # Keeps the cards' handlers: the cards themselves go on the tabs.
         self.panel = GraphicsPanel(loose=True)
         self.frame_gen = FrameGenCard(lambda: self._options, self._set_options)
+        # Settings boxes (#statTile) inside the panel; here they float on the
+        # game, so they take the Frame generation card's look.
+        self.panel.mangohud_card.setObjectName("card")
+        self.panel.vkbasalt_card.setObjectName("card")
 
         tokens = active_theme_tokens()
         # The theme's card colours for the rail: this is a window of its own,
