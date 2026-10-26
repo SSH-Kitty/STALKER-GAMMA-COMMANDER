@@ -15,6 +15,7 @@ that API:
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.parse
@@ -412,7 +413,7 @@ def _latest_stable_tag() -> str | None:
         )
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             final_url = resp.geturl()
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     match = re.search(r"/releases/tag/([^/]+)/?$", final_url)
     return urllib.parse.unquote(match.group(1)) if match else None
@@ -430,7 +431,7 @@ def _feed_tags() -> list[str]:
         )
         with urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
             text = read_response_bytes(resp, _MAX_FEED_BYTES).decode("utf-8", "replace")
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return []
     return [urllib.parse.unquote(tag) for tag in _FEED_TAG_RE.findall(text)]
 
@@ -513,7 +514,10 @@ def newer_unstable_tag(current_version: str) -> str | None:
 
 
 def check_commander_update(current_version: str, channel: str = "stable") -> str | None:
-    """Return the newer COMMANDER release tag, or None if up to date/unreachable.
+    """Return the newer COMMANDER release tag, or None if up to date.
+
+    Raises OSError when GitHub can't be reached, so callers don't show
+    "up to date" for a check that never happened.
 
     ``channel`` "stable" (the default) only ever looks at the release GitHub
     marks as latest, which is never a pre-release - stable users are not
@@ -536,7 +540,9 @@ def check_commander_update(current_version: str, channel: str = "stable") -> str
         candidates = _feed_tags()
     if not candidates:
         tag = _latest_stable_tag()
-        candidates = [tag] if tag else []
+        if not tag:
+            raise OSError("GitHub couldn't be reached")
+        candidates = [tag]
     best: tuple[tuple[int, ...], str] | None = None
     for tag in candidates:
         version = _numeric_version_tuple(tag)

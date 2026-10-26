@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 
-from . import __version__, network
+from . import __version__, atomic, network
 from .mod_install import ModInstallError, extract_archive
 from .network import read_response_bytes
 
@@ -125,7 +125,7 @@ def load_state(anomaly: str | Path) -> dict | None:
 
 
 def _save_state(anomaly: Path, state: dict) -> None:
-    (anomaly / _STATE_DIR / "state.json").write_text(json.dumps(state))
+    atomic.write_text(anomaly / _STATE_DIR / "state.json", json.dumps(state))
 
 
 # -- download -----------------------------------------------------------------
@@ -183,6 +183,19 @@ def _remove(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _put_back(original: Path, anomaly: Path) -> None:
+    """Move every file in ``original`` back over the Anomaly folder and
+    delete ``original``."""
+    if not original.is_dir():
+        return
+    for path in sorted(original.rglob("*"), reverse=True):
+        if path.is_file():
+            target = anomaly / path.relative_to(original)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), target)
+    shutil.rmtree(original)
+
+
 def _check_layout(staging: Path) -> None:
     if not (staging / "bin" / "AnomalyDX11.exe").is_file() or not (staging / "db" / "mods" / GAMEDATA_DB).is_file():
         raise ExesError("This zip isn't a modded exes release: it needs bin/AnomalyDX11.exe and db/mods/" + GAMEDATA_DB + ".")
@@ -212,36 +225,52 @@ def install(zip_path: Path, anomaly: str | Path, label: str, cancel_event: Event
         if cancel_event is not None and cancel_event.is_set():
             raise ModInstallError("Mod installation cancelled")
         original = root / "original"
-        first = not original.exists()
+        # No state means no finished install: an ``original`` folder is
+        # what an interrupted first install moved out, so it goes back.
+        first = state is None
+        if first and original.exists():
+            _put_back(original, anomaly)
         added = set(state.get("added", [])) if state else set()
-        if first:
-            # Everything the zip replaces or the clean-up removes, so
-            # restore_original() can put the folder back as it was.
-            original.mkdir()
-            (original / "bin").mkdir()
-        for exe in (staging / "zip" / "bin").iterdir():
-            current = anomaly / "bin" / exe.name
-            if first and current.is_file():
-                shutil.copy2(current, original / "bin" / exe.name)
-            elif not (original / "bin" / exe.name).exists():
-                added.add(exe.name)  # no original: restore deletes it
-        for path in _clean_targets(anomaly):
+        placed: list[Path] = []
+        try:
             if first:
-                _move(path, anomaly, original)
-            else:
-                # Only what a GAMMA update copied back since: the
-                # originals are already saved.
-                _remove(path)
-        for path in sorted((staging / "zip").rglob("*")):
-            if path.is_file():
-                target = anomaly / path.relative_to(staging / "zip")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(path), target)
-        _save_state(anomaly, {
-            "version": label,
-            "previous": state.get("version") if state else None,
-            "added": sorted(added),
-        })
+                # Everything the zip replaces or the clean-up removes, so
+                # restore_original() can put the folder back as it was.
+                original.mkdir()
+                (original / "bin").mkdir()
+            for exe in (staging / "zip" / "bin").iterdir():
+                current = anomaly / "bin" / exe.name
+                if first and current.is_file():
+                    shutil.copy2(current, original / "bin" / exe.name)
+                elif not (original / "bin" / exe.name).exists():
+                    added.add(exe.name)  # no original: restore deletes it
+            for path in _clean_targets(anomaly):
+                if first:
+                    _move(path, anomaly, original)
+                else:
+                    # Only what a GAMMA update copied back since: the
+                    # originals are already saved.
+                    _remove(path)
+            for path in sorted((staging / "zip").rglob("*")):
+                if path.is_file():
+                    target = anomaly / path.relative_to(staging / "zip")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), target)
+                    placed.append(target.relative_to(anomaly))
+            _save_state(anomaly, {
+                "version": label,
+                "previous": state.get("version") if state else None,
+                "added": sorted(added),
+            })
+        except BaseException:
+            if first:
+                # Files the zip brought that had no original are deleted;
+                # the rest are overwritten again by _put_back().
+                for rel in placed:
+                    if not (original / rel).exists():
+                        (anomaly / rel).unlink(missing_ok=True)
+                _put_back(original, anomaly)
+            raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -262,14 +291,7 @@ def restore_original(anomaly: str | Path) -> None:
     for name in (load_state(anomaly) or {}).get("added", []):
         if Path(name).name == name:
             (anomaly / "bin" / name).unlink(missing_ok=True)
-    for path in sorted(original.rglob("*"), reverse=True):
-        if path.is_file():
-            target = anomaly / path.relative_to(original)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), target)
-    for path in sorted(original.rglob("*"), reverse=True):
-        if path.is_dir():
-            path.rmdir()  # empty folders once their files have moved back
+    _put_back(original, anomaly)
     shutil.rmtree(root)
 
 

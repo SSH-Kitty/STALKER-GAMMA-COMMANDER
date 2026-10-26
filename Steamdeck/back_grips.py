@@ -98,10 +98,20 @@ class BackGripMonitor(QObject):
         return bool(self._fds)
 
     def stop(self) -> None:
-        for fd, notifier in self._fds:
-            notifier.setEnabled(False)
-            os.close(fd)
-        self._fds.clear()
+        for fd, _notifier in list(self._fds):
+            self._close(fd)
+
+    def _close(self, fd: int) -> None:
+        for entry in self._fds:
+            if entry[0] == fd:
+                entry[1].setEnabled(False)
+                entry[1].deleteLater()
+                self._fds.remove(entry)
+                os.close(fd)
+                break
+        if not self._fds:
+            # No grips left to navigate with: hand input back to the pad.
+            self.navigating = False
 
     def _read(self, fd: int) -> None:
         try:
@@ -115,7 +125,7 @@ class BackGripMonitor(QObject):
         except BlockingIOError:
             return
         except OSError:
-            self.stop()  # unplugged or gone: give up quietly
+            self._close(fd)  # this node is gone; the others keep working
 
     def feed(self, mask: int) -> None:
         """One report's buttons. Separate from the file handling for tests."""

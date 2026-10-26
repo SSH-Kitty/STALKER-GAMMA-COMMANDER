@@ -352,6 +352,27 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(coop.read_last_ip(self.anomaly, self.gamma, "G.A.M.M.A"), "1.2.3.4:5445")
         self.assertEqual(len(backups), 1)  # the overwritten save and MCM were kept
 
+    def test_snapshot_only_restores_settings_files(self):
+        self.assertTrue(coop._is_mode_file("user.ltx"))
+        self.assertTrue(coop._is_mode_file("mcm/overwrite/gamedata/configs/axr_options.ltx"))
+        self.assertTrue(coop._is_mode_file("mcm/mods/A mod/gamedata/configs/axr_options.ltx"))
+        for name in (
+            "mcm/ModOrganizer.ini",
+            "mcm/mods/A/gamedata/scripts/x.script",
+            "mcm/mods/../gamedata/configs/axr_options.ltx",
+            "mcm/mods/A/B/gamedata/configs/axr_options.ltx",
+        ):
+            self.assertFalse(coop._is_mode_file(name), name)
+        self._install()
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        target = self.gamma / "ModOrganizer.ini"
+        target.write_text("safe")
+        rogue = coop.state_dir(self.anomaly) / "modes" / "coop" / "mcm" / "ModOrganizer.ini"
+        rogue.parent.mkdir(parents=True, exist_ok=True)
+        rogue.write_text("evil")
+        coop._load_mode(self.anomaly, self.gamma, "coop")
+        self.assertEqual(target.read_text(), "safe")
+
     def test_import_rejects_other_zips(self):
         for members in ({"manifest.json": "{}"}, {"manifest.json": '{"type": "commander-coop"}', "../x": ""}):
             path = Path(self._tmp.name) / "bad.zip"

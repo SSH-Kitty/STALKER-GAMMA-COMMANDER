@@ -80,8 +80,8 @@ def forget_verbs(prefix, verbs: tuple[str, ...] = WINETRICKS_VERBS) -> None:
     """
     log = Path(prefix) / "winetricks.log"
     try:
-        lines = log.read_text(encoding="utf-8").splitlines()
-        atomic.write_bytes(log, "".join(f"{ln}\n" for ln in lines if ln.strip() not in verbs).encode("utf-8"), lock=False)
+        lines = log.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+        atomic.write_bytes(log, "".join(f"{ln}\n" for ln in lines if ln.strip() not in verbs).encode("utf-8", "surrogateescape"), lock=False)
     except OSError:
         pass
 

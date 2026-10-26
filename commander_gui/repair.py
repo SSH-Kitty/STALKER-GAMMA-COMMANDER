@@ -341,6 +341,9 @@ class QuarantineItem:
 
     original: Path
     quarantined: Path
+    #: The mod folder itself, not one of its archives. ``original.parent``
+    #: can't tell: gamma/mods may be a symlink to a folder of any name.
+    is_mod: bool = False
 
 
 @dataclass
@@ -384,7 +387,7 @@ def quarantine_mod_and_archive(
         if mod_path.is_dir():
             dest = _quarantine_dest(mods_root / _QUARANTINE_DIRNAME, folder)
             mod_path.rename(dest)
-            result.items.append(QuarantineItem(original=mod_path, quarantined=dest))
+            result.items.append(QuarantineItem(original=mod_path, quarantined=dest, is_mod=True))
         if mod_path.exists():
             raise OSError(f"Mod folder still exists after quarantine: {mod_path}")
         if record is not None:
@@ -457,7 +460,7 @@ class SettleResult:
 
 def _mod_item(record: QuarantineRecord) -> QuarantineItem | None:
     for item in record.items:
-        if item.original.parent.name == "mods":
+        if item.is_mod:
             return item
     return None
 

@@ -481,6 +481,19 @@ def _mode_files(anomaly, gamma) -> dict[str, Path]:
     return files
 
 
+def _is_mode_file(name: str) -> bool:
+    """A snapshot name ``_mode_files()`` can produce. An imported export is
+    someone else's file: anything else in its ``coop/`` folder would be
+    copied over GAMMA's own files."""
+    parts = PurePosixPath(name).parts
+    if name in ("user.ltx", "anomaly/" + MCM_FILE):
+        return True
+    tail = ("gamedata", "configs", MCM_FILE)
+    if parts[:2] == ("mcm", "overwrite"):
+        return parts[2:] == tail
+    return len(parts) == 6 and parts[:2] == ("mcm", "mods") and parts[3:] == tail and parts[2] not in ("", ".", "..")
+
+
 def _created_by_game(name: str) -> bool:
     """An MCM file the game or MO2 writes on first use, not one a mod ships:
     missing from a side's snapshot means that side never had it."""
@@ -509,7 +522,7 @@ def _load_mode(anomaly, gamma, mode: str) -> None:
     root = Path(gamma).expanduser() if str(gamma).strip() else None
     for saved in src.rglob("*"):
         name = saved.relative_to(src).as_posix()
-        if not saved.is_file():
+        if not saved.is_file() or not _is_mode_file(name):
             continue
         if name == "user.ltx":
             target = user_ltx_path(anomaly)
@@ -985,7 +998,7 @@ def import_session(anomaly, gamma, mo2_profile, profile_name: str, path, report=
                 continue
             if parts[0] in roots:
                 plan.append((name, roots[parts[0]].joinpath(*parts[1:])))
-            elif parts[0] == "coop":
+            elif parts[0] == "coop" and _is_mode_file(PurePosixPath(*parts[1:]).as_posix()):
                 plan.append((name, snapshot.joinpath(*parts[1:])))
         replaced = [(name, dest) for name, dest in plan if not name.startswith("coop/") and dest.is_file()]
         # Co-op on: the snapshot goes live below, over these files.

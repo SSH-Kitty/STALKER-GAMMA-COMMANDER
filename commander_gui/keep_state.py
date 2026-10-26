@@ -31,6 +31,10 @@ from .modlist import merge_after_update, modlist_path_for, read_lines, save_line
 from .romeo import KEPT_MCM, MCM_MOD, clean_appdata
 
 
+#: Folder name prefix of the copies ``capture()`` keeps in the Anomaly folder.
+_KEEP_PREFIX = ".commander-keep-"
+
+
 @dataclass
 class KeptState:
     mods_dir: Path | None = None
@@ -137,24 +141,33 @@ def capture(profile, *, keep_exes: bool = False) -> KeptState:
     if anomaly:
         state.anomaly = Path(anomaly).expanduser()
         state.keep_exes = keep_exes
+        if keep_exes:
+            # Copies go in the Anomaly folder, on disk: /tmp is RAM on
+            # SteamOS and Arch, and these are hundreds of MB. A run that
+            # was abandoned left its copies behind; they go now.
+            for stale in state.anomaly.glob(f"{_KEEP_PREFIX}*"):
+                shutil.rmtree(stale, ignore_errors=True)
         db = state.anomaly / "db" / "mods" / GAMEDATA_DB
         if keep_exes and db.is_file():
-            state.db_copy = Path(tempfile.mkdtemp(prefix="commander-exes-db-"))
             try:
+                state.db_copy = Path(tempfile.mkdtemp(prefix=f"{_KEEP_PREFIX}db-", dir=state.anomaly))
                 shutil.copy2(db, state.db_copy / db.name)
             except OSError:
-                shutil.rmtree(state.db_copy, ignore_errors=True)
+                if state.db_copy is not None:
+                    shutil.rmtree(state.db_copy, ignore_errors=True)
                 state.db_copy = None
     if keep_exes and anomaly:
         bin_dir = Path(anomaly).expanduser() / "bin"
         files = _engine_files(bin_dir)
         if files:
-            copy = Path(tempfile.mkdtemp(prefix="commander-exes-"))
+            copy = None
             try:
+                copy = Path(tempfile.mkdtemp(prefix=f"{_KEEP_PREFIX}exes-", dir=state.anomaly))
                 for path in files:
                     shutil.copy2(path, copy / path.name)
             except OSError:
-                shutil.rmtree(copy, ignore_errors=True)
+                if copy is not None:
+                    shutil.rmtree(copy, ignore_errors=True)
             else:
                 state.bin_dir = bin_dir
                 state.exe_copy = copy

@@ -95,11 +95,11 @@ if [ "${ALLOW_DIRTY:-0}" != 1 ] && git -C "$PROJECT_DIR" rev-parse --git-dir >/d
   fi
 fi
 
-# A "dev" version label marks a test build (Settings shows "Dev"): it must
-# not reach a release by accident. ALLOW_DIRTY=1 builds it anyway.
+# A "dev" version marks a test build: it must not reach a release by
+# accident. ALLOW_DIRTY=1 builds it anyway.
 if [ "${ALLOW_DIRTY:-0}" != 1 ] \
-   && sed -n 's/^__version_label__ = "\(.*\)"/\1/p' "$PROJECT_DIR/commander_gui/__init__.py" | grep -qi dev; then
-  die "__version_label__ in commander_gui/__init__.py says dev - remove it for a release, or set ALLOW_DIRTY=1 for a test build"
+   && sed -n 's/^__version__ = "\(.*\)"/\1/p' "$PROJECT_DIR/commander_gui/__init__.py" | grep -qi dev; then
+  die "__version__ in commander_gui/__init__.py says dev - remove it for a release, or set ALLOW_DIRTY=1 for a test build"
 fi
 
 for required in curl sha256sum awk grep sed sort tail cut du install readlink cp mv rm objdump ldconfig find dirname basename; do

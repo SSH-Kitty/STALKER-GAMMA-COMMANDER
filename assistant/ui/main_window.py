@@ -673,7 +673,7 @@ class MainWindow(QMainWindow):
                 filename=Path(chosen).name,
                 partial=getattr(self, "_partial", False),
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError: a name it refuses
             QMessageBox.warning(
                 self,
                 tr("Couldn't save the report"),

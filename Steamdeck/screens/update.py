@@ -28,7 +28,7 @@ from commander_gui.ui.common import (
     BackgroundTask,
     CommandRunner,
     aggregate_progress_value,
-    mo2_running,
+    game_running,
     notice,
 )
 from commander_gui.updates import (
@@ -397,8 +397,8 @@ class UpdateScreen(DeckScreen):
     def _confirm_apply(self) -> None:
         if self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         self.window.confirm(
             tr("Update GAMMA"),
@@ -422,8 +422,8 @@ class UpdateScreen(DeckScreen):
         if self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         self._apply()
 

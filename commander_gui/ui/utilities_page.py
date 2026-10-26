@@ -57,7 +57,7 @@ from .common import (
     dir_size,
     info_label,
     make_card,
-    mo2_running,
+    game_running,
     section_label,
     tr,
 )
@@ -936,7 +936,7 @@ class UtilitiesPage(QWidget):
         if self.window.install_busy:
             QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.warning(
                 self,
                 tr("Close the game first"),
@@ -986,7 +986,7 @@ class UtilitiesPage(QWidget):
         if self.window.install_busy:
             QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.warning(
                 self,
                 tr("Close the game first"),
@@ -1059,7 +1059,7 @@ class UtilitiesPage(QWidget):
             self._repair_running = False
             QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             self._repair_running = False
             QMessageBox.warning(
                 self,
@@ -1670,7 +1670,7 @@ class UtilitiesPage(QWidget):
             return
         if not self._require_profile():
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.warning(
                 self, tr("Close the game first"), tr("Mod Organizer or the game is still open. Close it, then uninstall ROMEO.")
             )
@@ -1708,7 +1708,12 @@ class UtilitiesPage(QWidget):
     def _on_romeo_uninstalled(self, gamma: Path, removed: list[str], atmos: bool) -> None:
         self._romeo_task = None
         self.window.set_install_busy(False)
-        back_to_gamma(self.window.settings, gamma, removed)
+        try:
+            back_to_gamma(self.window.settings, gamma, removed)
+        except OSError as exc:
+            self.refresh()
+            QMessageBox.warning(self, tr("ROMEO uninstalled"), tr("Could not write settings.json:\n{exc}", exc=exc))
+            return
         self.refresh()
         QMessageBox.information(
             self,
@@ -1745,7 +1750,7 @@ class UtilitiesPage(QWidget):
 
     def _check_mo2_free(self) -> bool:
         """Warn and refuse when MO2/the game holds the files this action touches."""
-        if not mo2_running(force=True):
+        if not game_running(force=True):
             return True
         QMessageBox.information(
             self,

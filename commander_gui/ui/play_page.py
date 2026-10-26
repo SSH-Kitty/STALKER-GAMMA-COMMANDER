@@ -937,6 +937,14 @@ class PlayPage(QWidget):
                 runner.wrapper.insert(0, gamemoderun)
         return runner
 
+    def _runner_label(self) -> str:
+        """The selected runner's name for a message; never raises, since a
+        broken runner is usually why the message is shown."""
+        try:
+            return self._runner().label
+        except LaunchError:
+            return self.runner_combo.currentText()
+
     def _resolve_command(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None):
         profile = self.window.settings.active_profile
         if profile is None:
@@ -2355,7 +2363,7 @@ class PlayPage(QWidget):
                             "The selected runner ({runner}) is missing something the "
                             "game needs, so it stopped right away. This often happens "
                             "with a very new or half-installed runner.",
-                            runner=self._runner().label,
+                            runner=self._runner_label(),
                         ),
                         points=(
                             tr("Pick an older Proton-GE on the Play page and try again."),
@@ -2371,13 +2379,12 @@ class PlayPage(QWidget):
                         ),
                     )
                 elif runner_prefix_error(detail):
-                    runner = self._runner()
                     compatibility_message = tr(
                         "The selected runner couldn't use the game's Wine prefix. "
                         "This usually means a different runner version made the "
                         "prefix, or is using it right now.\n\n"
                         "Runner: {runner}\nPrefix: {prefix}",
-                        runner=runner.label,
+                        runner=self._runner_label(),
                         prefix=self._prefix_for(kind=self.runner_combo.currentData()),
                     )
                     fixes = [

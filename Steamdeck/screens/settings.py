@@ -29,7 +29,7 @@ from commander_gui.steam_shortcuts import (
     steam_is_running,
 )
 from commander_gui.themes import THEME_INFO
-from commander_gui.ui.common import BackgroundTask, mo2_running, play_click_sound
+from commander_gui.ui.common import BackgroundTask, game_running, play_click_sound
 from commander_gui.ui.deck_switch import switch_mode
 from commander_gui.updates import is_unstable_version, newer_unstable_tag
 
@@ -397,8 +397,8 @@ class SettingsScreen(DeckScreen):
         if self.window.install_busy:
             self.window.notify(tr("An install is already running."))
             return True
-        if mo2_running() or self.window.session_active():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True) or self.window.session_active():
+            self.window.notify(tr("Close the game first"))
             return True
         return False
 

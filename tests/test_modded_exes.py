@@ -79,6 +79,25 @@ class ModdedExesTest(unittest.TestCase):
             self.assertEqual(_tree(anomaly), before)
             self.assertFalse((anomaly / "commander-exes").exists())
 
+    def test_a_failed_first_install_puts_everything_back(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            anomaly = tmp / "anomaly"
+            _gamma_anomaly(anomaly)
+            before = _tree(anomaly)
+            with patch.object(exes, "_save_state", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    exes.install(_release(tmp, "2026.9.12"), anomaly, "2026.9.12")
+            self.assertEqual(_tree(anomaly), before)
+            self.assertFalse((anomaly / "commander-exes" / "original").exists())
+
+            # The retry is a first install again, so restore still works.
+            exes.install(_release(tmp, "2026.9.12"), anomaly, "2026.9.12")
+            exes.restore_original(anomaly)
+            self.assertEqual(_tree(anomaly), before)
+
     def test_gamma_update_with_kept_exes_is_cleaned_up_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

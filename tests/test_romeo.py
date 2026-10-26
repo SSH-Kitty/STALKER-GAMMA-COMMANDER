@@ -127,6 +127,26 @@ class InstallTest(unittest.TestCase):
             self.assertLess(lines.index(f"+{KEPT_MCM} 2"), lines.index(f"+{KEPT_MCM}"))
 
 
+    def test_a_cancelled_update_keeps_the_old_mods(self):
+        from threading import Event
+
+        from commander_gui.mod_install import ModInstallError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            gamma, anomaly = tmp / "gamma", tmp / "anomaly"
+            for version, mods in (("v1", ["xx-A", "xx-B"]), ("v2", ["xx-A", "xx-C"])):
+                for name in mods:
+                    _write(tmp / version / ROOT / f"GAMMA/mods/{name}/a.ltx", version)
+                _write(tmp / version / ROOT / f"GAMMA/profiles/{PROFILE}/modlist.txt", "")
+            install(tmp / "v1", ROOT, PROFILE, gamma, anomaly)
+            cancel = Event()
+            cancel.set()
+            with self.assertRaises(ModInstallError):
+                install(tmp / "v2", ROOT, PROFILE, gamma, anomaly, cancel_event=cancel)
+            self.assertEqual((gamma / "mods/xx-A/a.ltx").read_text(), "v1")
+            self.assertTrue((gamma / "mods/xx-B").is_dir())
+
 class UninstallTest(unittest.TestCase):
     def test_uninstall_puts_gamma_back(self):
         with tempfile.TemporaryDirectory() as tmp:

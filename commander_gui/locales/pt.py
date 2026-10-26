@@ -3564,4 +3564,5 @@ TRANSLATIONS: dict[str, str] = {
     'Uninstalling ROMEO': 'Desinstalando o ROMEO',
     "You're back on G.A.M.M.A.": 'Você voltou para o G.A.M.M.A.',
     "Your G.A.M.M.A mod list and saves aren't touched.": 'Sua lista de mods do G.A.M.M.A e seus saves não são alterados.',
+    "Couldn't check for updates": 'Não foi possível procurar atualizações',
 }

@@ -51,7 +51,7 @@ from commander_gui.ui.common import (
     BackgroundTask,
     CommandRunner,
     StreamTask,
-    mo2_running,
+    game_running,
     notice,
 )
 from commander_gui.ui.utilities_page import (
@@ -404,7 +404,7 @@ class UtilitiesScreen(DeckScreen):
         )
 
     def _reject_if_mo2_running(self) -> bool:
-        if mo2_running(force=True):
+        if game_running(force=True):
             self.window.notify(
                 tr("Mod Organizer / the game is currently running. Close it first.")
             )
@@ -473,8 +473,14 @@ class UtilitiesScreen(DeckScreen):
     def _on_romeo_uninstalled(self, gamma: Path, removed: list[str], atmos: bool) -> None:
         self._romeo_task = None
         self.window.set_install_busy(False)
-        back_to_gamma(self.window.settings, gamma, removed)
         self._set_actions_enabled(True)
+        try:
+            back_to_gamma(self.window.settings, gamma, removed)
+        except OSError as exc:
+            self.window.announce_finished(
+                tr("ROMEO uninstalled"), tr("Could not write settings.json:\n{exc}", exc=exc), ok=False
+            )
+            return
         self.window.update_mod_counter()
         message = tr("You're back on G.A.M.M.A.")
         if not atmos:

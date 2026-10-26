@@ -2122,18 +2122,13 @@ class ModManagerPage(QWidget):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 self._on_install_error("Mod installation cancelled", generation)
                 return
-            selected = staging.parent / "selected"
-            try:
-                apply_options(config, fomod_root, selected, dialog.selections())
-            except ModInstallError as exc:
-                self._on_install_error(str(exc), generation)
-                return
-            source = selected
+            # Copied on the finalize worker: a big FOMOD would freeze the window.
+            fomod = (config, fomod_root, dialog.selections())
+            self._finalize_mod(staging.parent / "selected", generation, fomod)
         else:
-            source = staging
-        self._finalize_mod(source, generation)
+            self._finalize_mod(staging, generation)
 
-    def _finalize_mod(self, source: Path, generation: int) -> None:
+    def _finalize_mod(self, source: Path, generation: int, fomod=None) -> None:
         try:
             profile = self._active_profile()
         except RuntimeError as exc:
@@ -2149,6 +2144,9 @@ class ModManagerPage(QWidget):
         installation_file = self._install_source.name if self._install_source else ""
 
         def worker():
+            if fomod is not None:
+                config, fomod_root, selections = fomod
+                apply_options(config, fomod_root, source, selections)
             destination = mods_dir / name
             move_payload(source, destination, self._finalize_task.cancel_event)
             write_basic_meta_ini(destination, installation_file)
@@ -2495,7 +2493,10 @@ class ModManagerPage(QWidget):
             self._install_task.cancel()
         if self._finalize_task is not None:
             self._finalize_task.cancel()
-        QMessageBox.warning(self, tr("The mod couldn't be installed"), message)
+        # The player cancelled (the FOMOD wizard or the Cancel button):
+        # nothing went wrong, so no error pop-up.
+        if message != "Mod installation cancelled":
+            QMessageBox.warning(self, tr("The mod couldn't be installed"), message)
         self._finish_install()
 
     def _cancel_install(self) -> None:

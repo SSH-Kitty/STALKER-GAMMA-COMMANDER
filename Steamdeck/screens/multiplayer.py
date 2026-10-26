@@ -614,27 +614,28 @@ class MultiplayerScreen(DeckScreen):
         return page
 
     def _help_tab(self) -> QWidget:
-        """The xrRazom guide, as on the desktop page (English only there too)."""
+        """The xrRazom guide, as on the desktop page."""
         page, layout = _panel()
         start = DeckCard()
-        start.body.addWidget(deck_label("Getting started", role="section"))
+        start.body.addWidget(deck_label(tr("Getting started"), role="section"))
         for number, (title, text) in enumerate((
-            ("Pick your role and session", "Choose Hosting or Joining above. The whole party picks the same session type and Steam game."),
-            ("Set your player name", "On the Player tab. The host knows you by this name, so keep it the same."),
-            ("Launch Co-op", "COMMANDER sets the game up for the choices above."),
-            ("Play together", "The host loads a save or starts a new game, then friends join. The Hosting and Joining tabs walk you through it."),
+            (tr("Pick your role and session"), tr("Choose Hosting or Joining above. The whole party picks the same session type and Steam game.")),
+            (tr("Set your player name"), tr("On the Player tab. The host knows you by this name, so keep it the same.")),
+            (tr("Launch Co-op"), tr("COMMANDER sets the game up for the choices above.")),
+            (tr("Play together"), tr("The host loads a save or starts a new game, then friends join. The Hosting and Joining tabs walk you through it.")),
         ), 1):
             start.body.addWidget(_step(number, title, text))
-        start.body.addWidget(_caption("Everyone needs the same mods and xrRazom version as the host."))
+        start.body.addWidget(_caption(tr("Everyone needs the same mods and xrRazom version as the host.")))
 
         works = DeckCard()
-        works.body.addWidget(deck_label("How it works", role="section"))
+        works.body.addWidget(deck_label(tr("How it works"), role="section"))
         for title, text in (
-            ("The host keeps the world", "Everything is created and saved on the host's PC. Everyone else mirrors it."),
-            ("Join any time", "Up to 5 players, the host included. Friends can join at any point in the game and leave whenever they like."),
-            ("Your name is your profile", "Change it and the host sees a new player with a fresh character."),
-            ("The host sets the rules", "Session rules on the Hosting tab apply to everyone."),
-            ("Call of Pripyat or Spacewar", "Everyone picks the same one. Call of Pripyat must be owned. Spacewar is free."),
+            (tr("The host keeps the world"), tr("Everything is created and saved on the host's PC. Everyone else mirrors it.")),
+            (tr("Join any time"), tr("Up to 5 players, the host included. Friends can join at any point in the game and leave whenever they like.")),
+            (tr("Your name is your profile"), tr("Change it and the host sees a new player with a fresh character.")),
+            (tr("The host sets the rules"), tr("Session rules on the Hosting tab apply to everyone.")),
+            (tr("Call of Pripyat or Spacewar"), tr("Everyone picks the same one. Call of Pripyat must be owned. Spacewar is free.")),
+            (tr("GAMMA or Anomaly"), tr("One Anomaly folder runs co-op for one of them at a time. To keep both ready, use a second Anomaly folder and profile for Anomaly co-op.")),
         ):
             works.body.addWidget(_fact(title, text))
         start.body.addStretch(1)
@@ -642,24 +643,24 @@ class MultiplayerScreen(DeckScreen):
         layout.addLayout(side_by_side(start, works))
 
         game = DeckCard()
-        game.body.addWidget(deck_label("In game", role="section"))
+        game.body.addWidget(deck_label(tr("In game"), role="section"))
         for key, text in (
-            ("F5 / F9", "Quicksave and quickload, if the host allows it."),
-            ("Send to", "Right-click an item or money near a player to give it to them."),
-            ("Tag / Chat", "Bind keys under Settings → Control → Keybinds → xrRazom Co-op."),
-            ("Rescue", "Pick up a downed teammate, if the host turned it on."),
-            ("Anabiotic", "Protects you from the current emission."),
+            (tr("F5 / F9"), tr("Quicksave and quickload, if the host allows it.")),
+            (tr("Send to"), tr("Right-click an item or money near a player to give it to them.")),
+            (tr("Tag / Chat"), tr("Bind keys under Settings → Control → Keybinds → xrRazom Co-op.")),
+            (tr("Rescue"), tr("Pick up a downed teammate, if the host turned it on.")),
+            (tr("Anabiotic"), tr("Protects you from the current emission.")),
         ):
             game.body.addWidget(_fact(key, text))
-        game.body.addWidget(_caption("Companions follow the host. Only the host can give them orders."))
+        game.body.addWidget(_caption(tr("Companions follow the host. Only the host can give them orders.")))
 
         fixes = DeckCard()
-        fixes.body.addWidget(deck_label("Troubleshooting", role="section"))
+        fixes.body.addWidget(deck_label(tr("Troubleshooting"), role="section"))
         for title, text in (
-            ("Join rejected", "Your mods differ from the host's. Search the game log for [xrRazom] cfg-diff to find the file."),
-            ("Crashed or out of sync", "Quit to the main menu and join again. Your progress is kept on the host."),
-            ("Quest won't progress", "Give the quest item to the host, or ask the host to talk to the NPC."),
-            ("Engine reverted", "A GAMMA update or repair put the original files back. Click Re-apply co-op."),
+            (tr("Join rejected"), tr("Your mods differ from the host's. Search the game log for [xrRazom] cfg-diff to find the file.")),
+            (tr("Crashed or out of sync"), tr("Quit to the main menu and join again. Your progress is kept on the host.")),
+            (tr("Quest won't progress"), tr("Give the quest item to the host, or ask the host to talk to the NPC.")),
+            (tr("Engine reverted"), tr("A GAMMA update or repair put the original files back. Click Re-apply co-op.")),
         ):
             fixes.body.addWidget(_fact(title, text))
         game.body.addStretch(1)
@@ -667,21 +668,21 @@ class MultiplayerScreen(DeckScreen):
         layout.addLayout(side_by_side(game, fixes))
 
         issues = DeckCard()
-        issues.body.addWidget(deck_label("Known issues", role="section"))
+        issues.body.addWidget(deck_label(tr("Known issues"), role="section"))
         for text in (
-            "Saving, loading and level changes can crash now and then. Save often.",
-            "Don't continue from an autosave made while joined. Only the host's saves hold the full game.",
-            "Weather can look slightly different for each player.",
-            "Some quests and dialogs depend on your faction.",
-            "The debug menu can desync the session. Some options, like Weather, stay in the save.",
+            tr("Saving, loading and level changes can crash now and then. Save often."),
+            tr("Don't continue from an autosave made while joined. Only the host's saves hold the full game."),
+            tr("Weather can look slightly different for each player."),
+            tr("Some quests and dialogs depend on your faction."),
+            tr("The debug menu can desync the session. Some options, like Weather, stay in the save."),
         ):
             issues.body.addWidget(_caption("• " + text))
-        issues.body.addWidget(_warn("Not in co-op yet: vehicles, personal companions and Azazel mode."))
-        issues.body.addWidget(_warn("GAMMA works with co-op, but not every mod has been tested together. Expect bugs."))
+        issues.body.addWidget(_warn(tr("Not in co-op yet: vehicles, personal companions and Azazel mode.")))
+        issues.body.addWidget(_warn(tr("GAMMA works with co-op, but not every mod has been tested together. Expect bugs.")))
         layout.addWidget(issues)
 
         tile, _discord = _tool_row(
-            "Bugs and questions", "The xrRazom Discord has support, bug reports and patches for other mods.",
+            tr("Bugs and questions"), tr("The xrRazom Discord has support, bug reports and patches for other mods."),
             lambda: open_url(self.window, coop.DISCORD_URL), button_text=tr("Open"),
         )
         layout.addWidget(tile)

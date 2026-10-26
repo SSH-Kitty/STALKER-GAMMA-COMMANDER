@@ -2826,7 +2826,7 @@ class RegressionTests(unittest.TestCase):
         )
         page._warn_game_open = lambda: InstallPage._warn_game_open(page)
         with (
-            patch("commander_gui.ui.install_page.mo2_running", return_value=True),
+            patch("commander_gui.ui.install_page.game_running", return_value=True),
             patch("commander_gui.ui.install_page.QMessageBox.warning") as warned,
             patch("commander_gui.ui.install_page.BackgroundTask") as task,
         ):
@@ -2847,7 +2847,7 @@ class RegressionTests(unittest.TestCase):
         build = SimpleNamespace(name="GE-Proton9-1", steam_uses=False)
         with (
             # Closed when asked, open by the time "Delete" is clicked.
-            patch("commander_gui.ui.proton_manager.mo2_running", side_effect=[False, True]),
+            patch("commander_gui.ui.proton_manager.game_running", side_effect=[False, True]),
             patch(
                 "commander_gui.ui.proton_manager.QMessageBox.question",
                 return_value=QMessageBoxButtons.Yes,
@@ -10277,7 +10277,7 @@ class UserModsTrackerTests(unittest.TestCase):
             # pre-apply content.
             modlist.write_text("+NewMod\n")
             with (
-                patch("commander_gui.ui.update_page.mo2_running", return_value=False),
+                patch("commander_gui.ui.update_page.game_running", return_value=False),
                 patch("commander_gui.ui.update_page.QMessageBox.question")
                 as mock_question,
                 patch("commander_gui.ui.update_page.QMessageBox.information"),
@@ -10698,7 +10698,7 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertEqual(check_commander_update("1.2.9H1"), "v1.2.9H2")
             self.assertIsNone(check_commander_update("1.2.9H2"))
 
-    def test_check_commander_update_returns_none_when_unreachable(self):
+    def test_check_commander_update_raises_when_unreachable(self):
         from commander_gui.updates import check_commander_update
 
         with (
@@ -10708,7 +10708,10 @@ class UserModsTrackerTests(unittest.TestCase):
                 side_effect=OSError("no network"),
             ),
         ):
-            self.assertIsNone(check_commander_update("1.2.9-unstable"))
+            # Not None: that would read as "up to date" for a check that
+            # never happened.
+            with self.assertRaises(OSError):
+                check_commander_update("1.2.9-unstable")
 
     def test_network_urlopen_allows_http_and_https(self):
         with patch("commander_gui.network.urllib.request.urlopen") as urlopen:
@@ -12760,6 +12763,10 @@ class UserModsTrackerTests(unittest.TestCase):
                 # to something that eventually releases the busy lock.
                 cancelled_handler = runner.cancelled.connect.call_args[0][0]
             cancelled_handler()
+            # Still locked: the CLI hasn't exited yet.
+            self.assertEqual(busy_calls, [])
+            runner.was_cancelled = True
+            page._on_anomaly_recheck_finished(130, "")
             self.assertEqual(busy_calls, [(False,)])
             self.assertTrue(page.verify_button.isEnabled())
 
@@ -13551,6 +13558,23 @@ class RepairSafetyTests(unittest.TestCase):
             self.assertEqual(
                 (gamma / "mods" / "12- Some Mod" / "gamedata" / "a.script").read_text(), "original"
             )
+
+    def test_a_reinstalled_mod_keeps_the_new_copy_with_a_symlinked_mods_folder(self):
+        from commander_gui.repair import quarantine_mod_and_archive, settle_quarantine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma = Path(tmp) / "gamma"
+            gamma.mkdir()
+            real_mods = Path(tmp) / "gamma_mods"
+            (real_mods / "12- Some Mod").mkdir(parents=True)
+            (gamma / "mods").symlink_to(real_mods)
+            record = quarantine_mod_and_archive(str(gamma), "12- Some Mod")
+            fresh = real_mods / "12- Some Mod" / "gamedata"
+            fresh.mkdir(parents=True)
+            (fresh / "a.script").write_text("reinstalled")
+            result = settle_quarantine([record])
+            self.assertEqual(result.reinstalled, ["12- Some Mod"])
+            self.assertEqual((fresh / "a.script").read_text(), "reinstalled")
 
     def test_a_reinstalled_mod_keeps_the_new_copy(self):
         from commander_gui.repair import settle_quarantine

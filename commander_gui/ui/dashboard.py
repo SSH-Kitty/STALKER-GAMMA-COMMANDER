@@ -1206,6 +1206,8 @@ class DashboardPage(QWidget):
         tag = getattr(self.window, "_commander_update_tag", None)
         if not getattr(self.window, "_commander_update_known", False):
             add_row("COMMANDER", __version_label__, tr("Checking for updates"))
+        elif getattr(self.window, "_commander_update_failed", False):
+            add_row("COMMANDER", __version_label__, tr("Unknown"), False)
         elif tag:
             add_row(
                 "COMMANDER", __version_label__, tr("Update available"), False,

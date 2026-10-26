@@ -156,8 +156,9 @@ def install(
 ) -> None:
     """Put an extracted ROMEO archive (in ``staging``) into GAMMA and Anomaly.
 
-    Over an existing ROMEO this is an update: the old ``xx-`` mods go first,
-    and the old profile's mod list is kept as ``modlist.txt.before-update``.
+    Over an existing ROMEO this is an update: the old ``xx-`` mods it no
+    longer ships go once the new ones are in, and the old profile's mod
+    list is kept as ``modlist.txt.before-update``.
     """
     src = staging / wrapper if wrapper else staging
     profile_dir = gamma / "profiles" / profile
@@ -167,15 +168,18 @@ def install(
         old_modlist = None
     if keep_mcm:
         _keep_mcm(gamma)
-    for old in old_mods(gamma):
-        shutil.rmtree(old)
     mods = sorted((src / "GAMMA" / "mods").iterdir())
+    # Old mods go only once every new one is in: a cancel or failure
+    # part way keeps a working (if mixed) ROMEO instead of a half-empty one.
+    gone = [old for old in old_mods(gamma) if old.name not in {mod.name for mod in mods}]
     for count, mod in enumerate(mods, 1):
         if cancel_event is not None and cancel_event.is_set():
             raise ModInstallError("Mod installation cancelled")
         if progress:
             progress(count, len(mods))
         _swap_dir(mod, gamma / "mods" / mod.name)
+    for old in gone:
+        shutil.rmtree(old)
     _swap_dir(src / "GAMMA" / "profiles" / profile, gamma / "profiles" / profile)
     # First install only: on an update splash.png is already ROMEO's.
     if old_modlist is None and (gamma / "splash.png").is_file() and not (gamma / _SPLASH_BACKUP).exists():

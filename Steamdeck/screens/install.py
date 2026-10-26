@@ -49,7 +49,7 @@ from commander_gui.ui.common import (
     free_space_bytes,
     gamma_installed,
     human_size,
-    mo2_running,
+    game_running,
     use_stock_mo2_profile_if_missing,
 )
 from commander_gui.ui.install_page import (
@@ -463,8 +463,8 @@ class InstallScreen(DeckScreen):
         profile = self.profile()
         if profile is None or self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
 
         message = tr("Download and install STALKER Anomaly?")
@@ -530,8 +530,8 @@ class InstallScreen(DeckScreen):
         profile = self.profile()
         if profile is None or self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
 
         offline_lists = self._offline_lists()
@@ -573,8 +573,8 @@ class InstallScreen(DeckScreen):
         if self.window.install_busy:
             self.window.notify(tr("Another task is already running."))
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         start()
 
@@ -658,8 +658,8 @@ class InstallScreen(DeckScreen):
     def _confirm_dependencies(self) -> None:
         if self.window.install_busy:
             return
-        if mo2_running():
-            self.window.notify(tr("Mod Organizer is running"))
+        if game_running(force=True):
+            self.window.notify(tr("Close the game first"))
             return
         force = getattr(self, "_deps_force", False)
         self.window.confirm(
@@ -1143,7 +1143,7 @@ class InstallScreen(DeckScreen):
             if self.window.install_busy or self._proton_manage_task is not None:
                 self.window.notify(tr("Another task is already running."))
                 return
-            if mo2_running(force=True):
+            if game_running(force=True):
                 self.window.notify(
                     tr("Mod Organizer / the game is currently running. Close it first.")
                 )

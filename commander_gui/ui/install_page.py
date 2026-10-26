@@ -103,7 +103,7 @@ from .common import (
     info_label,
     make_card,
     make_header_row,
-    mo2_running,
+    game_running,
     normalize_path,
     notify_desktop,
     paused_dependency_status,
@@ -1484,8 +1484,8 @@ class InstallPage(QWidget):
         # Stays available once installed, as Reinstall: it is the only way
         # to re-unpack mods or apply "Re-download GitHub addons".
         self.install_button.setEnabled(True)
-        self.verify_button.setEnabled(not mo2_running() and not VERIFY_INTEGRITY_DISABLED)
-        self.repair_button.setEnabled(not mo2_running())
+        self.verify_button.setEnabled(not game_running() and not VERIFY_INTEGRITY_DISABLED)
+        self.repair_button.setEnabled(not game_running())
         # Offered whenever the status is known: "Install" when something is
         # missing, "Reinstall" (winetricks --force) when it is there or half there.
         self.winetricks_button.setText(
@@ -1493,7 +1493,7 @@ class InstallPage(QWidget):
             else tr("Reinstall Dependencies")
         )
         self.winetricks_button.setEnabled(
-            self._wt_installed is not None and not mo2_running()
+            self._wt_installed is not None and not game_running()
         )
         self.anomaly_edit.setEnabled(True)
         self.gamma_edit.setEnabled(True)
@@ -1934,7 +1934,8 @@ class InstallPage(QWidget):
         # Kept across failed and resumed attempts: a run that failed midway
         # may already have replaced the modlist, so capturing again on
         # resume would save the stock list instead of the user's.
-        # ponytail: an abandoned failed install leaves the exe copy in /tmp.
+        # An abandoned failed install leaves the exe copy in the Anomaly
+        # folder until the next capture() clears it.
         if getattr(self, "_kept", None) is None and gamma_installed(
             profile.gamma, profile.mo2_profile
         ):
@@ -2543,7 +2544,7 @@ class InstallPage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             # The game holds the Wine prefix; verification must not read it.
             QMessageBox.information(
                 self,
@@ -2638,6 +2639,7 @@ class InstallPage(QWidget):
         # 'finished' still arrives after a cancel (the CLI exits in response to
         # SIGINT), so the cancelled run must not fall through to the next stage.
         if self._verify_runner is not None and self._verify_runner.was_cancelled:
+            self._verify_cancel_done()
             return
         counts = self._verify_counts
         self.verify_progress.log.append_line("")
@@ -2876,7 +2878,7 @@ class InstallPage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.information(
                 self,
                 tr("Close the game first"),
@@ -3023,6 +3025,7 @@ class InstallPage(QWidget):
 
     def _on_anomaly_repair_finished(self, rc, output):
         if self._verify_runner is not None and self._verify_runner.was_cancelled:
+            self._verify_cancel_done()
             return
         repair_ok = cli_ok(rc, output, "")
         self.verify_progress.log.append_line(
@@ -3050,6 +3053,7 @@ class InstallPage(QWidget):
         if self._verify_runner is not None and self._verify_runner.was_cancelled:
             # A cancelled re-check delivers a partial verdict; do not let it
             # conclude the repair pipeline as if the check had passed/failed.
+            self._verify_cancel_done()
             return
         counts = self._verify_counts
         parsed = sum(counts.values())
@@ -3775,7 +3779,13 @@ class InstallPage(QWidget):
             return
 
     def _on_verify_cancelled(self, stage: str = "Anomaly check"):
+        # The CLI is still exiting (an Anomaly repair may still be writing
+        # files); the runner's finished handler unlocks once it has.
         self.verify_progress.log.append_line(f"{stage} cancelled")
+        self.verify_progress.status_message(tr("Cancelling"))
+
+    def _verify_cancel_done(self):
+        """The cancelled Anomaly check/repair/re-check has exited."""
         self.verify_button.setEnabled(True)
         self._set_verify_console(False)
         self.verify_progress.on_cancelled()
@@ -3812,7 +3822,7 @@ class InstallPage(QWidget):
         if getattr(self.window, "install_operation", None) == "dependencies":
             # Live "Installing..." status must survive refreshes.
             return
-        if mo2_running():
+        if game_running():
             self._paused_status()
             return
         self._wt_installed = None
@@ -3831,7 +3841,7 @@ class InstallPage(QWidget):
         if getattr(self.window, "install_operation", None) == "dependencies":
             # Live "Installing..." status must survive refreshes.
             return
-        if mo2_running():
+        if game_running():
             # The game started while the check was in flight; the result is stale.
             self._paused_status()
             return
@@ -3856,7 +3866,7 @@ class InstallPage(QWidget):
         self._wt_checking = False
         if getattr(self.window, "install_operation", None) == "dependencies":
             return
-        if mo2_running():
+        if game_running():
             self._paused_status()
             return
         self._wt_installed = None
@@ -3871,7 +3881,7 @@ class InstallPage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             # The game holds the Wine prefix; winetricks must not touch it.
             self._warn_game_open()
             return
@@ -3908,7 +3918,7 @@ class InstallPage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             self._warn_game_open()
             return
         if errors:
@@ -3954,7 +3964,7 @@ class InstallPage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.information(
                 self,
                 tr("Close the game first"),

@@ -37,7 +37,7 @@ from ..integrity import format_size
 from .common import (
     StreamTask,
     info_label,
-    mo2_running,
+    game_running,
     open_in_file_manager,
 )
 from .dialogs import InputDialog as QInputDialog
@@ -237,7 +237,7 @@ class BackupDialog(QDialog):
         if not (saves or settings):
             QMessageBox.information(self, tr("Nothing selected"), tr("Tick Saves, settings, or both, then press Restore."))
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.information(
                 self,
                 tr("Close the game first"),

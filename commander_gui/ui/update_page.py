@@ -66,7 +66,7 @@ from .common import (
     info_label,
     install_hover_grow_text,
     make_card,
-    mo2_running,
+    game_running,
     notice,
     notify_desktop,
     play_click_sound,
@@ -591,7 +591,7 @@ class UpdatePage(QWidget):
         modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
         if modlist_path is None:
             return
-        if mo2_running():
+        if game_running():
             QMessageBox.warning(
                 self,
                 tr("Close the game first"),
@@ -960,7 +960,7 @@ class UpdatePage(QWidget):
 
         # Re-checked after the questions above: another page could have
         # started an install (or MO2 been opened) while they were showing.
-        if self.window.install_busy or mo2_running(force=True):
+        if self.window.install_busy or game_running(force=True):
             QMessageBox.warning(
                 self,
                 tr("Please wait"),

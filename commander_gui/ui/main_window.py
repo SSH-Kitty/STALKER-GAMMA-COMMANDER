@@ -78,7 +78,7 @@ from .common import (
     count_active_mods,
     human_size,
     instance_window_title,
-    mo2_running,
+    game_running,
     notice,
     notify_desktop,
     open_url,
@@ -374,6 +374,7 @@ class MainWindow(QMainWindow):
         #: but not restarted into yet - both drive the update banner.
         self._commander_update_tag: str | None = None
         self._commander_update_known = False
+        self._commander_update_failed = False
         self._ready_update: tuple[str, Path] | None = None
 
         # Built before _build_ui(): constructing pages there (e.g. the
@@ -1032,7 +1033,26 @@ class MainWindow(QMainWindow):
             check_commander_update, __version__, channel=channel, parent=self
         )
         task.result.connect(self._on_commander_update_status_checked)
+        task.error.connect(self._on_commander_update_check_failed)
         task.start()
+
+    def _on_commander_update_check_failed(self, _message: str) -> None:
+        button = self._update_status_button
+        previous = getattr(self, "_update_status_handler", None)
+        if previous is not None:
+            try:
+                button.clicked.disconnect(previous)
+            except (RuntimeError, TypeError):
+                pass
+            self._update_status_handler = None
+        self._commander_update_tag = None
+        button.setText(tr("Couldn't check for updates"))
+        button.setStyleSheet("border: none;")
+        button.setEnabled(False)
+        self._commander_update_known = True
+        self._commander_update_failed = True
+        self._refresh_update_banner()
+        self.commander_update_checked.emit()
 
     def _on_commander_update_status_checked(self, tag: object) -> None:
         button = self._update_status_button
@@ -1066,6 +1086,7 @@ class MainWindow(QMainWindow):
             button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
             button.setEnabled(False)
         self._commander_update_known = True
+        self._commander_update_failed = False
         self._refresh_update_banner()
         self.commander_update_checked.emit()
 
@@ -1592,7 +1613,7 @@ class MainWindow(QMainWindow):
         if it's safe to proceed. Shared by apply_theme() and apply_language()
         since both are blocked by the same two conditions: a background task
         (install_busy) or the game/Mod Organizer currently running (same
-        mo2_running() check the Launch Game button itself uses) - changing
+        game_running() check, which also sees a game started without MO2) - changing
         either while the game is running is refused even though nothing
         about apply_theme() itself is unsafe then, to keep the two pickers'
         behavior consistent and predictable for the user.
@@ -1601,7 +1622,7 @@ class MainWindow(QMainWindow):
         # would orphan its task the same way and leave it "busy" for good.
         if self.install_busy or moddb_controller(self).busy:
             QMessageBox.warning(self, tr("Please wait"), busy_message)
-        elif mo2_running():
+        elif game_running(force=True):
             QMessageBox.warning(
                 self,
                 tr("Please wait"),
@@ -1642,8 +1663,8 @@ class MainWindow(QMainWindow):
         similar task is running): every page - and the background thread
         driving that task, which the page's own widgets hold a reference
         to - would be torn down and rebuilt, terminating or orphaning it.
-        Also refused while the game/Mod Organizer is running, the same
-        ``mo2_running()`` check the Launch Game button itself uses - it
+        Also refused while the game/Mod Organizer is running
+        (``game_running()``, which also sees a game started without MO2) - it
         becomes available again once the game quits.
         """
         if self._reject_language_or_theme_change(

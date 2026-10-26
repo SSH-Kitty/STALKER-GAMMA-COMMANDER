@@ -782,7 +782,10 @@ class DeckModInstaller(QObject):
                 self.window.notify(tr("Couldn't change the MO2 profile") + ": " + out.strip(), 8000)
                 return
             profile.mo2_profile = name
-            self.window.settings.save()
+            try:
+                self.window.settings.save()
+            except OSError as exc:
+                self.window.notify(tr("Could not write settings.json:\n{exc}", exc=exc), 8000)
             self.screen.refresh()
             self.window.update_mod_counter()
 

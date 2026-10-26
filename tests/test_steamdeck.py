@@ -1099,7 +1099,7 @@ class DeckUtilitiesTests(DeckWindowFixture):
 
         utilities = self.goto("utilities")
         with (
-            patch("Steamdeck.screens.utilities.mo2_running", return_value=False),
+            patch("Steamdeck.screens.utilities.game_running", return_value=False),
             patch(
                 "Steamdeck.screens.utilities.cli_command", return_value=["stub"]
             ) as cli,
@@ -1132,7 +1132,7 @@ class DeckUtilitiesTests(DeckWindowFixture):
 
         utilities = self.goto("utilities")
         with (
-            patch("Steamdeck.screens.utilities.mo2_running", return_value=True),
+            patch("Steamdeck.screens.utilities.game_running", return_value=True),
             patch("Steamdeck.screens.utilities.CommandRunner") as runner_cls,
         ):
             utilities._purge_shader_cache()

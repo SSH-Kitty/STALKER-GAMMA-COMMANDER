@@ -62,7 +62,7 @@ from .common import (
     NoWheelComboBox,
     discord_presence_state,
     make_card,
-    mo2_running,
+    game_running,
     open_in_file_manager,
     pick_shortcuts_vdf,
     populate_runner_combo,
@@ -1419,7 +1419,7 @@ class SettingsPage(QWidget):
             gui_settings.save_gui_settings(runner=runner)
 
     def _open_winecfg(self) -> None:
-        if mo2_running(force=True):
+        if game_running(force=True):
             # The game holds the Wine prefix; winecfg must not touch it live.
             QMessageBox.information(
                 self,
@@ -1452,7 +1452,7 @@ class SettingsPage(QWidget):
         dpi = self._display_scale_combo.currentData()
         if not isinstance(dpi, int):
             return
-        if mo2_running(force=True):
+        if game_running(force=True):
             # The game holds the Wine prefix; writing to its registry live
             # risks the same corruption already guarded against for winetricks.
             QMessageBox.information(

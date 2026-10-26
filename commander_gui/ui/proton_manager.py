@@ -36,7 +36,7 @@ from ..proton_installer import (
     installed_builds,
     remove_build,
 )
-from .common import BackgroundTask, info_label, mo2_running, section_label
+from .common import BackgroundTask, info_label, game_running, section_label
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import style_window
 
@@ -443,7 +443,7 @@ class ProtonManagerDialog(QDialog):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another task is still running. Wait for it to finish, then try again."))
             return False
-        if mo2_running(force=True):
+        if game_running(force=True):
             QMessageBox.information(
                 self,
                 tr("Close the game first"),

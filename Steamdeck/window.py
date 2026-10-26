@@ -285,7 +285,7 @@ class DeckWindow(QMainWindow):
 
         #: The newest release tag if COMMANDER is out of date, "" if up to
         #: date, None until the startup check answers.
-        self._commander_update: str | None = None
+        self._commander_update: str | bool | None = None
         self._render_update_badge()
         if fatal is None:
             self._check_commander_update()
@@ -1122,13 +1122,18 @@ class DeckWindow(QMainWindow):
             check_commander_update, __version__, channel=channel, parent=self
         )
         task.result.connect(self._on_commander_update)
-        task.error.connect(lambda _m: None)
+        task.error.connect(self._on_commander_update_failed)
         self._update_task = task
         task.start()
 
     def _on_commander_update(self, tag: object) -> None:
         self._update_task = None
         self._commander_update = tag if isinstance(tag, str) and tag else ""
+        self._render_update_badge()
+
+    def _on_commander_update_failed(self, _message: str) -> None:
+        self._update_task = None
+        self._commander_update = False  # checked, but GitHub didn't answer
         self._render_update_badge()
 
     def _render_update_badge(self) -> None:
@@ -1138,6 +1143,9 @@ class DeckWindow(QMainWindow):
         tag = getattr(self, "_commander_update", None)
         if tag is None:
             badge.setText(tr("Checking for updates"))
+            badge.setObjectName("deckHint")
+        elif tag is False:
+            badge.setText(tr("Couldn't check for updates"))
             badge.setObjectName("deckHint")
         elif tag:
             badge.setText(tr("COMMANDER update available"))
@@ -1242,9 +1250,21 @@ class DeckWindow(QMainWindow):
             )
             QTimer.singleShot(0, status, lambda: status.setText(heading + "\n" + text))
 
+        overlay = DeckOverlay(
+            tr("Updating COMMANDER"), status, [(tr("Cancel"), task.cancel_event.set, "normal")],
+        )
+        # B keeps the panel: closing it would hide Cancel and the progress
+        # while the download carries on.
+        overlay.back_handler = lambda: True
+
+        def close_panel() -> None:
+            # Only this panel: another one may have replaced it since.
+            if self.current_overlay() is overlay:
+                self.dismiss_overlay()
+
         def done(path: object) -> None:
             self.set_install_busy(False)
-            self.dismiss_overlay()
+            close_panel()
             if on_installed is not None:
                 on_installed()
             self.confirm(
@@ -1256,7 +1276,7 @@ class DeckWindow(QMainWindow):
 
         def failed(message: str) -> None:
             self.set_install_busy(False)
-            self.dismiss_overlay()
+            close_panel()
             if not task.cancel_event.is_set():
                 self.confirm(
                     tr("COMMANDER couldn't update"),
@@ -1268,9 +1288,7 @@ class DeckWindow(QMainWindow):
         task.result.connect(done)
         task.error.connect(failed)
         self.set_install_busy(True, "commander_update")
-        self.show_overlay(DeckOverlay(
-            tr("Updating COMMANDER"), status, [(tr("Cancel"), task.cancel_event.set, "normal")],
-        ))
+        self.show_overlay(overlay)
         task.start()
 
     def _quick_play(self) -> None:
