@@ -50,6 +50,7 @@ from commander_gui.ui.common import (
     gamma_installed,
     human_size,
     mo2_running,
+    use_stock_mo2_profile_if_missing,
 )
 from commander_gui.ui.install_page import (
     OFFLINE_GUIDE_URL,
@@ -578,6 +579,7 @@ class InstallScreen(DeckScreen):
             except OSError as exc:
                 self.window.notify(str(exc), 6000)
                 return False
+        use_stock_mo2_profile_if_missing(self.window.settings, profile)
 
         # Both must genuinely exist before trusting the cache to skip
         # re-extraction. Checking Anomaly alone is wrong straight after a

@@ -128,6 +128,30 @@ class OverlayTests(unittest.TestCase):
         self.assertLess(config.index("\ntime\n"), config.index("\nfps\n"))
         self.assertIn("background_alpha=0.0\n", config)
         self.assertIn("\nhorizontal\n", config)
+        # MangoHud shows the ms next to FPS unless told not to.
+        self.assertIn("\nframetime=0\n", config)
+        gui_settings.save_gui_settings(mangohud_items=["fps", "frametime"])
+        self.assertNotIn("frametime=0", overlays.write_mangohud_config().read_text())
+        self.assertNotIn("fps_limit", overlays.write_mangohud_config().read_text())
+        gui_settings.save_gui_settings(mangohud_items=["fps", "lows"], mangohud_start_hidden=True,
+                                       mangohud_colours=True)
+        config = overlays.write_mangohud_config().read_text()
+        for line in ("fps_metrics=0.01,0.001", "no_display", "fps_color_change", "core_load_change"):
+            self.assertIn(f"\n{line}\n", config)
+        gui_settings.save_gui_settings(mangohud_start_hidden="yes", mangohud_colours=0)  # hand-typed junk
+        config = overlays.write_mangohud_config().read_text()
+        self.assertNotIn("no_display", config)
+        self.assertNotIn("color_change", config)
+        # Full leaves out the core list and the NVIDIA-lagging throttling check.
+        gui_settings.save_gui_settings(mangohud_preset="full")
+        config = overlays.write_mangohud_config().read_text()
+        self.assertIn("\nio_read\n", config)
+        self.assertNotIn("core_load\n", config)
+        self.assertNotIn("throttling_status", config)
+        gui_settings.save_gui_settings(mangohud_preset="custom", mangohud_fps_limit=144)
+        self.assertIn("\nfps_limit=144\n", overlays.write_mangohud_config().read_text())
+        gui_settings.save_gui_settings(mangohud_fps_limit=143)  # hand-typed junk
+        self.assertNotIn("fps_limit", overlays.write_mangohud_config().read_text())
 
     def test_a_bar_stays_on_the_left(self):
         # MangoHud draws a bar across the whole screen, so right can't work.
@@ -164,6 +188,15 @@ class OverlayTests(unittest.TestCase):
         # And back: a bar moves the HUD to the left corner.
         page._graphics._mangohud_layout.setCurrentIndex(page._graphics._mangohud_layout.findData("bar"))
         self.assertEqual(page._graphics._mangohud_position.currentData(), "top-left")
+
+    def test_bundled_mangohud_over_an_installed_one(self):
+        # Only the bundled one is patched to reload its config safely: stock
+        # MangoHud 0.8.4 crashed the game when Full was picked mid-game.
+        env = {}
+        with patch.object(overlays, "mangohud_installed", return_value=True):
+            prefix = overlays.resolve(env, [overlays.MANGOHUD, "game"])
+        self.assertEqual(prefix, ["game"])
+        self.assertEqual(env["COMMANDER_MANGOHUD"], "1")
 
     def test_graphics_overlay_window_and_key(self):
         from PySide6.QtWidgets import QApplication
@@ -230,6 +263,24 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(hint._timer.interval(), 10_000)
         self.assertTrue(hint._timer.isActive())
 
+    def test_graphics_overlay_widens_for_a_big_font(self):
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.themes import build_stylesheet
+        from commander_gui.ui import graphics_window
+
+        app = QApplication.instance() or QApplication([])
+        app.setStyleSheet(build_stylesheet("gamma", font_size=18, font_family="DejaVu Sans"))
+        try:
+            window = graphics_window.GraphicsWindow()
+            window.toggle()
+            app.processEvents()
+            # The Performance overlay card shows whole: no sideways scrolling.
+            self.assertEqual(window.pages.widget(0).horizontalScrollBar().maximum(), 0)
+            window.hide()
+        finally:
+            app.setStyleSheet("")
+
 
     def test_overlay_takes_focus_unless_the_game_is_fullscreen(self):
         from commander_gui.ui import graphics_window
@@ -248,9 +299,9 @@ class OverlayTests(unittest.TestCase):
     def test_dll_label_shows_folder_and_version(self):
         dll = self.tmp / "Lossless.dll"
         dll.write_bytes(b"MZ" + "FileVersion".encode("utf-16-le") + b"\0\0" + "3.2.2.0".encode("utf-16-le") + b"\0\0")
-        self.assertEqual(launch_options.dll_label(dll), f"{dll} 3.2.2")
+        self.assertEqual(launch_options.dll_label(dll), f"{self.tmp.name}/Lossless.dll 3.2.2")
         dll.write_bytes(b"MZ no version here")
-        self.assertEqual(launch_options.dll_label(dll), str(dll))
+        self.assertEqual(launch_options.dll_label(dll), f"{self.tmp.name}/Lossless.dll")
 
     def test_typed_frame_gen_values_never_break_the_config(self):
         # Hand-typed launch options: junk falls back, numbers are clamped.
@@ -358,6 +409,43 @@ class OverlayTests(unittest.TestCase):
                 with self.subTest(look=name, grey=grey):
                     self.assertLess(abs(luma / grey - 1), 0.25)
                     self.assertLess((max(r, g, b) - min(r, g, b)) / grey, 0.16)
+
+    def test_umbriel_rule_and_socket_move(self):
+        import socket
+        import threading
+        import tomllib
+
+        from commander_gui.ui import graphics_window
+
+        rule = tomllib.loads(graphics_window.UMBRIEL_RULE)["window_rule"][0]
+        self.assertRegex(graphics_window.TITLE, rule["match"]["title"])
+        self.assertEqual(rule["default_floating_size_px"]["width"], graphics_window._WIDTH)
+        # Umbriel's socket: the windows list, then the move for the panel only.
+        path = str(self.tmp / "umbriel.sock")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(path)
+        server.listen()
+        self.addCleanup(server.close)
+        got = []
+        replies = [{"ok": [{"id": 3, "title": "Firefox"}, {"id": 7, "title": graphics_window.TITLE}]}, {"ok": None}]
+
+        def serve():
+            for reply in replies:
+                conn, _ = server.accept()
+                with conn:
+                    got.append(json.loads(conn.makefile("rb").readline()))
+                    conn.sendall(json.dumps(reply).encode() + b"\n")
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        with patch.dict(os.environ, {"UMBRIEL_SOCKET": path}):
+            self.assertTrue(graphics_window.on_umbriel())
+            graphics_window._umbriel_dock()
+        thread.join(2)
+        self.assertEqual(got, [{"cmd": "windows"}, {"cmd": "msg", "arg": "window-move-to:top_left/0/0/7"}])
+        # No Umbriel running: nothing raised.
+        with patch.dict(os.environ, {"UMBRIEL_SOCKET": str(self.tmp / "gone.sock")}):
+            graphics_window._umbriel_dock()
 
 if __name__ == "__main__":
     unittest.main()

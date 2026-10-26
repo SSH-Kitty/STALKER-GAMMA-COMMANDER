@@ -29,6 +29,14 @@ class CommanderLogTests(unittest.TestCase):
             (logs / "xray_a.log").write_text("Starting engine...\nInternalCloseLog\n")
             self.assertIn("shut down normally", engine_log_summary(tmp, since))
 
+    def test_dump_keeps_the_previous_launch_log(self):
+        from commander_gui.log_dump import _is_candidate
+
+        self.assertTrue(_is_candidate(Path("launcher.log.1")))
+        self.assertTrue(_is_candidate(Path("commander.log.1")))
+        self.assertFalse(_is_candidate(Path("launcher.log.stale-1789855249")))
+        self.assertFalse(_is_candidate(Path("libfoo.so.1")))
+
     def test_scrub_hides_the_login_name_in_any_path_form(self):
         from commander_gui.log_dump import _scrub
 

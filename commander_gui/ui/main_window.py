@@ -823,6 +823,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_overflow()
+        self._fit_status_bar()
 
     def _sync_topbar_min_width(self) -> None:
         """Window never narrower than the smallest bar that still works.
@@ -1008,6 +1009,12 @@ class MainWindow(QMainWindow):
         # text gets the same breathing room from the window edges as pages.
         self.statusBar().setContentsMargins(12, 0, 12, 4)
         self.statusBar().addPermanentWidget(update_area)
+        self._status_update_area = update_area
+        # Narrower than all of it is fine: _fit_status_bar hides the left
+        # group then. Left to its own size hint the bar (~1300 px) set the
+        # window's minimum, and tiling compositors (niri and the like) that
+        # give it a narrower column drew it cut off at the right.
+        self.statusBar().setMinimumWidth(1)
 
     def _check_commander_update_status(self) -> None:
         """Best-effort, non-blocking check for a newer COMMANDER release.
@@ -1365,6 +1372,35 @@ class MainWindow(QMainWindow):
         self._status_fontsize_combo.blockSignals(True)
         self._status_fontsize_combo.setCurrentIndex(max(size_index, 0))
         self._status_fontsize_combo.blockSignals(False)
+        self._fit_status_bar()
+
+    def _fit_status_bar(self) -> None:
+        """Hide the version, profile and Language/Theme/Font boxes when the
+        window is too narrow for them; all of it is on Settings too. The
+        update status, Discord and GitHub stay."""
+        if getattr(self, "_status_update_area", None) is None:  # not built yet
+            return
+        left = (
+            self._status_info_label,
+            self._status_language_combo,
+            self._status_theme_label,
+            self._status_theme_combo,
+            self._status_font_label,
+            self._status_font_combo,
+            self._status_fontsize_combo,
+        )
+        bar = self.statusBar()
+        margins = bar.contentsMargins()
+        need = (
+            margins.left()
+            + margins.right()
+            + sum(w.sizeHint().width() + 6 for w in left)
+            + self._status_update_area.sizeHint().width()
+            + 24  # slack between the groups, so text never clips
+        )
+        fits = need <= self.width()
+        for widget in left:
+            widget.setVisible(fits)
 
     def _on_status_language(self, *_args) -> None:
         code = self._status_language_combo.currentData()

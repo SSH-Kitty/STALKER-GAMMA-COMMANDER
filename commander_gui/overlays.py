@@ -33,21 +33,30 @@ MANGOHUD_ITEMS = {
     "time": ("time",),
     "gpu": ("gpu_stats", "gpu_temp"),
     "cpu": ("cpu_stats", "cpu_temp"),
+    # Anomaly leans on one core, which the overall CPU load hides.
+    "cores": ("core_load",),
+    "disk": ("io_read", "io_write"),
     "memory": ("ram", "vram"),
     "procmem": ("procmem",),
     "battery": ("battery",),
+    # Only shows while the GPU is held back by heat or power.
+    "throttling": ("throttling_status",),
     "fps": ("fps",),
     "frametime": ("frametime",),
+    "lows": ("fps_metrics=0.01,0.001",),
     "graph": ("frame_timing",),
 }
 MANGOHUD_PRESETS = {
     "fps": ("fps",),
     "basic": ("gpu", "cpu", "fps", "graph"),
-    "full": tuple(MANGOHUD_ITEMS),
+    # Not per-core load (a line per core) or throttling (lags RTX 30 cards).
+    "full": tuple(item for item in MANGOHUD_ITEMS if item not in ("cores", "throttling")),
 }
 MANGOHUD_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right")
 MANGOHUD_SIZES = {"small": 18, "medium": 24, "large": 32}
 MANGOHUD_LAYOUTS = ("box", "bar")
+#: MangoHud's frame rate caps; 0 is no cap.
+MANGOHUD_FPS_LIMITS = (0, 30, 60, 90, 120, 144, 165, 240)
 #: X keysym names, as MangoHud and vkBasalt read them. None is bound in
 #: Anomaly; F11, F12 (screenshot) and Pause are, so they're left out.
 MANGOHUD_KEYS = ("Insert", "Scroll_Lock", "Page_Up")
@@ -82,6 +91,9 @@ _DEFAULTS = {
     # Percent transparent: 0 is solid. MangoHud's own defaults.
     "mangohud_background_transparency": 50,
     "mangohud_transparency": 0,
+    "mangohud_fps_limit": 0,
+    "mangohud_start_hidden": False,
+    "mangohud_colours": False,
     "vkbasalt_preset": "natural",
     "vkbasalt_sharpness": "medium",
     "vkbasalt_sharpener": "cas",
@@ -97,6 +109,9 @@ def _own_mangohud_conf() -> bool:
     return (config / "MangoHud" / "MangoHud.conf").is_file()
 
 
+_SWITCHES = ("mangohud_start_hidden", "mangohud_colours", "vkbasalt_start_off")
+
+
 def settings() -> dict:
     """Settings > Graphics, with anything missing or hand-broken defaulted."""
     stored = gui_settings.load_gui_settings()
@@ -109,6 +124,9 @@ def settings() -> dict:
         "mangohud_layout": MANGOHUD_LAYOUTS,
         "mangohud_background_transparency": range(101),
         "mangohud_transparency": range(91),
+        "mangohud_fps_limit": MANGOHUD_FPS_LIMITS,
+        "mangohud_start_hidden": (True, False),
+        "mangohud_colours": (True, False),
         "vkbasalt_preset": VKBASALT_PRESETS,
         "vkbasalt_sharpness": tuple(VKBASALT_SHARPNESS),
         "vkbasalt_sharpener": VKBASALT_SHARPENERS,
@@ -118,7 +136,7 @@ def settings() -> dict:
         **{f"vkbasalt_{name}": range(-50, 51) for name in VKBASALT_COLOURS},
     }
     for key, allowed in choices.items():
-        if isinstance(data[key], bool) != (key == "vkbasalt_start_off") or data[key] not in allowed:
+        if isinstance(data[key], bool) != (key in _SWITCHES) or data[key] not in allowed:
             data[key] = _DEFAULTS[key]
     if not data["mangohud_preset"]:
         data["mangohud_preset"] = "own" if _own_mangohud_conf() else "basic"
@@ -184,9 +202,20 @@ def mangohud_config(data: dict) -> str:
              f"alpha={(100 - data['mangohud_transparency']) / 100}"]
     if data["mangohud_layout"] == "bar":
         lines.append("horizontal")
+    if data["mangohud_fps_limit"]:
+        # Under frame generation MangoHud caps the generated frames too.
+        lines.append(f"fps_limit={data['mangohud_fps_limit']}")
+    if data["mangohud_start_hidden"]:
+        lines.append("no_display")
+    if data["mangohud_colours"]:
+        # Red, yellow, green by MangoHud's own break points (30/60 FPS, 60/90% load).
+        lines += ["fps_color_change", "gpu_load_change", "cpu_load_change", "core_load_change"]
     for item, config in MANGOHUD_ITEMS.items():
         if item in data["mangohud_items"]:
             lines += config
+    if "frametime" not in data["mangohud_items"]:
+        # Not an element but a flag on the FPS line, on unless switched off.
+        lines.append("frametime=0")
     return "\n".join(lines) + "\n"
 
 
@@ -329,9 +358,10 @@ def resolve(env: dict[str, str], prefix: list[str]) -> list[str]:
     if mangohud:
         if data["mangohud_preset"] != "own":
             env["MANGOHUD_CONFIGFILE"] = str(write_mangohud_config(data))
-        # With frame generation the bundled one even over an installed one,
-        # to count the generated frames too.
-        if (frame_gen or not mangohud_installed()) and _install_bundled("mangohud"):
+        # The bundled one even over an installed one: it is patched to reload
+        # its config safely (stock MangoHud 0.8.4 can crash the game when its
+        # config changes mid-game; packaging/mangohud-reload-lock.patch).
+        if _install_bundled("mangohud"):
             prefix = [token for token in prefix if token != MANGOHUD]
             if frame_gen:
                 _under_frame_gen(env, "mangohud")

@@ -20,6 +20,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -115,6 +116,7 @@ from .common import (
     discord_presence_state,
     exe_pids,
     format_playtime,
+    game_running,
     gamma_installed,
     info_label,
     install_hover_grow_text,
@@ -450,6 +452,7 @@ class PlayPage(QWidget):
         self._launch_status_clear_timer.timeout.connect(self._clear_launch_status)
         self._crash_report_task: BackgroundTask | None = None
         self._repair_task: BackgroundTask | None = None
+        self._coop_switch_task: BackgroundTask | None = None
         self._launch_started_at: float | None = None
         self._discord_rpc = None
         self._discord_wanted = False
@@ -647,6 +650,7 @@ class PlayPage(QWidget):
         options_layout.addWidget(self.custom_options_edit)
         cards_row = QHBoxLayout()
         cards_row.setSpacing(16)
+        self._cards_row = cards_row  # stacked when narrow, see resizeEvent
         cards_row.addWidget(options_card, 3)
         self._frame_gen = FrameGenCard(self.custom_options_edit.text, self.custom_options_edit.setText)
         self._frame_gen.dll_changed.connect(self._refresh_preview)
@@ -696,6 +700,23 @@ class PlayPage(QWidget):
         self._load_state()
         self._refresh_preview()
         self._update_playtime_label()
+
+    def resizeEvent(self, event) -> None:
+        """Launch options above Frame generation when they don't fit side
+        by side: tiling compositors give the window a narrow column."""
+        super().resizeEvent(event)
+        row = self._cards_row
+        need = (
+            self._options_card.minimumSizeHint().width()
+            + self._frame_gen.minimumSizeHint().width()
+            + row.spacing()
+            + 64 + 16  # the page's side margins, and a scroll bar
+        )
+        row.setDirection(
+            QBoxLayout.Direction.LeftToRight
+            if self.width() >= need
+            else QBoxLayout.Direction.TopToBottom
+        )
 
     @property
     def is_launching(self) -> bool:
@@ -1063,9 +1084,6 @@ class PlayPage(QWidget):
             self.launch_button.setToolTip(tip)
             self.open_mo2_button.setToolTip(tip)
             self.direct_button.setToolTip(tip)
-        if self._coop_on() and not self._plain_coop_on():
-            self.direct_button.setEnabled(False)
-            self.direct_button.setToolTip(tr("Co-op is active. Anomaly cannot be launched without Mod Organizer 2 in co-op mode."))
         if not self._launching:
             set_hover_grow_text(self.launch_button, self._launch_text())
         # Co-op leaves these out (see coop_shortcut_fields).
@@ -1590,6 +1608,14 @@ class PlayPage(QWidget):
         profile = self.window.settings.active_profile
         if (
             coop_launch is None and profile is not None and coop.is_active(profile.anomaly)
+            and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
+        ):
+            # GAMMA co-op keeps half of xrRazom in an MO2 mod, so move it to
+            # Anomaly first (Multiplayer's "Play co-op on" switch).
+            self._switch_coop_to_anomaly(profile)
+            return
+        if (
+            coop_launch is None and profile is not None and coop.is_active(profile.anomaly)
             and coop.install_kind(profile.anomaly) == coop.KIND_ANOMALY
         ):
             # Plain Anomaly co-op: the player name and a Steam session
@@ -1605,6 +1631,31 @@ class PlayPage(QWidget):
                 self.target_combo.setCurrentText(fallback)
         self._set_launch_button_state(True)
         self._run(open_mo2=False, direct=True, coop_launch=coop_launch)
+
+    def _switch_coop_to_anomaly(self, profile) -> None:
+        if mo2_running(force=True) or game_running(force=True):
+            QMessageBox.warning(self, tr("Close the game first"), tr("Mod Organizer 2 or the game is still open. Close both, then try again."))
+            return
+        self.window.set_install_busy(True, "coop")
+        self._set_result(tr("Switching co-op to Anomaly…"))
+
+        def finish(error: str | None) -> None:
+            self._coop_switch_task = None
+            self.window.set_install_busy(False)
+            self.window.update_mod_counter()  # the co-op mod left MO2's list
+            if error is not None:
+                self._set_result(tr("Failed: {error}", error=tr(error)), error=True)
+                return
+            self._set_result(tr("Co-op is set up for Anomaly"))
+            self.launch_game()
+
+        task = BackgroundTask(
+            coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, coop.KIND_ANOMALY, parent=self
+        )
+        task.result.connect(lambda _result: finish(None))
+        task.error.connect(finish)
+        self._coop_switch_task = task
+        task.start()
 
     def _run(self, *, open_mo2: bool, direct: bool, runner=None, coop_launch: bool | None = None) -> None:
         """Launch the game through Mod Organizer 2 or directly."""
@@ -2614,7 +2665,7 @@ class PlayPage(QWidget):
         )
         self.launch_button.setEnabled(True)
         self.open_mo2_button.setEnabled(not launching)
-        self.direct_button.setEnabled(not launching and (not self._coop_on() or self._plain_coop_on()))
+        self.direct_button.setEnabled(not launching)
         self.shortcut_button.setEnabled(not launching)
         # Launch options only apply at launch: no editing them mid-game.
         self._options_card.setEnabled(not launching)

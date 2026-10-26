@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -211,27 +212,45 @@ class GraphicsPanel(QWidget):
         ):
             self._mangohud_preset.addItem(label, key)
         self._mangohud_preset.currentIndexChanged.connect(self._on_mangohud_preset)
+        # "Show" above two columns of checkboxes across the card's full width.
         items = QWidget()
         items.setObjectName("panelTransparent")
         items_layout = QVBoxLayout(items)
-        items_layout.setContentsMargins(0, 0, 0, 0)
+        items_layout.setContentsMargins(0, 6, 0, 6)
+        items_layout.setSpacing(6)
+        show_title = QLabel(tr("Show"))
+        show_title.setObjectName("settingTitle")
+        items_layout.addWidget(show_title)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(4)
+        items_layout.addLayout(grid)
         self._mangohud_items: dict[str, QCheckBox] = {}
-        # In the overlay's own order, top to bottom.
-        for key, label in (
-            ("time", tr("Clock")),
-            ("gpu", tr("GPU load and temperature")),
-            ("cpu", tr("CPU load and temperature")),
-            ("memory", tr("RAM and VRAM use")),
-            ("procmem", tr("Game's memory use")),
-            ("battery", tr("Battery")),
+        # Most used first, down the left column then the right. The overlay
+        # keeps its own order whatever the order here.
+        mangohud_items = (
             ("fps", tr("FPS")),
             ("frametime", tr("Frame time (ms)")),
             ("graph", tr("Frame time graph")),
-        ):
+            ("lows", tr("1% and 0.1% low FPS")),
+            ("gpu", tr("GPU load and temperature")),
+            ("cpu", tr("CPU load and temperature")),
+            ("memory", tr("RAM and VRAM use")),
+            ("cores", tr("Load of each CPU core")),
+            ("procmem", tr("Game's memory use")),
+            ("time", tr("Clock")),
+            ("disk", tr("Disk reads and writes")),
+            ("throttling", tr("GPU slowing down (heat or power)")),
+            ("battery", tr("Battery")),
+        )
+        per_column = (len(mangohud_items) + 1) // 2
+        for index, (key, label) in enumerate(mangohud_items):
             check = QCheckBox(label)
             check.toggled.connect(self._on_mangohud_item)
-            items_layout.addWidget(check)
+            grid.addWidget(check, index % per_column, index // per_column)
             self._mangohud_items[key] = check
+        self._mangohud_items["throttling"].setToolTip(tr("Can cause lag on NVIDIA RTX 30 cards."))
         self._mangohud_position = _combo(180)
         for label, key in zip(
             (tr("Top left"), tr("Top right"), tr("Bottom left"), tr("Bottom right")),
@@ -247,22 +266,32 @@ class GraphicsPanel(QWidget):
         self._mangohud_layout = _combo(180)
         for label, key in zip((tr("Box"), tr("Bar")), overlays.MANGOHUD_LAYOUTS):
             self._mangohud_layout.addItem(label, key)
-        for combo in (self._mangohud_size, self._mangohud_key):
+        self._mangohud_fps_limit = _combo(180)
+        for limit in overlays.MANGOHUD_FPS_LIMITS:
+            self._mangohud_fps_limit.addItem(str(limit) if limit else tr("Off"), limit)
+        for combo in (self._mangohud_size, self._mangohud_key, self._mangohud_fps_limit):
             combo.currentIndexChanged.connect(self._save_graphics)
         self._mangohud_position.currentIndexChanged.connect(self._on_mangohud_position)
         self._mangohud_layout.currentIndexChanged.connect(self._on_mangohud_layout)
+        self._mangohud_colours = QCheckBox(tr("Colour-code FPS and load"))
+        self._mangohud_start_hidden = QCheckBox(tr("Start with the overlay hidden"))
+        for check in (self._mangohud_colours, self._mangohud_start_hidden):
+            check.toggled.connect(self._save_graphics)
         background_row, self._mangohud_background = self._slider(0, 100)
         overlay_row, self._mangohud_transparency = self._slider(0, 90)
         _rows(
             box,
             _setting_row(tr("Preset"), tr("My own MangoHud.conf uses the file in ~/.config/MangoHud."), self._mangohud_preset),
-            _setting_row(tr("Show"), "", items),
+            items,
+            _check_row(self._mangohud_colours, tr("Red when FPS is low or the GPU or CPU is close to full load.")),
+            _setting_row(tr("FPS limit"), tr("Needs Performance overlay on. Still works while hidden with the on/off key. Frame generation's frames count too."), self._mangohud_fps_limit),
             _setting_row(tr("Layout"), tr("Bar puts everything on one line across the screen, at the top or bottom."), self._mangohud_layout),
             _setting_row(tr("Position"), tr("A bar can only sit on the left, so a right corner switches Layout to Box."), self._mangohud_position),
             _setting_row(tr("Size"), "", self._mangohud_size),
             _setting_row(tr("Background transparency"), tr("0% is solid."), background_row),
             _setting_row(tr("Overlay transparency"), tr("The text and graphs too."), overlay_row),
             _setting_row(tr("On/off key"), tr("Switches the overlay off and on in-game."), self._mangohud_key),
+            _check_row(self._mangohud_start_hidden, tr("Press the on/off key in-game to bring it in.")),
         )
         box.addStretch(1)
 
@@ -305,15 +334,15 @@ class GraphicsPanel(QWidget):
         self._vkbasalt_start_off.toggled.connect(self._save_graphics)
         _rows(
             box,
+            _setting_row(tr("Sharpening"), "", self._vkbasalt_sharpness),
+            _setting_row(tr("Sharpening method"), tr("DLS also cleans up grain and noise."), self._vkbasalt_sharpener),
+            _setting_row(tr("Anti-aliasing"), tr("Smooths jagged edges. SMAA looks better, FXAA costs less."), self._vkbasalt_aa),
             _setting_row(
                 tr("Look"),
                 tr("A starting point for the colours. The sliders below fine-tune it."),
                 self._vkbasalt_preset,
             ),
             *colour_rows,
-            _setting_row(tr("Anti-aliasing"), tr("Smooths jagged edges. SMAA looks better, FXAA costs less."), self._vkbasalt_aa),
-            _setting_row(tr("Sharpening method"), tr("DLS also cleans up grain and noise."), self._vkbasalt_sharpener),
-            _setting_row(tr("Sharpening"), "", self._vkbasalt_sharpness),
             _setting_row(
                 tr("On/off key"),
                 tr("Switches the effects off and on in-game."),
@@ -357,6 +386,7 @@ class GraphicsPanel(QWidget):
             (self._mangohud_size, "mangohud_size"),
             (self._mangohud_key, "mangohud_key"),
             (self._mangohud_layout, "mangohud_layout"),
+            (self._mangohud_fps_limit, "mangohud_fps_limit"),
             (self._vkbasalt_preset, "vkbasalt_preset"),
             (self._vkbasalt_sharpness, "vkbasalt_sharpness"),
             (self._vkbasalt_sharpener, "vkbasalt_sharpener"),
@@ -379,9 +409,14 @@ class GraphicsPanel(QWidget):
             slider.setValue(data[key])
             slider.blockSignals(False)
             slider.show_value(data[key])
-        self._vkbasalt_start_off.blockSignals(True)
-        self._vkbasalt_start_off.setChecked(data["vkbasalt_start_off"])
-        self._vkbasalt_start_off.blockSignals(False)
+        for check, key in (
+            (self._mangohud_colours, "mangohud_colours"),
+            (self._mangohud_start_hidden, "mangohud_start_hidden"),
+            (self._vkbasalt_start_off, "vkbasalt_start_off"),
+        ):
+            check.blockSignals(True)
+            check.setChecked(data[key])
+            check.blockSignals(False)
         self._sync_mangohud_enabled()
         self._sync_mangohud_positions()
 
@@ -411,6 +446,7 @@ class GraphicsPanel(QWidget):
         for widget in (
             *self._mangohud_items.values(), self._mangohud_position, self._mangohud_size,
             self._mangohud_key, self._mangohud_layout, self._mangohud_background, self._mangohud_transparency,
+            self._mangohud_fps_limit, self._mangohud_colours, self._mangohud_start_hidden,
         ):
             widget.setEnabled(not own)
 
@@ -464,6 +500,9 @@ class GraphicsPanel(QWidget):
             mangohud_layout=self._mangohud_layout.currentData(),
             mangohud_background_transparency=self._mangohud_background.value(),
             mangohud_transparency=self._mangohud_transparency.value(),
+            mangohud_fps_limit=self._mangohud_fps_limit.currentData(),
+            mangohud_start_hidden=self._mangohud_start_hidden.isChecked(),
+            mangohud_colours=self._mangohud_colours.isChecked(),
             vkbasalt_preset=self._vkbasalt_preset.currentData(),
             vkbasalt_sharpness=self._vkbasalt_sharpness.currentData(),
             vkbasalt_key=self._vkbasalt_key.currentData(),
@@ -551,12 +590,6 @@ class SettingsPage(QWidget):
             self._tab_pages.append(page)
         self.tab_group.idClicked.connect(self._show_tab)
         header.addStretch(1)
-        # Which MangoHud and vkBasalt the Graphics tab sets up; shown on that tab only.
-        self._graphics_source = QLabel()
-        self._graphics_source.setObjectName("accent")
-        self._graphics_source.setWordWrap(True)
-        self._graphics_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        header.addWidget(self._graphics_source, 1)
         tabs = QVBoxLayout()
         tabs.setSpacing(0)
         tabs.addLayout(header)
@@ -570,7 +603,6 @@ class SettingsPage(QWidget):
     def _show_tab(self, index: int) -> None:
         for i, page in enumerate(self._tab_pages):
             page.setVisible(i == index)
-        self._graphics_source.setVisible(_TABS[index][1] == "graphics")
 
     def show_build(self) -> None:
         """The General tab, scrolled to COMMANDER build (Welcome's "Unstable
@@ -722,11 +754,20 @@ class SettingsPage(QWidget):
         for key, (label, _keysym, _modifiers) in graphics_window.KEYS.items():
             self._overlay_key.addItem(tr(label) if label else tr("Off"), key)
         self._overlay_key.currentIndexChanged.connect(self._on_overlay_key)
-        _rows(box, _setting_row(
+        rows = [_setting_row(
             tr("Key"),
             tr("Works while the game runs, not in Steam Deck Game Mode. Esc closes the window."),
             self._overlay_key,
-        ))
+        )]
+        if graphics_window.on_umbriel():
+            rule = QPushButton(tr("Copy rule"))
+            rule.clicked.connect(lambda: graphics_window.offer_umbriel_rule(self))
+            rows.append(_setting_row(
+                tr("Umbriel window rule"),
+                tr("Umbriel opens the overlay in the middle of the screen. This rule docks it on the left."),
+                rule,
+            ))
+        _rows(box, *rows)
         layout.addWidget(overlay)
         self._graphics = GraphicsPanel()
         layout.addWidget(self._graphics)
@@ -737,13 +778,6 @@ class SettingsPage(QWidget):
         graphics_window.restart_key()
 
     def _render_graphics(self) -> None:
-        self._graphics_source.setText("\n".join(
-            f"{name}: " + (tr("installed on this system") if installed else tr("built into COMMANDER"))
-            for name, installed in (
-                ("MangoHud", overlays.mangohud_installed()),
-                ("vkBasalt", overlays.vkbasalt_installed() and not overlays.BUNDLED_VKBASALT.is_file()),
-            )
-        ))
         self._graphics.render()
         self._overlay_key.blockSignals(True)
         self._overlay_key.setCurrentIndex(self._overlay_key.findData(graphics_window.key_setting()))

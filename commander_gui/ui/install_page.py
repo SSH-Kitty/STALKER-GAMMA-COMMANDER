@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -109,6 +109,7 @@ from .common import (
     paused_dependency_status,
     save_profile_dirs,
     tr,
+    use_stock_mo2_profile_if_missing,
     winetricks_tooltip,
 )
 from .dialogs import MessageBox as QMessageBox
@@ -1143,6 +1144,9 @@ class InstallPage(QWidget):
         divider.setFrameShape(QFrame.Shape.NoFrame)
         divider.setFixedWidth(1)
         grid.addWidget(divider, 0, 1, 8, 1)
+        # Keeps the divider centred: _reflow_gamma_options drops the
+        # GAMMA options to one column when two don't fit in half the card.
+        self.anomaly_gamma_card.installEventFilter(self)
 
         self.anomaly_status = InstallStatusRow("")
         self.gamma_status = InstallStatusRow("")
@@ -1203,15 +1207,17 @@ class InstallPage(QWidget):
         opts_layout.setVerticalSpacing(6)
         opts_layout.setHorizontalSpacing(16)
         opts_layout.setContentsMargins(0, 8, 0, 0)  # borderless: line up with the folder row
-        rows = (len(_CHECKBOXES) + 1) // 2
         self.checkboxes = {}
-        for index, (key, label, tooltip) in enumerate(_CHECKBOXES):
+        for key, label, tooltip in _CHECKBOXES:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.checkboxes[key] = cb
-            opts_layout.addWidget(cb, index % rows, index // rows)
         opts_group.setLayout(opts_layout)
+        self._opts_layout = opts_layout
+        self._opts_columns = 0
+        self._ag_grid = grid
+        self._reflow_gamma_options()
         grid.addWidget(opts_group, 3, 2)
 
         # Cache folder selector is GAMMA-only, so it gets its own row
@@ -1587,6 +1593,39 @@ class InstallPage(QWidget):
             ),
         )
 
+    def eventFilter(self, obj, event):
+        if obj is self.anomaly_gamma_card and event.type() == QEvent.Type.Resize:
+            self._reflow_gamma_options()
+        return super().eventFilter(obj, event)
+
+    def _reflow_gamma_options(self):
+        """GAMMA install options in two columns of three when they fit in
+        half the Anomaly/GAMMA card, else one column - two columns made
+        the GAMMA side wider and pushed the divider off centre."""
+        boxes = list(self.checkboxes.values())
+        rows = (len(boxes) + 1) // 2
+        layout = self._opts_layout
+        two_wide = (
+            max(cb.sizeHint().width() for cb in boxes[:rows])
+            + layout.horizontalSpacing()
+            + max(cb.sizeHint().width() for cb in boxes[rows:])
+        )
+        # Card width, not the grid's: on the card's Resize event the
+        # grid geometry is still the old one.
+        card = self.anomaly_gamma_card
+        margins = card.layout().contentsMargins()
+        inner = card.width() - margins.left() - margins.right()
+        half = (inner - 2 * self._ag_grid.horizontalSpacing() - 1) // 2
+        columns = 2 if half >= two_wide else 1
+        if columns == self._opts_columns:
+            return
+        self._opts_columns = columns
+        rows = len(boxes) if columns == 1 else rows
+        for cb in boxes:
+            layout.removeWidget(cb)
+        for index, cb in enumerate(boxes):
+            layout.addWidget(cb, index % rows, index // rows)
+
     def _make_folder_row(self, label_text, on_browse, placeholder="Click to choose a folder"):
         edit = _PathEdit()
         edit.setPlaceholderText(tr(placeholder))
@@ -1886,6 +1925,7 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._update_button_states()
                 return
+        use_stock_mo2_profile_if_missing(self.window.settings, profile)
         backup_error = None
         if not _is_auto_retry and gamma_installed(profile.gamma, profile.mo2_profile):
             # Reinstalling over a working GAMMA can reset user.ltx and MCM

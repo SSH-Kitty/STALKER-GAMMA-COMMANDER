@@ -83,6 +83,10 @@ def _is_candidate(path: Path) -> bool:
     """True for files worth archiving: log/crash extensions or crash-y names."""
     if path.suffix.lower() in _EXTENSIONS:
         return True
+    # The previous launch's log (launcher.log.1): a player who restarts the
+    # game after a crash would otherwise send a dump without that session.
+    if path.suffix == ".1" and Path(path.stem).suffix.lower() == ".log":
+        return True
     if path.suffix.lower() in _BINARY_EXTENSIONS:
         return False
     lowered = path.name.lower()

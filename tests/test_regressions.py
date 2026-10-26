@@ -5579,6 +5579,37 @@ class ModCounterTests(unittest.TestCase):
                 window._mod_counter_timer.stop()
                 window.close()
 
+    def test_narrow_window_fits_status_bar_and_play_page(self):
+        # Tiling compositors (niri, Umbriel's scrolling layout) give the
+        # window a column narrower than the status bar's natural ~1300 px.
+        from PySide6.QtWidgets import QApplication, QBoxLayout
+
+        from commander_gui.ui.main_window import _TAB_INDEX, MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+            patch("commander_gui.ui.welcome_overlay.maybe_show_welcome", return_value=None),
+        ):
+            window = MainWindow()
+            try:
+                window.show()
+                window.tabs.setCurrentIndex(_TAB_INDEX["play"])
+                play = window._pages["play"]
+                window.resize(960, 800)
+                app.processEvents()
+                self.assertLessEqual(window.statusBar().minimumSizeHint().width(), 960)
+                self.assertFalse(window._status_info_label.isVisible())
+                self.assertEqual(play._cards_row.direction(), QBoxLayout.Direction.TopToBottom)
+                window.resize(1600, 800)
+                app.processEvents()
+                self.assertTrue(window._status_info_label.isVisible())
+                self.assertEqual(play._cards_row.direction(), QBoxLayout.Direction.LeftToRight)
+            finally:
+                window._mod_counter_timer.stop()
+                window.close()
+
     def test_switching_pages_refreshes_the_mod_counter_immediately(self):
         from PySide6.QtWidgets import QApplication
 
@@ -6565,6 +6596,43 @@ class ModCounterTests(unittest.TestCase):
         page._resolve_command = lambda **_kwargs: (["fake", "launch", "cmd"], None, None)
         page.executables = []
         return page
+
+    def test_launch_anomaly_switches_gamma_coop_to_anomaly_then_launches(self):
+        """Launch Anomaly with co-op set up for GAMMA moves co-op to Anomaly
+        (Multiplayer's "Play co-op on") and then launches, instead of being greyed out."""
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtWidgets import QApplication
+
+        class SyncTask(QObject):
+            result = Signal(object)
+            error = Signal(str)
+
+            def __init__(self, fn, *args, parent=None):
+                super().__init__(parent)
+                self._call = lambda: fn(*args)
+
+            def start(self):
+                self.result.emit(self._call())
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+            page = self._make_stubbed_play_page(tmp)
+            busy = []
+            page.window.set_install_busy = lambda on, *_a: busy.append(on)
+            page.window.update_mod_counter = lambda: None
+            switched, launched = [], []
+            page.launch_game = lambda: launched.append(True)
+            with patch("commander_gui.ui.play_page.coop.is_active", return_value=True), \
+                    patch("commander_gui.ui.play_page.coop.install_kind", return_value="gamma"), \
+                    patch("commander_gui.ui.play_page.coop.set_install_kind", side_effect=lambda *a: switched.append(a[-1])), \
+                    patch("commander_gui.ui.play_page.mo2_running", return_value=False), \
+                    patch("commander_gui.ui.play_page.game_running", return_value=False), \
+                    patch("commander_gui.ui.play_page.BackgroundTask", SyncTask):
+                page._refresh_preview_inner()
+                page._launch_direct()
+            self.assertEqual(switched, ["anomaly"])
+            self.assertEqual(busy, [True, False])
+            self.assertEqual(launched, [True])
 
     def test_set_launch_button_state_shows_quit_game_while_launching(self):
         """Regression test: the hero button must relabel to "Quit Game"
@@ -14315,3 +14383,26 @@ class LaunchOptionChipTests(unittest.TestCase):
             command = launch_options.apply(["game"], env, "gamescope -f -- LD_PRELOAD= mangohud %command% -x")
         self.assertEqual(command, ["gamescope", "-f", "--", "mangohud", "game", "-x"])
         self.assertEqual(env, {"LD_PRELOAD": ""})
+
+
+class StockMo2ProfileOnFreshInstallTests(unittest.TestCase):
+    def test_missing_custom_profile_goes_back_to_stock_name(self):
+        # Removing GAMMA with ROMEO selected made the next install write
+        # GAMMA's profile under "ROMEO" and leave no G.A.M.M.A profile.
+        from types import SimpleNamespace
+
+        from commander_gui.ui.common import use_stock_mo2_profile_if_missing
+
+        with tempfile.TemporaryDirectory() as gamma:
+            settings = SimpleNamespace(saves=0)
+            settings.save = lambda: setattr(settings, "saves", settings.saves + 1)
+            profile = SimpleNamespace(gamma=gamma, mo2_profile="ROMEO")
+            use_stock_mo2_profile_if_missing(settings, profile)
+            self.assertEqual((profile.mo2_profile, settings.saves), ("G.A.M.M.A", 1))
+
+            for marker in ("ModOrganizer.exe", "ModOrganizer.ini"):
+                Path(gamma, marker).touch()
+            Path(gamma, "profiles", "ROMEO").mkdir(parents=True)
+            profile.mo2_profile = "ROMEO"
+            use_stock_mo2_profile_if_missing(settings, profile)
+            self.assertEqual((profile.mo2_profile, settings.saves), ("ROMEO", 1))

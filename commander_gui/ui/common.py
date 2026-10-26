@@ -471,6 +471,21 @@ def gamma_installed(path: str, mo2_profile: str = GAMMA_PROFILE) -> bool:
     return _find_profile_dir(base / "profiles", mo2_profile) is not None
 
 
+
+def use_stock_mo2_profile_if_missing(settings, profile) -> None:
+    """Point ``profile`` back at "G.A.M.M.A" when its MO2 profile is gone.
+
+    ``full-install`` writes GAMMA's profile under the saved MO2 profile
+    name. A custom one picked before GAMMA was removed would get the stock
+    mod list and leave no G.A.M.M.A profile, so a fresh install goes back
+    to the stock name.
+    """
+    if profile.mo2_profile != GAMMA_PROFILE and not gamma_installed(
+        profile.gamma, profile.mo2_profile
+    ):
+        profile.mo2_profile = GAMMA_PROFILE
+        settings.save()
+
 def count_active_mods(
     gamma_dir: str, mo2_profile: str = GAMMA_PROFILE
 ) -> tuple[int, int] | None:

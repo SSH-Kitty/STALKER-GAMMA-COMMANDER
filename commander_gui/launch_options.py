@@ -22,9 +22,9 @@ from .deck_launch import in_game_mode
 #: the text added to the launch options, tooltip), ...)).
 GROUPS = (
     ("Display", (
-        ("Gamescope", "gamescope -f --", "Run the game fullscreen inside Gamescope. Helps with resolution and alt-tab problems."),
-        ("FSR upscaling", "WINE_FULLSCREEN_FSR=1", "Sharpen and upscale with AMD FSR when the game runs below your screen's resolution. Proton-GE only."),
         ("Image effects", "ENABLE_VKBASALT=1", "Sharpening, anti-aliasing and colour looks (vkBasalt). Choose the look in Settings > Graphics."),
+        ("FSR upscaling", "WINE_FULLSCREEN_FSR=1", "Sharpen and upscale with AMD FSR when the game runs below your screen's resolution. Proton-GE only."),
+        ("Gamescope", "gamescope -f --", "Run the game fullscreen inside Gamescope. Helps with resolution and alt-tab problems."),
         ("OpenGL", "PROTON_USE_WINED3D=1", "Use OpenGL instead of Vulkan (DXVK). Try it if the game won't start or looks broken on an older GPU."),
     )),
     ("Fixes", (
@@ -241,12 +241,10 @@ def _resolve_frame_gen(env: dict[str, str]) -> None:
 
 
 def dll_label(dll: Path) -> str:
-    """The DLL as the Play page shows it: where it is (~ for home) and the
-    Lossless Scaling version inside it, e.g. ~/Documents/Lossless.dll 3.2.2."""
-    try:
-        where = "~/" + str(dll.relative_to(Path.home()))
-    except ValueError:
-        where = str(dll)
+    """The DLL as the Play page shows it: its folder and the Lossless Scaling
+    version inside it, e.g. Lossless Scaling/Lossless.dll 3.2.2. Short, so
+    the card never widens the window; the tooltip has the full path."""
+    where = f"{dll.parent.name}/{dll.name}" if dll.parent.name else dll.name
     version = _dll_version(str(dll), dll.stat().st_mtime if dll.is_file() else 0)
     return f"{where} {version}" if version else where
 

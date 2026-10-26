@@ -22,6 +22,14 @@ one of:
 from __future__ import annotations
 
 from ..launch_options import GROUPS
+from .graphics_window import TITLE, UMBRIEL_RULE
+
+NIRI_RULE = f"""window-rule {{
+    match title="^{TITLE}$"
+    open-floating true
+    default-floating-position x=0 y=0 relative-to="top-left"
+    default-window-height {{ proportion 1.0; }}
+}}"""
 
 
 def _launch_option_blocks() -> list:
@@ -460,9 +468,19 @@ TOPICS: list[dict] = [
                         ("Performance overlay (MangoHud)", "An overlay with FPS, frame times, CPU and GPU load and temperatures, memory use, a clock and the battery level. Pick a preset (FPS only, Basic, Full) or tick what you want, and set its layout, size and transparency. Changes show in a running game right away. My own MangoHud.conf uses your file in ~/.config/MangoHud instead."),
                         ("Image effects (vkBasalt)", "Anti-aliasing (SMAA or FXAA), sharpening (CAS, or DLS, which also cleans up grain) and a colour look: Vibrant, Cinematic, Bleak, Warm, Cold, High contrast, Old film or Zone, fine-tuned with sliders for saturation, contrast, brightness, warmth and tint. Changes show in a running game right away."),
                         ("Hotkeys", "Insert shows or hides the performance overlay, and Home switches image effects off and on. You can change both in Settings."),
-                        ("Which copy is used", "Both are built into COMMANDER. If MangoHud or vkBasalt is installed on your system, that copy is used instead. Settings → Graphics shows which one."),
                     ]),
                     ("note", "The built-in copies only work while the game runs on Vulkan, the default. With the OpenGL launch option on, they show nothing."),
+                ],
+            ),
+            (
+                "The graphics overlay on Umbriel and niri",
+                [
+                    "Scrolling desktops such as Umbriel and niri put the graphics overlay in the middle of the screen: they place windows themselves. A window rule docks it down the left at full height, as on other desktops.",
+                    "Umbriel: COMMANDER moves the overlay to the top-left by itself and offers the rule the first time the overlay opens. Copy rule in Settings → Graphics copies it again. Paste it at the end of ~/.config/umbriel/config.toml and save. Umbriel applies it right away.",
+                    ("code", UMBRIEL_RULE.strip()),
+                    ("warn", "No ~/.config/umbriel/config.toml yet? Copy Umbriel's own config.toml there first (from /usr/share/umbriel). A new file with only the rule replaces Umbriel's default settings, keybinds included."),
+                    "niri: paste this rule into ~/.config/niri/config.kdl and save. niri applies it right away.",
+                    ("code", NIRI_RULE),
                 ],
             ),
             (
@@ -871,7 +889,7 @@ TOPICS: list[dict] = [
                         ("autostart, update_notifications, update_channel", "Startup and updates."),
                         ("last_update_check_ts, notified_gamma_version, notified_commander_tag", "When the daily GAMMA check last ran, and which versions you were already told about."),
                         ("mo2_display_dpi", "MO2 Display Scale (120 means 125%)."),
-                        ("mangohud_preset, mangohud_items, mangohud_position, mangohud_size, mangohud_key, mangohud_layout, mangohud_background_transparency, mangohud_transparency, vkbasalt_preset, vkbasalt_saturation, vkbasalt_contrast, vkbasalt_brightness, vkbasalt_warmth, vkbasalt_tint, vkbasalt_aa, vkbasalt_sharpener, vkbasalt_sharpness, vkbasalt_key, vkbasalt_start_off", "Settings → Graphics."),
+                        ("mangohud_preset, mangohud_items, mangohud_position, mangohud_size, mangohud_key, mangohud_layout, mangohud_background_transparency, mangohud_transparency, mangohud_fps_limit, vkbasalt_preset, vkbasalt_saturation, vkbasalt_contrast, vkbasalt_brightness, vkbasalt_warmth, vkbasalt_tint, vkbasalt_aa, vkbasalt_sharpener, vkbasalt_sharpness, vkbasalt_key, vkbasalt_start_off", "Settings → Graphics."),
                         ("tool_overrides", "Manual tool paths from System Check."),
                         ("playtime_seconds, last_played_ts", "Playtime per profile."),
                         ("profile_notes, profile_colors", "Profile notes and colour tags."),

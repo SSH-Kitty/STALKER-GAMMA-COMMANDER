@@ -11,7 +11,9 @@
 #
 # vkBasalt gets packaging/vkbasalt-live-reload.patch: it rebuilds its effects
 # when VKBASALT_CONFIG_FILE changes, so Settings > Graphics shows in a
-# running game.
+# running game. MangoHud gets packaging/mangohud-reload-lock.patch: it
+# reloads its config under the lock its HUD is drawn under, so a change in
+# a running game can't crash it (std::bad_function_call).
 #
 # Usage:  ./build-vulkan-layers.sh
 #
@@ -32,7 +34,7 @@ dnf -y -q install gcc-c++ libstdc++-static git python3-pip glslang libX11-devel 
 pip3 install -q meson ninja mako
 cd /tmp
 git clone -q --depth 1 -b "$MANGOHUD_VERSION" https://github.com/flightlessmango/MangoHud.git
-( cd MangoHud && meson setup build --buildtype=release -Dstrip=true \
+( cd MangoHud && git apply /patches/mangohud-reload-lock.patch && meson setup build --buildtype=release -Dstrip=true \
     -Dwith_xnvctrl=disabled -Dwith_dbus=disabled -Dmangoapp=false -Dmangohudctl=false \
     -Dmangoplot=disabled -Dtests=disabled -Dinclude_doc=false -Duse_system_spdlog=disabled \
   && ninja -C build src/libMangoHud.so )

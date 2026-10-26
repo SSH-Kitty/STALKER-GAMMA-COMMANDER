@@ -132,7 +132,7 @@ class GraphicsWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setWindowTitle(f"{tr('Graphics overlay')} - STALKER COMMANDER")
+        self.setWindowTitle(TITLE)
         self.setWindowOpacity(0.94)  # the game shows through a little
         # No window background: only the rail and the card float on the game.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -192,6 +192,7 @@ class GraphicsWindow(QWidget):
         layout.setSpacing(0)
         layout.addWidget(rail, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.pages, 1)
+        self._rail = rail
         # App-wide: a focused combo box or slider would take the key first.
         QApplication.instance().installEventFilter(self)
         # Without focus, clicking back into the game is seen by watching the
@@ -249,7 +250,15 @@ class GraphicsWindow(QWidget):
         """Full height down the left of the screen the mouse is on: the game's."""
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         area = screen.geometry()
-        self.setGeometry(area.x(), area.y(), min(_WIDTH, area.width()), area.height())
+        self.setGeometry(area.x(), area.y(), min(self._width(), area.width()), area.height())
+
+    def _width(self) -> int:
+        """_WIDTH, or wider when a page needs it (a bigger font, a longer
+        language): the card shows whole, with no scroll bar along the bottom."""
+        pages = [self.pages.widget(i) for i in range(self.pages.count())]
+        card = max(page.widget().minimumSizeHint().width() for page in pages)
+        bar = pages[0].verticalScrollBar().sizeHint().width()
+        return max(_WIDTH, self.layout().contentsMargins().left() + self._rail.sizeHint().width() + card + bar)
 
     def toggle(self, *, focus: bool = True) -> None:
         """Show it, or hide it. With focus, the game stops reading the mouse
@@ -283,9 +292,14 @@ class GraphicsWindow(QWidget):
         ratio = self.devicePixelRatioF() or 1.0
         _move_resize(int(self.winId()), *(round(v * ratio) for v in self.geometry().getRect()))
         self.raise_()
+        if on_umbriel():
+            QTimer.singleShot(100, _umbriel_dock)
         if focus:
             self.activateWindow()
             QTimer.singleShot(100, lambda: self._check_minimized(5))
+            if on_umbriel() and not gui_settings.load_gui_settings().get("umbriel_rule_offered"):
+                gui_settings.save_gui_settings(umbriel_rule_offered=True)
+                QTimer.singleShot(300, lambda: offer_umbriel_rule(self))
         self._pressed = True  # the click that opened it, if any, isn't one outside
         self._pointer.start()
 
@@ -321,6 +335,86 @@ class GraphicsWindow(QWidget):
 
 
 _WIDTH = 680
+
+#: The panel's window title. Not translated, so one window rule matches it
+#: in every language.
+TITLE = "Graphics overlay - STALKER COMMANDER"
+
+#: Umbriel (a scrolling Wayland compositor) places XWayland windows itself,
+#: in the middle of the screen. This rule, in its config.toml, docks the
+#: panel down the left at full height as on other desktops.
+UMBRIEL_RULE = f"""[[window_rule]]
+match.title = "^{TITLE}$"
+default_floating = true
+default_floating_size_px = {{ width = {_WIDTH} }}
+default_floating_size = {{ height = 1.0 }}
+default_position = {{ x = 0, y = 0, anchor = "top_left" }}
+"""
+
+
+def on_umbriel() -> bool:
+    return bool(os.environ.get("UMBRIEL_SOCKET"))
+
+
+def _umbriel_dock() -> None:
+    """Moves the panel to the top-left over Umbriel's socket: without the
+    rule it ignores where an X11 window asks to go. Its height can't be set
+    this way (Umbriel resizes only the focused window), hence the rule.
+    ponytail: the windows reply's shape is guessed from Umbriel 0.1's docs, check it on a real Umbriel"""
+    import socket
+
+    def ask(command: dict):
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(0.5)
+            sock.connect(os.environ["UMBRIEL_SOCKET"])
+            sock.sendall(json.dumps(command).encode() + b"\n")
+            return json.loads(sock.makefile("rb").readline())
+
+    try:
+        windows = ask({"cmd": "windows"}).get("ok")
+        if isinstance(windows, dict):
+            windows = windows.get("windows", [])
+        for window in windows or []:
+            if isinstance(window, dict) and window.get("title") == TITLE and "id" in window:
+                ask({"cmd": "msg", "arg": f"window-move-to:top_left/0/0/{window['id']}"})
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass  # nice to have: the rule docks it all the same
+
+
+def _umbriel_config() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "umbriel" / "config.toml"
+
+
+def offer_umbriel_rule(parent: QWidget | None) -> None:
+    """The rule to paste into Umbriel's config, with a Copy rule button.
+    Shown once, the first time the overlay opens on Umbriel, and from
+    Settings > Graphics. COMMANDER never edits that file itself."""
+    from .dialogs import MessageBox
+
+    config = _umbriel_config()
+    box = MessageBox(
+        MessageBox.Icon.Information,
+        tr("Umbriel needs a window rule"),
+        tr("Umbriel opens the overlay in the middle of the screen. Add this rule to Umbriel's "
+           "settings and it sits on the left at full height, as on other desktops."),
+        parent=parent,
+    )
+    box.points = (
+        tr("Press Copy rule."),
+        tr("Open {path}, paste the rule at the end and save. Umbriel applies it right away.",
+           path=str(config).replace(str(Path.home()), "~", 1)),
+    )
+    box.setInformativeText(UMBRIEL_RULE.strip() + "\n\n" + tr("You can copy it again in Settings > Graphics."))
+    if not config.is_file():
+        # Umbriel reads only the first config it finds: a new one with just
+        # the rule would drop its defaults (keybinds and all).
+        box.note = tr("You don't have this file yet. Copy Umbriel's own config.toml there first "
+                      "(from /usr/share/umbriel), or Umbriel loses its default settings.")
+    copy = box.addButton(tr("Copy rule"), MessageBox.ButtonRole.AcceptRole)
+    box.addButton(MessageBox.StandardButton.Close)
+    box.exec()
+    if box.clickedButton() is copy:
+        QGuiApplication.clipboard().setText(UMBRIEL_RULE)
 
 
 class _KeyHint(QWidget):
