@@ -510,9 +510,9 @@ class UpdatePage(QWidget):
         self.check_button.setEnabled(idle)
         self.apply_button.setEnabled(idle)
         if self._applying:
-            text = tr("Installing updates...")
+            text = tr("Installing updates")
         elif self._checking:
-            text = tr("Checking for updates...")
+            text = tr("Checking for updates")
         elif self._resume_args():
             text = tr("Resume update")
         elif self._diffs:
@@ -842,11 +842,11 @@ class UpdatePage(QWidget):
             profile.gamma,
             profile.cache,
         )
-        self.check_button.setText(tr("Checking..."))
-        self._set_pill(tr("Checking..."), "running")
+        self.check_button.setText(tr("Checking"))
+        self._set_pill(tr("Checking"), "running")
         self._update_button_states()
         self._set_status(
-            tr("Checking the active GAMMA installation for updates..."), "dim"
+            tr("Checking the active GAMMA installation for updates"), "dim"
         )
         task = BackgroundTask(check_updates, profile, parent=self)
         task.result.connect(

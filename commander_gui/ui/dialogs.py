@@ -433,7 +433,7 @@ class ProgressDialog(QDialog):
         if not self._cancel.isEnabled():
             return
         self._cancel.setEnabled(False)
-        self._text.setText(tr("Stopping..."))
+        self._text.setText(tr("Stopping"))
         self.canceled.emit()
 
     def resume(self) -> None:

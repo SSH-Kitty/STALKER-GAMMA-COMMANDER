@@ -2416,7 +2416,7 @@ class ProgressArea(QWidget):
                     self.bar.setRange(0, 100)
                     self.bar.setValue(pct)
                     self.bar.setFormat(f"{pct}%")
-                    self.status_label.setText(tr("{name} - {operation}...", name=event.name, operation=event.operation))
+                    self.status_label.setText(tr("{name} - {operation}", name=event.name, operation=event.operation))
             else:
                 # Dropped, not queued: with several archives downloading at
                 # once the raw line rate can flip this label several times a
@@ -2503,7 +2503,7 @@ class ProgressArea(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         # The console stays collapsed until the user opens it.
-        self.bar.setFormat(tr("Starting..."))
+        self.bar.setFormat(tr("Starting"))
 
     def on_finished(self, rc: int, output: str) -> None:
         self.cancel_button.hide()

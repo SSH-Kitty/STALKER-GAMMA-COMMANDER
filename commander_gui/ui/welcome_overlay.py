@@ -73,7 +73,7 @@ def version_status(latest_title: str | None) -> tuple[str, str]:
     Shared with Deck Mode's Welcome screen.
     """
     if latest_title is None:
-        return tr("Checking..."), "dim"
+        return tr("Checking"), "dim"
     installed = _numeric_version_tuple(__version__)
     latest = _numeric_version_tuple(latest_title)
     if installed is None or latest is None:
@@ -270,7 +270,7 @@ class WelcomeOverlay(QWidget):
         self.notes.setObjectName("welcomeNotes")
         open_web_links(self.notes)
         self.notes.setMinimumHeight(300)
-        self.notes.setPlainText(tr("Loading patch notes..."))
+        self.notes.setPlainText(tr("Loading patch notes"))
         notes_column.addWidget(self.notes, 1)
         body.addLayout(notes_column, 3)
 
@@ -489,7 +489,7 @@ class WelcomeOverlay(QWidget):
     def _render_notes(self) -> None:
         if self._notes is None:
             self.notes_title.setText(tr("Patch notes"))
-            self.notes.setPlainText(tr("Loading patch notes..."))
+            self.notes.setPlainText(tr("Loading patch notes"))
             return
         title, body, html = self._notes
         self.notes_title.setText(title)

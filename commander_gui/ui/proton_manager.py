@@ -251,11 +251,11 @@ class ProtonManagerDialog(QDialog):
         ) / "compatibilitytools.d"
 
         self.install_button.setEnabled(False)
-        self.install_button.setText(tr("Installing…"))
+        self.install_button.setText(tr("Installing"))
         self.version_combo.setEnabled(False)
         self.progress.setValue(0)
         self.progress.setVisible(True)
-        self.install_status.setText(tr("Preparing download…"))
+        self.install_status.setText(tr("Preparing download"))
         self.install_status.setVisible(True)
         self.cancel_button.setText(tr("Cancel"))
         self.cancel_button.setEnabled(True)
@@ -273,7 +273,7 @@ class ProtonManagerDialog(QDialog):
                 bridge.updated.emit(
                     int(downloaded * 100 / total),
                     tr(
-                        "Downloading {version}... {done}/{total}",
+                        "Downloading {version} {done}/{total}",
                         version=version,
                         done=format_size(downloaded),
                         total=format_size(total),
@@ -333,7 +333,7 @@ class ProtonManagerDialog(QDialog):
         if self._cancel_event is not None:
             self._cancel_event.set()
         self.cancel_button.setEnabled(False)
-        self.cancel_button.setText(tr("Cancelling…"))
+        self.cancel_button.setText(tr("Cancelling"))
 
     def _hide_install_progress(self) -> None:
         if self._install_task is not None:
@@ -480,7 +480,7 @@ class ProtonManagerDialog(QDialog):
         if answer != QMessageBox.StandardButton.Yes or not self._can_remove():
             return
         self.window.set_install_busy(True)
-        self.status.setText(tr("Removing..."))
+        self.status.setText(tr("Removing"))
         # Read on this thread: the settings cache is not for worker threads.
         runner_kind = gui_settings.load_gui_settings().get("runner") or "auto"
         task = BackgroundTask(_remove, builds, runner_kind, parent=self)

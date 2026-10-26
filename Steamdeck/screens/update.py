@@ -204,7 +204,7 @@ class UpdateScreen(DeckScreen):
             return
         self.action_button.setEnabled(False)
         self.update_hints()
-        self.summary_label.setText(tr("Checking..."))
+        self.summary_label.setText(tr("Checking"))
         self._reset_summary_color()
         self._task = BackgroundTask(check_updates, profile, parent=self)
         self._task.result.connect(self._on_checked)

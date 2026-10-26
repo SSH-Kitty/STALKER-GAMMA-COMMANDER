@@ -964,7 +964,7 @@ class MainWindow(QMainWindow):
         update_layout.setContentsMargins(0, 0, 0, 0)
         update_layout.setSpacing(0)
 
-        self._update_status_button = QPushButton(tr("Checking for updates..."))
+        self._update_status_button = QPushButton(tr("Checking for updates"))
         self._update_status_button.setObjectName("commanderUpdateStatus")
         self._update_status_button.setFlat(True)
         self._update_status_button.setEnabled(False)
@@ -1163,7 +1163,7 @@ class MainWindow(QMainWindow):
             self,
             update_tag=tag,
             on_update=lambda: self._run_commander_download(
-                tr("Downloading COMMANDER {tag}...", tag=tag),
+                tr("Downloading COMMANDER {tag}", tag=tag),
                 lambda cancel, progress: download_and_install_commander_update(
                     tag, cancel_event=cancel, progress_cb=progress
                 ),
@@ -1218,9 +1218,9 @@ class MainWindow(QMainWindow):
             gui_settings.save_gui_settings(update_channel=target)
 
         self._run_commander_download(
-            (tr("Downloading unstable build {tag}", tag=tag) if tag else tr("Downloading the unstable build..."))
+            (tr("Downloading unstable build {tag}", tag=tag) if tag else tr("Downloading the unstable build"))
             if target == "unstable"
-            else tr("Downloading the stable build..."),
+            else tr("Downloading the stable build"),
             work,
             on_installed=switched,
         )
@@ -1256,7 +1256,7 @@ class MainWindow(QMainWindow):
             pct = int(downloaded * 100 / total)
             if downloaded >= total:
                 # Verify and install run next, with no progress of their own.
-                bridge.updated.emit(100, tr("Checking and installing the new version..."))
+                bridge.updated.emit(100, tr("Checking and installing the new version"))
                 return
             # The bar shows the percentage; the label only needs the size.
             text = label + "\n" + f"{human_size(downloaded)} / {human_size(total)}"

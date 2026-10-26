@@ -54,7 +54,7 @@ class DeckExesCard(QObject):
         self.version_row.activated.connect(self._pick_version)
         body.addWidget(self.version_row)
         self.install_button = deck_button(tr("Install"), role="primary", on_click=self._install_selected)
-        self.file_button = deck_button(tr("From a file…"), on_click=self._install_file)
+        self.file_button = deck_button(tr("From a file"), on_click=self._install_file)
         self.back_button = deck_button("", on_click=self._go_back)
         self.restore_button = deck_button(tr("Restore original exes"), on_click=self._restore)
         self.cancel_button = deck_button(tr("Cancel"), on_click=lambda: self._task and self._task.cancel())
@@ -97,7 +97,7 @@ class DeckExesCard(QObject):
         if self._release is not None:
             self.version_row.set_value(self._release_text(self._release))
         elif self._list_task is not None:
-            self.version_row.set_value(tr("Loading releases…"))
+            self.version_row.set_value(tr("Loading releases"))
         if not self._releases and self._list_task is None:
             self._load_releases()
 
@@ -109,7 +109,7 @@ class DeckExesCard(QObject):
         return text
 
     def _load_releases(self) -> None:
-        self.version_row.set_value(tr("Loading releases…"))
+        self.version_row.set_value(tr("Loading releases"))
         self._list_task = BackgroundTask(modded_exes.fetch_releases, parent=self)
         self._list_task.result.connect(self._on_releases)
         self._list_task.error.connect(self._on_releases_error)
@@ -195,12 +195,12 @@ class DeckExesCard(QObject):
                     path = modded_exes.download(
                         release, download_dir,
                         lambda done, total: report(
-                            tr("Downloading {version}… {percent}%", version=label, percent=done * 100 // total)
-                            if total else tr("Downloading {version}…", version=label)
+                            tr("Downloading {version} {percent}%", version=label, percent=done * 100 // total)
+                            if total else tr("Downloading {version}", version=label)
                         ),
                         cancel_event,
                     )
-                report(tr("Installing {version}…", version=_version_text(label)))
+                report(tr("Installing {version}", version=_version_text(label)))
                 modded_exes.install(path, anomaly, label, cancel_event)
             finally:
                 if download_dir is not None:

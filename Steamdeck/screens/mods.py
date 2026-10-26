@@ -247,7 +247,7 @@ class ModsScreen(DeckScreen):
         # is a magnifier button at the right of the filter chips (or Y), and
         # the text lives in a hidden field the on-screen keyboard types into.
         self.search = QLineEdit()
-        self.search.setPlaceholderText(tr("Search mods..."))
+        self.search.setPlaceholderText(tr("Search mods"))
         self.search.textChanged.connect(self._on_search_changed)
         self.search.hide()
 
@@ -282,7 +282,7 @@ class ModsScreen(DeckScreen):
         self.search_button.setIcon(search_icon(QColor(active_theme_tokens().get("text", "#dddddd")), px(26)))
         self.search_button.setIconSize(QSize(px(26), px(26)))
         self.search_button.setFixedWidth(px(MIN_TOUCH + 32))
-        self.search_button.setToolTip(tr("Search mods..."))
+        self.search_button.setToolTip(tr("Search mods"))
         chips.addWidget(self.search_button)
         self.install_button = deck_button(
             "＋  " + tr("Install mod"), role="chip", on_click=self._install_mod

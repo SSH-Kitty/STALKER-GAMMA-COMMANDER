@@ -327,7 +327,7 @@ class MultiplayerScreen(DeckScreen):
         # the file browser.
         self.zip_button = deck_button("", role="hero", on_click=self._zip_clicked)
         setup.addWidget(self.zip_button)
-        self.other_zip_button = deck_button(tr("Choose another zip…"), on_click=self._pick_zip)
+        self.other_zip_button = deck_button(tr("Choose another zip"), on_click=self._pick_zip)
         setup.addWidget(self.other_zip_button)
         self.body.addWidget(self.install_box)
 
@@ -769,7 +769,7 @@ class MultiplayerScreen(DeckScreen):
             return
         to_plain = kind == coop.KIND_ANOMALY
         self._start(
-            tr("Switching co-op to Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
+            tr("Switching co-op to Anomaly") if to_plain else tr("Switching co-op to GAMMA"),
             coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, str(kind),
             done=tr("Co-op is set up for Anomaly") if to_plain else tr("Co-op is set up for GAMMA"),
         )
@@ -826,7 +826,7 @@ class MultiplayerScreen(DeckScreen):
         self.other_zip_button.setVisible(found)
         if found:
             self.found_label.setText(tr("Found {name} in {folder}.", name=self._found.name, folder=self._found.parent.name))
-        self.zip_button.setText(tr("Install {name}", name=self._found.name) if found else tr("Install from zip…"))
+        self.zip_button.setText(tr("Install {name}", name=self._found.name) if found else tr("Install from zip"))
         for button in (self.zip_button, self.other_zip_button, self.update_button, self.export_button, self.import_button, self.uninstall_button):
             button.setEnabled(idle)
 
@@ -1120,7 +1120,7 @@ class MultiplayerScreen(DeckScreen):
 
         def _go() -> None:
             self._start(
-                tr("Installing {name}…", name=path.name), self._install_job, path, profile,
+                tr("Installing {name}", name=path.name), self._install_job, path, profile,
                 done=tr("xrRazom Co-op installed"), announce=True,
             )
 
@@ -1144,7 +1144,7 @@ class MultiplayerScreen(DeckScreen):
             return
         play_click_sound()
         fn = coop.switch_to_coop if to_coop else coop.switch_to_singleplayer
-        label = tr("Switching to co-op…") if to_coop else tr("Switching to singleplayer…")
+        label = tr("Switching to co-op") if to_coop else tr("Switching to singleplayer")
         done = tr("Switched to co-op") if to_coop else tr("Switched to singleplayer")
         self._start(label, fn, profile.anomaly, profile.gamma, profile.mo2_profile, done=done)
 
@@ -1155,7 +1155,7 @@ class MultiplayerScreen(DeckScreen):
 
         def _uninstall() -> None:
             self._start(
-                tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile,
+                tr("Uninstalling"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile,
                 done=tr("xrRazom Co-op uninstalled"),
             )
 
@@ -1201,7 +1201,7 @@ class MultiplayerScreen(DeckScreen):
                 tr("Export co-op?"),
                 tr("Saves your co-op settings and all your saves to:\n{path}", path=str(dest)),
                 lambda: self._start(
-                    tr("Exporting…"), coop.export_session, profile.anomaly, profile.gamma, profile.mo2_profile, dest,
+                    tr("Exporting"), coop.export_session, profile.anomaly, profile.gamma, profile.mo2_profile, dest,
                     done=tr("Exported to {path}", path=str(dest)), on_done=then,
                 ),
                 confirm_text=tr("Export"),
@@ -1238,7 +1238,7 @@ class MultiplayerScreen(DeckScreen):
                 + "\n• " + tr("Steam game: {game}", game=game)
                 + "\n• " + tr("Files it replaces are backed up first."),
                 lambda: self._start(
-                    tr("Importing…"), coop.import_session, profile.anomaly, profile.gamma, profile.mo2_profile,
+                    tr("Importing"), coop.import_session, profile.anomaly, profile.gamma, profile.mo2_profile,
                     profile.profile_name, path, done=tr("Co-op imported"),
                 ),
                 confirm_text=tr("Import"),

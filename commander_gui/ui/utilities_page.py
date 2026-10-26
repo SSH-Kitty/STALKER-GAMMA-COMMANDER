@@ -410,7 +410,7 @@ def _cache_preflight_summary_html(
         shown_names = names[:_CACHE_PREFLIGHT_NAMES_SHOWN]
         items = "".join(f"<li>{escape(name)}</li>" for name in shown_names)
         if len(names) > len(shown_names):
-            more = tr("... and {count} more", count=len(names) - len(shown_names))
+            more = tr("and {count} more", count=len(names) - len(shown_names))
             items += f"<li>{escape(more)}</li>"
         sections.append(
             f"<p><b>{escape(label)}:</b> {escape(explanation, quote=False)}</p><ul>{items}</ul>"
@@ -1323,8 +1323,8 @@ class UtilitiesPage(QWidget):
         dest_row = QHBoxLayout()
         dest_row.setSpacing(10)
         self._move_dest_edit = QLineEdit()
-        self._move_dest_edit.setPlaceholderText(tr("Select destination folder..."))
-        dest_btn = QPushButton(tr("Browse..."))
+        self._move_dest_edit.setPlaceholderText(tr("Select destination folder"))
+        dest_btn = QPushButton(tr("Browse"))
         dest_btn.clicked.connect(self._browse_move_dest)
         dest_row.addWidget(self._move_dest_edit, 1)
         dest_row.addWidget(dest_btn)
@@ -1583,7 +1583,7 @@ class UtilitiesPage(QWidget):
     def _cancel_move(self) -> None:
         if self._move_task is not None:
             self._move_task.cancel()
-            self._move_progress.status_message(tr("Cancelling ..."))
+            self._move_progress.status_message(tr("Cancelling"))
 
     # ----- console -----
     def _add_console(self, layout) -> None:
@@ -1915,7 +1915,7 @@ class UtilitiesPage(QWidget):
         """Check cached archives before a destructive reset begins."""
         self.window.set_install_busy(True, "cache_preflight")
         self._show_console()
-        self.summary.setText(tr("Checking cached GAMMA archives before reset..."))
+        self.summary.setText(tr("Checking cached GAMMA archives before reset"))
         self.output.clear()
         self._set_buttons_enabled(False)
         task = StreamTask(
@@ -1935,7 +1935,7 @@ class UtilitiesPage(QWidget):
         profile = self.window.settings.active_profile
         if profile is None:
             raise RuntimeError("No active profile")
-        report("Downloading the current official GAMMA archive list...")
+        report("Downloading the current official GAMMA archive list")
         records = fetch_modpack_records(profile.mod_pack_maker_url)
         expected = expected_archive_md5s(records)
         if not expected:
@@ -1997,7 +1997,7 @@ class UtilitiesPage(QWidget):
             True, "anomaly" if self._reset_includes_anomaly else "gamma"
         )
         self.summary.setText(
-            tr("Wiping {reset_folders} folder{arg}...", reset_folders=self._reset_folders, arg='s' if self._reset_includes_anomaly else '')
+            tr("Wiping {reset_folders} folder{arg}", reset_folders=self._reset_folders, arg='s' if self._reset_includes_anomaly else '')
         )
         self.output.clear()
         self._set_buttons_enabled(False)
@@ -2048,9 +2048,9 @@ class UtilitiesPage(QWidget):
                 mcm=self._reset_preserve_mcm,
             )
         if self._reset_includes_anomaly:
-            self.summary.setText(tr("Folders wiped. Reinstalling Anomaly and GAMMA..."))
+            self.summary.setText(tr("Folders wiped. Reinstalling Anomaly and GAMMA"))
         else:
-            self.summary.setText(tr("GAMMA folder wiped. Reinstalling GAMMA..."))
+            self.summary.setText(tr("GAMMA folder wiped. Reinstalling GAMMA"))
         # set_page() first: pages are built lazily on first visit, and this
         # is the first time this flow touches the Install page if the user
         # never opened that tab themselves.
@@ -2137,7 +2137,7 @@ class UtilitiesPage(QWidget):
 
         self.window.set_install_busy(True)
         self._show_console()
-        self.summary.setText(tr("Removing Anomaly, GAMMA, and cache folders..."))
+        self.summary.setText(tr("Removing Anomaly, GAMMA, and cache folders"))
         self.output.clear()
         self._set_buttons_enabled(False)
         snapshot = dataclasses.replace(profile)
@@ -2252,7 +2252,7 @@ class UtilitiesPage(QWidget):
             return
         self.window.set_install_busy(True)
         self._show_console()
-        self.summary.setText(tr("Creating Log Dump..."))
+        self.summary.setText(tr("Creating Log Dump"))
         self.output.clear()
         self._set_buttons_enabled(False)
         task = StreamTask(create_log_dump, parent=self)

@@ -493,7 +493,7 @@ class DeckStatusRow(DeckRow):
         self.layout().addWidget(self._chip, 0, Qt.AlignmentFlag.AlignVCenter)
         self.activated.connect(self._show_detail)
         self.set_detail("")
-        self.set_status(tr("Checking..."), "warn")
+        self.set_status(tr("Checking"), "warn")
 
     def set_detail(self, text: str) -> None:
         """Extra text, opened with A on an interactive row."""
@@ -710,7 +710,7 @@ class DeckPicker(QWidget):
         self.search: QLineEdit | None = None
         if searchable:
             self.search = QLineEdit()
-            self.search.setPlaceholderText(tr("Type to filter..."))
+            self.search.setPlaceholderText(tr("Type to filter"))
             self.search.textChanged.connect(self._apply_filter)
             layout.addWidget(self.search)
         layout.addWidget(self.list, 1)
@@ -1137,10 +1137,10 @@ class DeckProgress(QWidget):
     def _do_cancel(self) -> None:
         if self._runner is not None:
             self._runner.cancel()
-            self.status.setText(tr("Cancelling..."))
+            self.status.setText(tr("Cancelling"))
         elif self._cancel_fn is not None:
             self._cancel_fn()
-            self.status.setText(tr("Cancelling..."))
+            self.status.setText(tr("Cancelling"))
 
     # -- slots ------------------------------------------------------------
     def status_message(self, text: str) -> None:
@@ -1157,7 +1157,7 @@ class DeckProgress(QWidget):
     def on_started(self) -> None:
         self.reset()
         self.set_indeterminate()
-        self.status.setText(tr("Starting..."))
+        self.status.setText(tr("Starting"))
 
     def on_line(self, line: str) -> None:
         text = line.strip()

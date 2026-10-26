@@ -994,7 +994,7 @@ def import_session(anomaly, gamma, mo2_profile, profile_name: str, path, report=
                      if name.startswith("coop/") and live.get(name[len("coop/"):], Path()).is_file()]
         try:
             if replaced:
-                report(f"Keeping a copy of the {len(replaced)} files this import replaces...")
+                report(f"Keeping a copy of the {len(replaced)} files this import replaces")
                 create_backup_of_files(profile_name, replaced, report)
             for name, dest in plan:
                 _extract(archive, name, dest)

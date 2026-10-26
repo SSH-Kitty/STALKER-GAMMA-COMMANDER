@@ -44,7 +44,7 @@ class SystemScreen(DeckScreen):
         # thing a user comes back to this screen to do.
         header = QHBoxLayout()
         header.setSpacing(px(12))
-        self.summary = deck_label(tr("Checking..."), role="body", wrap=True)
+        self.summary = deck_label(tr("Checking"), role="body", wrap=True)
         # Always accent-colored, matching desktop's system_check_page.py -
         # the summary line stays #accent even when reporting something is
         # missing, a deliberate desktop quirk this mirrors exactly.
@@ -68,7 +68,7 @@ class SystemScreen(DeckScreen):
     def _start(self) -> None:
         if self._task is not None:
             return
-        self.summary.setText(tr("Checking..."))
+        self.summary.setText(tr("Checking"))
         self.recheck_button.setEnabled(False)
         # Off the GUI thread: the checks shell out to vulkaninfo, winetricks
         # and protontricks, which take seconds on the Deck's storage.

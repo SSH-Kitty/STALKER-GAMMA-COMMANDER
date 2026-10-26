@@ -915,8 +915,8 @@ class ProfilesPage(QWidget):
         self.new_button.setObjectName("primary")
         self.new_button.setToolTip(tr("Create a new profile or import one from a file."))
         new_menu = QMenu(self.new_button)
-        new_menu.addAction(tr("New profile...")).triggered.connect(self._on_new_clicked)
-        new_menu.addAction(tr("Import from file...")).triggered.connect(self._import_profile)
+        new_menu.addAction(tr("New profile")).triggered.connect(self._on_new_clicked)
+        new_menu.addAction(tr("Import from file")).triggered.connect(self._import_profile)
         self.new_button.setMenu(new_menu)
         header.addWidget(self.new_button)
         layout.addLayout(header)
@@ -968,7 +968,7 @@ class ProfilesPage(QWidget):
         self.more_button.setFixedSize(36, 34)
         self.more_button.setToolTip(tr("More actions"))
         self.more_menu = QMenu(self.more_button)
-        self.export_action = self.more_menu.addAction(tr("Export..."))
+        self.export_action = self.more_menu.addAction(tr("Export"))
         self.export_action.triggered.connect(self._export_profile)
         self.more_menu.addSeparator()
         self.delete_action = self.more_menu.addAction(tr("Delete"))
@@ -997,7 +997,7 @@ class ProfilesPage(QWidget):
         self.note_edit = QPlainTextEdit()
         # Styled like a text field, not like the monospace log panes.
         self.note_edit.setObjectName("noteEdit")
-        self.note_edit.setPlaceholderText(tr("Add a note for this profile..."))
+        self.note_edit.setPlaceholderText(tr("Add a note for this profile"))
         self.note_edit.setMinimumHeight(60)
         # Ignored: the text box's tall default size hint would stretch the
         # whole top row; it just fills whatever height the profile card has.
@@ -1084,7 +1084,7 @@ class ProfilesPage(QWidget):
         folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
         for text, edit, check, tooltip in folders:
             edit.setToolTip(tooltip)
-            edit.setPlaceholderText(tr("Choose a folder..."))
+            edit.setPlaceholderText(tr("Choose a folder"))
             browse = QPushButton()
             browse.setIcon(folder_icon)
             browse.setFixedWidth(40)
@@ -1740,7 +1740,7 @@ class ProfilesPage(QWidget):
         self._task.error.connect(self._on_task_error)
         self._task.start()
         self._set_buttons_enabled(False)
-        self._show_status(tr("Creating profile..."))
+        self._show_status(tr("Creating profile"))
         return True
 
     def _on_create_done(

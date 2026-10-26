@@ -431,7 +431,7 @@ class BrowserWindow(QMainWindow):
         card, layout = make_card()
         card.setFixedWidth(380)
         title = QHBoxLayout()
-        label = QLabel(tr("Downloading {name}…", name=name))
+        label = QLabel(tr("Downloading {name}", name=name))
         label.setToolTip(name)
         label.setMinimumWidth(1)
         title.addWidget(label, 1)

@@ -136,7 +136,7 @@ class SetupScreen(DeckScreen):
             row.activated.connect(lambda d=drive: self._choose_drive(d))
             self.body.addWidget(row)
             self.drive_rows.append(row)
-        other = DeckRow(tr("Choose another folder..."))
+        other = DeckRow(tr("Choose another folder"))
         other.activated.connect(self._browse)
         self.body.addWidget(other)
         self._default = self.drive_rows[0] if self.drive_rows else other
@@ -234,7 +234,7 @@ class SetupScreen(DeckScreen):
 
     def on_back(self) -> bool:
         if self._task is not None:
-            self.window.notify(tr("Creating profile..."))
+            self.window.notify(tr("Creating profile"))
             return True
         if self._step == "review":
             self._back_to_drive()
@@ -270,7 +270,7 @@ class SetupScreen(DeckScreen):
             self.window.notify(str(exc), 6000)
             return
         self.create_button.setEnabled(False)
-        self.window.notify(tr("Creating profile..."), 0)
+        self.window.notify(tr("Creating profile"), 0)
         self._task = BackgroundTask(run_config_command, args, timeout=300, parent=self)
         self._task.result.connect(lambda res: self._on_created(profile, *res))
         self._task.error.connect(self._on_error)

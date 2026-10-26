@@ -224,7 +224,7 @@ class BackupDialog(QDialog):
                 name, anomaly, gamma, reason="manual", name=label, report=report
             ),
             done,
-            tr("Backing up..."),
+            tr("Backing up"),
         )
 
     def _restore(self) -> None:
@@ -276,7 +276,7 @@ class BackupDialog(QDialog):
                 info, anomaly, gamma, saves=saves, settings=settings, report=report
             ),
             done,
-            tr("Restoring..."),
+            tr("Restoring"),
         )
 
     def _delete(self) -> None:
@@ -297,7 +297,7 @@ class BackupDialog(QDialog):
             if error:
                 QMessageBox.warning(self, tr("Couldn't delete the backup"), error)
 
-        self._start(lambda report: delete_backup(info), done, tr("Removing..."))
+        self._start(lambda report: delete_backup(info), done, tr("Removing"))
 
     def _open_folder(self) -> None:
         profile = self._profile()

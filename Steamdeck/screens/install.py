@@ -383,7 +383,7 @@ class InstallScreen(DeckScreen):
     def _start_dependency_check(self) -> None:
         if self._deps_task is not None:
             return
-        self.deps_row.set_status(tr("Checking..."), "warn")
+        self.deps_row.set_status(tr("Checking"), "warn")
         # Off-thread on purpose. The desktop page calls this synchronously,
         # which is tolerable on a desktop and a visible stall on the Deck -
         # it shells out to several package managers and binaries.
@@ -499,7 +499,7 @@ class InstallScreen(DeckScreen):
         self._begin_run(
             cli_command(args, progress_interval_ms=200),
             operation="anomaly",
-            status=tr("Installing Anomaly..."),
+            status=tr("Installing Anomaly"),
         )
 
     def _pick_offline_lists(self) -> None:
@@ -622,7 +622,7 @@ class InstallScreen(DeckScreen):
         self._begin_run(
             cli_command(args, progress_interval_ms=200),
             operation="gamma",
-            status=tr("Installing GAMMA..."),
+            status=tr("Installing GAMMA"),
         )
         return True
 
@@ -687,11 +687,11 @@ class InstallScreen(DeckScreen):
         if stage == "winetricks":
             command = winetricks_tool_install_command()
             failure = tr("winetricks could not be installed (curl is not available).")
-            status = tr("Installing winetricks...")
+            status = tr("Installing winetricks")
         elif stage == "umu":
             command = umu_install_command()
             failure = tr("umu-run could not be installed (curl is not available).")
-            status = tr("Installing umu-run...")
+            status = tr("Installing umu-run")
         else:
             # Through the game's own runner - bare winetricks would run the
             # host's wine inside the Proton prefix and corrupt it.
@@ -709,7 +709,7 @@ class InstallScreen(DeckScreen):
                 else:
                     # winetricks skips verbs already in winetricks.log without this.
                     command.insert(len(command) - len(WINETRICKS_VERBS), "--force")
-            status = tr("Installing runtimes...")
+            status = tr("Installing runtimes")
         if not command:
             self._finish_run()
             self.window.notify(failure, 8000)
@@ -806,7 +806,7 @@ class InstallScreen(DeckScreen):
             self._begin_run(
                 cli_command(["anomaly", "check"]),
                 operation="anomaly",
-                status=tr("Verifying Anomaly files..."),
+                status=tr("Verifying Anomaly files"),
             )
             return
 
@@ -969,7 +969,7 @@ class InstallScreen(DeckScreen):
             return
         # Fetched on demand, not eagerly on screen build: this is a GitHub
         # API call, and most visits to this screen never touch it.
-        self.window.notify(tr("Fetching Proton-GE releases..."), 0)
+        self.window.notify(tr("Fetching Proton-GE releases"), 0)
         self._proton_releases_task = BackgroundTask(
             fetch_ge_proton_releases, count=100, parent=self
         )
@@ -1039,8 +1039,8 @@ class InstallScreen(DeckScreen):
 
         self.window.set_install_busy(True, "proton")
         self.proton_install_button.setEnabled(False)
-        self.proton_install_button.setText(tr("Installing..."))
-        self.proton_status.setText(tr("Preparing download..."))
+        self.proton_install_button.setText(tr("Installing"))
+        self.proton_status.setText(tr("Preparing download"))
         self.progress.reset()
         self.progress.show()
         self.anomaly_button.hide()
@@ -1058,7 +1058,7 @@ class InstallScreen(DeckScreen):
             if total > 0:
                 pct = int(downloaded * 100 / total)
                 text = tr(
-                    "Downloading {version}... {done}/{total}",
+                    "Downloading {version} {done}/{total}",
                     version=version,
                     done=human_size(downloaded),
                     total=human_size(total),
@@ -1083,7 +1083,7 @@ class InstallScreen(DeckScreen):
     def _manage_protons(self) -> None:
         if self._proton_manage_task is not None or self.window.install_busy:
             return
-        self.window.notify(tr("Checking Proton-GE builds..."), 0)
+        self.window.notify(tr("Checking Proton-GE builds"), 0)
 
         def _scan():
             builds = installed_builds()

@@ -536,13 +536,13 @@ class MultiplayerPage(QWidget):
         _columns(setup, *tiles)
         # Same hero button as the Play page: installs the zip found in
         # Downloads/Desktop, or asks for one.
-        self.zip_button = QPushButton(tr("Install from zip…"))
+        self.zip_button = QPushButton(tr("Install from zip"))
         self.zip_button.setObjectName("hero")
         install_hover_grow_text(self.zip_button, "hero_text")
         self.zip_button.clicked.connect(lambda: self._install_zip(self._found) if self._found else self._pick_zip())
         self.zip_button.clicked.connect(play_click_sound)
         setup.addWidget(self.zip_button)
-        self.other_zip_button = QPushButton(tr("Choose another zip…"))
+        self.other_zip_button = QPushButton(tr("Choose another zip"))
         self.other_zip_button.setObjectName("secondary")
         self.other_zip_button.clicked.connect(self._pick_zip)
         setup.addWidget(self.other_zip_button)
@@ -958,7 +958,7 @@ class MultiplayerPage(QWidget):
     def _manage_tab(self) -> QWidget:
         page, layout = _panel()
         layout.setSpacing(8)
-        self.update_button = QPushButton(tr("Update from zip…"))
+        self.update_button = QPushButton(tr("Update from zip"))
         self.update_button.clicked.connect(self._pick_zip)
         layout.addWidget(_action_row(tr("Update xrRazom"), tr("Install a newer Slim zip. Your settings are kept."), self.update_button))
         layout.addWidget(_divider())
@@ -982,7 +982,7 @@ class MultiplayerPage(QWidget):
         check.clicked.connect(lambda: open_url(coop.MODDB_PAGE))
         layout.addWidget(_action_row(tr("New releases"), tr("Everyone in a session must use the same version."), check))
         layout.addWidget(_divider())
-        self.backup_button = QPushButton(tr("Export or import…"))
+        self.backup_button = QPushButton(tr("Export or import"))
         self.backup_button.clicked.connect(self._export_or_import)
         layout.addWidget(_action_row(
             tr("Export or import co-op"),
@@ -1232,7 +1232,7 @@ class MultiplayerPage(QWidget):
         self.other_zip_button.setVisible(found)
         if found:
             self.found_label.setText(tr("Found {name} in {folder}.", name=self._found.name, folder=self._found.parent.name))
-        set_hover_grow_text(self.zip_button, tr("Install {name}", name=self._found.name) if found else tr("Install from zip…"))
+        set_hover_grow_text(self.zip_button, tr("Install {name}", name=self._found.name) if found else tr("Install from zip"))
 
     def _mirror_launch_status(self) -> None:
         play = self.window._pages["play"]
@@ -1488,7 +1488,7 @@ class MultiplayerPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._start(tr("Installing {name}…", name=path.name), self._install_job, path, profile, kind, done=tr("xrRazom Co-op installed"))
+        self._start(tr("Installing {name}", name=path.name), self._install_job, path, profile, kind, done=tr("xrRazom Co-op installed"))
 
     def _install_job(self, path: Path, profile, kind: str):
         return coop.install(path, profile.anomaly, profile.gamma, profile.mo2_profile, self._bridge.progress.emit, kind=kind)
@@ -1498,7 +1498,7 @@ class MultiplayerPage(QWidget):
         if profile is None:
             return
         fn = coop.switch_to_coop if to_coop else coop.switch_to_singleplayer
-        label = tr("Switching to co-op…") if to_coop else tr("Switching to singleplayer…")
+        label = tr("Switching to co-op") if to_coop else tr("Switching to singleplayer")
         done = tr("Switched to co-op") if to_coop else tr("Switched to singleplayer")
         self._start(label, fn, profile.anomaly, profile.gamma, profile.mo2_profile, done=done)
 
@@ -1509,7 +1509,7 @@ class MultiplayerPage(QWidget):
             return
         to_plain = kind == coop.KIND_ANOMALY
         self._start(
-            tr("Switching co-op to Anomaly…") if to_plain else tr("Switching co-op to GAMMA…"),
+            tr("Switching co-op to Anomaly") if to_plain else tr("Switching co-op to GAMMA"),
             coop.set_install_kind, profile.anomaly, profile.gamma, profile.mo2_profile, kind,
             done=tr("Co-op is set up for Anomaly") if to_plain else tr("Co-op is set up for GAMMA"),
         )
@@ -1521,7 +1521,7 @@ class MultiplayerPage(QWidget):
             self._update_address()  # puts the pills back
             return
         # A few small file writes: no progress bar or "Done" popping in and out.
-        self._start(tr("Switching Steam game…"), coop.set_steam_appid, profile.anomaly, appid, quiet=True)
+        self._start(tr("Switching Steam game"), coop.set_steam_appid, profile.anomaly, appid, quiet=True)
 
     def _uninstall(self) -> None:
         profile = self._ready()
@@ -1540,7 +1540,7 @@ class MultiplayerPage(QWidget):
             labels={SB.Save: tr("Export first"), SB.Yes: tr("Uninstall"), SB.No: tr("Cancel")},
         )
         uninstall = lambda _result=None: self._start(
-            tr("Uninstalling…"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile,
+            tr("Uninstalling"), coop.uninstall, profile.anomaly, profile.gamma, profile.mo2_profile,
             done=tr("xrRazom Co-op uninstalled"),
         )
         if answer == SB.Save:
@@ -1557,7 +1557,7 @@ class MultiplayerPage(QWidget):
                 tr("Save your co-op settings, keybinds, MCM values and all your saves to a zip."),
                 tr("Bring back an exported zip. Files it replaces are backed up first."),
             ),
-            labels={SB.Save: tr("Export…"), SB.Open: tr("Import…"), SB.Cancel: tr("Cancel")},
+            labels={SB.Save: tr("Export"), SB.Open: tr("Import"), SB.Cancel: tr("Cancel")},
         )
         if answer == SB.Save:
             self._export()
@@ -1578,7 +1578,7 @@ class MultiplayerPage(QWidget):
             if then:
                 then()
 
-        self._start(tr("Exporting…"), coop.export_session, profile.anomaly, profile.gamma, profile.mo2_profile, path,
+        self._start(tr("Exporting"), coop.export_session, profile.anomaly, profile.gamma, profile.mo2_profile, path,
                     on_done=exported)
 
     def _import(self) -> None:
@@ -1607,7 +1607,7 @@ class MultiplayerPage(QWidget):
         ) != QMessageBox.StandardButton.Yes:
             return
         self._dirty.clear()  # the imported settings replace what's on screen
-        self._start(tr("Importing…"), coop.import_session, profile.anomaly, profile.gamma, profile.mo2_profile,
+        self._start(tr("Importing"), coop.import_session, profile.anomaly, profile.gamma, profile.mo2_profile,
                     profile.profile_name, path, done=tr("Co-op imported"))
 
     # -------------------------------------------------------------- settings

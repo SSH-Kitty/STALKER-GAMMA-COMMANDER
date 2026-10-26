@@ -1137,7 +1137,7 @@ class DeckWindow(QMainWindow):
             return
         tag = getattr(self, "_commander_update", None)
         if tag is None:
-            badge.setText(tr("Checking for updates..."))
+            badge.setText(tr("Checking for updates"))
             badge.setObjectName("deckHint")
         elif tag:
             badge.setText(tr("COMMANDER update available"))
@@ -1230,14 +1230,14 @@ class DeckWindow(QMainWindow):
             def work(cancel, progress):
                 return download_and_install_commander_update(tag, cancel_event=cancel, progress_cb=progress)
 
-        heading = tr("Downloading COMMANDER {tag}...", tag=tag) if tag else tr("Updating COMMANDER")
+        heading = tr("Downloading COMMANDER {tag}", tag=tag) if tag else tr("Updating COMMANDER")
         status = deck_label(heading, role="body", wrap=True)
         task = BackgroundTask(lambda: work(task.cancel_event, report), parent=self)
 
         def report(done: int, total: int) -> None:
             # Runs on the worker thread: hand the text to the GUI thread.
             text = (
-                tr("Checking and installing the new version...") if total > 1 and done >= total
+                tr("Checking and installing the new version") if total > 1 and done >= total
                 else f"{human_size(done)} / {human_size(total)}" if total > 1 else human_size(done)
             )
             QTimer.singleShot(0, status, lambda: status.setText(heading + "\n" + text))

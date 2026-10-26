@@ -143,7 +143,7 @@ class MainWindow(QMainWindow):
         )
         open_logs_button.clicked.connect(self._open_dumps_folder)
         top_bar.addWidget(open_logs_button)
-        open_button = QPushButton(tr("Open ZIP..."))
+        open_button = QPushButton(tr("Open ZIP"))
         open_button.setToolTip(
             tr("Open a log dump ZIP (Ctrl+O). You can also drop one anywhere on this window.")
         )
@@ -703,7 +703,7 @@ class MainWindow(QMainWindow):
         merged = merged[:10]
         self.recent_combo.blockSignals(True)
         self.recent_combo.clear()
-        self.recent_combo.addItem(tr("Recent log dumps..."))
+        self.recent_combo.addItem(tr("Recent log dumps"))
         for path in merged:
             self.recent_combo.addItem(path.name, str(path))
         self.recent_combo.blockSignals(False)

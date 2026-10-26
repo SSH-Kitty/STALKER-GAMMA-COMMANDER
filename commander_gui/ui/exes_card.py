@@ -50,7 +50,7 @@ class ModdedExesCard:
         self.versions.setFixedHeight(38)
         row.addWidget(self.versions, 1)
         self.install_button = self._button(tr("Install"), self._install_selected, "primary")
-        self.file_button = self._button(tr("From a file…"), self._install_file)
+        self.file_button = self._button(tr("From a file"), self._install_file)
         self.back_button = self._button("", self._go_back)
         self.restore_button = self._button(tr("Restore original exes"), self._restore)
         self.cancel_button = self._button(tr("Cancel"), lambda: self._task and self._task.cancel())
@@ -116,7 +116,7 @@ class ModdedExesCard:
 
     def _load_releases(self) -> None:
         self.versions.clear()
-        self.versions.addItem(tr("Loading releases…"), None)
+        self.versions.addItem(tr("Loading releases"), None)
         self._list_task = BackgroundTask(modded_exes.fetch_releases)
         self._list_task.result.connect(self._on_releases)
         self._list_task.error.connect(self._on_releases_error)
@@ -203,12 +203,12 @@ class ModdedExesCard:
                     path = modded_exes.download(
                         release, download_dir,
                         lambda done, total: report(
-                            tr("Downloading {version}… {percent}%", version=label, percent=done * 100 // total)
-                            if total else tr("Downloading {version}…", version=label)
+                            tr("Downloading {version} {percent}%", version=label, percent=done * 100 // total)
+                            if total else tr("Downloading {version}", version=label)
                         ),
                         cancel_event,
                     )
-                report(tr("Installing {version}…", version=_version_text(label)))
+                report(tr("Installing {version}", version=_version_text(label)))
                 modded_exes.install(path, anomaly, label, cancel_event)
             finally:
                 if download_dir is not None:

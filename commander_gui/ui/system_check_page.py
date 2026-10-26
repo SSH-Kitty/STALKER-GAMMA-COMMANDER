@@ -610,7 +610,7 @@ class SystemCheckPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        self.summary = QLabel(tr("Checking system readiness..."))
+        self.summary = QLabel(tr("Checking system readiness"))
         self.summary.setObjectName("accent")
         self.summary.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(self.summary)
@@ -688,7 +688,7 @@ class SystemCheckPage(QWidget):
         """Pre-populate every section with a single CHECKING... placeholder."""
         for title, layout in self._sections.items():
             clear_layout(layout)
-            self._add_row(layout, title, tr("Scanning..."), "checking", "")
+            self._add_row(layout, title, tr("Scanning"), "checking", "")
 
     def showEvent(self, event) -> None:
         """Re-run checks when revisiting the page if the last run is stale."""
@@ -722,11 +722,11 @@ class SystemCheckPage(QWidget):
         self._pending_error = None
         self._refresh_start = time.monotonic()
         self.refresh_button.setEnabled(False)
-        self.refresh_button.setText(tr("Checking..."))
+        self.refresh_button.setText(tr("Checking"))
         self.checking_bar.show()
-        self.summary.setText(tr("Checking system readiness..."))
+        self.summary.setText(tr("Checking system readiness"))
         for lbl in self._status_labels.values():
-            lbl.setText(tr("Checking..."))
+            lbl.setText(tr("Checking"))
             lbl.setObjectName("statusChecking")
             lbl.style().unpolish(lbl)
             lbl.style().polish(lbl)
@@ -855,7 +855,7 @@ class SystemCheckPage(QWidget):
         status_text = {
             "ready": tr("Installed"),
             "optional": tr("Optional"),
-            "checking": tr("Checking..."),
+            "checking": tr("Checking"),
         }.get(state_text, tr("Missing"))
         status_object = {
             "ready": "statusReady",
@@ -924,7 +924,7 @@ class SystemCheckPage(QWidget):
         )
         self._override_checks[key] = automatic
         row.addWidget(automatic)
-        browse = QPushButton(tr("Browse..."))
+        browse = QPushButton(tr("Browse"))
         browse.setObjectName("secondary")
         browse.clicked.connect(
             lambda _checked=False, key=key, edit=edit, directory=directory: (

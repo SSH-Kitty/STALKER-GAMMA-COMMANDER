@@ -178,7 +178,7 @@ class DashboardScreen(DeckScreen):
             return True
         if action == pad.SEARCH:
             self._update_at = self._deps_at = self._sizes_at = 0.0
-            self.window.notify(tr("Checking..."), 1500)
+            self.window.notify(tr("Checking"), 1500)
             self.refresh()
             return True
         return False
@@ -384,7 +384,7 @@ class DashboardScreen(DeckScreen):
             return
         if time.monotonic() - self._deps_at < _CHECK_CACHE_S and self._deps_at:
             return
-        self.deps_row.set_status(tr("Checking..."), "warn")
+        self.deps_row.set_status(tr("Checking"), "warn")
         self._deps_task = BackgroundTask(check_all_dependencies, parent=self)
         self._deps_task.result.connect(self._on_dependencies)
         self._deps_task.error.connect(lambda _m: self._on_dependencies(None))
@@ -420,7 +420,7 @@ class DashboardScreen(DeckScreen):
             return
         if self._update_at and time.monotonic() - self._update_at < _CHECK_CACHE_S:
             return
-        self._set_update_text(tr("Checking..."), "deckBody")
+        self._set_update_text(tr("Checking"), "deckBody")
         self._update_task = BackgroundTask(check_updates, profile, parent=self)
         gen = self._generation
         self._update_task.result.connect(
@@ -481,7 +481,7 @@ class DashboardScreen(DeckScreen):
         # without the first check an autostart right after boot skipped it.
         if self._sizes_at and time.monotonic() - self._sizes_at < _SIZE_CACHE_S:
             return
-        self.storage_row.set_value(tr("Checking..."))
+        self.storage_row.set_value(tr("Checking"))
         paths = [profile.anomaly, profile.gamma, profile.cache]
 
         def measure() -> tuple[int, int | None]:

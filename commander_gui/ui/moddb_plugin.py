@@ -55,12 +55,12 @@ class ModDBPlugin(QObject):
             return
 
         def worker(report):
-            report(tr("Looking for the plugin…"))
+            report(tr("Looking for the plugin"))
             plugins.download_and_install(
                 self._task.cancel_event,
                 lambda done, total: report(
-                    tr("Downloading the ModDB browser… {percent}%", percent=done * 100 // total)
-                    if total else tr("Downloading the ModDB browser…")
+                    tr("Downloading the ModDB browser {percent}%", percent=done * 100 // total)
+                    if total else tr("Downloading the ModDB browser")
                 ),
             )
 
@@ -84,7 +84,7 @@ class ModDBPlugin(QObject):
                 return
 
         def worker(report):
-            report(tr("Installing the ModDB browser…"))
+            report(tr("Installing the ModDB browser"))
             plugins.install_archive(archive, digest)
 
         self._run(worker, cancellable=False)

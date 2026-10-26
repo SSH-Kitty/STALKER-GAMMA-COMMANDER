@@ -297,7 +297,7 @@ class DashboardPage(QWidget):
         )
         if anomaly_state == "installing":
             self.anomaly_status = InstallStatusRow("STALKER Anomaly", profile.anomaly)
-            self.anomaly_status.set_installing(tr("Installing Anomaly..."))
+            self.anomaly_status.set_installing(tr("Installing Anomaly"))
         else:
             self.anomaly_status = InstallStatusRow(
                 "STALKER Anomaly",
@@ -307,18 +307,18 @@ class DashboardPage(QWidget):
         layout.addWidget(self.anomaly_status)
         if gamma_state == "installing":
             self.gamma_status = InstallStatusRow("GAMMA Modpack", profile.gamma)
-            self.gamma_status.set_installing(tr("Installing GAMMA..."))
+            self.gamma_status.set_installing(tr("Installing GAMMA"))
         else:
             self.gamma_status = InstallStatusRow(
                 "GAMMA Modpack", profile.gamma, ok=bool(gamma_state)
             )
         layout.addWidget(self.gamma_status)
         self.winetricks_status = InstallStatusRow(
-            "Dependencies", tr("Checking..."), ok=None, pending_text=tr("Checking")
+            "Dependencies", tr("Checking"), ok=None, pending_text=tr("Checking")
         )
         layout.addWidget(self.winetricks_status)
         if op == "dependencies":
-            self.winetricks_status.set_installing(tr("Installing dependencies..."))
+            self.winetricks_status.set_installing(tr("Installing dependencies"))
         else:
             self._start_winetricks_status(
                 self._refresh_generation, self.winetricks_status
@@ -849,7 +849,7 @@ class DashboardPage(QWidget):
         layout.addWidget(_card_title(tr("Storage usage")))
         if sizes is None:
             layout.addWidget(_SegmentedBar([]))
-            measuring = QLabel(tr("Measuring folder sizes..."))
+            measuring = QLabel(tr("Measuring folder sizes"))
             measuring.setObjectName("dim")
             layout.addWidget(measuring)
             self._draw_free_space(layout)
@@ -1062,7 +1062,7 @@ class DashboardPage(QWidget):
             profile.cache,
         )
         self._render_update_card(
-            None, tr("Checking the active GAMMA installation for updates..."), "dim"
+            None, tr("Checking the active GAMMA installation for updates"), "dim"
         )
         task = BackgroundTask(
             check_updates,
@@ -1130,7 +1130,7 @@ class DashboardPage(QWidget):
         header.addWidget(section_label(tr("Updates")))
         header.addStretch(1)
         check_button = QPushButton(
-            tr("Checking...") if self._update_checking else "⟳  " + tr("Check for updates")
+            tr("Checking") if self._update_checking else "⟳  " + tr("Check for updates")
         )
         check_button.setObjectName("pillButton")
         check_button.setFixedHeight(34)
@@ -1191,7 +1191,7 @@ class DashboardPage(QWidget):
             else "–"
         )
         if status is None and self._update_checking:
-            add_row("GAMMA", gamma_version, tr("Checking for updates..."))
+            add_row("GAMMA", gamma_version, tr("Checking for updates"))
         elif status is not None and status.update_available:
             add_row(
                 "GAMMA", gamma_version, tr("Update available"), False,
@@ -1205,7 +1205,7 @@ class DashboardPage(QWidget):
         # COMMANDER: the status bar's startup check, shown here too.
         tag = getattr(self.window, "_commander_update_tag", None)
         if not getattr(self.window, "_commander_update_known", False):
-            add_row("COMMANDER", __version_label__, tr("Checking for updates..."))
+            add_row("COMMANDER", __version_label__, tr("Checking for updates"))
         elif tag:
             add_row(
                 "COMMANDER", __version_label__, tr("Update available"), False,
@@ -1340,9 +1340,9 @@ class DashboardPage(QWidget):
     def on_install_activity_changed(self, operation: str | None) -> None:
         """Show active Anomaly/GAMMA installs in the dashboard status card."""
         if operation == "anomaly" and hasattr(self, "anomaly_status"):
-            self.anomaly_status.set_installing(tr("Installing Anomaly..."))
+            self.anomaly_status.set_installing(tr("Installing Anomaly"))
         elif operation == "gamma" and hasattr(self, "gamma_status"):
-            self.gamma_status.set_installing(tr("Installing GAMMA..."))
+            self.gamma_status.set_installing(tr("Installing GAMMA"))
         elif operation is None and self.settings.active_profile is not None:
             # Bump the generation the same way refresh() does: _render_
             # install_status() below replaces self.winetricks_status with a

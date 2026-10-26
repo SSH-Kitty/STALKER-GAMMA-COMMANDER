@@ -1637,7 +1637,7 @@ class PlayPage(QWidget):
             QMessageBox.warning(self, tr("Close the game first"), tr("Mod Organizer 2 or the game is still open. Close both, then try again."))
             return
         self.window.set_install_busy(True, "coop")
-        self._set_result(tr("Switching co-op to Anomaly…"))
+        self._set_result(tr("Switching co-op to Anomaly"))
 
         def finish(error: str | None) -> None:
             self._coop_switch_task = None

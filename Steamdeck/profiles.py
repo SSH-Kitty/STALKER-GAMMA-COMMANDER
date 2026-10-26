@@ -293,7 +293,7 @@ class ProfilePanel(QWidget):
         if self._task is not None:
             # One switch at a time: two overlapping `config use` runs made the
             # first to finish report failure against the other's result.
-            self.window.notify(tr("Switching profile..."))
+            self.window.notify(tr("Switching profile"))
             return
         if self.window.install_busy:
             self.window.notify(tr("An install is already running."))
@@ -314,7 +314,7 @@ class ProfilePanel(QWidget):
         self._switch(name)
 
     def _switch(self, name: str) -> None:
-        self.window.notify(tr("Activating {name}...", name=name), 0)
+        self.window.notify(tr("Activating {name}", name=name), 0)
         # activate_profile only needs window.refresh_settings() and
         # window.settings, both of which DeckWindow provides - so the
         # desktop helper is reused exactly as-is, CLI call and all.

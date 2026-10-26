@@ -293,7 +293,7 @@ class AboutPage(QWidget):
         side = QVBoxLayout()
         side.setSpacing(10)
         self.search = QLineEdit()
-        self.search.setPlaceholderText(tr("Search the documentation..."))
+        self.search.setPlaceholderText(tr("Search the documentation"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._filter)
         side.addWidget(self.search)

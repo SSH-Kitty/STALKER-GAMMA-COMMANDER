@@ -7413,7 +7413,7 @@ class UserModsTrackerTests(unittest.TestCase):
         html = _cache_preflight_summary_html(result, include_anomaly=False)
         self.assertIn("Mod14.7z", html)
         self.assertNotIn("Mod15.7z", html)
-        self.assertIn("... and 5 more", html)
+        self.assertIn("and 5 more", html)
 
     def test_cache_preflight_summary_html_escapes_archive_names(self):
         result = CacheArchiveVerifyResult(missing=["<script>evil.7z"])
@@ -7665,7 +7665,7 @@ class UserModsTrackerTests(unittest.TestCase):
             window = MainWindow()
             try:
                 self.assertEqual(
-                    window._update_status_button.text(), "Checking for updates..."
+                    window._update_status_button.text(), "Checking for updates"
                 )
                 with patch(
                     "commander_gui.ui.main_window.BackgroundTask"
@@ -8154,7 +8154,7 @@ class UserModsTrackerTests(unittest.TestCase):
 
         error behind the 2-second minimum-display timer, even on the very
         first check (before _last_check_ts is ever set). _show_checks()
-        already skips that delay on a first load because the "Scanning..."
+        already skips that delay on a first load because the "Scanning"
         placeholders are on screen already - _show_error() must match that,
         or a fast failure on startup sits behind a pointless artificial
         delay instead of being reported right away.
@@ -9245,7 +9245,7 @@ class UserModsTrackerTests(unittest.TestCase):
             with patch("commander_gui.ui.mod_manager_page.QMessageBox.information") as mock_info:
                 page._on_conflicts_found([])
             mock_info.assert_called_once()
-            self.assertFalse(page.conflicts_button.text() == "Scanning...")
+            self.assertFalse(page.conflicts_button.text() == "Scanning")
 
     def test_check_file_conflicts_opens_the_conflicts_dialog_when_found(self):
         """Regression test: a real report shared one conflicting file
@@ -9529,7 +9529,7 @@ class UserModsTrackerTests(unittest.TestCase):
         self.assertEqual(offered, ["Gameplay"])
 
     def test_rename_category_ui_writes_the_renamed_separator_and_reloads(self):
-        """Regression test: the Mod Manager page's new "Rename Category..."
+        """Regression test: the Mod Manager page's new "Rename Category"
 
         action (right-click on a category header) must actually persist
         the rename to modlist.txt and reload the tree, mirroring the
@@ -10121,7 +10121,7 @@ class UserModsTrackerTests(unittest.TestCase):
             self.assertNotIn("My Category", names)
 
     def test_category_context_menu_only_offers_delete_for_tracked_categories(self):
-        """Regression test: "Delete Category..." must never be offered
+        """Regression test: "Delete Category" must never be offered
 
         for a real GAMMA category, only for one the user created
         themselves via "New Category" (see user_created_categories in
@@ -10156,8 +10156,8 @@ class UserModsTrackerTests(unittest.TestCase):
                 page._show_category_context_menu(header_item("My Category"), QPoint(0, 0))
                 tracked_actions = [c.args[0] for c in menu.addAction.call_args_list]
 
-            self.assertNotIn("Delete Category...", foo_actions)
-            self.assertIn("Delete Category...", tracked_actions)
+            self.assertNotIn("Delete Category", foo_actions)
+            self.assertIn("Delete Category", tracked_actions)
 
     def test_move_category_ui_reorders_via_the_context_menu_handler(self):
         with (
@@ -14112,7 +14112,7 @@ class UnstableBuildTests(unittest.TestCase):
                 page._render_build()
                 self.assertFalse(page._switch_build_button.isEnabled())
                 self.assertIn("git switch", page._build_note.text())
-                # From source the check must still run, or "Checking..." sticks.
+                # From source the check must still run, or "Checking" sticks.
                 page._unstable_checked = False
                 with (
                     patch.object(settings_page, "__version__", "1.3.0"),

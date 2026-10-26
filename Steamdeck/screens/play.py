@@ -455,7 +455,7 @@ class PlayScreen(DeckScreen):
             return
         play_click_sound()
         self.window.set_install_busy(True, "coop")
-        self.window.notify(tr("Switching co-op to Anomaly…"), 0)
+        self.window.notify(tr("Switching co-op to Anomaly"), 0)
 
         def finish(error: str | None) -> None:
             self._coop_switch_task = None

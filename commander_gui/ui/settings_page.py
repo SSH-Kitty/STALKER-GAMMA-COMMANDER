@@ -1016,7 +1016,7 @@ class SettingsPage(QWidget):
         self._plugin_open_folder.clicked.connect(self._open_plugin_downloads)
         for button in (self._plugin_delete_downloads, self._plugin_open_folder):
             button.setToolTip(tr("Mods the ModDB browser downloaded. Safe to delete once they're installed."))
-        self._plugin_from_file = _action(tr("From a file…"))
+        self._plugin_from_file = _action(tr("From a file"))
         self._plugin_from_file.setToolTip(tr("Install a plugin .tar.xz you already downloaded from COMMANDER's GitHub releases."))
         self._plugin_from_file.clicked.connect(self._install_plugin_file)
         self._plugin_install = _action("")
@@ -1163,7 +1163,7 @@ class SettingsPage(QWidget):
                     tag=self._unstable_offer.removeprefix("v"),
                 )
             elif not self._unstable_checked:
-                note = tr("Checking for an unstable build...")
+                note = tr("Checking for an unstable build")
             else:
                 note = tr(
                     "There's no unstable build newer than the stable one right now."
@@ -1284,7 +1284,7 @@ class SettingsPage(QWidget):
             lambda err: QMessageBox.warning(self, tr("Couldn't add COMMANDER to Steam"), err)
         )
         self._steam_restart_task.start()
-        self.window.statusBar().showMessage(tr("Restarting Steam..."), 0)
+        self.window.statusBar().showMessage(tr("Restarting Steam"), 0)
 
     def _on_start_page(self, *_args) -> None:
         key = self._start_page_combo.currentData()
@@ -1346,7 +1346,7 @@ class SettingsPage(QWidget):
 
     def _set_discord_status(self, connected: bool | None) -> None:
         if connected is None:
-            text, color = tr("Looking for Discord..."), None
+            text, color = tr("Looking for Discord"), None
         elif connected:
             text, color = tr("● Discord is running - ready"), OK_GREEN
         else:
@@ -1404,7 +1404,7 @@ class SettingsPage(QWidget):
             self._set_discord_status(False)
             return
         self._discord_test_rpc = rpc
-        self._discord_test_button.setText(tr("Showing on Discord..."))
+        self._discord_test_button.setText(tr("Showing on Discord"))
         QTimer.singleShot(15_000, self._end_discord_test)
 
     def _end_discord_test(self) -> None:

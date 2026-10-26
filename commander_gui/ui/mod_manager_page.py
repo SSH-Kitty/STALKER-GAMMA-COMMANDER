@@ -650,7 +650,7 @@ class _ConflictsDialog(QDialog):
         layout.addWidget(self.show_all_checkbox)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText(tr("Filter by mod name..."))
+        self.search.setPlaceholderText(tr("Filter by mod name"))
         self.search.textChanged.connect(self._apply_filter)
         layout.addWidget(self.search)
 
@@ -908,9 +908,9 @@ class ModManagerPage(QWidget):
         self.manage_profile_button.setToolTip(tr("Manage Profile"))
         self.manage_profile_button.setFixedSize(40, 32)
         manage_profile_menu = QMenu(self)
-        manage_profile_menu.addAction(tr("New Profile..."), self._create_mo2_profile)
-        manage_profile_menu.addAction(tr("Rename Profile..."), self._rename_mo2_profile)
-        manage_profile_menu.addAction(tr("Delete Profile..."), self._delete_mo2_profile)
+        manage_profile_menu.addAction(tr("New Profile"), self._create_mo2_profile)
+        manage_profile_menu.addAction(tr("Rename Profile"), self._rename_mo2_profile)
+        manage_profile_menu.addAction(tr("Delete Profile"), self._delete_mo2_profile)
         self.manage_profile_button.setMenu(manage_profile_menu)
         title_row.addWidget(self.manage_profile_button)
         title_row.addSpacing(8)
@@ -982,7 +982,7 @@ class ModManagerPage(QWidget):
         toolbar.addSpacing(12)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText(tr("Search the modlist..."))
+        self.search.setPlaceholderText(tr("Search the modlist"))
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumHeight(32)
         self.search.textChanged.connect(self._apply_filter)
@@ -1238,7 +1238,7 @@ class ModManagerPage(QWidget):
         if self._profiles_loading:
             return
         self._profiles_loading = True
-        self.count_label.setText(tr("Loading MO2 profiles..."))
+        self.count_label.setText(tr("Loading MO2 profiles"))
         task = BackgroundTask(_query_mo2_profiles, parent=self)
         task.result.connect(
             lambda result, task=task, generation=generation: self._on_profiles_loaded(
@@ -2145,7 +2145,7 @@ class ModManagerPage(QWidget):
             self._on_install_error("The GAMMA mods directory cannot be a symlink.", generation)
             return
         name = self._install_name
-        self.install_progress.status_message(tr("Installing {name}...", name=name))
+        self.install_progress.status_message(tr("Installing {name}", name=name))
 
         installation_file = self._install_source.name if self._install_source else ""
 
@@ -2794,7 +2794,7 @@ class ModManagerPage(QWidget):
         menu = QMenu(self)
         # A nickname only lives in COMMANDER's settings - modlist.txt and the
         # mod's folder never change - so it stays available while MO2 runs.
-        rename_action = menu.addAction(tr("Rename..."))
+        rename_action = menu.addAction(tr("Rename"))
         rename_action.setEnabled(single)
         reset_name_action = menu.addAction(tr("Reset Name"))
         reset_name_action.setEnabled(
@@ -2831,17 +2831,17 @@ class ModManagerPage(QWidget):
 
         folder_action = menu.addAction(tr("Open Mod Folder"))
         folder_action.setEnabled(not blocked)
-        conflicts_action = menu.addAction(tr("Show Conflicts..."))
+        conflicts_action = menu.addAction(tr("Show Conflicts"))
         conflicts_action.setEnabled(single)
         menu.addSeparator()
         # Only for a single mod - re-extracting from cache is a per-mod
         # operation, there's no meaningful "for all N selected" version.
-        reinstall_action = menu.addAction(tr("Reinstall from Cache..."))
+        reinstall_action = menu.addAction(tr("Reinstall from Cache"))
         reinstall_action.setEnabled(single and not blocked)
         # Only for mods the user installed: a GAMMA mod's files are GAMMA's
         # to update, and replacing them by hand breaks the next update.
         custom = set(custom_mod_names(self._lines))
-        update_action = menu.addAction(tr("Update from Archive..."))
+        update_action = menu.addAction(tr("Update from Archive"))
         update_action.setEnabled(
             single and not blocked and bool(self._selected_mod_names())
             and self._selected_mod_names()[0] in custom
@@ -2943,7 +2943,7 @@ class ModManagerPage(QWidget):
             return
         blocked = self._mo2_running() or self.window.install_busy or self._install_active
         menu = QMenu(self)
-        rename_action = menu.addAction(tr("Rename Category..."))
+        rename_action = menu.addAction(tr("Rename Category"))
         rename_action.setEnabled(not blocked)
         menu.addSeparator()
         move_up_action = menu.addAction(tr("Move Category Up"))
@@ -2953,7 +2953,7 @@ class ModManagerPage(QWidget):
         delete_action = None
         if category in self._tracked_user_categories():
             menu.addSeparator()
-            delete_action = menu.addAction(tr("Delete Category..."))
+            delete_action = menu.addAction(tr("Delete Category"))
             delete_action.setEnabled(not blocked)
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         # Parented to the page: without this every right-click leaked one.
@@ -3559,7 +3559,7 @@ class ModManagerPage(QWidget):
             return
         lines = list(self._lines)
         self.conflicts_button.setEnabled(False)
-        self.conflicts_button.setText(tr("Scanning..."))
+        self.conflicts_button.setText(tr("Scanning"))
         task = BackgroundTask(
             find_enabled_mod_file_conflicts, lines, mods_dir, parent=self
         )
@@ -3601,7 +3601,7 @@ class ModManagerPage(QWidget):
             mod == name and status == "Enabled" for status, mod in entries(lines)
         )
         self.window.statusBar().showMessage(
-            tr("Checking conflicts for {name}...", name=name)
+            tr("Checking conflicts for {name}", name=name)
         )
         task = BackgroundTask(mod_conflicts, lines, mods_dir, name, parent=self)
         self._mod_conflicts_task = task

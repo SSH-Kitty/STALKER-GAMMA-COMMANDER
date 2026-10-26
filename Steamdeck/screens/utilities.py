@@ -458,7 +458,7 @@ class UtilitiesScreen(DeckScreen):
             task.error.connect(self._on_romeo_uninstall_error)
             self._romeo_task = task
             task.start()
-            self.window.notify(tr("Uninstalling ROMEO…"), 5000)
+            self.window.notify(tr("Uninstalling ROMEO"), 5000)
 
         self.window.confirm(
             tr("Uninstall ROMEO?"),
@@ -614,7 +614,7 @@ class UtilitiesScreen(DeckScreen):
         if not prefix:
             self.window.notify(tr("The selected runner does not use a Proton prefix."))
             return
-        self.status.setText(tr("Scanning prefix..."))
+        self.status.setText(tr("Scanning prefix"))
         task = BackgroundTask(foreign_prefix_dlls, prefix, runner, parent=self)
         self._repair_task = task
         task.result.connect(lambda found: self._on_prefix_scanned(prefix, runner, found))
@@ -765,7 +765,7 @@ class UtilitiesScreen(DeckScreen):
             lambda report: create_backup(
                 name, anomaly, gamma, reason="manual", name=label, report=report
             ),
-            tr("Backing up..."),
+            tr("Backing up"),
             done,
         )
 
@@ -849,7 +849,7 @@ class UtilitiesScreen(DeckScreen):
             lambda report: restore_backup(
                 info, anomaly, gamma, saves=saves, settings=settings, report=report
             ),
-            tr("Restoring..."),
+            tr("Restoring"),
             done,
         )
 
@@ -878,7 +878,7 @@ class UtilitiesScreen(DeckScreen):
             self.window.notify(tr("Another task is already running."))
             return
         self.window.set_install_busy(True)
-        self.status.setText(tr("Creating Log Dump..."))
+        self.status.setText(tr("Creating Log Dump"))
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)
@@ -1021,7 +1021,7 @@ class UtilitiesScreen(DeckScreen):
             return
         self.window.set_install_busy(True, "move")
         self._set_actions_enabled(False)
-        self.status.setText(tr("Moving installation..."))
+        self.status.setText(tr("Moving installation"))
         self.progress.reset()
         self.progress.show()
         self._move_sources = sources
@@ -1143,7 +1143,7 @@ class UtilitiesScreen(DeckScreen):
         self._wipe_targets = (profile.anomaly, profile.gamma)
         self.window.set_install_busy(True, "anomaly" if include_anomaly else "gamma")
         self._set_actions_enabled(False)
-        self.status.setText(tr("Wiping {title}...", title=title))
+        self.status.setText(tr("Wiping {title}", title=title))
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)
@@ -1175,7 +1175,7 @@ class UtilitiesScreen(DeckScreen):
                 8000,
             )
             return
-        self.status.setText(tr("{title}: folders wiped, reinstalling...", title=title))
+        self.status.setText(tr("{title}: folders wiped, reinstalling", title=title))
         self.window.set_page("install")
         install_page = self.window._pages["install"]
         if self._reset_includes_anomaly:
@@ -1263,7 +1263,7 @@ class UtilitiesScreen(DeckScreen):
         self._full_uninstall_targets = (profile.anomaly, profile.gamma, profile.cache)
         self.window.set_install_busy(True)
         self._set_actions_enabled(False)
-        self.status.setText(tr("Removing Anomaly, GAMMA, and cache folders..."))
+        self.status.setText(tr("Removing Anomaly, GAMMA, and cache folders"))
         self.progress.reset()
         self.progress.show()
         self.progress.set_cancellable(None)

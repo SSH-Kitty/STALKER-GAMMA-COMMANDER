@@ -429,7 +429,7 @@ class DeckModInstaller(QObject):
         self._status = deck_label(text, role="body", wrap=True)
         layout.addWidget(self._status)
         overlay = DeckOverlay(
-            tr("Installing {name}...", name=self._name),
+            tr("Installing {name}", name=self._name),
             body,
             [(tr("Cancel"), self._cancel, "normal")],
             panel_width=900,
@@ -472,7 +472,7 @@ class DeckModInstaller(QObject):
         self.window.set_install_busy(True, "mod_install")
         self._staging_root = make_staging_dir(self.screen.profile().gamma)
         staging = self._staging_root / "archive"
-        self._show_progress(tr("Extracting {name}...", name=archive.name))
+        self._show_progress(tr("Extracting {name}", name=archive.name))
         task: StreamTask | None = None
 
         def worker(report):
@@ -481,7 +481,7 @@ class DeckModInstaller(QObject):
                 staging,
                 task.cancel_event,
                 lambda percent, text: report(
-                    tr("Extracting {name}...", name=archive.name)
+                    tr("Extracting {name}", name=archive.name)
                     + (f" {percent}%" if percent is not None else "")
                 ),
             )
@@ -528,7 +528,7 @@ class DeckModInstaller(QObject):
         destination = Path(profile.gamma) / "mods" / self._name
         selected = self._staging_root / "selected"
         archive_name = self._archive.name if self._archive is not None else ""
-        self._show_progress(tr("Installing {name}...", name=self._name))
+        self._show_progress(tr("Installing {name}", name=self._name))
 
         def worker():
             payload = source

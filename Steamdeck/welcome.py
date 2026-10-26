@@ -48,7 +48,7 @@ def open_url(window, url: str) -> None:
     """
     target = f"steam://openurl/{url}" if in_game_mode() else url
     if open_web_url(target):
-        window.notify(tr("Opening {url}...", url=url))
+        window.notify(tr("Opening {url}", url=url))
     else:
         window.notify(tr("Could not open {url}", url=url), 6000)
 
@@ -98,7 +98,7 @@ class WelcomePanel(QWidget):
         self.notes_title = deck_label(tr("Patch notes"), role="section")
         notes_column.addWidget(self.notes_title)
         self.notes = DeckTextPanel(
-            tr("Loading patch notes..."), min_height=320, max_height=420
+            tr("Loading patch notes"), min_height=320, max_height=420
         )
         notes_column.addWidget(self.notes, 1)
         row.addLayout(notes_column, 3)

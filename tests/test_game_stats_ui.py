@@ -166,7 +166,7 @@ class StorageCardTest(DashboardStatsCardTest):
             )
             page = self._page([profile])
             texts = [w.text() for w in page.sizes_card.findChildren(QLabel)]
-            self.assertIn("Measuring folder sizes...", texts)
+            self.assertIn("Measuring folder sizes", texts)
 
             save_gui_settings(
                 storage_sizes={

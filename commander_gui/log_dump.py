@@ -349,7 +349,7 @@ def create_log_dump(
     sources = gather_default_sources()
     for label, root in sorted(sources.items()):
         say(f"Scanning {label}: {root}")
-    say("Compressing logs...")
+    say("Compressing logs")
     return build_log_dump(
         log_dumps_dir(),
         sources,

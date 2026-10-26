@@ -276,7 +276,7 @@ class SettingsScreen(DeckScreen):
                 profile = self.profile()
                 row.setEnabled(profile is None or not coop.is_active(profile.anomaly))
         self.steam_row.set_value(
-            tr("Adding...") if self._steam_task is not None else ""
+            tr("Adding") if self._steam_task is not None else ""
         )
         self._render_build()
 
@@ -295,13 +295,13 @@ class SettingsScreen(DeckScreen):
                 tag=self._unstable_offer.removeprefix("v"),
             )
         elif self._unstable_task is None and not getattr(self, "_unstable_checked", False):
-            note = tr("Checking for an unstable build...")
+            note = tr("Checking for an unstable build")
             self._unstable_task = BackgroundTask(newer_unstable_tag, __version__, parent=self)
             self._unstable_task.result.connect(self._unstable_found)
             self._unstable_task.error.connect(lambda _m: self._unstable_found(None))
             self._unstable_task.start()
         elif self._unstable_task is not None:
-            note = tr("Checking for an unstable build...")
+            note = tr("Checking for an unstable build")
         else:
             note = tr("There's no unstable build newer than the stable one right now.")
         self.build_note.setText(note)
@@ -500,7 +500,7 @@ class SettingsScreen(DeckScreen):
         self._steam_task.error.connect(self._steam_done)
         self._steam_task.start()
         self.window.notify(
-            tr("Restarting Steam...") if restart else tr("Adding..."), 0
+            tr("Restarting Steam") if restart else tr("Adding"), 0
         )
         self.refresh()
 

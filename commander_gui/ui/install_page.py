@@ -625,7 +625,7 @@ class _FindingRow(QFrame):
             text = "\n".join(shown)
             if len(finding.items) > len(shown):
                 text += "\n" + tr(
-                    "... and {count} more (see the technical log)",
+                    "and {count} more (see the technical log)",
                     count=len(finding.items) - len(shown),
                 )
             self.items = QLabel(text)
@@ -2050,12 +2050,12 @@ class InstallPage(QWidget):
                     name = Path(broken[0]).name
                     if action == "renamed":
                         note = tr(
-                            "Using the copy of {name} you downloaded - retrying...",
+                            "Using the copy of {name} you downloaded - retrying",
                             name=name,
                         )
                     else:
                         note = tr(
-                            "{name} was broken - downloading it again...", name=name
+                            "{name} was broken - downloading it again", name=name
                         )
                     self.window.statusBar().showMessage(note, 8000)
                     self._start_full_install(
@@ -2073,7 +2073,7 @@ class InstallPage(QWidget):
                 self._auto_retry_count += 1
                 self.window.statusBar().showMessage(
                     tr(
-                        "A large file pack failed again - auto-retrying ({count}/{max})...",
+                        "A large file pack failed again - auto-retrying ({count}/{max})",
                         count=self._auto_retry_count,
                         max=_AUTO_RETRY_MAX,
                     ),
@@ -2239,8 +2239,8 @@ class InstallPage(QWidget):
         if self.full_progress.is_paused:
             runner.resume()
         self.full_progress.cancel_button.setEnabled(False)
-        self.full_progress.cancel_button.setText(tr("Cancelling..."))
-        self.full_progress.status_message(tr("Cancelling installation..."))
+        self.full_progress.cancel_button.setText(tr("Cancelling"))
+        self.full_progress.status_message(tr("Cancelling installation"))
         runner.cancel()
 
     def _start_anomaly_install(self, skip_confirm=False, respect_options=True):
@@ -2398,7 +2398,7 @@ class InstallPage(QWidget):
         self.full_progress.cancel_button.show()
         self.full_progress.cancel_button.setEnabled(True)
         self.full_progress.cancel_button.setText(tr("Cancel"))
-        self.full_progress.status_message(tr("Verifying Anomaly files..."))
+        self.full_progress.status_message(tr("Verifying Anomaly files"))
         self._post_anomaly_verify_cancelled = False
         self._post_anomaly_verify_runner = CommandRunner(
             cli_command(["anomaly", "check"]), parent=self
@@ -2489,7 +2489,7 @@ class InstallPage(QWidget):
         if chain and not cancelled and install_ok:
             self._anomaly_failure = None
             self.full_progress.status_message(
-                tr("Anomaly installed. Starting GAMMA install...")
+                tr("Anomaly installed. Starting GAMMA install")
             )
             self._start_full_install(skip_confirm=True)
             return
@@ -2586,7 +2586,7 @@ class InstallPage(QWidget):
         self.verify_tiles["anomaly"].set_state("running", "0", tr("files checked"))
         for key in ("mods", "md5", "cache"):
             self.verify_tiles[key].set_state("idle", "-", tr("Waiting"))
-        self._set_verify_pill("running", tr("Checking..."))
+        self._set_verify_pill("running", tr("Checking"))
         self.window.set_install_busy(True)
         self.verify_progress.reset()
         self.verify_button.setEnabled(False)
@@ -2628,7 +2628,7 @@ class InstallPage(QWidget):
             if seen and seen % 20 == 0:
                 # Keep the busy bar label moving during the anomaly check.
                 self.verify_progress.bar.setFormat(
-                    tr("Checking Anomaly files ({count})...", count=seen)
+                    tr("Checking Anomaly files ({count})", count=seen)
                 )
                 self.verify_tiles["anomaly"].set_state(
                     "running", str(seen), tr("files checked")
@@ -2682,7 +2682,7 @@ class InstallPage(QWidget):
     def _start_gamma_verify(self):
         self._scan_cancel = threading.Event()
         self.verify_progress.cancel_button.show()
-        self.verify_progress.status_message(tr("Checking GAMMA mods..."))
+        self.verify_progress.status_message(tr("Checking GAMMA mods"))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== GAMMA integrity check ==")
         self.verify_tiles["mods"].set_state("running", "-", tr("Downloading GAMMA's mod list"))
@@ -2701,7 +2701,7 @@ class InstallPage(QWidget):
 
         if _gamma_verify_gate(gamma_installed(profile.gamma, profile.mo2_profile)) is not None:
             return (_GAMMA_NOT_INSTALLED, None, None, {}, False, None)
-        report("Downloading official GAMMA mod list...")
+        report("Downloading official GAMMA mod list")
         official = fetch_official_mod_names(profile.mod_list_url)
         official_missing = official is None or len(official) == 0
         # Read on the GUI thread only after this task's result arrives;
@@ -2722,7 +2722,7 @@ class InstallPage(QWidget):
             ),
             official_mods=official,
         )
-        report("Starting full MD5 scan of mod files...")
+        report("Starting full MD5 scan of mod files")
         scan = scan_mods_md5(
             profile.gamma,
             on_progress=(
@@ -2733,7 +2733,7 @@ class InstallPage(QWidget):
             cancel=self._scan_cancel,
         )
         plan = None
-        report("Checking GAMMA download cache...")
+        report("Checking GAMMA download cache")
         records = fetch_modpack_records(profile.mod_pack_maker_url)
         expected = expected_archive_md5s(records)
         cache_result = (
@@ -2757,7 +2757,7 @@ class InstallPage(QWidget):
         # repair (see classify_problems' extra_broken_folders docstring).
         extra_broken = presence.missing + presence.empty
         if not scan.cancelled and (scan.problems or extra_broken):
-            report("Looking up download sources for broken mods...")
+            report("Looking up download sources for broken mods")
             plan = classify_problems(scan, records, extra_broken_folders=extra_broken)
         return (presence, scan, plan, records, official_missing, cache_result)
 
@@ -2901,7 +2901,7 @@ class InstallPage(QWidget):
         self._set_verify_console(True)
         self.verify_progress.bar.show()
         self.verify_progress.pause_button.hide()
-        self._set_verify_pill("running", tr("Repairing..."))
+        self._set_verify_pill("running", tr("Repairing"))
         error = backup_settings_before(self.window.settings.active_profile, "repair")
         if error:
             self.verify_progress.log.append_line(f"Settings backup failed: {error}")
@@ -2926,7 +2926,7 @@ class InstallPage(QWidget):
             names = self._repair_plan.repairable
             shown = "\n".join(f"• {name}" for name in names[:8])
             if len(names) > 8:
-                shown += "\n• " + tr("... and {count} more", count=len(names) - 8)
+                shown += "\n• " + tr("and {count} more", count=len(names) - 8)
             sections.append(tr("GAMMA mods to download again:") + "\n\n" + shown)
             sections.append(
                 tr(
@@ -3008,7 +3008,7 @@ class InstallPage(QWidget):
 
     def _run_anomaly_repair(self) -> None:
         self.verify_progress.cancel_button.show()
-        self.verify_progress.status_message(tr("Re-installing Anomaly..."))
+        self.verify_progress.status_message(tr("Re-installing Anomaly"))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Repairing Anomaly ==")
         runner = CommandRunner(cli_command(self._anomaly_install_args()), parent=self)
@@ -3079,7 +3079,7 @@ class InstallPage(QWidget):
         if not self._anomaly_recheck_done or self._gamma_skipped or profile is None:
             self._deliver_verdict()
             return
-        self.verify_progress.status_message(tr("Checking GAMMA's engine files..."))
+        self.verify_progress.status_message(tr("Checking GAMMA's engine files"))
         task = BackgroundTask(
             _check_gamma_overlay, profile.anomaly, profile.cache, parent=self
         )
@@ -3179,7 +3179,7 @@ class InstallPage(QWidget):
 
     def _start_gamma_repair_deletion(self) -> None:
         self.verify_progress.cancel_button.show()
-        self.verify_progress.status_message(tr("Setting broken mods aside..."))
+        self.verify_progress.status_message(tr("Setting broken mods aside"))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Repairing GAMMA mods ==")
         task = StreamTask(self._run_repair_quarantine, parent=self)
@@ -3286,7 +3286,7 @@ class InstallPage(QWidget):
         # missing if a future reordering ever reaches this stage directly.
         self.verify_progress.cancel_button.show()
         self.verify_progress.status_message(
-            tr("Re-downloading and re-installing broken mods...")
+            tr("Re-downloading and re-installing broken mods")
         )
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Running installer (repair) ==")
@@ -3356,7 +3356,7 @@ class InstallPage(QWidget):
         if not succeeded:
             self.verify_progress.log.append_line("Repair install failed.")
             self.verify_progress.log.append_line(
-                "Restoring mods that were set aside..."
+                "Restoring mods that were set aside"
             )
             restore_note = self._restore_all_quarantined()
             if _looks_like_cloudflare_challenge(output):
@@ -3403,11 +3403,11 @@ class InstallPage(QWidget):
     def _on_repair_install_cancelled(self):
         # The process is still exiting; _on_repair_install_finished restores.
         self.verify_progress.log.append_line("Repair install cancelled")
-        self.verify_progress.status_message(tr("Cancelling..."))
+        self.verify_progress.status_message(tr("Cancelling"))
 
     def _restore_after_repair_cancel(self):
         self._restore_user_modlist()
-        self.verify_progress.log.append_line("Restoring mods that were set aside...")
+        self.verify_progress.log.append_line("Restoring mods that were set aside")
         restore_note = self._restore_all_quarantined()
         self._finish_verify(
             ok=False,
@@ -3417,7 +3417,7 @@ class InstallPage(QWidget):
         )
 
     def _start_post_scan(self):
-        self.verify_progress.status_message(tr("Re-checking GAMMA mods..."))
+        self.verify_progress.status_message(tr("Re-checking GAMMA mods"))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Re-checking after repair ==")
         task = StreamTask(self._run_post_scan, parent=self)
@@ -3446,7 +3446,7 @@ class InstallPage(QWidget):
         )
         if post.cancelled:
             return (post, None, None)
-        report("Re-checking GAMMA mods are present...")
+        report("Re-checking GAMMA mods are present")
         presence = verify_gamma(
             profile.gamma,
             profile.mo2_profile,
@@ -3975,7 +3975,7 @@ class InstallPage(QWidget):
         self.wt_progress.reset()
         self._wt_dialog = ProgressDialog(
             tr("Reinstalling dependencies") if self._wt_force else tr("Installing dependencies"),
-            tr("Starting..."),
+            tr("Starting"),
             self,
             log=True,
         )
@@ -4013,8 +4013,8 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._refresh_winetricks_status()
                 return
-            self.wt_progress.status_message(tr("Installing winetricks..."))
-            self._wt_dialog_text(tr("Installing winetricks..."))
+            self.wt_progress.status_message(tr("Installing winetricks"))
+            self._wt_dialog_text(tr("Installing winetricks"))
             self.wt_progress.log.append_line("== Installing winetricks ==")
         elif self._wt_stage == "umu":
             command = umu_install_command()
@@ -4027,8 +4027,8 @@ class InstallPage(QWidget):
                 self.window.set_install_busy(False)
                 self._refresh_winetricks_status()
                 return
-            self.wt_progress.status_message(tr("Installing umu-run..."))
-            self._wt_dialog_text(tr("Installing umu-run..."))
+            self.wt_progress.status_message(tr("Installing umu-run"))
+            self._wt_dialog_text(tr("Installing umu-run"))
             self.wt_progress.log.append_line(
                 "== Installing umu-run (Proton launcher) =="
             )
@@ -4064,8 +4064,8 @@ class InstallPage(QWidget):
             elif self._wt_force:
                 # winetricks skips verbs already in winetricks.log without this.
                 command.insert(len(command) - len(WINETRICKS_VERBS), "--force")
-            self.wt_progress.status_message(tr("Installing runtimes..."))
-            self._wt_dialog_text(tr("Installing runtimes..."))
+            self.wt_progress.status_message(tr("Installing runtimes"))
+            self._wt_dialog_text(tr("Installing runtimes"))
             self.wt_progress.log.append_line(
                 "== Winetricks via " + runner.label + ": " + " ".join(WINETRICKS_VERBS) + " =="
             )
@@ -4178,6 +4178,6 @@ class InstallPage(QWidget):
         if self._wt_runner is None or not self._wt_runner.is_running():
             return
         self.wt_progress.cancel_button.setEnabled(False)
-        self.wt_progress.cancel_button.setText(tr("Cancelling..."))
-        self.wt_progress.status_message(tr("Cancelling Winetricks..."))
+        self.wt_progress.cancel_button.setText(tr("Cancelling"))
+        self.wt_progress.status_message(tr("Cancelling Winetricks"))
         self._wt_runner.cancel()

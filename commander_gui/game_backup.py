@@ -184,7 +184,7 @@ def _write_zip(
             for index, (name, path) in enumerate(files, 1):
                 archive.write(path, name)
                 if index % 50 == 0 or index == len(files):
-                    report(f"Backed up {index}/{len(files)} files...")
+                    report(f"Backed up {index}/{len(files)} files")
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -438,7 +438,7 @@ def restore_backup(
             )
             replaced.append((label, dest))
     if replaced:
-        report(f"Keeping a copy of the {len(replaced)} files this restore replaces...")
+        report(f"Keeping a copy of the {len(replaced)} files this restore replaces")
         create_backup_of_files(
             info.profile, replaced, report, folder=info.path.parent, protect=info.path
         )
@@ -510,7 +510,7 @@ def backup_before_wipe(
     gamma_wiped = "GAMMA" in wipe_labels
     if not (anomaly_wiped or gamma_wiped):
         return None
-    report("Backing up saves, user.ltx and MCM settings before deleting anything...")
+    report("Backing up saves, user.ltx and MCM settings before deleting anything")
     return create_backup(
         profile.profile_name,
         profile.anomaly,
