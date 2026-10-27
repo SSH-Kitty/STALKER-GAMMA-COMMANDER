@@ -164,18 +164,6 @@ def mangohud_available() -> bool:
     return mangohud_installed() or BUNDLED_MANGOHUD.is_file()
 
 
-def vkbasalt_installed() -> bool:
-    """A vkBasalt layer installed on the system or for this user."""
-    from .launch_options import _data_home
-
-    dirs = [str(_data_home()), *os.environ.get("XDG_DATA_DIRS", "").split(":"), "/usr/local/share", "/usr/share"]
-    return any(
-        (Path(d) / "vulkan" / "implicit_layer.d" / name).is_file()
-        for d in dirs if d
-        for name in ("vkBasalt.json", "vkBasalt.x86_64.json")
-    )
-
-
 def _write(path: Path, text: str) -> Path:
     """path holding text, rewritten only when it changed."""
     from .atomic import write_bytes

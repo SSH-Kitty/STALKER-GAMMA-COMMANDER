@@ -241,7 +241,7 @@ class DragTree(QTreeWidget):
         ):
             self._scroll_timer.stop()
 
-    def startDrag(self, supported_actions) -> None:
+    def startDrag(self, _actions) -> None:
         """No-op: drag is handled manually via mouse events."""
 
     # Files dragged in from a file manager. The item view would refuse
@@ -1375,8 +1375,8 @@ class ModManagerPage(QWidget):
                 .astimezone()
                 .strftime("%Y-%m-%d %H:%M")
             )
-            return f"Backup: {bak.name} ({stamp})"
-        return "No backup yet"
+            return tr("Backup: {name} ({stamp})", name=bak.name, stamp=stamp)
+        return tr("No backup yet")
 
     def _create_backup(self) -> None:
         if self.window.install_busy or self._mo2_running():
@@ -1440,7 +1440,7 @@ class ModManagerPage(QWidget):
         priority = 0
         nicknames = self._nicknames()
         self.tree.setColumnCount(2)
-        self.tree.setHeaderLabels(["Mod", "Priority"])
+        self.tree.setHeaderLabels([tr("Mod"), tr("Priority")])
         self.tree.header().setVisible(True)
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1483,7 +1483,7 @@ class ModManagerPage(QWidget):
                 if name in nicknames:
                     item.setToolTip(0, tr("Real name: {name}", name=name))
                 item.setText(1, str(priority))
-                item.setToolTip(1, f"MO2 priority {priority}")
+                item.setToolTip(1, tr("MO2 priority {priority}", priority=priority))
                 item.setFlags(
                     Qt.ItemFlag.ItemIsEnabled
                     | Qt.ItemFlag.ItemIsSelectable
@@ -2076,7 +2076,7 @@ class ModManagerPage(QWidget):
                     staging,
                     cancel_event,
                     lambda percent, text: report(
-                        f"Extracting {archive.name}... {percent}%"
+                        tr("Extracting {name} {percent}%", name=archive.name, percent=percent)
                         if percent is not None
                         else text
                     ),
@@ -2136,7 +2136,7 @@ class ModManagerPage(QWidget):
             return
         mods_dir = Path(profile.gamma) / "mods"
         if mods_dir.is_symlink():
-            self._on_install_error("The GAMMA mods directory cannot be a symlink.", generation)
+            self._on_install_error(tr("The GAMMA mods directory cannot be a symlink."), generation)
             return
         name = self._install_name
         self.install_progress.status_message(tr("Installing {name}", name=name))

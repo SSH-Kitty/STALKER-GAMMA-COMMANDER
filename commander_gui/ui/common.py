@@ -129,29 +129,6 @@ def count_cached_archives(cache_path: str) -> int:
     return count
 
 
-def update_cache_label(label: QLabel, cache_path: str) -> None:
-    """Set *label* text and colour based on archive count."""
-    if not cache_path:
-        label.setText("")
-        return
-    count = count_cached_archives(cache_path)
-    if count == 0:
-        label.setText(tr("No archives cached"))
-        label.setStyleSheet(f"color: {STATUS_RED.name()};")
-    else:
-        # Separate singular/plural keys instead of an English-only "s" suffix
-        # appended to a translated noun: Romanian (and most languages) plural
-        # by changing the word itself ("arhivă" -> "arhive"), not by adding a
-        # suffix, so a shared "{count} archive{arg} cached" template could
-        # never translate correctly for them.
-        label.setText(
-            tr("{count} archive cached", count=count)
-            if count == 1
-            else tr("{count} archives cached", count=count)
-        )
-        label.setStyleSheet(f"color: {OK_GREEN.name()};")
-
-
 def format_playtime(total_seconds: float) -> str:
     """Format accumulated play time as e.g. "3h 24m", "12m", or "0m"."""
     total_minutes = int(total_seconds // 60)
@@ -1564,20 +1541,6 @@ def assistant_token(text: str = "ASSISTANT") -> str:
     )
 
 
-def _kv_row(label: str, value: str) -> QHBoxLayout:
-    """Key-value row: dim label on the left, selectable value on the right."""
-    row = QHBoxLayout()
-    key = QLabel(label)
-    key.setObjectName("dim")
-    key.setAlignment(Qt.AlignmentFlag.AlignTop)
-    val = QLabel(value)
-    val.setWordWrap(True)
-    val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    row.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
-    row.addWidget(val, 1)
-    return row
-
-
 #: Re-exported so UI code keeps a single, obvious import site for sizes.
 human_size = format_size
 
@@ -1849,10 +1812,15 @@ def open_in_file_manager(path: str | Path) -> bool:
     if command is None:
         return False
     try:
+        # Like open_url(): the AppImage's Python and SSL paths point into a
+        # mount that goes away when COMMANDER quits.
         subprocess.Popen(
             command,
+            env=child_environment(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         return True
     except OSError:
@@ -1888,7 +1856,7 @@ class ProgressTable(QTableWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(0, 3, parent)
-        self.setHorizontalHeaderLabels(["Addon", "Operation", "Percent"])
+        self.setHorizontalHeaderLabels([tr("Addon"), tr("Operation"), tr("Percent")])
         self.verticalHeader().setVisible(False)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -2392,7 +2360,10 @@ class ProgressArea(QWidget):
             self.log.append_line(clean)
         event = parse_progress_line(clean)
         if event is not None:
-            self.bar.setStyleSheet("")
+            # Clearing an already-empty sheet still re-styles the bar, and
+            # this runs for every progress line.
+            if self.bar.styleSheet():
+                self.bar.setStyleSheet("")
             if self.stage_progress:
                 if event.operation == "Download":
                     # The bar must mirror the true download percentage; no

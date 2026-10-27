@@ -49,7 +49,6 @@ from commander_gui.modlist import (
     grouped,
     install_conflict,
     rename_category,
-    rename_mod,
     reorder_to_original,
     set_status_at,
 )
@@ -104,7 +103,7 @@ from commander_gui.ui.utilities_page import (
 )
 from commander_gui.updates import (
     diff_records,
-    latest_version_human,
+    _version_from_patchnotes_or_readme,
     local_modpack_records,
     remote_version,
 )
@@ -4567,31 +4566,6 @@ class RegressionTests(unittest.TestCase):
             ["+Visual_separator", "+Shaders", "-NewMod", "+Extra Mods_separator"],
         )
 
-    def test_rename_mod_changes_display_name_only(self):
-        self.assertEqual(
-            rename_mod(["-Old Name", "+Keep"], "Old Name", "New Name"),
-            ["-New Name", "+Keep"],
-        )
-
-    def test_rename_mod_preserves_status(self):
-        self.assertEqual(rename_mod(["+Old Name"], "Old Name", "Renamed"), ["+Renamed"])
-
-    def test_rename_mod_rejects_duplicate(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First", "+Second"], "First", "Second")
-
-    def test_rename_mod_rejects_separator_name(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "Uncategorized_separator")
-
-    def test_rename_mod_rejects_invalid_name(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "nested/mod")
-
-    def test_rename_mod_returns_same_list_when_missing(self):
-        lines = ["-First"]
-        self.assertEqual(rename_mod(lines, "Missing", "New Name"), lines)
-
     def test_rename_category_changes_the_separator_name_only(self):
         self.assertEqual(
             rename_category(
@@ -4770,12 +4744,6 @@ class RegressionTests(unittest.TestCase):
             add_mod([], "+LeadingPlus")
         with self.assertRaises(ValueError):
             add_mod([], "-LeadingDash")
-
-    def test_rename_mod_rejects_status_prefix(self):
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "+Prefixed")
-        with self.assertRaises(ValueError):
-            rename_mod(["-First"], "First", "-Prefixed")
 
     def test_add_category_rejects_status_prefix(self):
         with self.assertRaises(ValueError):
@@ -10558,7 +10526,7 @@ class UserModsTrackerTests(unittest.TestCase):
             )
 
     def test_profiles_page_always_saves_official_sources(self):
-        from commander_gui.profile_bundle import non_default_sources
+        from commander_gui.profile_bundle import SOURCE_FIELDS
 
         page = self._profiles_page(
             [
@@ -10572,7 +10540,8 @@ class UserModsTrackerTests(unittest.TestCase):
         page._begin_edit()
         self.assertFalse(page._is_dirty())
         values = page._form_values()
-        self.assertEqual(non_default_sources(values), [])
+        default = CliProfile()
+        self.assertTrue(all(getattr(values, name) == getattr(default, name) for name in SOURCE_FIELDS))
         # Fields no longer on the form are kept from the saved profile.
         self.assertEqual((values.mo2_profile, values.download_threads), ("Mine", 9))
 
@@ -10746,7 +10715,7 @@ class UserModsTrackerTests(unittest.TestCase):
         exec_line = autostart._desktop_exec(["/home/John Doe/App.AppImage"])
         self.assertEqual(exec_line, '"/home/John Doe/App.AppImage"')
 
-    def test_latest_version_human_falls_back_to_readme_on_format_mismatch(self):
+    def test_version_falls_back_to_readme_on_format_mismatch(self):
         """Regression test: the README fallback must actually run.
 
         Previously the loop broke on the first *non-empty* fetch regardless
@@ -10788,7 +10757,9 @@ class UserModsTrackerTests(unittest.TestCase):
             "commander_gui.updates.urllib.request.urlopen",
             side_effect=fake_urlopen,
         ):
-            self.assertEqual(latest_version_human(CliProfile()), "0.9.5")
+            self.assertEqual(
+                _version_from_patchnotes_or_readme(CliProfile(), responses["Patchnotes.md"]), "0.9.5"
+            )
 
     def test_proton_archive_rejects_special_members(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -13380,17 +13351,13 @@ class AuditFixTests(unittest.TestCase):
         outside = {"PYTHONPATH": "/x", "HOME": "/h"}
         self.assertEqual(child_environment(outside), outside)
 
-    def test_bundle_sources_are_detected_and_resettable(self):
-        from commander_gui.profile_bundle import non_default_sources, reset_sources
+    def test_bundle_sources_are_resettable(self):
+        from commander_gui.profile_bundle import reset_sources
 
         profile = CliProfile()
-        self.assertEqual(non_default_sources(profile), [])
         profile.gamma_large_files_repo_url = "https://github.com/evil/fork"
-        self.assertEqual(
-            non_default_sources(profile), [("gamma_large_files_repo_url", "https://github.com/evil/fork")]
-        )
         reset_sources(profile)
-        self.assertEqual(non_default_sources(profile), [])
+        self.assertEqual(profile.gamma_large_files_repo_url, CliProfile().gamma_large_files_repo_url)
 
     def test_bundle_with_infinite_threads_and_bad_manifest(self):
         import zipfile
@@ -13948,15 +13915,14 @@ class UpdateStatusRecheckTests(unittest.TestCase):
 
 class AboutDiscordLinkTests(unittest.TestCase):
     def test_about_page_links_to_the_discord_invite(self):
-        from PySide6.QtWidgets import QApplication, QPushButton
+        from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui import about_page
 
         QApplication.instance() or QApplication([])
         page = about_page.AboutPage.__new__(about_page.AboutPage)
         about_page.QWidget.__init__(page)
-        card = page._links_card()
-        buttons = [b for b in card.findChildren(QPushButton) if b.text() == "Join the Discord"]
+        buttons = [b for b in page._link_buttons() if b.text() == "Join the Discord"]
         self.assertEqual(len(buttons), 1)
         with patch.object(about_page, "open_url") as open_url:
             buttons[0].click()

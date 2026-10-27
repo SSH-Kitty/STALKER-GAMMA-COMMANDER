@@ -55,24 +55,6 @@ def load_saved_font_size() -> int:
     return min(22, max(9, value))
 
 
-def save_theme(name: str) -> None:
-    if name not in THEMES:
-        return
-    path = config_path()
-    try:
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(settings, dict):
-                settings = {}
-        except (OSError, ValueError):
-            settings = {}
-        settings["theme"] = name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass
-
-
 def set_active_theme(name: str) -> None:
     global _ACTIVE
     if name in THEMES:

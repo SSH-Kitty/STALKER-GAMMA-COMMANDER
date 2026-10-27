@@ -258,13 +258,6 @@ class DumpArchive:
             return True
         return any(f.source != "other" for f in self.files)
 
-    def file_by_arcname(self, arcname: str) -> DumpFile | None:
-        for entry in self.files:
-            if entry.arcname == arcname:
-                return entry
-        return None
-
-
 def _safe_name(filename: str) -> str | None:
     """Normalise safe separators; ``None`` for unsafe archive paths."""
     name = filename.replace("\\", "/")

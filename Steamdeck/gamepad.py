@@ -604,9 +604,7 @@ class GamepadMonitor(QObject):
             return
         self._emit(self._held)
         self._repeats += 1
-        self._repeat.start(
-            REPEAT_FAST_RATE_MS if self._repeats >= REPEAT_FAST_AFTER else REPEAT_RATE_MS
-        )
+        self._repeat.start(self.repeat_interval())
 
     def repeat_interval(self) -> int:
         """The delay before the next repeat of a held direction, in ms."""

@@ -138,7 +138,8 @@ def send(embeds: list[dict]) -> None:
         if not webhook:
             sys.exit("set DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID, "
                      "or DISCORD_WEBHOOK_URL")
-        url = webhook.removesuffix("/github") + "?wait=true"
+        base = webhook.removesuffix("/github")
+        url = base + ("&" if "?" in base else "?") + "wait=true"
         payload["username"] = USERNAME
         if os.environ.get("DISCORD_AVATAR_URL"):
             payload["avatar_url"] = os.environ["DISCORD_AVATAR_URL"]
@@ -158,7 +159,11 @@ def send(embeds: list[dict]) -> None:
             if e.code != 429 or attempt == 4:
                 raise SystemExit(f"Discord rejected the post: HTTP {e.code} "
                                  f"{e.read().decode(errors='replace')}") from e
-            time.sleep(float(json.loads(e.read()).get("retry_after", 1)) + 0.5)
+            try:
+                wait = float(json.loads(e.read()).get("retry_after", 1))
+            except (ValueError, TypeError, AttributeError):
+                wait = 1.0  # a 429 from a proxy, not Discord's JSON
+            time.sleep(wait + 0.5)
 
 
 def main() -> None:

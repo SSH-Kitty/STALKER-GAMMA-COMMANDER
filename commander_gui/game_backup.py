@@ -34,6 +34,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .i18n import tr
+
 #: Why a backup was made. ``manual`` backups are never pruned; the others
 #: are made automatically and only the newest few are kept.
 REASON_LABELS = {
@@ -184,7 +186,7 @@ def _write_zip(
             for index, (name, path) in enumerate(files, 1):
                 archive.write(path, name)
                 if index % 50 == 0 or index == len(files):
-                    report(f"Backed up {index}/{len(files)} files")
+                    report(tr("Backed up {done}/{total} files", done=index, total=len(files)))
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -212,7 +214,7 @@ def create_backup(
     except OSError as exc:
         raise BackupError(f"Could not read the files to back up: {exc}") from exc
     if not files:
-        report("No saves, user.ltx or MCM settings found - nothing to back up.")
+        report(tr("No saves, user.ltx or MCM settings found - nothing to back up."))
         return None
     created = time.time()
     label = clean_name(name)
@@ -237,12 +239,12 @@ def create_backup(
     while dest.exists():
         suffix += 1
         dest = folder / f"{stamp}-{tag}-{suffix}.zip"
-    report(f"Backing up {len(files)} files to {dest} ...")
+    report(tr("Backing up {count} files to {path}", count=len(files), path=dest))
     try:
         _write_zip(dest, files, manifest, report)
     except OSError as exc:
         raise BackupError(f"Could not write the backup: {exc}") from exc
-    report("Backup complete.")
+    report(tr("Backup complete."))
     if reason != "manual":
         prune_automatic(profile_name)
     info = read_info(dest)
@@ -438,7 +440,7 @@ def restore_backup(
             )
             replaced.append((label, dest))
     if replaced:
-        report(f"Keeping a copy of the {len(replaced)} files this restore replaces")
+        report(tr("Keeping a copy of the {count} files this restore replaces", count=len(replaced)))
         create_backup_of_files(
             info.profile, replaced, report, folder=info.path.parent, protect=info.path
         )
@@ -455,7 +457,7 @@ def restore_backup(
                 Path(tmp).unlink(missing_ok=True)
                 raise
             written += 1
-    report(f"Restored {written} files.")
+    report(tr("Restored {count} files.", count=written))
     return written
 
 
@@ -510,7 +512,7 @@ def backup_before_wipe(
     gamma_wiped = "GAMMA" in wipe_labels
     if not (anomaly_wiped or gamma_wiped):
         return None
-    report("Backing up saves, user.ltx and MCM settings before deleting anything")
+    report(tr("Backing up saves, user.ltx and MCM settings before deleting anything"))
     return create_backup(
         profile.profile_name,
         profile.anomaly,

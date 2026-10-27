@@ -90,16 +90,6 @@ class ProfileBundleError(ValueError):
     """Raised when a bundle cannot be built or read."""
 
 
-def non_default_sources(profile: CliProfile) -> list[tuple[str, str]]:
-    """``(field, value)`` for every download source differing from the default."""
-    default = CliProfile()
-    return [
-        (name, getattr(profile, name))
-        for name in SOURCE_FIELDS
-        if getattr(profile, name) != getattr(default, name)
-    ]
-
-
 def reset_sources(profile: CliProfile) -> None:
     """Put every download source back to the official default."""
     default = CliProfile()

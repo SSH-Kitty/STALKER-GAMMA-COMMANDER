@@ -430,31 +430,6 @@ def reorder_to_original(lines: list[str], original: list[str]) -> list[str]:
     return out
 
 
-def rename_mod(lines: list[str], old_name: str, new_name: str) -> list[str]:
-    """Rename a mod in the modlist without touching its folder on disk.
-
-    Keeps the mod's enabled/disabled status.  Raises ``ValueError`` if the new
-    name is invalid, duplicates an existing entry, or would turn the entry into
-    an MO2 separator.  Returns the original list when the mod is not found.
-    """
-    if not _valid_name(new_name):
-        raise ValueError("Mod names cannot contain path separators or control characters")
-    _reject_status_prefix(new_name)
-    if new_name.endswith("_separator"):
-        raise ValueError("A mod name cannot end in '_separator'")
-    if new_name == old_name:
-        return list(lines)
-    if any(mod_name == new_name for _, mod_name in entries(lines)):
-        raise ValueError(f"Mod {new_name!r} is already in the modlist")
-    out = list(lines)
-    for index, line in enumerate(out):
-        info = _line_info(line)
-        if info is not None and info[1] == old_name:
-            prefix = "+" if info[0] == "Enabled" else "-"
-            out[index] = f"{prefix}{new_name}"
-    return out
-
-
 def save_lines(path: str | Path, lines: list[str]) -> None:
     """Write the modlist atomically.
 

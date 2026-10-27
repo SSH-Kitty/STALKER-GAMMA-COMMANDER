@@ -771,7 +771,7 @@ class SystemCheckPage(QWidget):
         _missing = {
             "label": "?",
             "state": "missing",
-            "detail": "Data unavailable.",
+            "detail": tr("Data unavailable."),
             "command": "",
         }
         try:

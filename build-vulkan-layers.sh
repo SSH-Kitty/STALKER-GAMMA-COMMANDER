@@ -13,7 +13,8 @@
 # when VKBASALT_CONFIG_FILE changes, so Settings > Graphics shows in a
 # running game. MangoHud gets packaging/mangohud-reload-lock.patch: it
 # reloads its config under the lock its HUD is drawn under, so a change in
-# a running game can't crash it (std::bad_function_call). Both get a
+# a running game can't crash it (std::bad_function_call), and keeps the HUD
+# shown or hidden as the key left it ("Start hidden" is for launch). Both get a
 # *-state-file.patch: they write 1 (on) or 0 (off) to the file in
 # COMMANDER_MANGOHUD_STATE / COMMANDER_VKBASALT_STATE whenever they go on
 # or off, for COMMANDER's pop-up.

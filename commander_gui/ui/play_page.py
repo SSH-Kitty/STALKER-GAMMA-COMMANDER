@@ -675,13 +675,13 @@ class PlayPage(QWidget):
         folders_grid.setColumnStretch(1, 1)
         folders_layout.addLayout(folders_grid)
         self.anomaly_edit = self._folder_row(
-            folders_grid, 0, tr("Anomaly folder:"), "Select Anomaly install folder"
+            folders_grid, 0, tr("Anomaly folder:"), tr("Select Anomaly install folder")
         )
         self.gamma_edit = self._folder_row(
-            folders_grid, 1, tr("GAMMA folder:"), "Select GAMMA install folder"
+            folders_grid, 1, tr("GAMMA folder:"), tr("Select GAMMA install folder")
         )
         self.cache_edit = self._folder_row(
-            folders_grid, 2, tr("Cache folder:"), "Select cache folder"
+            folders_grid, 2, tr("Cache folder:"), tr("Select cache folder")
         )
         root.addWidget(folders_card)
 

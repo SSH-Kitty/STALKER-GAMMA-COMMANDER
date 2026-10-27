@@ -1081,7 +1081,7 @@ class InstallPage(QWidget):
 
         self.root_card_edit, self.root_card_row = (
             self._make_folder_row(
-                "Installation directory:",
+                tr("Installation directory:"),
                 self._browse_install_root,
             )
         )
@@ -1172,11 +1172,11 @@ class InstallPage(QWidget):
 
         # -- "Anomaly folder" / "GAMMA folder" - aligned on the same row. --
         self.anomaly_edit, self.anomaly_folder_row = (
-            self._make_folder_row("Anomaly folder:", self._browse_anomaly)
+            self._make_folder_row(tr("Anomaly folder:"), self._browse_anomaly)
         )
         grid.addLayout(self.anomaly_folder_row, 2, 0)
         self.gamma_edit, self.gamma_folder_row = (
-            self._make_folder_row("GAMMA folder:", self._browse_gamma)
+            self._make_folder_row(tr("GAMMA folder:"), self._browse_gamma)
         )
         grid.addLayout(self.gamma_folder_row, 2, 2)
 
@@ -1226,7 +1226,7 @@ class InstallPage(QWidget):
         # side. No section title above it - "Cache folder:" on the row
         # itself already says what it is.
         self.cache_edit, self.cache_folder_row = (
-            self._make_folder_row("Cache folder:", self._browse_cache)
+            self._make_folder_row(tr("Cache folder:"), self._browse_cache)
         )
         grid.addLayout(self.cache_folder_row, 5, 2)
 
@@ -1406,7 +1406,7 @@ class InstallPage(QWidget):
                     self.full_progress.bar.setRange(0, 1)
                     self.full_progress.bar.setValue(1)
                     self.full_progress.bar.setFormat(
-                        "Incomplete" if self._resume_state is not None else "Installed"
+                        tr("Incomplete") if self._resume_state is not None else tr("Installed")
                     )
                 elif op != "gamma":
                     self.full_progress.bar.setRange(0, 1)
@@ -1537,7 +1537,7 @@ class InstallPage(QWidget):
             self.full_progress._toggle_table()
 
     def _browse_install_root(self):
-        self._pick_folder(self.root_card_edit, "Select install root directory")
+        self._pick_folder(self.root_card_edit, tr("Select install root directory"))
 
     def _create_install_folders(self):
         """Create the anomaly/gamma/cache folders under the chosen install root.
@@ -1551,7 +1551,7 @@ class InstallPage(QWidget):
         root = self.root_card_edit.text().strip()
         if not root:
             root = QFileDialog.getExistingDirectory(
-                self, "Select install root directory", str(Path.home())
+                self, tr("Select install root directory"), str(Path.home())
             )
             if not root:
                 return
@@ -1648,7 +1648,7 @@ class InstallPage(QWidget):
         edit = self.offline_edits[0 if key == "offline_modpack_list" else 1]
         start = edit.text() or str(Path.home())
         path, _filter = QFileDialog.getOpenFileName(
-            self, tr("Select list file"), start, "Text files (*.txt);;All files (*)"
+            self, tr("Select list file"), start, tr("Text files (*.txt);;All files (*)")
         )
         if not path:
             return
@@ -1701,15 +1701,15 @@ class InstallPage(QWidget):
         return (self.offline_edits[0].text(), self.offline_edits[1].text())
 
     def _browse_anomaly(self):
-        if self._pick_folder(self.anomaly_edit, "Select Anomaly install folder"):
+        if self._pick_folder(self.anomaly_edit, tr("Select Anomaly install folder")):
             self._persist_dirs()
 
     def _browse_gamma(self):
-        if self._pick_folder(self.gamma_edit, "Select GAMMA install folder"):
+        if self._pick_folder(self.gamma_edit, tr("Select GAMMA install folder")):
             self._persist_dirs()
 
     def _browse_cache(self):
-        if self._pick_folder(self.cache_edit, "Select cache folder"):
+        if self._pick_folder(self.cache_edit, tr("Select cache folder")):
             self._persist_dirs()
 
     def _persist_dirs(self) -> bool:
@@ -2596,7 +2596,7 @@ class InstallPage(QWidget):
         self.verify_progress.bar.show()
         # Verify cannot pause (no runner is bound), so hide the inert Pause button.
         self.verify_progress.pause_button.hide()
-        self._verify_phase_busy("Checking Anomaly files")
+        self._verify_phase_busy(tr("Checking Anomaly files"))
         self.verify_progress.log.append_line("== Anomaly integrity check ==")
         runner = CommandRunner(cli_command(["anomaly", "check"]), parent=self)
         runner.line.connect(self._on_verify_line)
@@ -2665,7 +2665,7 @@ class InstallPage(QWidget):
     def _verify_phase_busy(self, label: str) -> None:
         """Animated busy bar with a phase label (no numeric source)."""
         self.verify_progress.bar.setRange(0, 0)
-        self.verify_progress.bar.setFormat(f"{label}...")
+        self.verify_progress.bar.setFormat(label)
         self.verify_progress.status_message(label)
 
     def _set_verify_phase(
@@ -3037,7 +3037,7 @@ class InstallPage(QWidget):
         self._verify_counts = {"OK": 0, "CORRUPT": 0, "NOT FOUND": 0}
         self._anomaly_problem_lines: list[str] = []
         self._anomaly_recheck_done = True
-        self._verify_phase_busy("Re-checking Anomaly files")
+        self._verify_phase_busy(tr("Re-checking Anomaly files"))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Re-checking Anomaly ==")
         runner = CommandRunner(cli_command(["anomaly", "check"]), parent=self)

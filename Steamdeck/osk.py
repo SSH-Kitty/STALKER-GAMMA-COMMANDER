@@ -202,9 +202,6 @@ class DeckKeyboard(QWidget):
             self._set_shift(not self._shift)
         self._last_shift = now
 
-    def _toggle_shift(self) -> None:
-        self._set_shift(not self._shift)
-
     def _set_shift(self, on: bool) -> None:
         self._shift = on
         upper = self._shift or self._caps

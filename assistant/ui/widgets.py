@@ -40,17 +40,9 @@ class DropZone(QFrame):
         self.setAcceptDrops(True)
         self.setMinimumHeight(220)
         self._hover = False
-        self._compact = False
         self._pressed = False
         self._reject = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def set_compact(self, compact: bool) -> None:
-        """Shrink to a slim bar for the analysis view."""
-        self._compact = compact
-        self.setMinimumHeight(44 if compact else 220)
-        self.setMaximumHeight(52 if compact else 260)
-        self.update()
 
     def flash_reject(self) -> None:
         """Paint a red dashed border briefly (custom paintEvent state)."""
@@ -154,19 +146,6 @@ class DropZone(QFrame):
         else:
             title_color = theme.token("TEXT")
         sub_color = theme.token("DIM")
-
-        if self._compact:
-            painter.setPen(QColor(title_color))
-            font = painter.font()
-            font.setPointSize(12)
-            font.setBold(False)
-            painter.setFont(font)
-            painter.drawText(
-                rect,
-                Qt.AlignmentFlag.AlignCenter,
-                tr("+ Open another dump: drop a ZIP here or click"),
-            )
-            return
 
         third = max(1, rect.height() // 3)
 

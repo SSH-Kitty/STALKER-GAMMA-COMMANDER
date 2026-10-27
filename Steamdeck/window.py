@@ -79,7 +79,7 @@ from .deck_theme import build_deck_stylesheet
 from .focus import DeckFocusController
 from .power import SleepInhibitor, battery_state
 from .scale import px, scale, scale_for, set_scale
-from .screens import SCREENS
+from .screens import SCREEN_KEYS, SCREENS
 from .widgets import (
     DECK_H,
     DECK_W,
@@ -251,9 +251,8 @@ class DeckWindow(QMainWindow):
         self.back_grips.action.connect(self._focus.on_pad_action)
         self._game_overlay_from: str | None = None
         self._hint_wait = None
+        self._grips_allowed = os.environ.get(NO_GAMEPAD_ENV) != "1" and is_steam_deck()
         self.apply_overlay_shortcut()
-        if os.environ.get(NO_GAMEPAD_ENV) != "1" and is_steam_deck():
-            self.back_grips.start()
 
         # A stuck user needs a keyboard escape hatch that does not depend on
         # reaching the Settings screen.
@@ -302,7 +301,7 @@ class DeckWindow(QMainWindow):
     # ------------------------------------------------------------ styling
     @property
     def _screen_keys(self) -> list[str]:
-        return [key for key, _title, _glyph in SCREENS]
+        return SCREEN_KEYS
 
     def start_screen(self) -> str:
         start = gui_settings.load_gui_settings().get("deck_start_screen", "play")
@@ -1045,6 +1044,12 @@ class DeckWindow(QMainWindow):
 
         key = gui_settings.load_gui_settings().get("deck_overlay_shortcut")
         self.back_grips.chord = SHORTCUTS.get(key, 0)
+        # Off means no reads at all: the controller sends hundreds of
+        # reports a second, games included.
+        if not self.back_grips.chord:
+            self.back_grips.stop()
+        elif getattr(self, "_grips_allowed", False) and not self.back_grips.listening():
+            self.back_grips.start()
 
     def toggle_game_overlay(self) -> None:
         """The back grips held: Graphics over the running game, or back to it."""

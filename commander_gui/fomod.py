@@ -65,7 +65,6 @@ REQUIRED = "Required"
 RECOMMENDED = "Recommended"
 OPTIONAL = "Optional"
 NOT_USABLE = "NotUsable"
-COULD_BE_USABLE = "CouldBeUsable"
 
 
 @dataclass(frozen=True)

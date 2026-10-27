@@ -218,9 +218,8 @@ def remote_version(profile) -> str | None:
 def fetch_latest_patchnotes(profile) -> str | None:
     """Fetch the repo's full ``Patchnotes.md`` body; None if unreachable.
 
-    latest_version_human() only ever needed a version-number regex match
-    out of this same fetch and discarded the rest - this keeps the full
-    text so callers (the Updates page's "What's New" panel) can show it.
+    Keeps the full text, not just the version number, so callers (the
+    Updates page's "What's New" panel) can show it.
     """
     try:
         req = urllib.request.Request(
@@ -249,8 +248,8 @@ def parse_patchnotes_sections(text: str) -> list[tuple[str, str]]:
     Patchnotes.md is not just the latest release's notes - it's the
     whole history, one level-1 Markdown heading per release (confirmed
     against the real file: 0.9.5, 0.9.4, 0.9.3.1, 0.9.3, three separate
-    0.9.1 entries), stacked oldest-last. ``latest_version_human()``/
-    ``fetch_latest_patchnotes()`` only ever needed the very first one;
+    0.9.1 entries), stacked oldest-last. The version check only ever
+    needed the very first one;
     this is for showing the rest too, each as its own collapsible entry,
     in the same (already latest-first) order the file itself uses.
 
@@ -308,15 +307,6 @@ def new_releases(titles: list[str], seen: str | None, update_available: bool) ->
         version = _numeric_version_tuple(match.group(0)) if match else None
         flags.append(version is not None and version > seen_version)
     return flags
-
-
-def latest_version_human(profile) -> str | None:
-    """Fetch the human-readable GAMMA version (e.g. "0.9.5").
-
-    Taken from the repo's ``Patchnotes.md`` heading (``# **GAMMA 0.9.5**``),
-    falling back to the README badge ``gamma-v0.9.5``. None if unreachable.
-    """
-    return _version_from_patchnotes_or_readme(profile, fetch_latest_patchnotes(profile))
 
 
 def _version_from_patchnotes_or_readme(profile, patchnotes: str | None) -> str | None:
@@ -895,8 +885,8 @@ def check_updates(profile) -> UpdateStatus:
     # fetch it so a list outage does not hide an available update.
     status.latest = remote_version(profile)
     # One fetch shared between the human version label and the "What's
-    # New" panel - latest_version_human()'s own README fallback is only
-    # used if this single Patchnotes.md fetch didn't yield a match.
+    # New" panel - the README fallback is only used if this single
+    # Patchnotes.md fetch didn't yield a match.
     status.patchnotes = fetch_latest_patchnotes(profile)
     status.latest_human = _version_from_patchnotes_or_readme(profile, status.patchnotes)
     # The human label is only reliable for the latest release; an installed

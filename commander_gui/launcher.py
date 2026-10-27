@@ -1405,15 +1405,10 @@ def write_desktop_shortcut(
     return path
 
 
-#: Kept for backward compatibility with anything inspecting it; rotation
-#: itself is no longer size-gated (see _rotate_log's docstring).
-MAX_LOG_BYTES = 1 << 20
-
-
 def _rotate_log(path: Path) -> None:
     """Roll ``path`` to ``path.1`` unconditionally, at the start of a launch.
 
-    Was size-gated (only past :data:`MAX_LOG_BYTES`) until a real incident
+    Was size-gated (only past 1 MiB) until a real incident
     showed why that is wrong: the crash-loop breaker in play_page.py now
     kills a bad launch after a few dozen lines, so a repeatedly-crashing
     prefix never produces a megabyte of output and this never rotated - the

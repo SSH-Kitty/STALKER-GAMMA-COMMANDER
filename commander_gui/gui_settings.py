@@ -102,7 +102,18 @@ _cache_file_mtime: float = 0.0
 
 
 def animations_enabled() -> bool:
-    """The Settings > Appearance "Animations" switch (cheap: mtime-cached)."""
+    """The Settings > Appearance "Animations" switch (cheap: mtime-cached).
+
+    Asked on every wheel tick and hover, so it reads the cache directly
+    instead of taking load_gui_settings()'s deep copy.
+    """
+    path = gui_settings_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if _cache is not None and str(path) == _cache_path_str and mtime == _cache_file_mtime:
+        return bool(_cache.get("animations_enabled", True))
     return bool(load_gui_settings().get("animations_enabled", True))
 
 

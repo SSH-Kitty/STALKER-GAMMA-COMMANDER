@@ -1515,9 +1515,9 @@ class MainWindow(QMainWindow):
         self.tabs.style().polish(self.tabs)
         key = NAV_ITEMS[index][0]
         self.setWindowTitle(
-            "Install - STALKER COMMANDER"
+            tr("Install - STALKER COMMANDER")
             if key == "install"
-            else "STALKER COMMANDER"
+            else tr("STALKER COMMANDER")
         )
         page = self._ensure_page(key)
         self.stack.setCurrentWidget(page)

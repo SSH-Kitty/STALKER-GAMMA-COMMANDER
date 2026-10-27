@@ -1281,7 +1281,10 @@ class SettingsPage(QWidget):
             lambda _r: self.window.statusBar().showMessage(added, 6000)
         )
         self._steam_restart_task.error.connect(
-            lambda err: QMessageBox.warning(self, tr("Couldn't add COMMANDER to Steam"), err)
+            lambda err: (
+                self.window.statusBar().clearMessage(),
+                QMessageBox.warning(self, tr("Couldn't add COMMANDER to Steam"), err),
+            )
         )
         self._steam_restart_task.start()
         self.window.statusBar().showMessage(tr("Restarting Steam"), 0)
@@ -1557,8 +1560,6 @@ class SettingsPage(QWidget):
         task.start()
 
     def _on_export_log_done(self, path: str) -> None:
-        from PySide6.QtWidgets import QMessageBox
-
         self._export_task = None
         QMessageBox.information(
             self,
@@ -1567,8 +1568,6 @@ class SettingsPage(QWidget):
         )
 
     def _on_export_log_error(self, message: str) -> None:
-        from PySide6.QtWidgets import QMessageBox
-
         self._export_task = None
         QMessageBox.critical(
             self,

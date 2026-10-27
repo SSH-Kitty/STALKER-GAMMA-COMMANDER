@@ -20,3 +20,16 @@
                  *nt->params = local_params;
              }
          }
+--- a/src/overlay_params.cpp
++++ b/src/overlay_params.cpp
+@@ -1217,6 +1217,10 @@
+       config_cv.notify_one();
+    }
+ 
++   // COMMANDER: no_display is how the HUD starts. Once the game runs, the
++   // toggle key decides, through any config reload, as vkBasalt's enableOnLaunch.
++   if (auto running = std::atomic_load_explicit(&g_params, std::memory_order_acquire))
++      params->no_display = running->no_display;
+    auto snapshot = std::make_shared<overlay_params>(*params);
+    std::atomic_store_explicit(&g_params, std::move(snapshot), std::memory_order_release);
+ 

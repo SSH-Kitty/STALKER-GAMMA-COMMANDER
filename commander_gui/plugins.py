@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import tarfile
@@ -134,6 +135,10 @@ def release_candidates(tags: list[str], version: str = __version__) -> list[str]
 def _find_release() -> tuple[str, str]:
     """(asset URL, its SHA512) from the first of ``release_candidates()`` that has it."""
     for tag in release_candidates(_feed_tags()):
+        # Same rule as self_update: a plain version-like tag, never "/" or
+        # ".." that could point the download somewhere else.
+        if not re.fullmatch(r"v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}", tag) or ".." in tag:
+            continue
         url = f"{_COMMANDER_REPO}/releases/download/{tag}/{asset_name()}"
         try:
             digest = _published_sha512(url)

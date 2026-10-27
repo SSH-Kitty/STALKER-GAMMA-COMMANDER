@@ -355,13 +355,6 @@ class AboutPage(QWidget):
             buttons.append(button)
         return buttons
 
-    def _links_card(self) -> QWidget:
-        card, layout = make_card()
-        layout.addWidget(section_label(tr("Links"), level=2))
-        for button in self._link_buttons():
-            layout.addWidget(button)
-        return card
-
     # -- topics -----------------------------------------------------------
 
     def show_topic(self, title: str) -> None:

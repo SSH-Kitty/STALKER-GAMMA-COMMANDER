@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Mapping
 from html import escape
@@ -309,7 +310,7 @@ def _wipe_folders(paths: list[tuple[str, str]], report) -> list[str]:
         if not resolved.is_dir():
             report(f"{label}: folder not present, skipping ({path})")
             continue
-        report(f"Deleting {label} folder: {resolved} ...")
+        report(f"Deleting {label} folder: {resolved}")
         shutil.rmtree(resolved, ignore_errors=True)
         if resolved.exists():
             raise ValueError(f"{label} folder could not be fully deleted: {resolved}")
@@ -452,7 +453,7 @@ def _copy_dir_tree(src: Path, dst: Path, report, cancel_event=None) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
         if idx % 200 == 0 or idx == total:
-            report(f"  copied {idx}/{total} entries ...")
+            report(f"  copied {idx}/{total} entries")
 
 
 def _file_count_and_verify(source: Path, destination: Path) -> tuple[int, bool]:
@@ -567,7 +568,7 @@ def _move_folders(
             # Register before copying so an interrupted/failed copy is removed.
             copied.append(dst)
             _copy_dir_tree(src, dst, report, cancel_event)
-            report("Copy complete. Verifying ...")
+            report("Copy complete. Verifying")
             _source_count, verified = _file_count_and_verify(src, dst)
             if not verified:
                 raise ValueError(f"Copy verification failed for {label}: {dst}")
@@ -765,7 +766,6 @@ class UtilitiesPage(QWidget):
         self._cache_cancel_event = None
         self._wipe_targets: tuple[str, str] = ("", "")
         self._reset_wipe_paths: list[tuple[str, str]] = []
-        self._reset_folders = ""
         self._reset_includes_anomaly = True
         self._reset_profile = None
         self._wipe_title = "Fresh Reset"
@@ -781,7 +781,8 @@ class UtilitiesPage(QWidget):
         self._repair_running = False
         self._assistant_process = None
         self._assistant_timer = QTimer(self)
-        self._assistant_timer.setInterval(100)
+        self._assistant_timer.setInterval(1000)
+        self._assistant_started_at = 0.0
         self._assistant_timer.timeout.connect(self._check_assistant)
         self.buttons: list[QPushButton] = []
 
@@ -1108,6 +1109,7 @@ class UtilitiesPage(QWidget):
     def _track_assistant(self, process) -> None:
         """Watch ASSISTANT without blocking the Qt event loop."""
         self._assistant_process = process
+        self._assistant_started_at = time.monotonic()
         self._set_assistant_button(False)
         self._assistant_timer.start()
 
@@ -1126,7 +1128,9 @@ class UtilitiesPage(QWidget):
         self._assistant_process = None
         self._assistant_timer.stop()
         self._set_assistant_button(True)
-        if return_code != 0:
+        # Only an exit in the first seconds means it failed to start; later
+        # it was used and closed (or crashed after, which it reports itself).
+        if return_code != 0 and time.monotonic() - self._assistant_started_at < 15:
             QMessageBox.warning(
                 self,
                 tr("ASSISTANT couldn't start"),
@@ -1860,7 +1864,6 @@ class UtilitiesPage(QWidget):
         self._wipe_title = title
         self._reset_preserve_user = False
         self._reset_preserve_mcm = False
-        folders = "Anomaly and GAMMA" if include_anomaly else "GAMMA"
         lead = (
             tr("Anomaly and GAMMA are deleted, then installed again from scratch.")
             if include_anomaly
@@ -1913,7 +1916,6 @@ class UtilitiesPage(QWidget):
 
         self._reset_wipe_paths = wipe_paths
         self._reset_profile = dataclasses.replace(profile)
-        self._reset_folders = folders
         self._start_cache_preflight()
 
     def _start_cache_preflight(self) -> None:
@@ -2002,7 +2004,9 @@ class UtilitiesPage(QWidget):
             True, "anomaly" if self._reset_includes_anomaly else "gamma"
         )
         self.summary.setText(
-            tr("Wiping {reset_folders} folder{arg}", reset_folders=self._reset_folders, arg='s' if self._reset_includes_anomaly else '')
+            tr("Deleting the Anomaly and GAMMA folders")
+            if self._reset_includes_anomaly
+            else tr("Deleting the GAMMA folder")
         )
         self.output.clear()
         self._set_buttons_enabled(False)
