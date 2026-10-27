@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from commander_gui import themes as commander_themes
 from commander_gui.gui_settings import load_gui_settings
 from commander_gui.i18n import tr
 from commander_gui.ui.dialogs import MessageBox as QMessageBox
@@ -125,6 +126,7 @@ class MainWindow(QMainWindow):
         # Follow the theme picked in COMMANDER, also while ASSISTANT is open: both
         # share gui-settings.json, which is cheap to stat.
         self._theme_mtime = self._settings_mtime()
+        self._painted_theme = commander_themes.resolve_theme(theme.active_theme())
         self._font_size = theme.load_saved_font_size()
         self._theme_watch = QTimer(self)
         self._theme_watch.setInterval(1500)
@@ -314,6 +316,7 @@ class MainWindow(QMainWindow):
         if app is None:
             return False
         theme.apply_theme(app, name)
+        self._painted_theme = commander_themes.resolve_theme(name)
         self._refresh_theme_labels()
         for widget in self.findChildren(QWidget):
             widget.update()
@@ -328,12 +331,13 @@ class MainWindow(QMainWindow):
 
     def _follow_saved_theme(self) -> None:
         mtime = self._settings_mtime()
-        if mtime == self._theme_mtime:
+        painted = commander_themes.resolve_theme(theme.active_theme())
+        if mtime == self._theme_mtime and painted == self._painted_theme:
             return
         self._theme_mtime = mtime
         name = theme.load_saved_theme()
         font_size = theme.load_saved_font_size()
-        if name == theme.active_theme() and font_size == self._font_size:
+        if name == theme.active_theme() and font_size == self._font_size and painted == self._painted_theme:
             return
         self._font_size = font_size
         self._apply_theme_ui(name)

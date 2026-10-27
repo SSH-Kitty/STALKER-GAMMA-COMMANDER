@@ -813,6 +813,8 @@ class SettingsPage(QWidget):
         self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
         self._animations_check = QCheckBox(tr("Animations"))
         self._animations_check.toggled.connect(self._on_animations_toggled)
+        self._snow_check = QCheckBox(tr("Snow animation"))
+        self._snow_check.toggled.connect(self._on_snow_toggled)
         _rows(
             box,
             _setting_row(tr("Font family"), "", self._font_family_combo),
@@ -825,6 +827,10 @@ class SettingsPage(QWidget):
             _check_row(
                 self._animations_check,
                 tr("Hover effects, page fades, smooth scrolling and the game loading screen's moving scenery. Turn off for a still interface."),
+            ),
+            _check_row(
+                self._snow_check,
+                tr("Falling snow in the Winter (Live) theme. It pauses while COMMANDER is in the background."),
             ),
         )
         # Rows at the top when Themes makes the column taller.
@@ -1501,6 +1507,12 @@ class SettingsPage(QWidget):
     def _on_animations_toggled(self, on: bool) -> None:
         gui_settings.save_gui_settings(animations_enabled=on)
 
+    def _on_snow_toggled(self, on: bool) -> None:
+        gui_settings.save_gui_settings(snow_enabled=on)
+        sync = getattr(self.window, "sync_snow", None)
+        if callable(sync):
+            sync()
+
     def _on_nav_tab_toggled(self, *_args) -> None:
         gui_settings.save_gui_settings(
             hidden_nav_tabs=[k for k, c in self._nav_checks.items() if not c.isChecked()]
@@ -1608,6 +1620,9 @@ class SettingsPage(QWidget):
         self._animations_check.blockSignals(True)
         self._animations_check.setChecked(bool(state.get("animations_enabled", True)))
         self._animations_check.blockSignals(False)
+        self._snow_check.blockSignals(True)
+        self._snow_check.setChecked(bool(state.get("snow_enabled", True)))
+        self._snow_check.blockSignals(False)
         hidden = set(state.get("hidden_nav_tabs") or [])
         for key, check in self._nav_checks.items():
             check.blockSignals(True)

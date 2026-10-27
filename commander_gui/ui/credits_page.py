@@ -7,10 +7,19 @@ this is the short product card. License texts are read from the bundled
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import (
+    QColor,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QGridLayout,
@@ -25,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version_label__
 from ..config import project_root
-from ..themes import active_theme_tokens
+from ..themes import active_theme, active_theme_tokens
 from .about_page import _DISCORD, _GITHUB
 from .brand_icons import brand_icon, icon_size
 from .common import info_label, make_card, open_url, section_label, tr
@@ -40,39 +49,10 @@ _CREDITS = (
     ("Grokitach and the GAMMA team", "The GAMMA modpack."),
     ("The Anomaly Team", "Developers of the standalone S.T.A.L.K.E.R. Anomaly modification and engine base."),
     ("GSC Game World", "Creators of the original S.T.A.L.K.E.R. games and universe."),
-    ("Other projects", "Proton-GE (GloriousEggroll), umu-launcher (Open Wine Components), Winetricks, Wine, Mod Organizer 2, xrRazom Co-op, 7-Zip, Qt and PySide6."),
+    ("Other projects", "Proton-GE (GloriousEggroll), umu-launcher, Winetricks and Mod Organizer 2."),
 )
 
 _COPYRIGHT = "Copyright \u00a9 2026 SSH-Kitty and contributors"
-
-#: (name, license, files under licenses/) for every third-party component
-#: COMMANDER ships; a folder means every file in it. Rows whose files are
-#: missing (Python's, outside the AppImage) are left out. Names and SPDX
-#: ids are not translated. licenses/THIRD-PARTY-NOTICES.txt has the
-#: versions, copyrights and source links.
-_THIRD_PARTY = (
-    ("stalker-gamma-cli", "GPL-3.0", ("texts/GPL-3.0-only.txt",)),
-    ("libgit2", "GPL-2.0 WITH GCC-exception-2.0", ("libgit2",)),
-    ("curl-impersonate", "MIT, curl, Apache-2.0, ...", ("curl-impersonate",)),
-    ("7-Zip", "LGPL-2.1, BSD-3-Clause, unRAR", ("7-Zip", "texts/LGPL-2.1-or-later.txt")),
-    ("Mozilla CA certificates, certifi", "MPL-2.0", ("texts/MPL-2.0.txt",)),
-    ("Python", "PSF-2.0", ("Python-LICENSE.txt",)),
-    ("Qt 6, PySide6, Shiboken6", "LGPL-3.0", ("texts/LGPL-3.0-only.txt", "texts/GPL-3.0-only.txt")),
-    ("FFmpeg", "LGPL-2.1", ("texts/LGPL-2.1-or-later.txt",)),
-    ("ICU", "Unicode-3.0", ("texts/Unicode-3.0.txt",)),
-    ("XCB utilities, xkbcommon", "MIT", ("xcb-util", "libxkbcommon")),
-    ("AppImage runtime", "MIT, LGPL-2.1, BSD-2-Clause", ("AppImage-runtime", "texts/LGPL-2.1-or-later.txt", "texts/BSD-2-Clause.txt")),
-)
-
-
-def _license_files(entries) -> list[Path]:
-    root = project_root() / "licenses"
-    files = []
-    for entry in entries:
-        path = root / entry
-        files.extend(sorted(path.iterdir()) if path.is_dir() else [path])
-    return files
-
 
 def show_text_files(parent: QWidget, heading: str, files: list[Path]) -> None:
     """A themed read-only window with ``files`` one after another."""
@@ -94,6 +74,86 @@ def show_text_files(parent: QWidget, heading: str, files: list[Path]) -> None:
     style_window(dialog, heading)
     dialog.resize(760, 640)
     dialog.exec()
+
+
+def _fluff(points) -> QPainterPath:
+    """Overlapping circles, unioned: the fuzzy outline of fur trim."""
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.WindingFill)
+    for x, y, r in points:
+        path.addEllipse(QPointF(x, y), r, r)
+    return path.simplified()
+
+
+#: Where the hat's canvas sits over the 96 px logo, and how far it reaches.
+_HAT_OFFSET = 14
+_HAT_SIZE = (116, 84)
+
+
+def _santa_hat(dpr: float) -> QPixmap:
+    """A Santa hat for the 96 px logo, its tip flopped down the right side."""
+    canvas = QPixmap(round(_HAT_SIZE[0] * dpr), round(_HAT_SIZE[1] * dpr))
+    canvas.setDevicePixelRatio(dpr)
+    canvas.fill(Qt.GlobalColor.transparent)
+    p = QPainter(canvas)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.translate(48, _HAT_OFFSET + 22)  # the middle of the brim
+
+    cone = QPainterPath(QPointF(-34, 0))
+    cone.cubicTo(-30, -30, -4, -38, 20, -32)
+    cone.cubicTo(42, -26, 54, -6, 56, 20)
+    cone.cubicTo(50, 22, 47, 22, 44, 20)
+    cone.cubicTo(42, 4, 36, -8, 26, -12)
+    cone.quadTo(32, -6, 34, 0)
+    cone.closeSubpath()
+    red = QLinearGradient(-30, -34, 30, 6)
+    red.setColorAt(0, QColor("#e8323f"))
+    red.setColorAt(0.6, QColor("#c3142a"))
+    red.setColorAt(1, QColor("#8a0c1d"))
+    p.setPen(QPen(QColor("#5a0712"), 1))
+    p.setBrush(red)
+    p.drawPath(cone)
+    # The flopped tip falls into its own shade.
+    p.setClipPath(cone)
+    flop = QPainterPath(QPointF(18, -32))
+    flop.cubicTo(30, -24, 30, -14, 26, -12)
+    flop.cubicTo(38, -8, 44, 6, 44, 24)
+    flop.lineTo(70, 24)
+    flop.lineTo(70, -40)
+    flop.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(60, 0, 10, 70))
+    p.drawPath(flop)
+    p.setClipping(False)
+
+    trim = _fluff(
+        [(x, -1, 5) for x in range(-39, 40, 6)]
+        + [(x, 6, 5) for x in range(-36, 37, 6)]
+        + [(-41, 2.5, 5), (41, 2.5, 5)]
+    )
+    ball = _fluff(
+        [(50, 24, 6.5)]
+        + [(50 + 4.5 * math.cos(a), 24 + 4.5 * math.sin(a), 3.4) for a in (k * math.pi / 5 for k in range(10))]
+    )
+    p.setBrush(QColor(0, 0, 0, 60))
+    p.drawPath(trim.translated(0, 2.5))
+    p.drawPath(ball.translated(0.5, 2))
+    fur = QLinearGradient(0, -6, 0, 11)
+    fur.setColorAt(0, QColor("#ffffff"))
+    fur.setColorAt(0.6, QColor("#eef1f3"))
+    fur.setColorAt(1, QColor("#bcc5cc"))
+    p.setPen(QPen(QColor(0, 0, 0, 45), 0.6))
+    p.setBrush(fur)
+    p.drawPath(trim)
+    ball_fur = QRadialGradient(QPointF(48, 21), 10)
+    ball_fur.setColorAt(0, QColor("#ffffff"))
+    ball_fur.setColorAt(0.6, QColor("#eef1f3"))
+    ball_fur.setColorAt(1, QColor("#bcc5cc"))
+    p.setBrush(ball_fur)
+    p.drawPath(ball)
+    p.end()
+    return canvas
+
 
 class CreditsPage(QWidget):
     """The "About" tab: hero card, credits and the legal notices."""
@@ -135,18 +195,17 @@ class CreditsPage(QWidget):
         card, layout = make_card()
         row = QHBoxLayout()
         row.setSpacing(18)
-        logo = QPixmap(str(project_root() / "cli" / "stalker-gamma.png"))
-        if not logo.isNull():
-            image = QLabel()
-            image.setPixmap(
-                logo.scaled(
-                    96, 96,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-            image.setAlignment(Qt.AlignmentFlag.AlignTop)
-            row.addWidget(image)
+        self._logo = QPixmap(str(project_root() / "cli" / "stalker-gamma.png"))
+        if not self._logo.isNull():
+            self._logo_label = QLabel()
+            self._logo_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+            row.addWidget(self._logo_label)
+            # The hat floats over the logo instead of widening it, so the
+            # card lays out the same in every theme.
+            self._hat = QLabel(card)
+            self._hat.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self._logo_label.installEventFilter(self)
+            self._paint_logo()
 
         text = QVBoxLayout()
         text.setSpacing(6)
@@ -189,6 +248,35 @@ class CreditsPage(QWidget):
         self.update_button.clicked.connect(lambda: open_url(f"{_GITHUB}/releases"))
         layout.addWidget(self.update_button)
         return card
+
+    def _paint_logo(self) -> None:
+        # Drawn at the screen's pixel density so the hat stays crisp.
+        dpr = self.devicePixelRatioF()
+        logo = self._logo.scaled(
+            round(96 * dpr), round(96 * dpr),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        logo.setDevicePixelRatio(dpr)
+        self._logo_label.setPixmap(logo)
+        winter = active_theme() == "winter"
+        if winter:
+            self._hat.setPixmap(_santa_hat(dpr))
+            self._hat.resize(*_HAT_SIZE)
+        self._hat.setVisible(winter)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is getattr(self, "_logo_label", None) and event.type() in (
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+        ):
+            self._hat.move(watched.x(), watched.y() - _HAT_OFFSET)
+            self._hat.raise_()
+        return super().eventFilter(watched, event)
+
+    def on_theme_changed(self) -> None:
+        if hasattr(self, "_logo_label"):
+            self._paint_logo()
 
     def _on_commander_update_checked(self, tag: object) -> None:
         if not tag or not isinstance(tag, str):
@@ -248,43 +336,6 @@ class CreditsPage(QWidget):
             buttons.addWidget(button)
         buttons.addStretch(1)
         layout.addLayout(buttons)
-
-        layout.addSpacing(6)
-        layout.addWidget(section_label(tr("Included software"), level=3))
-        layout.addWidget(
-            info_label(tr("COMMANDER ships with these open-source components. Each keeps its own license."))
-        )
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(8)
-        grid.setColumnStretch(1, 1)
-        rows = [(name, spdx, _license_files(entries)) for name, spdx, entries in _THIRD_PARTY]
-        rows = [row for row in rows if all(path.is_file() for path in row[2])]
-        for row, (name, spdx, files) in enumerate(rows):
-            who = QLabel(name)
-            who.setObjectName("accent")
-            grid.addWidget(who, row, 0)
-            terms = QLabel(spdx)
-            terms.setObjectName("dim")
-            grid.addWidget(terms, row, 1)
-            button = QPushButton(tr("License"))
-            button.setObjectName("pillButton")
-            button.setFixedHeight(30)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(
-                lambda _checked=False, title=name, paths=files: show_text_files(self, title, paths)
-            )
-            grid.addWidget(button, row, 2)
-        layout.addLayout(grid)
-
-        layout.addSpacing(6)
-        for text in (
-            tr("COMMANDER is not affiliated with GSC Game World or the GAMMA team."),
-            tr("S.T.A.L.K.E.R. is a trademark of GSC Game World. Discord and GitHub are trademarks of their owners. They are named and shown here only to identify those projects and services."),
-        ):
-            note = info_label(text)
-            note.setObjectName("dim")
-            layout.addWidget(note)
         return card
 
     def _open_privacy(self) -> None:

@@ -46,7 +46,7 @@ from commander_gui.modlist import (
     read_lines,
     set_status_at,
 )
-from commander_gui.themes import active_theme_tokens
+from commander_gui.themes import active_theme_tokens, token_color
 from commander_gui.ui.common import mo2_running
 
 from .. import gamepad as pad
@@ -140,13 +140,13 @@ class _ModRowDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(inner, px(10), px(10))
         if selected:
             painter.setPen(QPen(QColor(tokens.get("focus", "#9fe96f")), 2))
-            painter.setBrush(QColor(tokens.get("btn_hover", "#222222")))
+            painter.setBrush(token_color("btn_hover", "#222222"))
             painter.drawRoundedRect(inner, px(10), px(10))
 
     def _paint_header(self, painter, rect, index, tokens, selected, pad) -> None:
         # The same "header band" treatment the desktop tree gives category
         # rows: the card colour behind bold accent text.
-        self._selection(painter, rect, tokens, selected, QColor(tokens.get("btn", "#222222")))
+        self._selection(painter, rect, tokens, selected, token_color("btn", "#222222"))
         collapsed = bool(index.data(_COLLAPSED))
         font = QFont(painter.font())
         font.setPixelSize(px(_HEADER_PX))

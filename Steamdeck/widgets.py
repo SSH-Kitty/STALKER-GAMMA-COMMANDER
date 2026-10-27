@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QColor,
     QLinearGradient,
     QPainter,
+    QPixmap,
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
@@ -57,6 +58,7 @@ from PySide6.QtWidgets import (
 from commander_gui.i18n import tr
 from commander_gui.themes import active_theme_tokens
 from commander_gui.ui.common import notice
+from commander_gui.ui.winter import Snowfall, paint_scene
 
 from .scale import px
 
@@ -114,12 +116,17 @@ class DeckBackdrop(QWidget):
     The same treatment the desktop window uses - a diagonal base gradient
     with two soft radial glows over it - drawn from the same theme tokens,
     so Deck Mode looks like the rest of COMMANDER rather than a generic Qt
-    application that happens to share its colours.
+    application that happens to share its colours. Winter (Live) paints its
+    village scene instead, with the snow falling over it.
 
     Painted rather than styled: a QSS background on this widget would sit
     on top of the glow. Everything stacked above it is semi-transparent, so
     the glow reads through the cards and rows.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.snowfall = Snowfall(self)
 
     def sizeHint(self) -> QSize:
         return QSize(DECK_W, DECK_H)
@@ -129,7 +136,25 @@ class DeckBackdrop(QWidget):
         return int(red), int(green), int(blue)
 
     def paintEvent(self, _event) -> None:
+        # Gradients (or Winter's scene) are slow to paint and the snow
+        # repaints bits of this many times a second, so the still part is
+        # drawn once per size/theme and blitted from then on.
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
+        if getattr(self, "_cache_key", None) != key:
+            pixmap = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
+            pixmap.setDevicePixelRatio(dpr)
+            pixmap.fill(QColor(0, 0, 0))
+            self._paint_still(QPainter(pixmap))
+            self._cache_key, self._cache = key, pixmap
         painter = QPainter(self)
+        try:
+            painter.drawPixmap(0, 0, self._cache)
+            self.snowfall.paint(painter)
+        finally:
+            painter.end()
+
+    def _paint_still(self, painter: QPainter) -> None:
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = self.rect()
@@ -139,6 +164,8 @@ class DeckBackdrop(QWidget):
             base.setColorAt(0.0, QColor(tokens["back_base_a"]))
             base.setColorAt(1.0, QColor(tokens["back_base_b"]))
             painter.fillRect(rect, base)
+            if paint_scene(painter, rect):
+                return
 
             radius = max(rect.width(), rect.height())
             top_left = QRadialGradient(

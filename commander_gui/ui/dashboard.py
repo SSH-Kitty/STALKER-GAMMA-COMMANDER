@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version_label__, coop
+from .. import __version_label__, coop, romeo
 from ..achievements import ACHIEVEMENTS, unlocked_count
 from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
@@ -72,11 +72,16 @@ from .mod_manager_page import _query_mo2_profiles
 _LOW_DISK_BYTES = 50 * 1024**3
 
 
-#: Theme tokens colouring the Storage usage segments, in folder order:
-#: bright accent, dark shade, light neutral - picked per theme so the three
-#: always stay apart (a theme's own accent shades can be near-identical).
-#: Looked up at paint time, so a theme switch recolours them straight away.
-_SEGMENT_TOKENS = ("storage_a", "storage_b", "storage_c")
+#: Theme tokens colouring the Storage usage segments: bright accent, dark
+#: shade, muted mid-tone, light neutral - picked per theme so the four always
+#: stay apart (a theme's own accent shades can be near-identical). Looked up
+#: at paint time, so a theme switch recolours them straight away.
+_SEGMENT_TOKENS = {
+    "Anomaly": "storage_a",
+    "GAMMA": "storage_b",
+    "ROMEO": "storage_d",
+    "Cache": "storage_c",
+}
 
 
 def _token_color(token: str) -> QColor:
@@ -803,7 +808,16 @@ class DashboardPage(QWidget):
                 self._draw_sizes(None)
 
         def compute() -> dict[str, int]:
-            return {k: dir_size(p) for k, p in paths.items()}
+            sizes = {k: dir_size(p) for k, p in paths.items()}
+            gamma = Path(profile.gamma) if profile.gamma else None
+            if gamma is not None and romeo.installed(gamma):
+                # ROMEO's mods live inside GAMMA: shown on their own, taken
+                # out of GAMMA so the total stays the same.
+                folders = romeo.old_mods(gamma) + [gamma / "mods" / romeo.KEPT_MCM]
+                sizes["ROMEO"] = sum(dir_size(p) for p in folders if p.is_dir())
+                sizes["GAMMA"] = max(sizes["GAMMA"] - sizes["ROMEO"], 0)
+                sizes = {k: sizes[k] for k in _SEGMENT_TOKENS if k in sizes}
+            return sizes
 
         task = BackgroundTask(compute, parent=self)
         self._size_task = task
@@ -846,22 +860,30 @@ class DashboardPage(QWidget):
         shown while the first measurement runs."""
         layout = self.sizes_card.layout()
         clear_layout(layout)
-        layout.addWidget(_card_title(tr("Storage usage")))
         if sizes is None:
+            layout.addWidget(_card_title(tr("Storage usage")))
             layout.addWidget(_SegmentedBar([]))
             measuring = QLabel(tr("Measuring folder sizes"))
             measuring.setObjectName("dim")
             layout.addWidget(measuring)
             self._draw_free_space(layout)
             return
-        total = sum(sizes.values())
+        # Title with the total on the right, which leaves the legend room
+        # for a fourth folder (ROMEO).
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(_card_title(tr("Storage usage")))
+        header.addStretch(1)
+        total_label = QLabel(tr("Total: {arg}", arg=human_size(sum(sizes.values()))))
+        total_label.setStyleSheet(f"color: {OK_GREEN.name()};")
+        header.addWidget(total_label)
+        layout.addLayout(header)
         segments = [
-            (value, _SEGMENT_TOKENS[index % len(_SEGMENT_TOKENS)])
-            for index, value in enumerate(sizes.values())
+            (value, _SEGMENT_TOKENS.get(key, "storage_c")) for key, value in sizes.items()
         ]
         layout.addWidget(_SegmentedBar(segments))
 
-        # Legend: a swatch per folder, then the total on the right.
+        # Legend: a swatch per folder.
         legend = QHBoxLayout()
         legend.setSpacing(18)
         for (key, value), (_value, token) in zip(sizes.items(), segments, strict=True):
@@ -871,9 +893,6 @@ class DashboardPage(QWidget):
             item.addWidget(QLabel(tr("{key}: {arg}", key=key, arg=human_size(value))))
             legend.addLayout(item)
         legend.addStretch(1)
-        total_label = QLabel(tr("Total: {arg}", arg=human_size(total)))
-        total_label.setStyleSheet(f"color: {OK_GREEN.name()};")
-        legend.addWidget(total_label)
         layout.addLayout(legend)
         self._draw_free_space(layout)
         if unavailable is not None:
@@ -1332,6 +1351,10 @@ class DashboardPage(QWidget):
 
     def on_busy_changed(self, busy: bool) -> None:
         """Mirror the Play page lock while installation work is active."""
+        # An install, update or uninstall just changed the folders: measure
+        # them again on the next refresh instead of reusing the cached sizes.
+        if not busy:
+            self._size_cache_key = None
         button = getattr(self, "_play_button", None)
         if button is None:
             return

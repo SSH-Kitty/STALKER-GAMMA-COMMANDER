@@ -13690,6 +13690,25 @@ class AssistantThemeParityTests(unittest.TestCase):
             )
 
 
+class WinterTimeOfDayTests(unittest.TestCase):
+    def test_winter_follows_the_clock_in_every_window(self) -> None:
+        """Winter paints dawn, day, dusk or night by the hour; each look must
+        be complete (COMMANDER and ASSISTANT tokens, scene image) or a
+        window falls back to GAMMA or an unpainted backdrop at that hour."""
+        from assistant.ui import theme as assistant_theme
+        from commander_gui.themes import THEMES, resolve_theme
+
+        hours = {0: "winter_night", 6: "winter_dawn", 8: "winter", 16: "winter", 17: "winter_dusk", 19: "winter_night"}
+        for hour, expected in hours.items():
+            self.assertEqual(resolve_theme("winter", hour), expected, hour)
+        self.assertEqual(resolve_theme("dusk", 3), "dusk")
+        assets = Path(__file__).resolve().parents[1] / "commander_gui" / "assets"
+        for key in set(hours.values()):
+            self.assertLessEqual(set(THEMES["reactor"]), set(THEMES[key]), key)
+            self.assertTrue((assets / THEMES[key]["back_image"]).is_file(), key)
+            self.assertEqual(set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key)
+
+
 class RepairPreviewTests(unittest.TestCase):
     def test_preview_lists_every_mod_with_its_file_counts(self):
         from commander_gui.integrity import Md5ScanResult
@@ -14405,3 +14424,62 @@ class StockMo2ProfileOnFreshInstallTests(unittest.TestCase):
             profile.mo2_profile = "ROMEO"
             use_stock_mo2_profile_if_missing(settings, profile)
             self.assertEqual((profile.mo2_profile, settings.saves), ("ROMEO", 1))
+
+
+class TokenColorTests(unittest.TestCase):
+    def test_rgba_tokens_parse_instead_of_falling_back(self):
+        # Winter's card is rgba(); QColor() alone can't read it, which left
+        # the Welcome panel GAMMA's dark green under Winter's dark text.
+        from commander_gui import themes
+
+        previous = themes.active_theme()
+        try:
+            themes.set_active_theme("winter_dawn")
+            card = themes.token_color("card", "#000000")
+            self.assertEqual((card.red(), card.green(), card.blue(), card.alpha()), (240, 244, 248, 160))
+            themes.set_active_theme("gamma")
+            self.assertEqual(themes.token_color("card", "#000000").name(), "#141b15")
+            self.assertEqual(themes.token_color("no_such_token", "#123456").name(), "#123456")
+        finally:
+            themes.set_active_theme(previous)
+
+    def test_deck_glass_and_rows_read_winter_rgba(self):
+        # Deck Mode parsed rgba() with QColor() too: the mod list's header
+        # rows came out black and the cards kept Winter's see-through alpha.
+        from Steamdeck.deck_theme import _translucent
+
+        self.assertEqual(_translucent("rgba(22, 29, 36, 175)", 240), "rgba(22, 29, 36, 240)")
+        source = (Path(__file__).resolve().parents[1] / "Steamdeck" / "screens" / "mods.py").read_text()
+        self.assertNotIn('QColor(tokens.get("btn', source)
+
+
+class WinterSnowfallTests(unittest.TestCase):
+    def test_snow_and_lights_follow_theme_and_setting(self):
+        # Shared by the desktop window and Deck Mode's backdrop: flakes and
+        # fairy lights only in Winter, and switching snow off clears them.
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        QApplication.instance() or QApplication([])
+        from commander_gui import themes
+        from commander_gui.ui.winter import ChristmasLights, Snowfall
+
+        previous = themes.active_theme()
+        host = QWidget()
+        host.resize(400, 300)
+        try:
+            themes.set_active_theme("winter")
+            snowfall = Snowfall(host)
+            snowfall.lights = ChristmasLights(QWidget(host), host)
+            snowfall._tick()
+            self.assertEqual(len(snowfall.flakes), Snowfall.FLAKES)
+            with patch("commander_gui.gui_settings.load_gui_settings", return_value={"snow_enabled": False}):
+                snowfall.sync(True)
+            self.assertEqual(snowfall.flakes, [])
+            self.assertFalse(snowfall.lights.isHidden())
+            themes.set_active_theme("gamma")
+            snowfall.sync(True)
+            self.assertTrue(snowfall.lights.isHidden())
+            self.assertFalse(snowfall._timer.isActive())
+        finally:
+            themes.set_active_theme(previous)
+            host.deleteLater()

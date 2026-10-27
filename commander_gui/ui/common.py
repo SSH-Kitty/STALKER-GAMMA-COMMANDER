@@ -71,26 +71,31 @@ class _ThemeColor:
     instead of staying GAMMA green on every theme.
     """
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, default: str | None = None) -> None:
         self._token = token
+        self._default = default
 
     def name(self) -> str:
         from ..themes import active_theme_tokens
 
-        return active_theme_tokens()[self._token]
+        tokens = active_theme_tokens()
+        if self._default is None:
+            return tokens[self._token]
+        return tokens.get(self._token, self._default)
 
 
 ACCENT = _ThemeColor("accent_strong")
 # Status colours stay fixed on purpose: "Installed" is the same green and a
-# failure the same red in every theme (see themes.py's #verifyPill).
-WARN = QColor("#d9a04c")
-OK_GREEN = QColor("#7dc963")
-STATUS_RED = QColor("#e0554f")
-STATUS_GREY = QColor("#7f8f78")
-ITEM_GREEN = QColor("#e2ead8")
+# failure the same red in every dark theme (see themes.py's #verifyPill).
+# Only a light theme (Winter) overrides them, as these are too pale on white.
+WARN = _ThemeColor("status_warn", "#d9a04c")
+OK_GREEN = _ThemeColor("status_ok", "#7dc963")
+STATUS_RED = _ThemeColor("status_red", "#e0554f")
+STATUS_GREY = _ThemeColor("status_grey", "#7f8f78")
+ITEM_GREEN = _ThemeColor("status_item", "#e2ead8")
 #: "Check MD5" rows in the download table: secondary text, not a blue.
 TEAL = _ThemeColor("text_info")
-LIGHT_GREY = QColor("#cfd9c6")
+LIGHT_GREY = _ThemeColor("status_light", "#cfd9c6")
 
 ANOMALY_MARKERS = ("AnomalyLauncher.exe", "fsgame.ltx")
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")

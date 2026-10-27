@@ -17,6 +17,7 @@ THEME_INFO = [
     ("midnight", "Midnight"),
     ("terminal", "Terminal"),
     ("reactor", "Reactor"),
+    ("winter", "Winter (Live)"),
 ]
 
 # These are the COMMANDER core colors. The smaller assistant UI derives all
@@ -28,7 +29,12 @@ THEMES = {
     "midnight": {"bg": "#0b1016", "panel": "#111824", "card": "#1a2432", "border": "#1d2a3a", "text": "#dbe6f0", "dim": "#6e8496", "accent": "#6fd3a8", "strong": "#5ec99b", "selection": "#3f9d7a", "danger": "#b0554f", "warn": "#d9a04c"},
     "terminal": {"bg": "#000000", "panel": "#060b06", "card": "#0a120a", "border": "#123912", "text": "#33cc55", "dim": "#1f7a33", "accent": "#33ff66", "strong": "#2ee75c", "selection": "#1f8a3a", "danger": "#a0443f", "warn": "#cc9933"},
     "reactor": {"bg": "#010a0a", "panel": "#061616", "card": "#0a2020", "border": "#0f3232", "text": "#cdeaea", "dim": "#4a7a7a", "accent": "#00a3a3", "strong": "#00c2c2", "selection": "#0a9494", "danger": "#b0554f", "warn": "#d9a04c"},
+    "winter": {"bg": "#e8edf1", "panel": "#f4f7f9", "card": "#ffffff", "border": "#c4ced6", "text": "#1b252d", "dim": "#56636d", "accent": "#3a6d37", "strong": "#2f6d2b", "selection": "#9fc49a", "danger": "#b84a40", "warn": "#9a5f0c"},
 }
+# Winter's time-of-day looks (see commander_gui.themes.resolve_theme).
+THEMES["winter_dawn"] = THEMES["winter"]
+THEMES["winter_night"] = {"bg": "#11161b", "panel": "#161d24", "card": "#1f2830", "border": "#2e3a44", "text": "#dde5ea", "dim": "#8a97a1", "accent": "#8fcf72", "strong": "#9fe07f", "selection": "#4f8a45", "danger": "#b0554f", "warn": "#d9a04c"}
+THEMES["winter_dusk"] = {**THEMES["winter_night"], "bg": "#1a1517", "panel": "#211a1d", "card": "#2c2326", "border": "#3e3236"}
 
 _ACTIVE = "gamma"
 
@@ -43,7 +49,7 @@ def load_saved_theme() -> str:
         value = json.loads(config_path().read_text(encoding="utf-8")).get("theme")
     except (OSError, ValueError, AttributeError):
         value = None
-    return value if value in THEMES else "gamma"
+    return value if value in dict(THEME_INFO) else "gamma"
 
 
 def load_saved_font_size() -> int:
@@ -65,12 +71,18 @@ def set_active_theme(name: str) -> None:
         commander_themes.set_active_theme(name)
 
 
+def _tokens() -> dict[str, str]:
+    from commander_gui.themes import resolve_theme
+
+    return THEMES[resolve_theme(_ACTIVE)]
+
+
 def active_theme() -> str:
     return _ACTIVE
 
 
 def token(name: str) -> str:
-    values = THEMES[_ACTIVE]
+    values = _tokens()
     aliases = {"PANEL": "panel", "CARD": "card", "BG": "bg", "BORDER": "border", "TEXT": "text", "DIM": "dim", "ACCENT": "accent", "RED": "danger", "AMBER": "warn", "SECTION_ACCENT": "accent", "WORDMARK_ACCENT": "accent", "NAV_TEXT": "dim", "INFO_TEXT": "dim", "TEXT_BRIGHT": "text", "GREY": "dim"}
     return values.get(aliases.get(name, name), values["text"])
 
@@ -88,7 +100,7 @@ def _stylesheet() -> str:
 
 
 def _base_stylesheet() -> str:
-    t = THEMES[_ACTIVE]
+    t = _tokens()
     return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"Exo 2\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
 QLabel {{ background:transparent; }} QWidget#topbar {{ background:{t['panel']}; border-bottom:1px solid {t['border']}; }}
 QWidget#quickActions, QWidget#wordmarkBlock {{ background:transparent; }} QPushButton {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px; padding:6px 14px; }}
@@ -143,7 +155,7 @@ def apply_theme(app: QApplication, name: str | None = None) -> None:
         set_active_theme(load_saved_theme())
     load_font()
     app.setStyle("Fusion")
-    t = THEMES[_ACTIVE]
+    t = _tokens()
     palette = QPalette()
     for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base, QPalette.ColorRole.AlternateBase):
         palette.setColor(role, QColor(t["bg"]))

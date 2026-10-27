@@ -190,6 +190,46 @@ class StorageCardTest(DashboardStatsCardTest):
             )
 
 
+    def test_romeo_mods_get_their_own_segment_out_of_gamma(self):
+        from pathlib import Path
+
+        with (
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+            patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
+            patch("commander_gui.ui.dashboard.BackgroundTask.start"),
+        ):
+            gamma = Path(tmp) / "gamma"
+            for mod, size in (("xx-Romeo Mod", 300), ("Base Mod", 100)):
+                (gamma / "mods" / mod).mkdir(parents=True)
+                (gamma / "mods" / mod / "file").write_bytes(b"x" * size)
+            (gamma / "profiles" / "ROMEO").mkdir(parents=True)
+            (gamma / "profiles" / "ROMEO" / "modlist.txt").write_text("+xx-CLIKR\u0394D MCM Values\n")
+            page = self._page([CliProfile(active=True, profile_name="Mine", gamma=str(gamma))])
+            sizes = page._size_task._fn()
+            self.assertEqual(list(sizes), ["Anomaly", "GAMMA", "ROMEO", "Cache"])
+            self.assertEqual(sizes["ROMEO"], 300)
+            self.assertEqual(sizes["GAMMA"], 100 + len("+xx-CLIKR\u0394D MCM Values\n".encode()))
+
+    def test_sizes_are_measured_again_after_an_install_finishes(self):
+        with (
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}),
+            patch("commander_gui.ui.dashboard.latest_save_stats", return_value=None),
+            patch("commander_gui.ui.dashboard.BackgroundTask.start") as start,
+        ):
+            profile = CliProfile(active=True, profile_name="Mine", gamma=tmp)
+            page = self._page([profile])
+            key = (profile.anomaly, profile.gamma, profile.cache)
+            page._render_sizes({"GAMMA": 1}, page._refresh_generation, cache_key=key)
+            start.reset_mock()
+            page.refresh()
+            start.assert_not_called()  # cached
+            page.on_busy_changed(False)
+            page.refresh()
+            start.assert_called()
+
+
 class DashboardPlayButtonTest(_QtTest):
     def test_play_button_greys_on_the_first_click_after_startup(self):
         """The Play page is built by the click itself; the Dashboard must

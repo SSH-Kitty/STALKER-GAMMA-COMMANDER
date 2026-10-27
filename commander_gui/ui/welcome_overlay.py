@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__, __version_label__, gui_settings
-from ..themes import active_theme_tokens
+from ..themes import token_color as _token
 from ..updates import (
     _numeric_version_tuple,
     effective_update_channel,
@@ -83,11 +83,6 @@ def version_status(latest_title: str | None) -> tuple[str, str]:
     if installed == latest:
         return tr("Up to date"), "ok"
     return tr("Update available"), "warn"
-
-
-def _token(name: str, fallback: str) -> QColor:
-    color = QColor(active_theme_tokens().get(name, fallback))
-    return color if color.isValid() else QColor(fallback)
 
 
 def _clear_background(frame: QFrame) -> None:
@@ -362,21 +357,37 @@ class WelcomeOverlay(QWidget):
             self._regrab.start()
         return super().eventFilter(obj, event)
 
+    def _lights(self) -> QWidget | None:
+        lights = getattr(self.window, "_lights", None)
+        return lights if lights is not None and lights.isVisible() else None
+
     def _grab_backdrop(self) -> None:
-        """Snapshot the window without this overlay, dimmed by the scrim."""
+        """Snapshot the window without this overlay, the snow or the lights.
+
+        Winter's snow and fairy lights keep moving under the overlay, so
+        paintEvent draws them live over the still snapshot.
+        """
         shown = self.isVisible()
         focus = self.focusWidget() if shown else None
         if shown:
             self.hide()
-        pixmap = self.window.grab()
+        lights = self._lights()
+        if lights is not None:
+            lights.hide()
+        snowfall = getattr(self.window, "snowfall", None)
+        flakes = snowfall.flakes if snowfall is not None else []
+        if snowfall is not None:
+            snowfall.flakes = []
+        try:
+            pixmap = self.window.grab()
+        finally:
+            if snowfall is not None:
+                snowfall.flakes = flakes
+            if lights is not None:
+                lights.show()
         if shown:
             self.show()
             (focus or self).setFocus(Qt.FocusReason.OtherFocusReason)
-        painter = QPainter(pixmap)
-        try:
-            painter.fillRect(QRectF(0, 0, pixmap.width(), pixmap.height()), QColor(0, 0, 0, _SCRIM_ALPHA))
-        finally:
-            painter.end()
         self._backdrop = pixmap
         self.update()
 
@@ -385,6 +396,13 @@ class WelcomeOverlay(QWidget):
         try:
             # Stretched until a resize's re-snapshot lands.
             painter.drawPixmap(self.rect(), self._backdrop)
+            snowfall = getattr(self.window, "snowfall", None)
+            if snowfall is not None:
+                snowfall.paint(painter)
+            lights = self._lights()
+            if lights is not None:
+                lights.render(painter, lights.mapTo(self.window, QPoint(0, 0)))
+            painter.fillRect(self.rect(), QColor(0, 0, 0, _SCRIM_ALPHA))
         finally:
             painter.end()
 

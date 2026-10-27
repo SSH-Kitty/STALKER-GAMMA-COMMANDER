@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QPropertyAnimation,
+    QSize,
     Qt,
     QTimer,
     QVariantAnimation,
@@ -61,6 +62,7 @@ from ..themes import (
     active_theme_tokens,
     build_palette,
     build_stylesheet,
+    resolve_theme,
     set_active_theme,
 )
 from ..updates import (
@@ -108,6 +110,7 @@ from .title_bar import (
 )
 from .update_page import UpdatePage
 from .utilities_page import UtilitiesPage
+from .winter import ChristmasLights, Snowfall, paint_scene
 
 NAV_ITEMS = [
     ("dashboard", "Dashboard"),
@@ -283,7 +286,7 @@ class NavTabBar(QTabBar):
         painter.end()
 
 
-def paint_backdrop(painter: QPainter, rect) -> None:
+def paint_backdrop(painter: QPainter, rect, screen: QSize | None = None) -> None:
     """Dark GAMMA-style backdrop with a soft, blurred radiation-green glow.
 
     Painted by the main window across its whole area - behind the central
@@ -301,6 +304,9 @@ def paint_backdrop(painter: QPainter, rect) -> None:
     base.setColorAt(0.0, QColor(tokens["back_base_a"]))
     base.setColorAt(1.0, QColor(tokens["back_base_b"]))
     painter.fillRect(rect, base)
+
+    if paint_scene(painter, rect, screen):
+        return
 
     radius = max(rect.width(), rect.height())
     r1 = rgb("back_glow1_rgb")
@@ -358,6 +364,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        self.snowfall = Snowfall(self)
         self.setStatusBar(_NoticeStatusBar(self))
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
@@ -396,6 +403,12 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._maybe_check_for_updates_in_background)
         QTimer.singleShot(0, self._check_commander_update_status)
         self._start_update_timer()
+        # Winter moves on to dawn, day, dusk and night with the clock.
+        self._painted_theme = resolve_theme(active_theme())
+        self._daytime_timer = QTimer(self)
+        self._daytime_timer.setInterval(60_000)
+        self._daytime_timer.timeout.connect(self._follow_time_of_day)
+        self._daytime_timer.start()
         # The Welcome screen (latest patch notes, links), unless "Don't show
         # again" was ticked - here or in Deck Mode, which shares the setting.
         QTimer.singleShot(0, self._maybe_show_welcome)
@@ -721,6 +734,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(topbar)
         layout.addWidget(self._build_update_banner())
         layout.addWidget(self.stack, 1)
+        self._lights = self.snowfall.lights = ChristmasLights(topbar, central)
         self.setCentralWidget(central)
         for widget in (
             topbar, header, wordmark_block, wordmark, byline,
@@ -1606,7 +1620,7 @@ class MainWindow(QMainWindow):
         else:
             self.open_settings()
 
-    def _reject_language_or_theme_change(self, busy_message: str) -> bool:
+    def _reject_language_or_theme_change(self, busy_message: str, force: bool = True) -> bool:
         """Show why a language/theme change is refused and revert both pickers.
 
         Returns True if the change was refused (caller should stop), False
@@ -1622,7 +1636,7 @@ class MainWindow(QMainWindow):
         # would orphan its task the same way and leave it "busy" for good.
         if self.install_busy or moddb_controller(self).busy:
             QMessageBox.warning(self, tr("Please wait"), busy_message)
-        elif game_running(force=True):
+        elif game_running(force=force):
             QMessageBox.warning(
                 self,
                 tr("Please wait"),
@@ -1642,11 +1656,18 @@ class MainWindow(QMainWindow):
         if self._reject_language_or_theme_change(
             tr(
                 "The theme can't change while a task is running. Wait for it to finish, then try again."
-            )
+            ),
+            # A theme change is safe even if the game just started, so the
+            # few-seconds-old answer will do and spares two pgrep runs.
+            force=False,
         ):
             return
         gui_settings.save_gui_settings(theme=name)
         self._apply_style()
+
+    def _follow_time_of_day(self) -> None:
+        if resolve_theme(active_theme()) != self._painted_theme:
+            self._apply_style()
 
     def apply_font_size(self, size: int) -> None:
         gui_settings.save_gui_settings(font_size=int(size))
@@ -1729,6 +1750,7 @@ class MainWindow(QMainWindow):
         font_size = int(state.get("font_size") or 13)
         font_family = state.get("font_family") or "Exo 2"
         set_active_theme(name)
+        self._painted_theme = resolve_theme(name)
         app = QApplication.instance()
         if app is not None:
             app.setPalette(build_palette(name))
@@ -1739,6 +1761,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()
         self.update()
+        self.sync_snow()
         # Icons painted in a theme colour don't follow the stylesheet.
         for page in getattr(self, "_pages", {}).values():
             notify = getattr(page, "on_theme_changed", None)
@@ -1774,22 +1797,29 @@ class MainWindow(QMainWindow):
         super().paintEvent(event)
         # The backdrop's full-window gradients are slow to paint, and every
         # repaint anywhere in the window repaints the backdrop under it, so
-        # they are drawn once per size/theme and blitted from then on.
+        # they are drawn once per size/theme and blitted from then on. The last
+        # two are kept, so switching back to a theme (Winter's photo is slow
+        # to decode and scale) is a blit too.
         dpr = self.devicePixelRatioF()
         key = (self.width(), self.height(), dpr, tuple(active_theme_tokens().items()))
-        if getattr(self, "_backdrop_key", None) != key:
+        cache = self.__dict__.setdefault("_backdrop_cache", {})
+        pixmap = cache.pop(key, None)
+        if pixmap is None:
             pixmap = QPixmap(round(self.width() * dpr), round(self.height() * dpr))
             pixmap.setDevicePixelRatio(dpr)
             pixmap.fill(QColor(0, 0, 0))
             cache_painter = QPainter(pixmap)
             try:
-                paint_backdrop(cache_painter, self.rect())
+                paint_backdrop(cache_painter, self.rect(), self.screen().size())
             finally:
                 cache_painter.end()
-            self._backdrop_key, self._backdrop_pixmap = key, pixmap
+        cache[key] = pixmap
+        while len(cache) > 2:
+            cache.pop(next(iter(cache)))
         painter = QPainter(self)
         try:
-            painter.drawPixmap(0, 0, self._backdrop_pixmap)
+            painter.drawPixmap(0, 0, pixmap)
+            self.snowfall.paint(painter)
         finally:
             painter.end()
 
@@ -1837,7 +1867,14 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_max_button()
+        if event.type() in (QEvent.Type.WindowStateChange, QEvent.Type.ActivationChange):
+            self.sync_snow()
         super().changeEvent(event)
+
+    def sync_snow(self) -> None:
+        snowfall = getattr(self, "snowfall", None)
+        if snowfall is not None:
+            snowfall.sync(self.isActiveWindow() and not self.isMinimized())
 
     def closeEvent(self, event) -> None:
         if self.install_busy:

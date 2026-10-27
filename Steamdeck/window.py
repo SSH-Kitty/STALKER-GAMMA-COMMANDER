@@ -52,7 +52,12 @@ from commander_gui import gui_settings
 from commander_gui.deck_launch import in_game_mode, is_steam_deck
 from commander_gui.i18n import tr
 from commander_gui.settings import load_settings
-from commander_gui.themes import build_palette, set_active_theme
+from commander_gui.themes import (
+    active_theme,
+    build_palette,
+    resolve_theme,
+    set_active_theme,
+)
 from commander_gui.ui.common import (
     GAMMA_PROFILE,
     count_active_mods,
@@ -73,6 +78,7 @@ from commander_gui.ui.title_bar import (
     pin_top_right,
     update_max_button,
 )
+from commander_gui.ui.winter import ChristmasLights
 
 from . import gamepad as pad
 from .deck_theme import build_deck_stylesheet
@@ -327,6 +333,7 @@ class DeckWindow(QMainWindow):
         if sheet != self._last_sheet:
             self._last_sheet = sheet
             app.setStyleSheet(sheet)
+        self.sync_snow()
 
     def apply_style_later(self) -> None:
         """Restyle once things stop changing (see _RESTYLE_DEBOUNCE_MS)."""
@@ -344,7 +351,8 @@ class DeckWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_header())
+        header = self._build_header()
+        root.addWidget(header)
 
         self.stack = QStackedWidget()
         self.stack.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -360,6 +368,10 @@ class DeckWindow(QMainWindow):
         # The widget tree used for overlay geometry, the toast, and
         # DeckFocusController's scope.
         self._deck_root = central
+
+        # Winter's fairy lights under the header, twinkling off the snow.
+        central.snowfall.lights = ChristmasLights(header, central)
+        self.sync_snow()
 
         self.toast = DeckToast(central)
         self._status_shim = _DeckStatusBar(self.toast)
@@ -812,6 +824,11 @@ class DeckWindow(QMainWindow):
 
     def update_clock(self) -> None:
         self.clock_label.setText(time.strftime("%H:%M"))
+        # Winter (Live) moves on to dawn, day, dusk and night with the clock.
+        phase = resolve_theme(active_theme())
+        if phase != getattr(self, "_painted_phase", phase):
+            self.apply_style()
+        self._painted_phase = phase
         state = battery_state()
         if state is None:
             self.battery_label.hide()
@@ -1436,6 +1453,14 @@ class DeckWindow(QMainWindow):
         elif event.type() == QEvent.Type.WindowStateChange:
             update_max_button(self)
             self._sync_title_bar()
+        if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange):
+            self.sync_snow()
+
+    def sync_snow(self) -> None:
+        """Winter's snow runs only while Deck Mode is in front (see Snowfall)."""
+        central = getattr(self, "_deck_root", None)
+        if central is not None:
+            central.snowfall.sync(self.isActiveWindow() and not self.isMinimized())
 
     def _sync_gamepad(self) -> None:
         """Read the controller only while this window can use it.

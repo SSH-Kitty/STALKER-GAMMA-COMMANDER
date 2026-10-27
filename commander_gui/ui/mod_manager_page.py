@@ -105,7 +105,7 @@ from ..modlist import (
 )
 from ..romeo import EXES_NEEDED, KEPT_MCM, MCM_MOD, find_romeo, is_romeo_profile, mcm_changed, old_mods, unpacked_size
 from ..romeo import install as install_romeo
-from ..themes import active_theme_tokens
+from ..themes import token_color
 from ..updates import local_modpack_records
 from .about_page import _copy_button
 from .common import (
@@ -1457,7 +1457,7 @@ class ModManagerPage(QWidget):
         # order and mod order alike, and also makes the incrementing
         # `priority` counter below come out matching MO2's own numbering
         # (lowest at screen-top) with no separate formula needed.
-        card_bg = QColor(active_theme_tokens()["card"])
+        card_bg = token_color("card", "#141b15")
         for category, mods in reversed(grouped(self._lines)):
             header = QTreeWidgetItem([f"{category} ({len(mods)})"])
             # The display text carries a "(N)" mod-count suffix - drop

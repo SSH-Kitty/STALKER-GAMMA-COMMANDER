@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import string
+import time
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QPalette
@@ -52,6 +53,12 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         "Deep black with a glowing reactor-coolant teal accent.",
         ("#010a0a", "#006868", "#cdeaea"),
     ),
+    (
+        "winter",
+        "Winter (Live)",
+        "Frosty and snowbound: an abandoned village that follows the clock through dawn, day, dusk and night.",
+        ("#dfe5ea", "#3a6d37", "#1b252d"),
+    ),
 ]
 
 _ACTIVE: str = "gamma"
@@ -68,7 +75,26 @@ def active_theme() -> str:
 
 
 def active_theme_tokens() -> dict[str, str]:
-    return THEMES[_ACTIVE]
+    return THEMES[resolve_theme(_ACTIVE)]
+
+
+def token_color(name: str, fallback: str) -> QColor:
+    """A live theme token as a QColor, ``rgba(r, g, b, a)`` ones included.
+
+    QColor() reads hex but not CSS rgba(), which Winter's see-through
+    surfaces (card, chip, btn) use - it came out invalid, i.e. black.
+    """
+    return parse_color(active_theme_tokens().get(name, fallback), fallback)
+
+
+def parse_color(value: str, fallback: str) -> QColor:
+    """``value`` as a QColor, CSS ``rgba(r, g, b, a)`` included (see token_color)."""
+    match = re.fullmatch(r"\s*rgba\(([^)]*)\)\s*", value)
+    if match:
+        color = QColor(*(int(part) for part in match.group(1).split(",")))
+    else:
+        color = QColor(value)
+    return color if color.isValid() else QColor(fallback)
 
 
 _FALLBACK_FONT = '"Exo 2", "DejaVu Sans", "Noto Sans", sans-serif'
@@ -88,7 +114,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 def build_stylesheet(
     name: str, font_size: int | None = None, font_family: str | None = None
 ) -> str:
-    tokens = THEMES.get(name) or THEMES["gamma"]
+    tokens = {"status_ok": "#7dc963", **(THEMES.get(resolve_theme(name)) or THEMES["gamma"])}
     if font_size is None:
         font_size = int(tokens["font_size"].rstrip("px"))
     qss = _TEMPLATE.safe_substitute(tokens)
@@ -105,7 +131,7 @@ def build_stylesheet(
 
 
 def build_palette(name: str) -> QPalette:
-    tokens = THEMES.get(name) or THEMES["gamma"]
+    tokens = THEMES.get(resolve_theme(name)) or THEMES["gamma"]
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(tokens["pal_window"]))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(tokens["pal_window_text"]))
@@ -334,7 +360,7 @@ QPushButton#winClose:pressed {
     color: $text_info;
 }
 /* Fixed green, same as InstallStatusRow's OK_GREEN "Installed". */
-#verifyPill[level="healthy"] { color: #7dc963; }
+#verifyPill[level="healthy"] { color: $status_ok; }
 #verifyPill[level="running"] { color: $accent_strong; }
 #verifyPill[level="snapshot"] { color: $text_bright; }
 #verifyPill[level="attention"] { color: $warn; }
@@ -1186,6 +1212,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#8fe45c",
         "storage_b": "#3f7f2c",
         "storage_c": "#9aa596",
+        "storage_d": "#a3ad5c",
         "accent_text": "#0c130a",
         "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
@@ -1270,6 +1297,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#5ec99b",
         "storage_b": "#2d6e57",
         "storage_c": "#8aa0b2",
+        "storage_d": "#8fae7a",
         "accent_text": "#0b1511",
         "warn_text": "#0b1511",
         "accent_section": "#7fceab",
@@ -1354,6 +1382,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#2ee75c",
         "storage_b": "#12692a",
         "storage_c": "#9aa59c",
+        "storage_d": "#8fbf4a",
         "accent_text": "#001a05",
         "warn_text": "#001a05",
         "accent_section": "#33dd55",
@@ -1438,6 +1467,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#8fe45c",
         "storage_b": "#3f7f2c",
         "storage_c": "#8a8a8a",
+        "storage_d": "#a3ad5c",
         "accent_text": "#0c130a",
         "warn_text": "#0c130a",
         "accent_section": "#a8d66f",
@@ -1522,6 +1552,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#ff8f2e",
         "storage_b": "#8a4a14",
         "storage_c": "#d9c7a6",
+        "storage_d": "#b3b84f",
         "accent_text": "#2a1600",
         "warn_text": "#2a1600",
         "accent_section": "#f0a75f",
@@ -1606,6 +1637,7 @@ THEMES: dict[str, dict[str, str]] = {
         "storage_a": "#00a3a3",
         "storage_b": "#035e5e",
         "storage_c": "#8fb3b3",
+        "storage_d": "#6fae8f",
         "accent_text": "#eafcfc",
         "warn_text": "#001515",
         "accent_section": "#3aabab",
@@ -1657,4 +1689,229 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_highlight": "#047777",
         "pal_highlighted_text": "#eafcfc",
     },
+    "winter": {
+        "font_size": "13px",
+        "bg": "#dfe5ea",
+        "page": "rgba(225, 232, 238, 40)",
+        "topbar": "rgba(232, 238, 243, 215)",
+        "card": "rgba(240, 244, 248, 160)",
+        "input": "rgba(255, 255, 255, 190)",
+        "mono": "#f1f4f7",
+        "btn": "rgba(255, 255, 255, 150)",
+        "btn_hover": "rgba(255, 255, 255, 215)",
+        "btn_pressed": "rgba(206, 215, 223, 220)",
+        "btn_disabled": "rgba(226, 231, 236, 130)",
+        "chip": "rgba(255, 255, 255, 165)",
+        "border": "#c4ced6",
+        "border_strong": "#a9b5bf",
+        "border_input": "#b9c4cc",
+        "border_secondary": "#9db29b",
+        "gridline": "#d2dae0",
+        "text": "#1b252d",
+        "text_bright": "#0f171d",
+        "text_btn": "#1b252d",
+        "text_btn_hover": "#0f171d",
+        "text_nav": "#4f5d68",
+        "text_info": "#4c5a64",
+        "text_dim": "#56636d",
+        "text_mono": "#26323a",
+        "text_disabled": "#97a2aa",
+        "text_tertiary_hover": "#2f6a2c",
+        "accent": "#3a6d37",
+        "accent_strong": "#2f6d2b",
+        "storage_a": "#62945a",
+        "storage_b": "#3a6d37",
+        "storage_c": "#8f9ba5",
+        "storage_d": "#9f9a63",
+        "accent_text": "#ffffff",
+        "warn_text": "#1b1206",
+        "accent_section": "#3a6d37",
+        "primary": "#3f7a3a",
+        "primary_hover": "#4c8c45",
+        "primary_disabled_bg": "#c9d3cb",
+        "primary_disabled_border": "#b6c3b8",
+        "primary_disabled_text": "#7f8c82",
+        "hero1": "#3a6d37",
+        "hero2": "#62945a",
+        "hero_hover1": "#427c3e",
+        "hero_hover2": "#6fa266",
+        "hero_border": "#2f5f2c",
+        "hero_text": "#ffffff",
+        "secondary_hover_border": "#4c8c45",
+        "selection": "#3f7a3a",
+        "selection_text": "#ffffff",
+        "focus": "#3f7a3a",
+        "chip_ok": "#2f6d2b",
+        "chip_ok_border": "#9fc49a",
+        "checking_bg": "#d7dee4",
+        "warn": "#a86a12",
+        "danger_bg": "#b84a40",
+        "danger_border": "#9a3a32",
+        "danger_text": "#ffffff",
+        "danger_hover": "#c9574c",
+        "danger_disabled_bg": "#e3cfcc",
+        "danger_disabled_border": "#d1b5b1",
+        "danger_disabled_text": "#9a7f7b",
+        "link": "#2f6d2b",
+        "link_hover": "#1f4f1c",
+        # The fixed status colours (ui/common.py) are too pale on white.
+        "status_ok": "#2f7a2a",
+        "status_warn": "#9a5f0c",
+        "status_red": "#b2362f",
+        "status_grey": "#5f6b74",
+        "status_item": "#1b252d",
+        "status_light": "#3a4650",
+        # Painted over the gradient: a pre-blurred village scene (the cards
+        # read as frosted glass over it) with falling snow on top.
+        "back_image": "winter/backdrop.jpg",
+        "back_snow": "1",
+        "back_lights": "1",  # fairy lights around the wordmark
+        "back_base_a": "#e3e9ee",
+        "back_base_b": "#c3ccd4",
+        "back_glow1_rgb": "255, 255, 255",
+        "back_glow1_a": "60",
+        "back_glow1b_rgb": "240, 244, 248",
+        "back_glow1b_a": "40",
+        "back_glow1c_rgb": "220, 228, 234",
+        "back_glow1c_a": "20",
+        "back_glow2_rgb": "200, 210, 218",
+        "back_glow2_a": "40",
+        "pal_window": "#dfe5ea",
+        "pal_window_text": "#1b252d",
+        "pal_base": "#f4f7f9",
+        "pal_alternate": "#e8edf1",
+        "pal_text": "#1b252d",
+        "pal_button": "#eef2f5",
+        "pal_button_text": "#1b252d",
+        "pal_highlight": "#3f7a3a",
+        "pal_highlighted_text": "#ffffff",
+    },
 }
+
+# Winter follows the time of day. Dawn keeps the light day colours over a
+# warmer scene; dusk and night switch to dark frosted glass so the cards stay
+# readable over the dark scenes.
+THEMES["winter_dawn"] = {
+    **THEMES["winter"],
+    "back_image": "winter/dawn.jpg",
+    "back_base_a": "#ecdcd6",
+    "back_base_b": "#c9c3cc",
+}
+THEMES["winter_night"] = {
+    "font_size": "13px",
+    "bg": "#11161b",
+    "page": "rgba(14, 19, 24, 40)",
+    "topbar": "rgba(14, 19, 24, 215)",
+    "card": "rgba(22, 29, 36, 175)",
+    "input": "rgba(10, 14, 18, 190)",
+    "mono": "#0e1317",
+    "btn": "rgba(44, 54, 64, 160)",
+    "btn_hover": "rgba(58, 70, 82, 210)",
+    "btn_pressed": "rgba(28, 36, 44, 220)",
+    "btn_disabled": "rgba(30, 38, 46, 120)",
+    "chip": "rgba(36, 46, 56, 170)",
+    "border": "#2e3a44",
+    "border_strong": "#3e4c58",
+    "border_input": "#36444f",
+    "border_secondary": "#3f5a3c",
+    "gridline": "#232d36",
+    "text": "#dde5ea",
+    "text_bright": "#f2f6f8",
+    "text_btn": "#dde5ea",
+    "text_btn_hover": "#ffffff",
+    "text_nav": "#95a2ac",
+    "text_info": "#9aa8b2",
+    "text_dim": "#8a97a1",
+    "text_mono": "#c9d3da",
+    "text_disabled": "#56626c",
+    "text_tertiary_hover": "#a6dc8a",
+    "accent": "#8fcf72",
+    "accent_strong": "#9fe07f",
+    "storage_a": "#8fcf72",
+    "storage_b": "#4f8a45",
+    "storage_c": "#7d8a94",
+    "storage_d": "#b3ac6e",
+    "accent_text": "#0f1a0c",
+    "warn_text": "#1b1206",
+    "accent_section": "#8fcf72",
+    "primary": "#4f8a45",
+    "primary_hover": "#5e9c53",
+    "primary_disabled_bg": "#26302a",
+    "primary_disabled_border": "#34403a",
+    "primary_disabled_text": "#6c7a70",
+    "hero1": "#3f7a3a",
+    "hero2": "#62945a",
+    "hero_hover1": "#4a8a44",
+    "hero_hover2": "#72a868",
+    "hero_border": "#7fbf6a",
+    "hero_text": "#ffffff",
+    "secondary_hover_border": "#5e9c53",
+    "selection": "#4f8a45",
+    "selection_text": "#ffffff",
+    "focus": "#8fcf72",
+    "chip_ok": "#8fcf72",
+    "chip_ok_border": "#3f5a3c",
+    "checking_bg": "#1c252d",
+    "warn": "#d9a04c",
+    "danger_bg": "#7a322b",
+    "danger_border": "#b0554f",
+    "danger_text": "#ffe6dd",
+    "danger_hover": "#9c3e35",
+    "danger_disabled_bg": "#2c1e1c",
+    "danger_disabled_border": "#4d3330",
+    "danger_disabled_text": "#7a6460",
+    "link": "#a6dc8a",
+    "link_hover": "#ffffff",
+    "back_image": "winter/night.jpg",
+    "back_snow": "1",
+    "back_lights": "1",
+    "back_base_a": "#1a2128",
+    "back_base_b": "#0b0f13",
+    "back_glow1_rgb": "120, 140, 160",
+    "back_glow1_a": "30",
+    "back_glow1b_rgb": "60, 74, 88",
+    "back_glow1b_a": "24",
+    "back_glow1c_rgb": "30, 38, 46",
+    "back_glow1c_a": "12",
+    "back_glow2_rgb": "50, 62, 74",
+    "back_glow2_a": "30",
+    "pal_window": "#11161b",
+    "pal_window_text": "#dde5ea",
+    "pal_base": "#0e1317",
+    "pal_alternate": "#161d24",
+    "pal_text": "#dde5ea",
+    "pal_button": "#232d36",
+    "pal_button_text": "#dde5ea",
+    "pal_highlight": "#4f8a45",
+    "pal_highlighted_text": "#ffffff",
+}
+THEMES["winter_dusk"] = {
+    **THEMES["winter_night"],
+    "bg": "#1a1517",
+    "page": "rgba(26, 20, 22, 40)",
+    "topbar": "rgba(26, 20, 22, 215)",
+    "card": "rgba(36, 28, 30, 175)",
+    "input": "rgba(20, 15, 17, 190)",
+    "mono": "#171214",
+    "border": "#3e3236",
+    "gridline": "#2e2528",
+    "checking_bg": "#2a2124",
+    "back_image": "winter/dusk.jpg",
+    "back_base_a": "#3a2c30",
+    "back_base_b": "#16100f",
+    "pal_window": "#1a1517",
+    "pal_base": "#171214",
+    "pal_alternate": "#241c1f",
+    "pal_button": "#33282b",
+}
+
+#: (first hour, phase) in order; the last phase runs past midnight.
+_WINTER_PHASES = ((6, "winter_dawn"), (8, "winter"), (17, "winter_dusk"), (19, "winter_night"))
+
+
+def resolve_theme(name: str, hour: int | None = None) -> str:
+    """The palette to paint: Winter's for the current hour, any other as is."""
+    if name != "winter":
+        return name
+    hour = time.localtime().tm_hour if hour is None else hour
+    return next((key for start, key in reversed(_WINTER_PHASES) if hour >= start), "winter_night")

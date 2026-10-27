@@ -43,7 +43,7 @@ from .updates import _COMMANDER_REPO, _feed_tags, is_unstable_version
 #: anything it imports - not only how COMMANDER talks to it. Installed
 #: plugins carry their own copy of that code and are only asked to update
 #: when this number (or, in the AppImage, the Qt version) moves.
-PROTOCOL = 4
+PROTOCOL = 5
 MODDB = "moddb-browser"
 _MAX_ARCHIVE_BYTES = 2 * 1024**3
 #: Releases tried, newest first, when the running version's has no plugin.

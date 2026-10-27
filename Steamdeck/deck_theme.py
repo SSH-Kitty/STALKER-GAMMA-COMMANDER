@@ -30,6 +30,7 @@ from commander_gui.themes import (
     _FONT_FAMILY_MAP,
     _FONT_SIZE_RE,
     THEMES,
+    resolve_theme,
 )
 
 #: Smallest font the scale is allowed to produce, matching the floor the
@@ -57,7 +58,7 @@ def build_deck_stylesheet(
     from .scale import scale
 
     factor = scale() if ui_scale is None else ui_scale
-    tokens = dict(THEMES.get(name) or THEMES["gamma"])
+    tokens = dict(THEMES.get(resolve_theme(name)) or THEMES["gamma"])
     tokens["card_glass"] = _translucent(tokens.get("card", "#141b15"), 240)
     qss = _DECK_TEMPLATE.safe_substitute(tokens)
     if factor != 1.0:
@@ -76,9 +77,9 @@ def build_deck_stylesheet(
 
 def _translucent(color: str, alpha: int) -> str:
     """``color`` (any form QColor parses) as an ``rgba()`` at ``alpha``."""
-    from PySide6.QtGui import QColor
+    from commander_gui.themes import parse_color
 
-    parsed = QColor(color)
+    parsed = parse_color(color, color)
     if not parsed.isValid():
         return color
     return f"rgba({parsed.red()}, {parsed.green()}, {parsed.blue()}, {alpha})"

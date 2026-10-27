@@ -82,6 +82,9 @@ class SettingsScreen(DeckScreen):
         self.theme_row = DeckRow(tr("Theme"))
         self.theme_row.activated.connect(self._pick_theme)
         self.body.addWidget(self.theme_row)
+        self.snow_row = DeckToggleRow(tr("Snow animation"), True)
+        self.snow_row.toggled.connect(self._toggle_snow)
+        self.body.addWidget(self.snow_row)
 
         self.language_row = DeckRow(tr("Language"))
         self.language_row.activated.connect(self._pick_language)
@@ -268,6 +271,9 @@ class SettingsScreen(DeckScreen):
         self.chime_row.set_checked(state.get("deck_finish_sound", True) is not False)
         self.rumble_row.set_checked(state.get("deck_finish_rumble", True) is not False)
         self.welcome_row.set_checked(not state.get("welcome_hidden", False))
+        self.snow_row.set_checked(state.get("snow_enabled", True) is not False)
+        # Only Winter (Live) has snow.
+        self.snow_row.setVisible(theme == "winter")
         options = state.get("custom_launch_options") or ""
         for row, option in self.option_rows:
             row.set_checked(launch_options.is_on(options, option))
@@ -327,6 +333,10 @@ class SettingsScreen(DeckScreen):
         gui_settings.save_gui_settings(deck_finish_sound=bool(on))
         if on:
             play_click_sound()
+
+    def _toggle_snow(self, on: bool) -> None:
+        gui_settings.save_gui_settings(snow_enabled=bool(on))
+        self.window.sync_snow()
 
     def _toggle_launch_option(self, option: str, on: bool) -> None:
         options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
