@@ -13,10 +13,9 @@ from PySide6.QtWidgets import QApplication
 THEME_INFO = [
     ("gamma", "GAMMA"),
     ("black", "GAMMA Black"),
-    ("dusk", "Dusk"),
     ("midnight", "Midnight"),
-    ("terminal", "Terminal"),
     ("reactor", "Reactor"),
+    ("redforest", "Red Forest (Live)"),
     ("winter", "Winter (Live)"),
 ]
 
@@ -25,9 +24,7 @@ THEME_INFO = [
 THEMES = {
     "gamma": {"bg": "#0d130c", "panel": "#141b15", "card": "#1f2b20", "border": "#26321f", "text": "#e2ead8", "dim": "#7f8f78", "accent": "#9fe96f", "strong": "#8fe45c", "selection": "#5fb548", "danger": "#e0554f", "warn": "#d9a04c"},
     "black": {"bg": "#000000", "panel": "#0a0a0a", "card": "#141414", "border": "#1f1f1f", "text": "#e0e0e0", "dim": "#777777", "accent": "#9fe96f", "strong": "#8fe45c", "selection": "#5fb548", "danger": "#e0554f", "warn": "#d9a04c"},
-    "dusk": {"bg": "#140d06", "panel": "#1d140a", "card": "#2a1c10", "border": "#3a2a18", "text": "#f0e2cc", "dim": "#9c8261", "accent": "#ff9f45", "strong": "#ff8f2e", "selection": "#c8721e", "danger": "#b04f3d", "warn": "#e0a24a"},
     "midnight": {"bg": "#0b1016", "panel": "#111824", "card": "#1a2432", "border": "#1d2a3a", "text": "#dbe6f0", "dim": "#6e8496", "accent": "#6fd3a8", "strong": "#5ec99b", "selection": "#3f9d7a", "danger": "#b0554f", "warn": "#d9a04c"},
-    "terminal": {"bg": "#000000", "panel": "#060b06", "card": "#0a120a", "border": "#123912", "text": "#33cc55", "dim": "#1f7a33", "accent": "#33ff66", "strong": "#2ee75c", "selection": "#1f8a3a", "danger": "#a0443f", "warn": "#cc9933"},
     "reactor": {"bg": "#010a0a", "panel": "#061616", "card": "#0a2020", "border": "#0f3232", "text": "#cdeaea", "dim": "#4a7a7a", "accent": "#00a3a3", "strong": "#00c2c2", "selection": "#0a9494", "danger": "#b0554f", "warn": "#d9a04c"},
     "winter": {"bg": "#e8edf1", "panel": "#f4f7f9", "card": "#ffffff", "border": "#c4ced6", "text": "#1b252d", "dim": "#56636d", "accent": "#3a6d37", "strong": "#2f6d2b", "selection": "#9fc49a", "danger": "#b84a40", "warn": "#9a5f0c"},
 }
@@ -35,6 +32,11 @@ THEMES = {
 THEMES["winter_dawn"] = THEMES["winter"]
 THEMES["winter_night"] = {"bg": "#11161b", "panel": "#161d24", "card": "#1f2830", "border": "#2e3a44", "text": "#dde5ea", "dim": "#8a97a1", "accent": "#8fcf72", "strong": "#9fe07f", "selection": "#4f8a45", "danger": "#b0554f", "warn": "#d9a04c"}
 THEMES["winter_dusk"] = {**THEMES["winter_night"], "bg": "#1a1517", "panel": "#211a1d", "card": "#2c2326", "border": "#3e3236"}
+# Red Forest's time-of-day looks, the same way.
+THEMES["redforest"] = {"bg": "#f2e9de", "panel": "#fbf6f0", "card": "#ffffff", "border": "#d8c6b2", "text": "#2a1e18", "dim": "#6f5d52", "accent": "#a8481a", "strong": "#9a3f14", "selection": "#e0b090", "danger": "#b84a40", "warn": "#9a5f0c"}
+THEMES["redforest_dawn"] = THEMES["redforest"]
+THEMES["redforest_night"] = {"bg": "#11161b", "panel": "#161d24", "card": "#1f2830", "border": "#2e3a44", "text": "#dde5ea", "dim": "#8a97a1", "accent": "#f0a24a", "strong": "#ffb35c", "selection": "#c46a24", "danger": "#b0554f", "warn": "#d9a04c"}
+THEMES["redforest_dusk"] = {**THEMES["redforest_night"], "bg": "#1a1517", "panel": "#211a1d", "card": "#2c2326", "border": "#3e3236"}
 
 _ACTIVE = "gamma"
 

@@ -384,11 +384,24 @@ def _add_root_appid(state: dict, root: Path) -> None:
     files[_APPID] = files[source]
 
 
-def ensure_root_appid(anomaly, gamma, mo2_profile) -> None:
-    """Bring an install made before ``_add_root_appid`` up to date."""
+def prepare_launch(anomaly, gamma, mo2_profile) -> None:
+    """Get a launch with *mo2_profile* ready for the current mode.
+
+    An install made before ``_add_root_appid`` gets the root appid. The
+    co-op mod follows the mode in this profile too: switch_to_coop and
+    switch_to_singleplayer only change the profile active then, so one
+    picked later (ROMEO) started without co-op, or solo with the mod on.
+    """
     state = load_state(anomaly)
-    if state and state.get("active") and not any(rel.lower() == _APPID for rel in state["files"]):
+    if not state:
+        return
+    active = bool(state.get("active"))
+    if active and not any(rel.lower() == _APPID for rel in state["files"]):
         switch_to_coop(anomaly, gamma, mo2_profile)
+    elif state.get("kind", KIND_GAMMA) == KIND_GAMMA and _has_modlist(gamma, mo2_profile):
+        lines = modlist.read_lines(_modlist(gamma, mo2_profile))
+        if (f"+{MOD_NAME}" in (line.strip() for line in lines)) != active:
+            _set_mod_enabled(gamma, mo2_profile, active)
 
 
 def steam_appid(anomaly) -> int:

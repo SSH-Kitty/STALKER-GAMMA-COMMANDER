@@ -229,7 +229,7 @@ class WelcomeOverlay(QWidget):
         self.panel = _GlassPanel()
         self.panel.setObjectName("welcomePanel")
         _clear_background(self.panel)
-        self.panel.setMaximumWidth(980)
+        self.panel.setMaximumWidth(1100)
         self.panel.setMinimumWidth(640)
         panel_layout = QVBoxLayout(self.panel)
         panel_layout.setContentsMargins(24, 18, 24, 18)
@@ -362,10 +362,11 @@ class WelcomeOverlay(QWidget):
         return lights if lights is not None and lights.isVisible() else None
 
     def _grab_backdrop(self) -> None:
-        """Snapshot the window without this overlay, the snow or the lights.
+        """Snapshot the window without this overlay, the snow, lights or leaves.
 
-        Winter's snow and fairy lights keep moving under the overlay, so
-        paintEvent draws them live over the still snapshot.
+        Winter's snow and fairy lights and the Red Forest's leaves keep moving
+        under the overlay, so paintEvent draws them live over the still
+        snapshot (the Red Forest's trees and fire stay still in it).
         """
         shown = self.isVisible()
         focus = self.focusWidget() if shown else None
@@ -378,11 +379,17 @@ class WelcomeOverlay(QWidget):
         flakes = snowfall.flakes if snowfall is not None else []
         if snowfall is not None:
             snowfall.flakes = []
+        redforest = getattr(self.window, "redforest", None)
+        leaves = redforest.leaves if redforest is not None else []
+        if redforest is not None:
+            redforest.leaves = []
         try:
             pixmap = self.window.grab()
         finally:
             if snowfall is not None:
                 snowfall.flakes = flakes
+            if redforest is not None:
+                redforest.leaves = leaves
             if lights is not None:
                 lights.show()
         if shown:
@@ -399,6 +406,9 @@ class WelcomeOverlay(QWidget):
             snowfall = getattr(self.window, "snowfall", None)
             if snowfall is not None:
                 snowfall.paint(painter)
+            redforest = getattr(self.window, "redforest", None)
+            if redforest is not None:
+                redforest.paint_leaves(painter)
             lights = self._lights()
             if lights is not None:
                 lights.render(painter, lights.mapTo(self.window, QPoint(0, 0)))

@@ -112,6 +112,11 @@ def _prepare_launch(profile, kind, prefix, target, direct, watch_exe, arguments)
     options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
     if coop.is_active(profile.anomaly):
         options = launch_options.for_coop(options)
+    if direct is None:
+        try:
+            coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
+        except (OSError, coop.CoopError):
+            pass  # MO2 shows its own error then.
     if direct is None and not target and "%command%" in (tokens := launch_options.split(options)):
         # MO2 on its own: no game to hand the words after %command% to,
         # and MO2 quits on a word it doesn't know.

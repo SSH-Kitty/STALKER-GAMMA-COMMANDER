@@ -1,16 +1,14 @@
-"""Winter (Live) theme extras: the painted scene, falling snow and fairy lights.
+"""Winter (Live) theme extras: falling snow and fairy lights.
 
 Shared by the desktop window and Deck Mode.
 """
 
 from __future__ import annotations
 
-import functools
 import math
 import random
-from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
@@ -18,35 +16,11 @@ from .. import gui_settings
 from ..themes import active_theme_tokens
 
 
-@functools.cache
-def _scene(image: str) -> QPixmap:
-    # ponytail: keeps every scene seen this session decoded (4 small JPEGs at most).
-    return QPixmap(str(Path(__file__).resolve().parents[1] / "assets" / image))
-
-
-def paint_scene(painter: QPainter, rect, screen: QSize | None = None) -> bool:
-    """Paint the theme's scene image, if it has one; True if painted.
-
-    Scaled to cover the screen (or the window, if larger), so resizing the
-    window crops the scene around its centre instead of zooming it.
-    """
-    image = active_theme_tokens().get("back_image")
-    pixmap = _scene(image) if image else None
-    if pixmap is None or pixmap.isNull():
-        return False
-    cover = rect.size() if screen is None else rect.size().expandedTo(screen)
-    scaled = pixmap.size().scaled(cover, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    painter.drawPixmap(
-        QRect(
-            (rect.width() - scaled.width()) // 2,
-            (rect.height() - scaled.height()) // 2,
-            scaled.width(),
-            scaled.height(),
-        ),
-        pixmap,
+def lights_wanted() -> bool:
+    """Winter's fairy lights, unless switched off in Settings."""
+    return bool(active_theme_tokens().get("back_lights")) and gui_settings.load_gui_settings().get(
+        "christmas_lights", True
     )
-    return True
 
 
 class Snowfall:
@@ -76,7 +50,7 @@ class Snowfall:
     def sync(self, visible: bool) -> None:
         tokens = active_theme_tokens()
         enabled = bool(tokens.get("back_snow")) and gui_settings.load_gui_settings().get(
-            "snow_enabled", True
+            "live_animation", True
         )
         wanted = enabled and visible
         if wanted and not self._timer.isActive():
@@ -84,7 +58,7 @@ class Snowfall:
         elif not wanted and self._timer.isActive():
             self._timer.stop()
         if self.lights is not None:
-            self.lights.setVisible(bool(tokens.get("back_lights")))
+            self.lights.setVisible(lights_wanted())
         # Paused flakes stay put; switched-off ones (or another theme's) go.
         if not enabled and self.flakes:
             self.flakes.clear()
@@ -142,7 +116,7 @@ class ChristmasLights(QWidget):
         self._phase = 0
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # Rebuilt on a language change, which doesn't run Snowfall.sync().
-        self.setHidden(not active_theme_tokens().get("back_lights"))
+        self.setHidden(not lights_wanted())
         bar.installEventFilter(self)
 
     def eventFilter(self, watched, event) -> bool:

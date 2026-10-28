@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import string
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,28 +31,22 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
         ("#000000", "#9fe96f", "#e0e0e0"),
     ),
     (
-        "dusk",
-        "Dusk",
-        "Warm charcoal and amber with orange sunset accents.",
-        ("#140d06", "#ff9f45", "#f0e2cc"),
-    ),
-    (
         "midnight",
         "Midnight",
         "Cool slate blues and greys with a teal accent.",
         ("#0b1016", "#6fd3a8", "#dbe6f0"),
     ),
     (
-        "terminal",
-        "Terminal",
-        "Retro CRT: pure black with neon green phosphor text.",
-        ("#000000", "#33ff66", "#33cc55"),
-    ),
-    (
         "reactor",
         "Reactor",
         "Deep black with a glowing reactor-coolant teal accent.",
         ("#010a0a", "#006868", "#cdeaea"),
+    ),
+    (
+        "redforest",
+        "Red Forest (Live)",
+        "Autumn in the Zone: the forester's tower in the Red Forest, following the clock through dawn, day, dusk and night.",
+        ("#efe4d6", "#b5521f", "#2a1e18"),
     ),
     (
         "winter",
@@ -65,9 +60,13 @@ _ACTIVE: str = "gamma"
 
 
 def set_active_theme(name: str) -> None:
-    global _ACTIVE
+    global _ACTIVE, _LIVE_TIME
     if name in THEMES:
         _ACTIVE = name
+    # Re-read with the theme, so every window that restyles picks up a new lock.
+    from . import gui_settings
+
+    _LIVE_TIME = gui_settings.load_gui_settings().get("live_time", "")
 
 
 def active_theme() -> str:
@@ -127,7 +126,21 @@ def build_stylesheet(
     qss = qss.replace("%FONT_SIZE%", f"{font_size}px")
     resolved_family = _FONT_FAMILY_MAP.get(font_family or "Exo 2", _FALLBACK_FONT)
     qss = qss.replace("%FONT_FAMILY%", resolved_family)
+    qss = qss.replace("%COMBO_ARROW%", _combo_arrow(tokens["text_dim"]))
     return qss.replace("%SLIDER_HANDLE%", (_ROOT / "cli" / "stalker-gamma.png").as_posix())
+
+
+def _combo_arrow(color: str) -> str:
+    # QSS only takes image files, so write one chevron per theme colour.
+    hex_color = parse_color(color, "#888888").name()
+    path = Path(tempfile.gettempdir()) / f"commander-combo-arrow-{hex_color[1:]}.svg"
+    if not path.exists():
+        path.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
+            f'<path d="M1 1l4 4 4-4" fill="none" stroke="{hex_color}" stroke-width="1.6" '
+            'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        )
+    return path.as_posix()
 
 
 def build_palette(name: str) -> QPalette:
@@ -895,6 +908,22 @@ QLineEdit, QSpinBox, QComboBox {
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
     border-color: $focus;
 }
+QComboBox {
+    padding-right: 26px;
+}
+/* Borderless chevron instead of the native boxed arrow. */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 24px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow {
+    image: url("%COMBO_ARROW%");
+    width: 10px;
+    height: 6px;
+}
 QComboBox QAbstractItemView {
     background-color: $card;
     border: 1px solid $border_input;
@@ -956,6 +985,17 @@ QFrame#profileCard[selected="true"] {
 }
 QFrame#profileCard[active="true"] {
     border: 2px solid $accent;
+}
+/* Dashboard Installation status rows: plain until hovered, then a
+   soft tile shows the row can be clicked. */
+QFrame#componentRow {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+}
+QFrame#componentRow:hover {
+    background-color: $input;
+    border-color: $border;
 }
 QFrame#statTile {
     background-color: $input;
@@ -1349,91 +1389,6 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_highlight": "#3f9d7a",
         "pal_highlighted_text": "#0b1511",
     },
-    "terminal": {
-        "font_size": "13px",
-        "bg": "#000000",
-        "page": "rgba(0, 0, 0, 190)",
-        "topbar": "rgba(0, 0, 0, 245)",
-        "card": "#060b06",
-        "input": "#000000",
-        "mono": "#000000",
-        "btn": "#0a120a",
-        "btn_hover": "#122212",
-        "btn_pressed": "#060c06",
-        "btn_disabled": "#080c08",
-        "chip": "#071007",
-        "border": "#123912",
-        "border_strong": "#1c4f1c",
-        "border_input": "#123012",
-        "border_secondary": "#1c4a1c",
-        "gridline": "#0c240c",
-        "text": "#33cc55",
-        "text_bright": "#66ff88",
-        "text_btn": "#3ddc5a",
-        "text_btn_hover": "#5cf27a",
-        "text_nav": "#1f7a33",
-        "text_info": "#2fa847",
-        "text_dim": "#1f7a33",
-        "text_mono": "#33cc55",
-        "text_disabled": "#1a5c28",
-        "text_tertiary_hover": "#3ddc5a",
-        "accent": "#33ff66",
-        "accent_strong": "#2ee75c",
-        "storage_a": "#2ee75c",
-        "storage_b": "#12692a",
-        "storage_c": "#9aa59c",
-        "storage_d": "#8fbf4a",
-        "accent_text": "#001a05",
-        "warn_text": "#001a05",
-        "accent_section": "#33dd55",
-        "primary": "#1f8a3a",
-        "primary_hover": "#26a346",
-        "primary_disabled_bg": "#0f3318",
-        "primary_disabled_border": "#185c26",
-        "primary_disabled_text": "#2a8a42",
-        "hero1": "#16a13a",
-        "hero2": "#26c94e",
-        "hero_hover1": "#1bb844",
-        "hero_hover2": "#30dd5a",
-        "hero_border": "#33ff66",
-        "hero_text": "#001a05",
-        "secondary_hover_border": "#26c94e",
-        "selection": "#1f8a3a",
-        "selection_text": "#001a05",
-        "focus": "#2ee75c",
-        "chip_ok": "#33ff66",
-        "chip_ok_border": "#1c6b2e",
-        "checking_bg": "#112817",
-        "warn": "#cc9933",
-        "danger_bg": "#5a1f1c",
-        "danger_border": "#a0443f",
-        "danger_text": "#ffd9d4",
-        "danger_hover": "#9a3a34",
-        "danger_disabled_bg": "#241211",
-        "danger_disabled_border": "#40201e",
-        "danger_disabled_text": "#7a504d",
-        "link": "#66ff88",
-        "link_hover": "#aaffcc",
-        "back_base_a": "#020702",
-        "back_base_b": "#000000",
-        "back_glow1_rgb": "33, 255, 102",
-        "back_glow1_a": "45",
-        "back_glow1b_rgb": "16, 120, 50",
-        "back_glow1b_a": "25",
-        "back_glow1c_rgb": "8, 55, 24",
-        "back_glow1c_a": "12",
-        "back_glow2_rgb": "12, 90, 30",
-        "back_glow2_a": "35",
-        "pal_window": "#000000",
-        "pal_window_text": "#33cc55",
-        "pal_base": "#000000",
-        "pal_alternate": "#060b06",
-        "pal_text": "#33cc55",
-        "pal_button": "#0a120a",
-        "pal_button_text": "#3ddc5a",
-        "pal_highlight": "#1f8a3a",
-        "pal_highlighted_text": "#001a05",
-    },
     "black": {
         "font_size": "13px",
         "bg": "#000000",
@@ -1518,91 +1473,6 @@ THEMES: dict[str, dict[str, str]] = {
         "pal_button_text": "#e8e8e8",
         "pal_highlight": "#5fb548",
         "pal_highlighted_text": "#0c130a",
-    },
-    "dusk": {
-        "font_size": "13px",
-        "bg": "#140d06",
-        "page": "rgba(20, 13, 6, 180)",
-        "topbar": "rgba(16, 10, 4, 240)",
-        "card": "#1d140a",
-        "input": "#120b04",
-        "mono": "#0d0703",
-        "btn": "#2a1c10",
-        "btn_hover": "#3a2817",
-        "btn_pressed": "#1d1309",
-        "btn_disabled": "#1c1208",
-        "chip": "#221608",
-        "border": "#3a2a18",
-        "border_strong": "#4f3a20",
-        "border_input": "#3a2a18",
-        "border_secondary": "#57401f",
-        "gridline": "#2a1d10",
-        "text": "#f0e2cc",
-        "text_bright": "#faf0e0",
-        "text_btn": "#f5e8d4",
-        "text_btn_hover": "#ffe9c4",
-        "text_nav": "#b09778",
-        "text_info": "#c2a885",
-        "text_dim": "#9c8261",
-        "text_mono": "#e8d4b8",
-        "text_disabled": "#7a6245",
-        "text_tertiary_hover": "#e8c9a0",
-        "accent": "#ff9f45",
-        "accent_strong": "#ff8f2e",
-        "storage_a": "#ff8f2e",
-        "storage_b": "#8a4a14",
-        "storage_c": "#d9c7a6",
-        "storage_d": "#b3b84f",
-        "accent_text": "#2a1600",
-        "warn_text": "#2a1600",
-        "accent_section": "#f0a75f",
-        "primary": "#c8721e",
-        "primary_hover": "#dd8530",
-        "primary_disabled_bg": "#4a2e12",
-        "primary_disabled_border": "#6b4518",
-        "primary_disabled_text": "#a8804f",
-        "hero1": "#d97a1e",
-        "hero2": "#ff9f45",
-        "hero_hover1": "#ea8a2c",
-        "hero_hover2": "#ffb061",
-        "hero_border": "#ffb061",
-        "hero_text": "#2a1600",
-        "secondary_hover_border": "#ff9f45",
-        "selection": "#c8721e",
-        "selection_text": "#2a1600",
-        "focus": "#ff8f2e",
-        "chip_ok": "#ff9f45",
-        "chip_ok_border": "#7a4f1c",
-        "checking_bg": "#2e261d",
-        "warn": "#e0a24a",
-        "danger_bg": "#6e2a1e",
-        "danger_border": "#b04f3d",
-        "danger_text": "#ffe0d4",
-        "danger_hover": "#b04a36",
-        "danger_disabled_bg": "#2d1610",
-        "danger_disabled_border": "#4d2919",
-        "danger_disabled_text": "#7a5a48",
-        "link": "#ffe9c4",
-        "link_hover": "#ffffff",
-        "back_base_a": "#201408",
-        "back_base_b": "#0d0703",
-        "back_glow1_rgb": "255, 159, 69",
-        "back_glow1_a": "55",
-        "back_glow1b_rgb": "150, 80, 30",
-        "back_glow1b_a": "32",
-        "back_glow1c_rgb": "70, 38, 14",
-        "back_glow1c_a": "14",
-        "back_glow2_rgb": "160, 90, 40",
-        "back_glow2_a": "45",
-        "pal_window": "#140d06",
-        "pal_window_text": "#f0e2cc",
-        "pal_base": "#120b04",
-        "pal_alternate": "#1d140a",
-        "pal_text": "#f0e2cc",
-        "pal_button": "#2a1c10",
-        "pal_button_text": "#f5e8d4",
-        "pal_highlight": "#c8721e",
-        "pal_highlighted_text": "#2a1600",
     },
     "reactor": {
         "font_size": "13px",
@@ -1905,13 +1775,251 @@ THEMES["winter_dusk"] = {
     "pal_button": "#33282b",
 }
 
-#: (first hour, phase) in order; the last phase runs past midnight.
-_WINTER_PHASES = ((6, "winter_dawn"), (8, "winter"), (17, "winter_dusk"), (19, "winter_night"))
+# Red Forest (Live): the forester's tower in the Zone's Red Forest, on the
+# same clock. Light warm glass by day and dawn, dark glass at dusk and
+# night. Ember orange stands in for the usual green: green is lost
+# among the red and gold leaves. back_redforest names the scene's swaying tree layers (see
+# ui/redforest.py); back_fire lights the campfire (dusk and night).
+THEMES["redforest"] = {
+    "font_size": "13px",
+    "bg": "#efe4d6",
+    "page": "rgba(236, 224, 208, 40)",
+    "topbar": "rgba(244, 236, 226, 215)",
+    "card": "rgba(248, 240, 230, 160)",
+    "input": "rgba(255, 252, 247, 190)",
+    "mono": "#f6efe6",
+    "btn": "rgba(255, 250, 244, 150)",
+    "btn_hover": "rgba(255, 250, 244, 215)",
+    "btn_pressed": "rgba(226, 212, 196, 220)",
+    "btn_disabled": "rgba(238, 228, 216, 130)",
+    "chip": "rgba(255, 250, 244, 165)",
+    "border": "#d8c6b2",
+    "border_strong": "#c4ae96",
+    "border_input": "#cfbba5",
+    "border_secondary": "#d4a888",
+    "gridline": "#e2d4c4",
+    "text": "#2a1e18",
+    "text_bright": "#1a120d",
+    "text_btn": "#2a1e18",
+    "text_btn_hover": "#1a120d",
+    "text_nav": "#6a5446",
+    "text_info": "#65503f",
+    "text_dim": "#6f5d52",
+    "text_mono": "#33261d",
+    "text_disabled": "#ab9a8c",
+    "text_tertiary_hover": "#8a3a12",
+    "accent": "#a8481a",
+    "accent_strong": "#9a3f14",
+    "storage_a": "#d9782e",
+    "storage_b": "#a8481a",
+    "storage_c": "#a8958a",
+    "storage_d": "#9f9a63",
+    "accent_text": "#ffffff",
+    "warn_text": "#1b1206",
+    "accent_section": "#a8481a",
+    "primary": "#b5521f",
+    "primary_hover": "#c8622a",
+    "primary_disabled_bg": "#e0d2c4",
+    "primary_disabled_border": "#cdbba8",
+    "primary_disabled_text": "#8f7f72",
+    "hero1": "#a8481a",
+    "hero2": "#d9782e",
+    "hero_hover1": "#b8521f",
+    "hero_hover2": "#e68a3c",
+    "hero_border": "#8a3a12",
+    "hero_text": "#ffffff",
+    "secondary_hover_border": "#c8622a",
+    "selection": "#b5521f",
+    "selection_text": "#ffffff",
+    "focus": "#b5521f",
+    "chip_ok": "#9a3f14",
+    "chip_ok_border": "#e0b090",
+    "checking_bg": "#eadccc",
+    "warn": "#a86a12",
+    "danger_bg": "#b84a40",
+    "danger_border": "#9a3a32",
+    "danger_text": "#ffffff",
+    "danger_hover": "#c9574c",
+    "danger_disabled_bg": "#ecd6cf",
+    "danger_disabled_border": "#dcbdb4",
+    "danger_disabled_text": "#9a7f7b",
+    "link": "#9a3f14",
+    "link_hover": "#6a2a08",
+    "status_ok": "#2f7a2a",
+    "status_warn": "#9a5f0c",
+    "status_red": "#b2362f",
+    "status_grey": "#6f6258",
+    "status_item": "#2a1e18",
+    "status_light": "#4a3a30",
+    "back_image": "redforest/day.jpg",
+    "back_base_a": "#f0e4d6",
+    "back_base_b": "#d6bba0",
+    "back_glow1_rgb": "255, 248, 238",
+    "back_glow1_a": "60",
+    "back_glow1b_rgb": "246, 236, 224",
+    "back_glow1b_a": "40",
+    "back_glow1c_rgb": "232, 218, 202",
+    "back_glow1c_a": "20",
+    "back_glow2_rgb": "214, 196, 176",
+    "back_glow2_a": "40",
+    "pal_window": "#efe4d6",
+    "pal_window_text": "#2a1e18",
+    "pal_base": "#fbf6f0",
+    "pal_alternate": "#f2e8dc",
+    "pal_text": "#2a1e18",
+    "pal_button": "#f6eee4",
+    "pal_button_text": "#2a1e18",
+    "pal_highlight": "#b5521f",
+    "pal_highlighted_text": "#ffffff",
+    "back_redforest": "redforest/day",
+    "back_leaf_alpha": "230",
+}
+THEMES["redforest_dawn"] = {
+    **THEMES["redforest"],
+    "back_base_a": "#f2dccf",
+    "back_base_b": "#d9b9a8",
+    "back_image": "redforest/dawn.jpg",
+    "back_redforest": "redforest/dawn",
+}
+THEMES["redforest_night"] = {
+    "font_size": "13px",
+    "bg": "#11161b",
+    "page": "rgba(14, 19, 24, 40)",
+    "topbar": "rgba(14, 19, 24, 215)",
+    "card": "rgba(22, 29, 36, 175)",
+    "input": "rgba(10, 14, 18, 190)",
+    "mono": "#0e1317",
+    "btn": "rgba(44, 54, 64, 160)",
+    "btn_hover": "rgba(58, 70, 82, 210)",
+    "btn_pressed": "rgba(28, 36, 44, 220)",
+    "btn_disabled": "rgba(30, 38, 46, 120)",
+    "chip": "rgba(36, 46, 56, 170)",
+    "border": "#2e3a44",
+    "border_strong": "#3e4c58",
+    "border_input": "#36444f",
+    "border_secondary": "#5a4028",
+    "gridline": "#232d36",
+    "text": "#dde5ea",
+    "text_bright": "#f2f6f8",
+    "text_btn": "#dde5ea",
+    "text_btn_hover": "#ffffff",
+    "text_nav": "#95a2ac",
+    "text_info": "#9aa8b2",
+    "text_dim": "#8a97a1",
+    "text_mono": "#c9d3da",
+    "text_disabled": "#56626c",
+    "text_tertiary_hover": "#ffc078",
+    "accent": "#f0a24a",
+    "accent_strong": "#ffb35c",
+    "storage_a": "#f0a24a",
+    "storage_b": "#b8642a",
+    "storage_c": "#7d8a94",
+    "storage_d": "#b3ac6e",
+    "accent_text": "#1e1206",
+    "warn_text": "#1b1206",
+    "accent_section": "#f0a24a",
+    "primary": "#c46a24",
+    "primary_hover": "#d97c30",
+    "primary_disabled_bg": "#2e2620",
+    "primary_disabled_border": "#3e3228",
+    "primary_disabled_text": "#7a6c60",
+    "hero1": "#b85a1c",
+    "hero2": "#e08a36",
+    "hero_hover1": "#c8682a",
+    "hero_hover2": "#ee9a46",
+    "hero_border": "#f0a24a",
+    "hero_text": "#ffffff",
+    "secondary_hover_border": "#d97c30",
+    "selection": "#c46a24",
+    "selection_text": "#ffffff",
+    "focus": "#f0a24a",
+    "chip_ok": "#f0a24a",
+    "chip_ok_border": "#5a4028",
+    "checking_bg": "#1c252d",
+    "warn": "#d9a04c",
+    "danger_bg": "#7a322b",
+    "danger_border": "#b0554f",
+    "danger_text": "#ffe6dd",
+    "danger_hover": "#9c3e35",
+    "danger_disabled_bg": "#2c1e1c",
+    "danger_disabled_border": "#4d3330",
+    "danger_disabled_text": "#7a6460",
+    "link": "#ffb35c",
+    "link_hover": "#ffffff",
+    "back_image": "redforest/night.jpg",
+    "back_base_a": "#1a2230",
+    "back_base_b": "#0b0f18",
+    "back_glow1_rgb": "120, 140, 160",
+    "back_glow1_a": "30",
+    "back_glow1b_rgb": "60, 74, 88",
+    "back_glow1b_a": "24",
+    "back_glow1c_rgb": "30, 38, 46",
+    "back_glow1c_a": "12",
+    "back_glow2_rgb": "50, 62, 74",
+    "back_glow2_a": "30",
+    "pal_window": "#11161b",
+    "pal_window_text": "#dde5ea",
+    "pal_base": "#0e1317",
+    "pal_alternate": "#161d24",
+    "pal_text": "#dde5ea",
+    "pal_button": "#232d36",
+    "pal_button_text": "#dde5ea",
+    "pal_highlight": "#c46a24",
+    "pal_highlighted_text": "#ffffff",
+    "back_redforest": "redforest/night",
+    "back_fire": "1",
+    "back_leaf_alpha": "120",
+}
+THEMES["redforest_dusk"] = {
+    **THEMES["redforest_night"],
+    "bg": "#1a1517",
+    "page": "rgba(26, 20, 22, 40)",
+    "topbar": "rgba(26, 20, 22, 215)",
+    "card": "rgba(36, 28, 30, 175)",
+    "input": "rgba(20, 15, 17, 190)",
+    "mono": "#171214",
+    "border": "#3e3236",
+    "gridline": "#2e2528",
+    "checking_bg": "#2a2124",
+    "back_base_a": "#4a3448",
+    "back_base_b": "#1c1218",
+    "pal_window": "#1a1517",
+    "pal_base": "#171214",
+    "pal_alternate": "#241c1f",
+    "pal_button": "#33282b",
+    "back_image": "redforest/dusk.jpg",
+    "back_redforest": "redforest/dusk",
+    "back_leaf_alpha": "160",
+}
+
+#: Live themes: (first hour, phase) in order; the last phase runs past midnight.
+_PHASES = {
+    "winter": ((6, "winter_dawn"), (8, "winter"), (17, "winter_dusk"), (19, "winter_night")),
+    "redforest": ((6, "redforest_dawn"), (8, "redforest"), (17, "redforest_dusk"), (19, "redforest_night")),
+}
+LIVE_THEMES = tuple(_PHASES)
+
+
+#: Times of day a Live theme can be locked to, in _PHASES order.
+LIVE_TIMES = ("dawn", "day", "dusk", "night")
+#: Settings choices for the lock: (saved value, untranslated label).
+LIVE_TIME_CHOICES = (
+    ("", "Follow the clock"),
+    ("dawn", "Always dawn"),
+    ("day", "Always day"),
+    ("dusk", "Always dusk"),
+    ("night", "Always night"),
+)
+#: The locked time of day; "" follows the clock (see set_active_theme).
+_LIVE_TIME = ""
 
 
 def resolve_theme(name: str, hour: int | None = None) -> str:
-    """The palette to paint: Winter's for the current hour, any other as is."""
-    if name != "winter":
+    """The palette to paint: a Live theme's for the locked time or current hour, any other as is."""
+    phases = _PHASES.get(name)
+    if phases is None:
         return name
+    if hour is None and _LIVE_TIME in LIVE_TIMES:
+        return phases[LIVE_TIMES.index(_LIVE_TIME)][1]
     hour = time.localtime().tm_hour if hour is None else hour
-    return next((key for start, key in reversed(_WINTER_PHASES) if hour >= start), "winter_night")
+    return next((key for start, key in reversed(phases) if hour >= start), phases[-1][1])

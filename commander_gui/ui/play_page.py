@@ -1404,7 +1404,7 @@ class PlayPage(QWidget):
         try:
             if not no_mo2:
                 unblock_mo2_python(profile.gamma)
-            coop.ensure_root_appid(profile.anomaly, profile.gamma, profile.mo2_profile)
+            coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
             base_fields = self._coop_shortcut_fields(profile, "")
             fields = with_coop_options(base_fields)
         except (LaunchError, coop.CoopError, OSError) as exc:
@@ -1680,7 +1680,8 @@ class PlayPage(QWidget):
             if not direct:
                 try:
                     unblock_mo2_python(profile.gamma)
-                except OSError:
+                    coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
+                except (OSError, coop.CoopError):
                     pass  # MO2 shows its own error then.
         self._launch_status_clear_timer.stop()
         # A crash-dump poll from the previous session must not fire a

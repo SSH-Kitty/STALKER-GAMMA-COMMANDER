@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from .. import coop, gui_settings
 from .common import (
+    ACCENT,
     BackgroundTask,
     PlainSpinBox,
     game_running,
@@ -621,7 +622,8 @@ class MultiplayerPage(QWidget):
                 body.addWidget(self.dash_kind_box, 1)
             if index:
                 target.addWidget(_vline())
-            column = _field(caption, pills)
+            # Numbered like the Install page steps so the four choices read in order.
+            column = _field(f"<span style='color:{ACCENT.name()};'>{index + 1}.</span> {caption}", pills)
             column.setSpacing(6)
             for widget in extras:
                 column.addWidget(widget)

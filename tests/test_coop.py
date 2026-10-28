@@ -201,10 +201,33 @@ class CoopTests(unittest.TestCase):
         coop._save_state(self.anomaly, state)
         root_appid.unlink()
 
-        coop.ensure_root_appid(self.anomaly, self.gamma, "G.A.M.M.A")
+        coop.prepare_launch(self.anomaly, self.gamma, "G.A.M.M.A")
 
         self.assertEqual(root_appid.read_text(), "41700")
         self.assertEqual(coop.status(self.anomaly), coop.COOP)
+
+    def test_launch_turns_the_mod_on_in_a_profile_picked_after_the_switch(self):
+        # Co-op switched on with G.A.M.M.A, then ROMEO picked: ROMEO's list
+        # never got the mod, so the game started without co-op.
+        self._install()
+        romeo = self.gamma / "profiles" / "CLIKR\u0394D - ROMEO"
+        romeo.mkdir()
+        (romeo / "modlist.txt").write_text("# generated\n+ROMEO Base\n")
+
+        coop.prepare_launch(self.anomaly, self.gamma, "CLIKR\u0394D - ROMEO")
+
+        self.assertIn(f"+{coop.MOD_NAME}", (romeo / "modlist.txt").read_text())
+
+    def test_solo_launch_turns_the_mod_off_in_a_profile_left_with_it_on(self):
+        self._install()
+        romeo = self.gamma / "profiles" / "ROMEO"
+        romeo.mkdir()
+        (romeo / "modlist.txt").write_text(f"# generated\n+{coop.MOD_NAME}\n+ROMEO Base\n")
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+
+        coop.prepare_launch(self.anomaly, self.gamma, "ROMEO")
+
+        self.assertNotIn(f"+{coop.MOD_NAME}", (romeo / "modlist.txt").read_text())
 
     def test_reverted_detected_and_newer_original_kept(self):
         self._install()

@@ -4467,6 +4467,39 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(env, {"WINEPREFIX": "/prefix"})
         self.assertEqual(cwd, str(gamma))
 
+    def test_build_command_makes_relative_gamma_dir_absolute(self):
+        # The CLI's default "gamma/gamma" made wine look for the exe at
+        # gamma/gamma/gamma/gamma/ModOrganizer.exe, since cwd was relative too.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "gamma" / "gamma").mkdir(parents=True)
+            (Path(tmp) / "gamma" / "gamma" / "ModOrganizer.exe").touch()
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                command, _env, cwd = build_command("gamma/gamma", Runner("wine", "Wine", ["wine"], {}))
+            finally:
+                os.chdir(old)
+        self.assertEqual(cwd, os.path.join(tmp, "gamma", "gamma"))
+        self.assertEqual(command, ["wine", os.path.join(cwd, "ModOrganizer.exe")])
+
+    def test_load_settings_pins_relative_folders_to_the_start_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps({"Profiles": [{"Active": True, "Gamma": "gamma/gamma", "Anomaly": "/abs/anomaly", "Cache": "gamma/cache"}]}))
+            (Path(tmp) / "gamma" / "gamma").mkdir(parents=True)
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                profile = load_settings(path).active_profile
+            finally:
+                os.chdir(old)
+            saved = json.loads(path.read_text())["Profiles"][0]
+        self.assertEqual(profile.gamma, os.path.join(tmp, "gamma", "gamma"))
+        self.assertEqual(saved["Gamma"], profile.gamma)
+        self.assertEqual(profile.anomaly, "/abs/anomaly")
+        # Missing here: a start from the wrong folder must not pin it.
+        self.assertEqual(profile.cache, "gamma/cache")
+
     def test_svg_noise_detector_suppresses_renderer_warnings(self):
         from PySide6.QtCore import QtMsgType
 
@@ -6027,9 +6060,8 @@ class ModCounterTests(unittest.TestCase):
             mock_activate.assert_not_called()
             self.assertEqual(combo.currentText(), "Mine")
 
-    def test_dashboard_mo2_profiles_loaded_prefers_actual_selected_over_stale_config(
-        self,
-    ):
+    def test_dashboard_mo2_profile_combo_shows_the_profile_play_launches(self):
+        # ROMEO picked inside MO2 showed here while Play still sent -p G.A.M.M.A.
         from PySide6.QtWidgets import QApplication
 
         from commander_gui.ui.dashboard import DashboardPage
@@ -6055,7 +6087,7 @@ class ModCounterTests(unittest.TestCase):
                 (["G.A.M.M.A", "Solo Profile"], "Solo Profile"),
                 page._refresh_generation,
             )
-            self.assertEqual(page.mo2_profile_combo.currentText(), "Solo Profile")
+            self.assertEqual(page.mo2_profile_combo.currentText(), "G.A.M.M.A")
 
     def test_mo2_profile_switch_updates_the_cli_profile_and_refreshes(self):
         from PySide6.QtWidgets import QApplication
@@ -6906,7 +6938,7 @@ class ModCounterTests(unittest.TestCase):
         ):
             window = MainWindow()
             self.assertEqual(window._status_theme_combo.currentData(), active_theme())
-            # The style is app-wide: left on "dusk"/18px/"Inter" (a font that
+            # The style is app-wide: left on "midnight"/18px/"Inter" (a font that
             # may not be installed), every widget any later test builds pays
             # for it - the rest of the suite ran minutes slower.
             app = QApplication.instance()
@@ -6915,12 +6947,12 @@ class ModCounterTests(unittest.TestCase):
             self.addCleanup(app.setStyleSheet, app.styleSheet())
 
             # Exactly what settings_page.py's pickers call.
-            window.apply_theme("dusk")
+            window.apply_theme("midnight")
             window.apply_font_size(18)
             window.apply_font_family("Inter")
 
-            self.assertEqual(active_theme(), "dusk")
-            self.assertEqual(window._status_theme_combo.currentData(), "dusk")
+            self.assertEqual(active_theme(), "midnight")
+            self.assertEqual(window._status_theme_combo.currentData(), "midnight")
             self.assertEqual(window._status_fontsize_combo.currentData(), 18)
             self.assertEqual(window._status_font_combo.currentData(), "Inter")
 
@@ -13701,7 +13733,7 @@ class WinterTimeOfDayTests(unittest.TestCase):
         hours = {0: "winter_night", 6: "winter_dawn", 8: "winter", 16: "winter", 17: "winter_dusk", 19: "winter_night"}
         for hour, expected in hours.items():
             self.assertEqual(resolve_theme("winter", hour), expected, hour)
-        self.assertEqual(resolve_theme("dusk", 3), "dusk")
+        self.assertEqual(resolve_theme("midnight", 3), "midnight")
         assets = Path(__file__).resolve().parents[1] / "commander_gui" / "assets"
         for key in set(hours.values()):
             self.assertLessEqual(set(THEMES["reactor"]), set(THEMES[key]), key)
@@ -14472,7 +14504,7 @@ class WinterSnowfallTests(unittest.TestCase):
             snowfall.lights = ChristmasLights(QWidget(host), host)
             snowfall._tick()
             self.assertEqual(len(snowfall.flakes), Snowfall.FLAKES)
-            with patch("commander_gui.gui_settings.load_gui_settings", return_value={"snow_enabled": False}):
+            with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_animation": False}):
                 snowfall.sync(True)
             self.assertEqual(snowfall.flakes, [])
             self.assertFalse(snowfall.lights.isHidden())
@@ -14480,6 +14512,76 @@ class WinterSnowfallTests(unittest.TestCase):
             snowfall.sync(True)
             self.assertTrue(snowfall.lights.isHidden())
             self.assertFalse(snowfall._timer.isActive())
+        finally:
+            themes.set_active_theme(previous)
+            host.deleteLater()
+
+
+class RedForestTests(unittest.TestCase):
+    def test_red_forest_follows_the_clock_in_every_window(self) -> None:
+        """Each Red Forest look must be complete: COMMANDER and ASSISTANT
+        tokens, the scene image and both swaying tree layers."""
+        from assistant.ui import theme as assistant_theme
+        from commander_gui.themes import THEMES, resolve_theme
+
+        hours = {0: "redforest_night", 6: "redforest_dawn", 8: "redforest", 16: "redforest", 17: "redforest_dusk", 19: "redforest_night"}
+        for hour, expected in hours.items():
+            self.assertEqual(resolve_theme("redforest", hour), expected, hour)
+        # Locked to one time of day in Settings, the clock no longer moves it.
+        from commander_gui import themes
+
+        with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_time": "night"}):
+            themes.set_active_theme("redforest")
+        try:
+            self.assertEqual(resolve_theme("redforest"), "redforest_night")
+            self.assertEqual(resolve_theme("winter"), "winter_night")
+        finally:
+            themes._LIVE_TIME = ""
+        assets = Path(__file__).resolve().parents[1] / "commander_gui" / "assets"
+        for key in set(hours.values()):
+            self.assertLessEqual(set(THEMES["reactor"]), set(THEMES[key]), key)
+            self.assertNotIn("back_snow", THEMES[key])
+            self.assertTrue((assets / THEMES[key]["back_image"]).is_file(), key)
+            for side in ("left", "right"):
+                self.assertTrue((assets / f"{THEMES[key]['back_redforest']}_{side}.png").is_file(), key)
+            self.assertEqual(set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key)
+
+    def test_trees_fire_and_leaves_follow_theme_and_setting(self):
+        from PySide6.QtGui import QPainter, QPixmap
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        QApplication.instance() or QApplication([])
+        from commander_gui import themes
+        from commander_gui.ui.redforest import RedForest
+
+        previous = themes.active_theme()
+        host = QWidget()
+        host.resize(400, 300)
+        canvas = QPixmap(400, 300)
+        try:
+            themes.set_active_theme("redforest_night")
+            forest = RedForest(host)
+            forest._tick()
+            self.assertEqual(len(forest.leaves), RedForest.LEAVES)
+            painter = QPainter(canvas)
+            forest.paint(painter)
+            painter.end()
+            # Both tree layers and the fire get repainted as they move.
+            self.assertEqual(len(forest._moving), 3)
+            with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_animation": False}):
+                forest.sync(True)
+            self.assertEqual(forest.leaves, [])
+            self.assertFalse(forest._timer.isActive())
+            forest.sync(True)
+            self.assertTrue(forest._timer.isActive())
+            themes.set_active_theme("winter")
+            forest.sync(True)
+            self.assertFalse(forest._timer.isActive())
+            forest._moving = []
+            painter = QPainter(canvas)
+            forest.paint(painter)
+            painter.end()
+            self.assertEqual(forest._moving, [])
         finally:
             themes.set_active_theme(previous)
             host.deleteLater()

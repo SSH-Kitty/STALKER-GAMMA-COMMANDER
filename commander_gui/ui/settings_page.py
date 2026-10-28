@@ -52,7 +52,7 @@ from ..steam_shortcuts import (
     ShortcutsFileError,
     add_to_steam,
 )
-from ..themes import THEME_INFO, active_theme
+from ..themes import LIVE_THEMES, LIVE_TIME_CHOICES, THEME_INFO, active_theme, active_theme_tokens
 from ..updates import is_unstable_version, newer_unstable_tag
 from . import graphics_window
 from .common import (
@@ -813,8 +813,14 @@ class SettingsPage(QWidget):
         self._title_bar_check.toggled.connect(self._on_title_bar_toggled)
         self._animations_check = QCheckBox(tr("Animations"))
         self._animations_check.toggled.connect(self._on_animations_toggled)
-        self._snow_check = QCheckBox(tr("Snow animation"))
-        self._snow_check.toggled.connect(self._on_snow_toggled)
+        self._live_animation_check = QCheckBox(tr("Live theme animation"))
+        self._live_animation_check.toggled.connect(self._on_live_animation_toggled)
+        self._lights_check = QCheckBox(tr("Christmas lights"))
+        self._lights_check.toggled.connect(self._on_lights_toggled)
+        self._live_time_combo = _combo()
+        for value, label in LIVE_TIME_CHOICES:
+            self._live_time_combo.addItem(tr(label), value)
+        self._live_time_combo.currentIndexChanged.connect(self._on_live_time)
         _rows(
             box,
             _setting_row(tr("Font family"), "", self._font_family_combo),
@@ -827,10 +833,6 @@ class SettingsPage(QWidget):
             _check_row(
                 self._animations_check,
                 tr("Hover effects, page fades, smooth scrolling and the game loading screen's moving scenery. Turn off for a still interface."),
-            ),
-            _check_row(
-                self._snow_check,
-                tr("Falling snow in the Winter (Live) theme. It pauses while COMMANDER is in the background."),
             ),
         )
         # Rows at the top when Themes makes the column taller.
@@ -864,6 +866,35 @@ class SettingsPage(QWidget):
                 row.addWidget(_swatch(color), 0, Qt.AlignmentFlag.AlignVCenter)
             box.addLayout(row)
         self._group.buttonToggled.connect(self._on_toggled)
+        # Live themes only: on_theme_changed() shows or hides it, dividers and all.
+        self._live_rows = QWidget()
+        live_box = QVBoxLayout(self._live_rows)
+        live_box.setContentsMargins(0, 0, 0, 0)
+        live_box.setSpacing(0)
+        live_box.addWidget(_divider())
+        _rows(
+            live_box,
+            _check_row(
+                self._live_animation_check,
+                tr("Falling snow in Winter (Live); swaying trees, a flickering campfire and falling leaves in Red Forest (Live). It pauses while COMMANDER is in the background."),
+            ),
+            _setting_row(
+                tr("Live theme time of day"),
+                tr("Keep the Live themes at one time of day instead of following the clock."),
+                self._live_time_combo,
+            ),
+        )
+        # Winter only, within the Live rows.
+        self._lights_row = QWidget()
+        lights_box = QVBoxLayout(self._lights_row)
+        lights_box.setContentsMargins(0, 0, 0, 0)
+        lights_box.setSpacing(0)
+        lights_box.addWidget(_divider())
+        lights_box.addWidget(
+            _check_row(self._lights_check, tr("The string of lights under the top bar in Winter (Live)."))
+        )
+        live_box.addWidget(self._lights_row)
+        box.addWidget(self._live_rows)
         box.addStretch(1)
         _columns(layout, interface, themes)
         layout.addWidget(self._top_bar_card())
@@ -1507,11 +1538,23 @@ class SettingsPage(QWidget):
     def _on_animations_toggled(self, on: bool) -> None:
         gui_settings.save_gui_settings(animations_enabled=on)
 
-    def _on_snow_toggled(self, on: bool) -> None:
-        gui_settings.save_gui_settings(snow_enabled=on)
-        sync = getattr(self.window, "sync_snow", None)
+    def _on_live_animation_toggled(self, on: bool) -> None:
+        gui_settings.save_gui_settings(live_animation=on)
+        sync = getattr(self.window, "sync_animations", None)
         if callable(sync):
             sync()
+
+    def on_theme_changed(self) -> None:
+        """Run by the window on every theme change, from any picker."""
+        self._live_rows.setVisible(active_theme() in LIVE_THEMES)
+        self._lights_row.setVisible(bool(active_theme_tokens().get("back_lights")))
+
+    def _on_lights_toggled(self, on: bool) -> None:
+        gui_settings.save_gui_settings(christmas_lights=on)
+        self.window.sync_animations()
+
+    def _on_live_time(self, *_args) -> None:
+        self.window.apply_live_time(self._live_time_combo.currentData())
 
     def _on_nav_tab_toggled(self, *_args) -> None:
         gui_settings.save_gui_settings(
@@ -1620,9 +1663,16 @@ class SettingsPage(QWidget):
         self._animations_check.blockSignals(True)
         self._animations_check.setChecked(bool(state.get("animations_enabled", True)))
         self._animations_check.blockSignals(False)
-        self._snow_check.blockSignals(True)
-        self._snow_check.setChecked(bool(state.get("snow_enabled", True)))
-        self._snow_check.blockSignals(False)
+        self._live_animation_check.blockSignals(True)
+        self._live_animation_check.setChecked(bool(state.get("live_animation", True)))
+        self._live_animation_check.blockSignals(False)
+        self._lights_check.blockSignals(True)
+        self._lights_check.setChecked(bool(state.get("christmas_lights", True)))
+        self._lights_check.blockSignals(False)
+        self.on_theme_changed()
+        self._live_time_combo.blockSignals(True)
+        self._live_time_combo.setCurrentIndex(max(self._live_time_combo.findData(state.get("live_time", "")), 0))
+        self._live_time_combo.blockSignals(False)
         hidden = set(state.get("hidden_nav_tabs") or [])
         for key, check in self._nav_checks.items():
             check.blockSignals(True)

@@ -110,7 +110,9 @@ from .title_bar import (
 )
 from .update_page import UpdatePage
 from .utilities_page import UtilitiesPage
-from .winter import ChristmasLights, Snowfall, paint_scene
+from .live_scene import paint_scene
+from .redforest import RedForest
+from .winter import ChristmasLights, Snowfall
 
 NAV_ITEMS = [
     ("dashboard", "Dashboard"),
@@ -365,6 +367,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.snowfall = Snowfall(self)
+        self.redforest = RedForest(self)
         self.setStatusBar(_NoticeStatusBar(self))
         gui_state = gui_settings.load_gui_settings()
         self.resize(gui_state["window_width"], gui_state["window_height"])
@@ -888,7 +891,7 @@ class MainWindow(QMainWindow):
         _STATUS_COMBO_STYLE = (
             "QComboBox {"
             "  font-size: 12px;"
-            "  padding: 1px 6px;"
+            "  padding: 1px 18px 1px 6px;"
             "  border: 1px solid palette(mid);"
             "  border-radius: 3px;"
             "  background: palette(button);"
@@ -1673,6 +1676,10 @@ class MainWindow(QMainWindow):
         gui_settings.save_gui_settings(font_size=int(size))
         self._apply_style()
 
+    def apply_live_time(self, live_time: str) -> None:
+        gui_settings.save_gui_settings(live_time=live_time)
+        self._apply_style()
+
     def apply_font_family(self, family: str) -> None:
         gui_settings.save_gui_settings(font_family=family)
         self._apply_style()
@@ -1761,7 +1768,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()
         self.update()
-        self.sync_snow()
+        self.sync_animations()
         # Icons painted in a theme colour don't follow the stylesheet.
         for page in getattr(self, "_pages", {}).values():
             notify = getattr(page, "on_theme_changed", None)
@@ -1819,6 +1826,7 @@ class MainWindow(QMainWindow):
         painter = QPainter(self)
         try:
             painter.drawPixmap(0, 0, pixmap)
+            self.redforest.paint(painter)
             self.snowfall.paint(painter)
         finally:
             painter.end()
@@ -1868,13 +1876,15 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_max_button()
         if event.type() in (QEvent.Type.WindowStateChange, QEvent.Type.ActivationChange):
-            self.sync_snow()
+            self.sync_animations()
         super().changeEvent(event)
 
-    def sync_snow(self) -> None:
-        snowfall = getattr(self, "snowfall", None)
-        if snowfall is not None:
-            snowfall.sync(self.isActiveWindow() and not self.isMinimized())
+    def sync_animations(self) -> None:
+        """Run the Live themes' animations only while this window is in front."""
+        visible = self.isActiveWindow() and not self.isMinimized()
+        for animation in (getattr(self, "snowfall", None), getattr(self, "redforest", None)):
+            if animation is not None:
+                animation.sync(visible)
 
     def closeEvent(self, event) -> None:
         if self.install_busy:

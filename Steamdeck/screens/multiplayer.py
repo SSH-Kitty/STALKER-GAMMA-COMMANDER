@@ -167,7 +167,7 @@ def _prepare_coop_steam(profile, kind, prefix, mo2_profile, target, arguments) -
     coop_options_only_change)."""
     if coop.install_kind(profile.anomaly) == coop.KIND_GAMMA:
         unblock_mo2_python(profile.gamma)
-    coop.ensure_root_appid(profile.anomaly, profile.gamma, profile.mo2_profile)
+    coop.prepare_launch(profile.anomaly, profile.gamma, profile.mo2_profile)
     runner = resolve_runner(kind, prefix)
     base_fields = coop_shortcut_fields(profile, runner, mo2_profile, target, arguments, options="")
     return with_coop_options(base_fields), base_fields

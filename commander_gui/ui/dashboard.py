@@ -34,9 +34,10 @@ from ..updates import UpdateStatus, check_updates, format_version, status_summar
 from ..winetricks import check_winetricks_full_status
 from .common import (
     OK_GREEN,
+    STATUS_GREY,
+    STATUS_RED,
     WARN,
     BackgroundTask,
-    InstallStatusRow,
     NoWheelComboBox,
     StatusDot,
     activate_profile,
@@ -104,6 +105,133 @@ def _card_title(text: str) -> QLabel:
     label.setFixedHeight(_TITLE_ROW_H)
     label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     return label
+
+
+def _short_path(text: str) -> str:
+    """Show the home folder as ~ so paths stay readable."""
+    home = str(Path.home())
+    if text == home or text.startswith(home + "/"):
+        return "~" + text[len(home):]
+    return text
+
+
+class _ElidedLabel(QLabel):
+    """A one-line label that cuts long text in the middle instead of
+    widening its card."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(40)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full = text
+        self._elide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        super().setText(
+            self.fontMetrics().elidedText(
+                self._full, Qt.TextElideMode.ElideMiddle, max(self.width(), 40)
+            )
+        )
+
+
+class _ComponentRow(QFrame):
+    """An Installation status row: bold name over a shortened path, a fix
+    button shown only while the component is missing, and the state on the
+    right. Clicking the row runs ``on_click``."""
+
+    def __init__(
+        self,
+        name: str,
+        detail: str = "",
+        ok: bool | None = None,
+        pending_text: str = "",
+        on_click=None,
+        fix_text: str = "",
+        on_fix=None,
+        on_change=None,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("componentRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.state = "pending"
+        self._on_click = on_click
+        self._on_change = on_change
+        self._pending_text = pending_text or tr("Unknown")
+        if on_click is not None:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(8)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        title = QLabel(tr(name))
+        title.setObjectName("settingTitle")
+        text.addWidget(title)
+        self._detail = _ElidedLabel()
+        self._detail.setObjectName("dim")
+        text.addWidget(self._detail)
+        row.addLayout(text, 1)
+        self._fix = QPushButton(fix_text)
+        self._fix.setObjectName("settingAction")
+        self._fix.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fix.hide()
+        if on_fix is not None:
+            self._fix.clicked.connect(on_fix)
+        row.addWidget(self._fix, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._dot = StatusDot()
+        row.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._status = QLabel()
+        row.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.set_state(ok, detail)
+
+    def _show(self, state: str, color: str, text: str, detail: str) -> None:
+        self.state = state
+        self._detail.setText(_short_path(detail))
+        if detail:
+            tip = detail
+            if self._on_click is not None:
+                tip += "\n" + tr("Click to open the folder")
+            self.set_status_tooltip(tip)
+        self._status.setText(text)
+        self._dot.setStyleSheet(f"color: {color};")
+        self._status.setStyleSheet(f"color: {color};")
+        self._fix.setVisible(state == "missing" and bool(self._fix.text()))
+        if self._on_change is not None:
+            self._on_change()
+
+    def set_state(
+        self, ok: bool | None, detail: str = "", pending_text: str | None = None
+    ) -> None:
+        if ok is True:
+            self._show("ok", OK_GREEN.name(), tr("Installed"), detail)
+        elif ok is False:
+            self._show("missing", STATUS_RED.name(), tr("Not installed"), detail)
+        else:
+            text = pending_text if pending_text is not None else self._pending_text
+            self._show("pending", STATUS_GREY.name(), text, detail)
+
+    def set_installing(self, detail: str = "") -> None:
+        self._show("installing", WARN.name(), tr("Installing"), detail)
+
+    def set_status_tooltip(self, text: str) -> None:
+        self.setToolTip(text)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if (
+            self._on_click is not None
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self._on_click()
+        super().mouseReleaseEvent(event)
 
 
 def _field_combo() -> NoWheelComboBox:
@@ -289,45 +417,96 @@ class DashboardPage(QWidget):
     def _render_install_status(self) -> None:
         layout = self.install_status_card.layout()
         clear_layout(layout)
-        layout.addWidget(_card_title(tr("Installation status")))
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        header.addWidget(_card_title(tr("Installation status")))
+        header.addStretch(1)
+        self._install_headline_dot = StatusDot()
+        header.addWidget(self._install_headline_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._install_headline = QLabel()
+        header.addWidget(self._install_headline, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(header)
+        self._install_rows: list[_ComponentRow] = []
         profile = self.settings.active_profile
         if profile is None:
-            layout.addWidget(InstallStatusRow("STALKER Anomaly", tr("No active profile")))
-            layout.addWidget(InstallStatusRow("GAMMA Modpack", tr("No active profile")))
+            for name in ("STALKER Anomaly", "GAMMA Modpack"):
+                row = _ComponentRow(name, tr("No active profile"))
+                self._install_rows.append(row)
+                layout.addWidget(row)
+            self._update_install_headline()
             return
         op = getattr(self.window, "install_operation", None)
         anomaly_state = display_state(anomaly_installed(profile.anomaly), op, "anomaly")
         gamma_state = display_state(
             gamma_installed(profile.gamma, profile.mo2_profile), op, "gamma"
         )
-        if anomaly_state == "installing":
-            self.anomaly_status = InstallStatusRow("STALKER Anomaly", profile.anomaly)
-            self.anomaly_status.set_installing(tr("Installing Anomaly"))
-        else:
-            self.anomaly_status = InstallStatusRow(
-                "STALKER Anomaly",
-                profile.anomaly,
-                ok=bool(anomaly_state),
-            )
-        layout.addWidget(self.anomaly_status)
-        if gamma_state == "installing":
-            self.gamma_status = InstallStatusRow("GAMMA Modpack", profile.gamma)
-            self.gamma_status.set_installing(tr("Installing GAMMA"))
-        else:
-            self.gamma_status = InstallStatusRow(
-                "GAMMA Modpack", profile.gamma, ok=bool(gamma_state)
-            )
-        layout.addWidget(self.gamma_status)
-        self.winetricks_status = InstallStatusRow(
-            "Dependencies", tr("Checking"), ok=None, pending_text=tr("Checking")
+        to_install = lambda: self.window.set_page("install")
+        self.anomaly_status = _ComponentRow(
+            "STALKER Anomaly",
+            profile.anomaly,
+            ok=anomaly_state if anomaly_state != "installing" else None,
+            on_click=lambda: self._open_folder(profile.anomaly),
+            fix_text=tr("Install"),
+            on_fix=to_install,
+            on_change=self._update_install_headline,
         )
-        layout.addWidget(self.winetricks_status)
+        if anomaly_state == "installing":
+            self.anomaly_status.set_installing(tr("Installing Anomaly"))
+        self.gamma_status = _ComponentRow(
+            "GAMMA Modpack",
+            profile.gamma,
+            ok=gamma_state if gamma_state != "installing" else None,
+            on_click=lambda: self._open_folder(profile.gamma),
+            fix_text=tr("Install"),
+            on_fix=to_install,
+            on_change=self._update_install_headline,
+        )
+        if gamma_state == "installing":
+            self.gamma_status.set_installing(tr("Installing GAMMA"))
+        self.winetricks_status = _ComponentRow(
+            "Dependencies",
+            tr("Checking"),
+            pending_text=tr("Checking"),
+            on_click=to_install,
+            fix_text=tr("Install missing"),
+            on_fix=self._install_missing_dependencies,
+            on_change=self._update_install_headline,
+        )
+        self._install_rows = [self.anomaly_status, self.gamma_status, self.winetricks_status]
+        for row in self._install_rows:
+            layout.addWidget(row)
+        self._update_install_headline()
         if op == "dependencies":
             self.winetricks_status.set_installing(tr("Installing dependencies"))
         else:
             self._start_winetricks_status(
                 self._refresh_generation, self.winetricks_status
             )
+
+    def _update_install_headline(self) -> None:
+        """One line summing up the rows: green when all is installed, amber
+        when something is missing or installing, grey while still checking."""
+        label = getattr(self, "_install_headline", None)
+        rows = getattr(self, "_install_rows", None)
+        if label is None or not rows:
+            return
+        states = {row.state for row in rows}
+        if "installing" in states:
+            color, text = WARN, tr("Installing")
+        elif "missing" in states:
+            color, text = WARN, tr("Something needs attention")
+        elif "pending" in states:
+            color, text = STATUS_GREY, tr("Checking")
+        else:
+            color, text = OK_GREEN, tr("Everything is installed")
+        label.setText(text)
+        label.setStyleSheet(f"color: {color.name()}; font-weight: 600;")
+        self._install_headline_dot.setStyleSheet(f"color: {color.name()};")
+
+    def _install_missing_dependencies(self) -> None:
+        self.window.set_page("install")
+        page = self.window._ensure_page("install")
+        page._start_winetricks()
 
     def _paused_winetricks_status(self) -> None:
         """Hold the status as Installed while the game is running.
@@ -642,9 +821,10 @@ class DashboardPage(QWidget):
         combo.blockSignals(True)
         combo.clear()
         combo.addItems(names)
-        # Same preference as Mod Manager's own profile combo: MO2's actual
-        # selected profile wins over a stale CliProfile.mo2_profile field.
-        for candidate in (selected, profile.mo2_profile if profile else None):
+        # Show the profile Play launches (CliProfile.mo2_profile, passed to
+        # MO2 as -p), not MO2's own selected one: picking ROMEO inside MO2
+        # left this showing ROMEO while Play still started G.A.M.M.A.
+        for candidate in (profile.mo2_profile if profile else None, selected):
             if not candidate:
                 continue
             wanted = candidate.upper()
@@ -1167,8 +1347,13 @@ class DashboardPage(QWidget):
         rows.setHorizontalSpacing(16)
         rows.setVerticalSpacing(8)
         rows.setColumnStretch(3, 1)
+        # History on the right, past a divider like Profile overview's.
+        history = QGridLayout()
+        history.setHorizontalSpacing(16)
+        history.setVerticalSpacing(8)
+        history.setColumnStretch(2, 1)
 
-        def add_row(name: str, value: str, state: str | None = None, ok=None, action=None):
+        def add_row(name: str, value: str, state: str | None = None, ok=None, action=None, rows=rows):
             """One line: dim name | value | coloured dot + state | button."""
             row = rows.rowCount()
             # Every row as tall as one with a button, so the lines stay even.
@@ -1248,12 +1433,20 @@ class DashboardPage(QWidget):
 
         profile = self.settings.active_profile
         version_file = Path(profile.gamma, "version.txt") if profile and profile.gamma else None
-        add_row(tr("GAMMA last updated"), ago(version_file) or tr("Unknown"))
+        add_row(tr("GAMMA last updated"), ago(version_file) or tr("Unknown"), rows=history)
         # The AppImage is swapped whole on a self-update; a source run has
         # no install step, so its own package stands in.
         commander_file = commander_appimage_path() or Path(__file__).parent.parent / "__init__.py"
-        add_row(tr("COMMANDER last updated"), ago(commander_file) or tr("Unknown"))
-        layout.addLayout(rows)
+        add_row(tr("COMMANDER last updated"), ago(commander_file) or tr("Unknown"), rows=history)
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        body.addLayout(rows, 1)
+        divider = QFrame()
+        divider.setObjectName("vDivider")
+        divider.setFixedWidth(1)
+        body.addWidget(divider)
+        body.addLayout(history, 1)
+        layout.addLayout(body)
 
         # Errors and other long results get their own line under the rows.
         if status_kind == "warn":
@@ -1308,9 +1501,8 @@ class DashboardPage(QWidget):
             QTimer.singleShot(0, self._bind_play_state)
             grid = QGridLayout()
             grid.setSpacing(8)
+            # Anomaly and GAMMA folders open from the Installation status rows.
             buttons: list[tuple[str, str]] = [
-                (tr("Open Anomaly folder"), profile.anomaly),
-                (tr("Open GAMMA folder"), profile.gamma),
                 (tr("Open cache folder"), profile.cache),
                 (tr("Open log folder"), "logs"),
             ]

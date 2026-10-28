@@ -333,7 +333,7 @@ class DeckWindow(QMainWindow):
         if sheet != self._last_sheet:
             self._last_sheet = sheet
             app.setStyleSheet(sheet)
-        self.sync_snow()
+        self.sync_animations()
 
     def apply_style_later(self) -> None:
         """Restyle once things stop changing (see _RESTYLE_DEBOUNCE_MS)."""
@@ -371,7 +371,7 @@ class DeckWindow(QMainWindow):
 
         # Winter's fairy lights under the header, twinkling off the snow.
         central.snowfall.lights = ChristmasLights(header, central)
-        self.sync_snow()
+        self.sync_animations()
 
         self.toast = DeckToast(central)
         self._status_shim = _DeckStatusBar(self.toast)
@@ -824,7 +824,7 @@ class DeckWindow(QMainWindow):
 
     def update_clock(self) -> None:
         self.clock_label.setText(time.strftime("%H:%M"))
-        # Winter (Live) moves on to dawn, day, dusk and night with the clock.
+        # The Live themes move on to dawn, day, dusk and night with the clock.
         phase = resolve_theme(active_theme())
         if phase != getattr(self, "_painted_phase", phase):
             self.apply_style()
@@ -1454,13 +1454,15 @@ class DeckWindow(QMainWindow):
             update_max_button(self)
             self._sync_title_bar()
         if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange):
-            self.sync_snow()
+            self.sync_animations()
 
-    def sync_snow(self) -> None:
-        """Winter's snow runs only while Deck Mode is in front (see Snowfall)."""
+    def sync_animations(self) -> None:
+        """The Live themes' animations run only while Deck Mode is in front."""
         central = getattr(self, "_deck_root", None)
         if central is not None:
-            central.snowfall.sync(self.isActiveWindow() and not self.isMinimized())
+            visible = self.isActiveWindow() and not self.isMinimized()
+            central.snowfall.sync(visible)
+            central.redforest.sync(visible)
 
     def _sync_gamepad(self) -> None:
         """Read the controller only while this window can use it.

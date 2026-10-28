@@ -8,6 +8,7 @@ safely share the same file.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -215,7 +216,31 @@ def load_settings(path: Path | None = None) -> CliSettings:
         default = CliProfile(active=True)
         settings.profiles = [default]
         settings.save(path)
+    elif _absolute_folders(settings):
+        try:
+            settings.save(path)
+        except OSError:
+            pass  # still absolute in memory; saved with the next change
     return settings
+
+
+def _absolute_folders(settings: CliSettings) -> bool:
+    """Pin relative profile folders that exist here; True if any changed.
+
+    The CLI's defaults ("gamma/gamma") are relative to wherever COMMANDER was
+    started, so starting it from another folder lost the install. Only a
+    folder that exists is pinned: a start from the wrong folder leaves the
+    path relative, instead of saving a path where nothing is installed.
+    """
+    changed = False
+    for profile in settings.profiles:
+        for key in ("anomaly", "gamma", "cache"):
+            value = getattr(profile, key)
+            fixed = os.path.abspath(os.path.expanduser(value)) if value.strip() else value
+            if fixed != value and os.path.isdir(fixed):
+                setattr(profile, key, fixed)
+                changed = True
+    return changed
 
 
 def run_config_command(args: list[str], timeout: int = 120) -> tuple[int, str, str]:

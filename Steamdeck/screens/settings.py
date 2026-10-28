@@ -28,7 +28,7 @@ from commander_gui.steam_shortcuts import (
     list_steam_accounts,
     steam_is_running,
 )
-from commander_gui.themes import THEME_INFO
+from commander_gui.themes import LIVE_TIME_CHOICES, THEME_INFO
 from commander_gui.ui.common import BackgroundTask, game_running, play_click_sound
 from commander_gui.ui.deck_switch import switch_mode
 from commander_gui.updates import is_unstable_version, newer_unstable_tag
@@ -82,9 +82,15 @@ class SettingsScreen(DeckScreen):
         self.theme_row = DeckRow(tr("Theme"))
         self.theme_row.activated.connect(self._pick_theme)
         self.body.addWidget(self.theme_row)
-        self.snow_row = DeckToggleRow(tr("Snow animation"), True)
-        self.snow_row.toggled.connect(self._toggle_snow)
-        self.body.addWidget(self.snow_row)
+        self.live_animation_row = DeckToggleRow(tr("Live theme animation"), True)
+        self.live_animation_row.toggled.connect(self._toggle_live_animation)
+        self.body.addWidget(self.live_animation_row)
+        self.lights_row = DeckToggleRow(tr("Christmas lights"), True)
+        self.lights_row.toggled.connect(self._toggle_lights)
+        self.body.addWidget(self.lights_row)
+        self.live_time_row = DeckRow(tr("Live theme time of day"))
+        self.live_time_row.activated.connect(self._pick_live_time)
+        self.body.addWidget(self.live_time_row)
 
         self.language_row = DeckRow(tr("Language"))
         self.language_row.activated.connect(self._pick_language)
@@ -271,9 +277,16 @@ class SettingsScreen(DeckScreen):
         self.chime_row.set_checked(state.get("deck_finish_sound", True) is not False)
         self.rumble_row.set_checked(state.get("deck_finish_rumble", True) is not False)
         self.welcome_row.set_checked(not state.get("welcome_hidden", False))
-        self.snow_row.set_checked(state.get("snow_enabled", True) is not False)
-        # Only Winter (Live) has snow.
-        self.snow_row.setVisible(theme == "winter")
+        self.live_animation_row.set_checked(state.get("live_animation", True) is not False)
+        live_time = state.get("live_time", "")
+        self.live_time_row.set_value(
+            next((tr(label) for value, label in LIVE_TIME_CHOICES if value == live_time), "")
+        )
+        # Only the Live themes animate and follow the clock.
+        for row in (self.live_animation_row, self.live_time_row):
+            row.setVisible(theme in ("winter", "redforest"))
+        self.lights_row.set_checked(state.get("christmas_lights", True) is not False)
+        self.lights_row.setVisible(theme == "winter")
         options = state.get("custom_launch_options") or ""
         for row, option in self.option_rows:
             row.set_checked(launch_options.is_on(options, option))
@@ -334,9 +347,13 @@ class SettingsScreen(DeckScreen):
         if on:
             play_click_sound()
 
-    def _toggle_snow(self, on: bool) -> None:
-        gui_settings.save_gui_settings(snow_enabled=bool(on))
-        self.window.sync_snow()
+    def _toggle_lights(self, on: bool) -> None:
+        gui_settings.save_gui_settings(christmas_lights=bool(on))
+        self.window.sync_animations()
+
+    def _toggle_live_animation(self, on: bool) -> None:
+        gui_settings.save_gui_settings(live_animation=bool(on))
+        self.window.sync_animations()
 
     def _toggle_launch_option(self, option: str, on: bool) -> None:
         options = gui_settings.load_gui_settings().get("custom_launch_options") or ""
@@ -366,6 +383,21 @@ class SettingsScreen(DeckScreen):
         gui_settings.save_gui_settings(theme=str(key))
         # Theme is pure QSS plus a palette, so it takes effect immediately -
         # no widget rebuild needed, unlike a language change.
+        self.window.apply_style()
+        self.refresh()
+
+    def _pick_live_time(self) -> None:
+        picker = DeckPicker(
+            "",
+            [(tr(label), value) for value, label in LIVE_TIME_CHOICES],
+            gui_settings.load_gui_settings().get("live_time", ""),
+        )
+        picker.chosen.connect(self._apply_live_time)
+        self.window.show_overlay(self._overlay_for(picker, tr("Live theme time of day")))
+
+    def _apply_live_time(self, value: object) -> None:
+        self.window.dismiss_overlay()
+        gui_settings.save_gui_settings(live_time=str(value))
         self.window.apply_style()
         self.refresh()
 

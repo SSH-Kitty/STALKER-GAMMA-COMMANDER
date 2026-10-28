@@ -1269,6 +1269,9 @@ def build_command(
     ``arguments`` replaces the target's own arguments for this run; the
     ``--name=value`` form keeps a value starting with "-" a value.
     """
+    # The CLI's default profile paths are relative ("gamma/gamma"); passed
+    # as-is, the exe path is then read again from inside that same cwd.
+    gamma_dir = os.path.abspath(os.path.expanduser(gamma_dir))
     mo2 = Path(gamma_dir) / "ModOrganizer.exe"
     if not mo2.is_file():
         raise LaunchError(f"ModOrganizer.exe not found in {gamma_dir}")

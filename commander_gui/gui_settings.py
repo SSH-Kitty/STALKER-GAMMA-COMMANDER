@@ -18,7 +18,7 @@ from pathlib import Path
 from .atomic import write_text
 from .config import gui_settings_path
 from .i18n import LANGUAGE_INFO
-from .themes import THEME_INFO
+from .themes import LIVE_TIMES, THEME_INFO
 
 try:
     import fcntl
@@ -57,7 +57,9 @@ _DEFAULTS = {
     "move_sources": [],  # absolute source folders of an in-progress move
     "custom_title_bar": True,  # draw COMMANDER's own title bar instead of the desktop's
     "animations_enabled": True,  # hover grow, page fades, smooth scroll, splash effects
-    "snow_enabled": True,  # falling snow behind the cards in the Winter theme
+    "live_animation": True,  # Winter's snow, the Red Forest's trees, campfire and leaves
+    "christmas_lights": True,  # Winter's fairy lights under the top bar
+    "live_time": "",  # Live themes locked to dawn/day/dusk/night; "" follows the clock
     "hidden_nav_tabs": [],  # top-bar tabs the user hid (keys into main_window.NAV_ITEMS)
     "window_width": 1080,
     "window_height": 950,
@@ -244,8 +246,12 @@ def load_gui_settings() -> dict:
         data["update_notifications"] = True
     if not isinstance(data.get("animations_enabled"), bool):
         data["animations_enabled"] = True
-    if not isinstance(data.get("snow_enabled"), bool):
-        data["snow_enabled"] = True
+    if not isinstance(data.get("live_animation"), bool):
+        data["live_animation"] = True
+    if not isinstance(data.get("christmas_lights"), bool):
+        data["christmas_lights"] = True
+    if data.get("live_time") not in ("", *LIVE_TIMES):
+        data["live_time"] = ""
     hidden = data.get("hidden_nav_tabs")
     # Same hardcoded key set as start_page; the dashboard is the way back
     # to everything else, so it can never be hidden.

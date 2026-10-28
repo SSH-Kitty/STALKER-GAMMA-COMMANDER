@@ -58,7 +58,9 @@ from PySide6.QtWidgets import (
 from commander_gui.i18n import tr
 from commander_gui.themes import active_theme_tokens
 from commander_gui.ui.common import notice
-from commander_gui.ui.winter import Snowfall, paint_scene
+from commander_gui.ui.live_scene import paint_scene
+from commander_gui.ui.redforest import RedForest
+from commander_gui.ui.winter import Snowfall
 
 from .scale import px
 
@@ -116,8 +118,9 @@ class DeckBackdrop(QWidget):
     The same treatment the desktop window uses - a diagonal base gradient
     with two soft radial glows over it - drawn from the same theme tokens,
     so Deck Mode looks like the rest of COMMANDER rather than a generic Qt
-    application that happens to share its colours. Winter (Live) paints its
-    village scene instead, with the snow falling over it.
+    application that happens to share its colours. The Live themes paint
+    their scene instead: Winter's village with the snow falling over it,
+    the Red Forest with its swaying trees, campfire and falling leaves.
 
     Painted rather than styled: a QSS background on this widget would sit
     on top of the glow. Everything stacked above it is semi-transparent, so
@@ -127,6 +130,7 @@ class DeckBackdrop(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.snowfall = Snowfall(self)
+        self.redforest = RedForest(self)
 
     def sizeHint(self) -> QSize:
         return QSize(DECK_W, DECK_H)
@@ -150,6 +154,7 @@ class DeckBackdrop(QWidget):
         painter = QPainter(self)
         try:
             painter.drawPixmap(0, 0, self._cache)
+            self.redforest.paint(painter)
             self.snowfall.paint(painter)
         finally:
             painter.end()

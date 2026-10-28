@@ -863,7 +863,7 @@ TOPICS: list[dict] = [
                         ("Performance overlay and image effects", "Settings → Graphics. See Playing and launching."),
                         ("MO2 Display Scale", "Sets the prefix's display DPI so Mod Organizer's text is readable: 100% to 200%, 125% recommended. Restart MO2 after applying."),
                         ("Language", "Ten languages: English, French, Spanish, German, Romanian, Polish, Russian, Ukrainian, Portuguese and Turkish."),
-                        ("Theme", "Seven themes: GAMMA (default), GAMMA Black, Dusk, Midnight, Terminal, Reactor and Winter (Live)."),
+                        ("Theme", "Eight themes: GAMMA (default), GAMMA Black, Dusk, Midnight, Terminal, Reactor, Red Forest (Live) and Winter (Live)."),
                         ("Font and size", "Six font families (Exo 2 by default) and 9 to 22 px."),
                         ("Use COMMANDER's own title bar", "Draws COMMANDER's own title bar; turn it off to use your desktop's."),
                         ("Discord Rich Presence", "See Playing and launching. A custom Discord Application ID can be set for your own app."),

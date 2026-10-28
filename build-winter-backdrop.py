@@ -18,12 +18,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 OUT_DIR = Path(__file__).resolve().parent / "commander_gui" / "assets" / "winter"
 W, H = 1722, 1094  # scene's drawing size; scaled to cover the output
 OUT_W, OUT_H = 1920, 1200
-BLUR = 3
+BLUR = 2
 
 V = {"title": "B - Blizzard (cold grey-blue, heavy snow)",
         "sky": ("#dfe5ea", "#c3ccd4", "#a9b4bd"),
@@ -36,6 +36,7 @@ V = {"title": "B - Blizzard (cold grey-blue, heavy snow)",
         "text": "#1b252d", "dim": "#56636d", "nav": "#4f5d68",
         "accent": "#4d7c4a", "accent_strong": "#3a6d37", "hero1": "#3a6d37", "hero2": "#62945a",
         "topbar": "rgba(232,238,243,0.62)", "storage": ("#62945a", "#3a6d37", "#9f9a63", "#8f9ba5"),
+        "stars": 0,  # added after the grade, so they stay bright
         "flakes": 420, "wind": -30, "house_x": 430, "lights": False,
         # (color, opacity, x, y, radius) of the hazy sun or moon
         "sun": ("#ffffff", 0.55, 0.78, 0.18, 70),
@@ -54,39 +55,119 @@ PHASES = {
     "dusk.jpg": {
         "sky": ("#3d3c52", "#8a6a72", "#d98f5c"), "fog": "rgba(150,120,122,%s)",
         "sun": ("#ffb070", 0.75, 0.2, 0.5, 90),
-        "grade": "linear-gradient(#6a6676, #8c7570)",
+        "grade": "linear-gradient(#6a6676, #8c7570)", "stars": 12,
     },
     "night.jpg": {
         "sky": ("#0d131c", "#18212c", "#26303b"), "fog": "rgba(58,68,80,%s)",
         "sun": ("#f4f8fb", 1.0, 0.78, 0.16, 55),
-        "grade": "linear-gradient(#363f4a, #45505b)",
+        "grade": "linear-gradient(#363f4a, #45505b)", "stars": 320,
     },
 }
 
 
-def spruce(x, base, h, color):
-    w = h * 0.38
-    pts = []
-    tiers = 5
+def spruce(x, base, h, color, rnd, snow=None):
+    """A spruce with drooping, jagged branch tiers and snow along the tips.
+    The trunk runs on below the base so the snow in front always buries it."""
+    w = h * rnd.uniform(0.3, 0.38)
+    tiers = max(5, int(h / 26))
+    th = h * 0.88 / tiers
+    out = [f'<rect x="{x-h*0.018:.1f}" y="{base-h*0.3:.0f}" width="{h*0.036:.1f}" height="{h*0.3+40:.0f}" fill="{color}"/>']
     for i in range(tiers):
-        y0 = base - h * i / tiers
-        y1 = base - h * (i + 1.4) / tiers
-        ww = w * (1 - i / tiers)
-        pts.append(f'<polygon points="{x-ww:.0f},{y0:.0f} {x+ww:.0f},{y0:.0f} {x:.0f},{y1:.0f}" fill="{color}"/>')
-    pts.append(f'<rect x="{x-3:.0f}" y="{base-4:.0f}" width="6" height="14" fill="{color}"/>')
-    return "".join(pts)
+        f = i / tiers
+        y0 = base - h * 0.1 - th * i
+        top = y0 - th * 2.1
+        ww = w * (1 - f) ** 0.85 * rnd.uniform(0.85, 1.1) + h * 0.02
+        droop = th * 0.35
+        pts = [(x - ww, y0 + droop)]
+        n = rnd.randint(3, 5)
+        for k in range(1, 2 * n):
+            px = x - ww + 2 * ww * k / (2 * n)
+            pts.append((px, y0 + (droop * 0.6 if k % 2 == 0 else -th * 0.25)))
+        pts += [(x + ww, y0 + droop), (x + ww * 0.12, top), (x, top - th * 0.15), (x - ww * 0.12, top)]
+        out.append(f'<polygon points="{" ".join(f"{a:.0f},{b:.0f}" for a, b in pts)}" fill="{color}"/>')
+        if snow:
+            # a shelf of snow lying on the tier's lower boughs
+            out.append(f'<path d="M{x-ww*0.92:.0f},{y0+droop*0.5:.0f} Q{x:.0f},{y0-th*0.95:.0f} {x+ww*0.92:.0f},{y0+droop*0.5:.0f} '
+                       f'Q{x:.0f},{y0-th*0.25:.0f} {x-ww*0.92:.0f},{y0+droop*0.5:.0f} Z" fill="{snow}" opacity=".6"/>')
+    return "".join(out)
 
 
 def birch(x, base, h, rnd):
-    s = f'<rect x="{x}" y="{base-h}" width="5" height="{h}" fill="#e8e6e0"/>'
-    for _ in range(int(h / 18)):
-        yy = base - rnd.uniform(0, h)
-        s += f'<rect x="{x}" y="{yy:.0f}" width="{rnd.choice([3,5])}" height="2" fill="#4a4a46"/>'
-    for _ in range(4):
-        yy = base - h * rnd.uniform(0.45, 0.95)
-        dx = rnd.choice([-1, 1]) * rnd.uniform(25, 60)
-        s += f'<line x1="{x+2}" y1="{yy:.0f}" x2="{x+2+dx:.0f}" y2="{yy-rnd.uniform(20,50):.0f}" stroke="#6f6c66" stroke-width="1.5"/>'
-    return s
+    """Tapering white trunk, dark lenticels and base, bare branching crown."""
+    tx = x + h * rnd.uniform(-0.04, 0.04)
+    bw = rnd.uniform(5, 8)
+    s = [f'<polygon points="{x-bw/2:.1f},{base+30} {x+bw/2:.1f},{base+30} {tx+1:.1f},{base-h:.0f} {tx-1:.1f},{base-h:.0f}" fill="#e9e7e1"/>',
+         f'<polygon points="{x:.1f},{base+30} {x+bw/2:.1f},{base+30} {tx+1:.1f},{base-h:.0f} {tx:.1f},{base-h:.0f}" fill="#b3b2ad" opacity=".55"/>']
+    for _ in range(int(h / 12)):
+        t = rnd.random() ** 1.4  # marks crowd towards the foot
+        px, py, ww = x + (tx - x) * t, base - h * t, bw * (1 - t * 0.75)
+        s.append(f'<rect x="{px-ww/2:.1f}" y="{py:.0f}" width="{ww*rnd.uniform(0.35,1):.1f}" height="{rnd.uniform(1.2,3):.1f}" fill="#2f2d2a"/>')
+    s.append(f'<polygon points="{x-bw/2:.1f},{base+30} {x+bw/2:.1f},{base+30} {x+bw*0.4:.1f},{base-h*0.1:.0f} {x-bw*0.4:.1f},{base-h*0.07:.0f}" fill="#45403a" opacity=".8"/>')
+    for _ in range(rnd.randint(5, 8)):
+        t = rnd.uniform(0.4, 0.92)
+        side = rnd.choice((-1, 1))
+        s.append(twigs(x + (tx - x) * t, base - h * t, math.pi / 2 - side * rnd.uniform(0.45, 1.05),
+                       h * rnd.uniform(0.07, 0.14), 3, rnd, "#5a534d", 2.4 * (1 - t) + 0.7))
+    s.append(twigs(tx, base - h, math.pi / 2 + rnd.uniform(-0.3, 0.3), h * 0.07, 3, rnd, "#6a625b", 1.0))
+    return "".join(s)
+
+
+def rock(x, y, r, rnd, snow):
+    """A rounded boulder half sunk in the snow: lit top, dusting of snow on
+    the crown, darker shadow side and a blue shadow cast on the snow."""
+    n = rnd.randint(5, 7)
+    pts = [(x - math.cos(math.pi * k / n) * r * 1.15 * rnd.uniform(0.9, 1.05),
+            y - math.sin(math.pi * k / n) * r * rnd.uniform(0.75, 1.0)) for k in range(n + 1)]
+
+    def smooth(p):
+        d = f"M{p[0][0]:.0f},{p[0][1]:.0f}"
+        for (ax, ay), (bx, by) in itertools.pairwise(p[1:-1]):
+            d += f" Q{ax:.0f},{ay:.0f} {(ax+bx)/2:.0f},{(ay+by)/2:.0f}"
+        return d + f" Q{p[-2][0]:.0f},{p[-2][1]:.0f} {p[-1][0]:.0f},{p[-1][1]:.0f}"
+
+    body = smooth(pts) + " Z"
+    cid = f"rk{x:.0f}_{y:.0f}"
+    crown = min(py for _, py in pts)
+    return (f'<clipPath id="{cid}"><path d="{body}"/></clipPath>'
+            f'<ellipse cx="{x+r*0.7:.0f}" cy="{y-r*0.05:.0f}" rx="{r*1.5:.0f}" ry="{r*0.25:.0f}" fill="#8f9ca8" opacity=".5" filter="url(#rsoft)"/>'
+            f'<path d="{body}" fill="#5a5f63"/>'
+            f'<path d="{body}" fill="url(#rockShade)"/>'
+            f'<ellipse cx="{x-r*0.2:.0f}" cy="{crown-r*0.15:.0f}" rx="{r*0.95:.0f}" ry="{r*0.42:.0f}" fill="{snow}" opacity=".8" clip-path="url(#{cid})"/>'
+            f'<ellipse cx="{x:.0f}" cy="{y+r*0.04:.0f}" rx="{r*1.3:.0f}" ry="{r*0.08+2:.0f}" fill="{snow}"/>')
+
+
+def grass(x, y, rnd, n=7):
+    """Dry stalks poking out of the snow."""
+    return "".join(
+        f'<path d="M{x+rnd.uniform(-10,10):.0f},{y} q{rnd.uniform(-6,6):.0f},{-rnd.uniform(10,20):.0f} {rnd.uniform(-10,10):.0f},{-rnd.uniform(18,38):.0f}" '
+        f'stroke="{rnd.choice(("#8a7a5e", "#76684f", "#9a8b6c"))}" stroke-width="1.2" fill="none"/>'
+        for _ in range(n))
+
+
+def stump(x, y, r, snow):
+    return (f'<rect x="{x-r}" y="{y-r*1.7:.0f}" width="{2*r}" height="{r*1.7+6:.0f}" fill="#4a3d31"/>'
+            f'<rect x="{x+r*0.3:.0f}" y="{y-r*1.7:.0f}" width="{r*0.7:.0f}" height="{r*1.7+6:.0f}" fill="#000" opacity=".25"/>'
+            f'<ellipse cx="{x}" cy="{y-r*1.7:.0f}" rx="{r+2}" ry="{r*0.3:.0f}" fill="{snow}"/>'
+            f'<ellipse cx="{x}" cy="{y+4}" rx="{r*1.6:.0f}" ry="{r*0.25+3:.0f}" fill="{snow}"/>')
+
+
+def ridge(pts):
+    """Closed path: a smooth snow line through pts, filled down to the bottom."""
+    d = f"M{pts[0][0]},{H+10} L{pts[0][0]},{pts[0][1]:.0f}"
+    for (ax, ay), (bx, by) in itertools.pairwise(pts):
+        d += f" Q{ax},{ay:.0f} {(ax+bx)/2:.0f},{(ay+by)/2:.0f}"
+    return d + f" L{pts[-1][0]},{pts[-1][1]:.0f} L{pts[-1][0]},{H+10} Z"
+
+
+def snowline(y, amp, rnd, step=160, flat=None):
+    """Points for ridge(); `flat` (x0, x1, y) keeps the line low under the house."""
+    pts = []
+    for x in range(-step, W + 2 * step, step):
+        yy = y + rnd.uniform(-amp, amp)
+        if flat and flat[0] < x < flat[1]:
+            yy = flat[2]
+        pts.append((x, yy))
+    return pts
 
 
 def twigs(x, y, angle, length, depth, rnd, color, width):
@@ -286,7 +367,7 @@ def house(v, x, ground):
     s.append(f'<line x1="{tx}" y1="{rL[1]+4}" x2="{tx+3}" y2="{rL[1]-60}" stroke="#55585a" stroke-width="2"/>')
     for k, w in ((0, 34), (9, 26), (18, 18)):
         s.append(f'<line x1="{tx+3-w/2}" y1="{rL[1]-52+k+w/10:.0f}" x2="{tx+3+w/2}" y2="{rL[1]-52+k-w/10:.0f}" stroke="#55585a" stroke-width="1.5"/>')
-    s.append(f'<path d="M{tx+3},{rL[1]-40} Q{tx-30},{rL[1]-10} {x-140},{rL[1]+30}" stroke="#55585a" stroke-width="1" fill="none"/>')
+    s.append(f'<path d="M{tx+3},{rL[1]-40} Q{tx-40},{rL[1]-10} {x+6},{top-rise+40}" stroke="#55585a" stroke-width="1" fill="none"/>')
 
     # ---- dead growth: vines up the walls, bushes, bare apple trees ----
     for vx in (x + 16, x + 70, L + 40, L + 170, L + 250):
@@ -322,46 +403,120 @@ def house(v, x, ground):
 
 
 def scene(v, rnd):
-    sky = v["sky"]
+    sky, sc = v["sky"], v["snowcap"]
     g = H * 0.80
+    hx = v["house_x"]
     s = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" preserveAspectRatio="xMidYMid slice">',
          '<defs>',
          f'<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{sky[0]}"/><stop offset=".6" stop-color="{sky[1]}"/><stop offset="1" stop-color="{sky[2]}"/></linearGradient>',
-         '<filter id="glow"><feGaussianBlur stdDeviation="18"/></filter>',
+         '<filter id="glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="18"/></filter>',
+         '<filter id="rsoft"><feGaussianBlur stdDeviation="3"/></filter>',
+         '<linearGradient id="rockShade" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".22"/>'
+         '<stop offset=".55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".35"/></linearGradient>',
          f'<linearGradient id="fog" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{v["fog"] % 0}"/><stop offset=".5" stop-color="{v["fog"] % 0.85}"/><stop offset="1" stop-color="{v["fog"] % 0.95}"/></linearGradient>',
+         f'<linearGradient id="nearfog" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{v["fog"] % 0}"/><stop offset=".35" stop-color="{v["fog"] % 0.9}"/><stop offset=".6" stop-color="{v["fog"] % 0.5}"/><stop offset="1" stop-color="{v["fog"] % 0}"/></linearGradient>',
          '</defs>',
          f'<rect width="{W}" height="{H}" fill="url(#sky)"/>',
-         f'<circle cx="{W*v["sun"][2]}" cy="{H*v["sun"][3]}" r="{v["sun"][4]}" fill="{v["sun"][0]}" opacity="{v["sun"][1]}" filter="url(#glow)"/>']
-    # far tree line
-    for i in range(70):
-        x = i * 26 + rnd.uniform(-8, 8)
-        s.append(spruce(x, g - 120, rnd.uniform(70, 130), v["far"]))
-    s.append(f'<rect y="{g-160}" width="{W}" height="200" fill="url(#fog)" opacity="0.9"/>')
-    # power line poles (leaning) with sagging wires
+         f'<circle cx="{W*v["sun"][2]}" cy="{H*v["sun"][3]}" r="{v["sun"][4]}" fill="{v["sun"][0]}" opacity="{v["sun"][1]}" filter="url(#glow)"/>',
+         '<!--sky-->']
+    # far tree line, standing in a distant snowfield
+    for i in range(78):
+        x = i * 23 + rnd.uniform(-8, 8)
+        s.append(spruce(x, g - 122 + rnd.uniform(-6, 6), rnd.uniform(60, 135), v["far"], rnd, sc))
+    s.append(f'<path d="{ridge(snowline(g - 124, 4, rnd, 220))}" fill="{sc}"/>')
+    s.append(f'<rect y="{g-170}" width="{W}" height="240" fill="url(#fog)" opacity="0.9"/>')
+    # power line poles (leaning) with sagging wires; feet hidden by the mid snow
     poles = [(120, 0), (620, 4), (1180, -6), (1680, 3)]
     for px, tilt in poles:
-        s.append(f'<line x1="{px}" y1="{g-40}" x2="{px+tilt}" y2="{g-300}" stroke="{v["mid"]}" stroke-width="7"/>')
+        s.append(f'<line x1="{px}" y1="{g-15}" x2="{px+tilt}" y2="{g-300}" stroke="{v["mid"]}" stroke-width="7"/>')
         s.append(f'<line x1="{px+tilt-30}" y1="{g-285}" x2="{px+tilt+30}" y2="{g-288}" stroke="{v["mid"]}" stroke-width="5"/>')
     for (a, ta), (b, tb) in itertools.pairwise(poles):
         for off in (-26, 26):
             mx = (a + b) / 2
             s.append(f'<path d="M{a+ta+off},{g-285} Q{mx},{g-215} {b+tb+off},{g-285}" stroke="{v["mid"]}" stroke-width="1.6" fill="none"/>')
-    # mid trees
-    for i in range(24):
+    # mid trees, on a low snow bank that buries their trunks
+    for i in range(30):
         x = rnd.uniform(0, W)
-        if abs(x - v["house_x"] - 210) < 330:
+        if abs(x - hx - 210) < 330:
             continue
-        s.append(spruce(x, g - 30, rnd.uniform(140, 230), v["mid"]))
-    s.append(house(v, v["house_x"], g - 20))
+        s.append(spruce(x, g - 32 + rnd.uniform(-6, 6), rnd.uniform(130, 240), v["mid"], rnd, sc))
+    mid = snowline(g - 36, 6, rnd, 140)
+    s.append(f'<path d="{ridge(mid)}" fill="#d3dbe2" transform="translate(0 -4)" filter="url(#rsoft)"/>')
+    s.append(f'<path d="{ridge(mid)}" fill="{sc}"/>')
+    for x, r in ((1250, 9), (1580, 12), (1020, 7)):
+        s.append(rock(x, g - 30, r, rnd, sc))
+    s.append(house(v, hx, g - 20))
     # birches near
     for i in range(9):
         x = rnd.choice([rnd.uniform(0, 260), rnd.uniform(W - 300, W)])
-        s.append(birch(int(x), g + 30, rnd.uniform(380, 620), rnd))
-    # ground snow + near fog
-    s.append(f'<path d="M0,{g} Q{W*0.3},{g-25} {W*0.55},{g+5} T{W},{g-10} L{W},{H} L0,{H} Z" fill="{v["snowcap"]}"/>')
-    s.append(f'<rect y="{g-260}" width="{W}" height="420" fill="url(#fog)" opacity="0.55"/>')
+        s.append(birch(int(x), g + 20 + rnd.uniform(0, 20), rnd.uniform(380, 620), rnd))
+    # ground snow, kept low under the house so its drift meets it cleanly
+    near = snowline(g + 2, 10, rnd, 170, (hx - 120, hx + 560, g + 4))
+    s.append(f'<path d="{ridge(near)}" fill="#d0d9e1" transform="translate(0 -5)" filter="url(#rsoft)"/>')
+    s.append(f'<path d="{ridge(near)}" fill="{sc}"/>')
+    door = hx + 115 + 330 - 33
+    s.append(f'<path d="M{door-14},{g-2} C{door-30},{g+60} {door+120},{g+110} {door+60},{H+10} L{door+250},{H+10} '
+             f'C{door+250},{g+110} {door+10},{g+60} {door+14},{g-2} Z" fill="#cdd6de" opacity=".55" filter="url(#rsoft)"/>')
+    for x, y, r in ((hx - 90, g + 6, 13), (hx + 560, g + 10, 17), (hx + 590, g + 12, 9)):
+        s.append(rock(x, y, r, rnd, sc))
+    s.append(f'<rect y="{g-260}" width="{W}" height="{H-g+270}" fill="url(#nearfog)" opacity="0.55"/>')
+    # foreground: a closer drift with boulders, a stump and dry grass
+    fore = snowline(g + 125, 12, rnd, 260)
+    s.append(f'<path d="{ridge(fore)}" fill="#d6dee5" transform="translate(0 -6)" filter="url(#rsoft)"/>')
+    s.append(f'<path d="{ridge(fore)}" fill="{sc}"/>')
+    for x, y, r in ((170, g + 150, 42), (250, g + 162, 22), (1420, g + 148, 56), (1505, g + 168, 26), (1560, g + 175, 14), (40, g + 120, 30), (620, g + 140, 18), (1760, g + 130, 34)):
+        s.append(rock(x, y, r, rnd, sc))
+    s.append(stump(1180, g + 72, 20, sc))
+    for x, y in ((120, g + 160), (300, g + 168), (1360, g + 160), (1600, g + 178), (1160, g + 76), (900, g + 40),
+                 (hx - 60, g + 14), (680, g + 150), (1000, g + 150)):
+        s.append(grass(x, y, rnd))
     s.append('</svg>')
     return "".join(s)
+
+
+def to_output(x, y):
+    """A scene point in output pixels: the SVG covers OUT + 60 px (the blur's
+    margin, see main) and is centred, like preserveAspectRatio slice."""
+    box_w, box_h = OUT_W + 60, OUT_H + 60
+    k = max(box_w / W, box_h / H)
+    return (box_w - W * k) / 2 - 30 + x * k, (box_h - H * k) / 2 - 30 + y * k, k
+
+
+def add_stars(img, sky, count, moon):
+    """Stars pricked into the open sky of `img`, drawn sharp after the blur so
+    they read as stars, not falling snow: mostly sub-pixel points in white,
+    blue and warm tints, a few brighter ones with a faint cross. They only go
+    where `img` still matches `sky` (the same page with nothing but the sky),
+    so no star sits on a tree, the house or the fog. `moon` is (x, y, r) in
+    output pixels and stays clear too."""
+    if not count:
+        return img
+    ss = 4  # drawn 4x and scaled down, for smooth sub-pixel dots
+    layer = Image.new("RGBA", (OUT_W * ss, OUT_H * ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    sr = random.Random(2)
+    top = OUT_H * (0.55 if count > 50 else 0.3)
+    n = 0
+    while n < count:
+        x, y = sr.uniform(0, OUT_W), top * sr.random() ** 1.25  # thinning towards the horizon
+        if math.dist((x, y), moon[:2]) < moon[2]:
+            continue
+        n += 1
+        tint = sr.choice(((255, 255, 255), (255, 255, 255), (214, 228, 255), (255, 240, 214)))
+        roll = sr.random()
+        r, a = (0.9, 255) if roll < 0.05 else (0.65, 235) if roll < 0.2 else (sr.uniform(0.35, 0.5), sr.randint(150, 230))
+        X, Y, R = x * ss, y * ss, r * ss
+        d.ellipse((X - R, Y - R, X + R, Y + R), fill=(*tint, a))
+        if roll < 0.05:
+            arm = sr.uniform(2.5, 3.5) * ss
+            d.line((X - arm, Y, X + arm, Y), fill=(*tint, 110), width=1)
+            d.line((X, Y - arm, X, Y + arm), fill=(*tint, 110), width=1)
+    layer = layer.resize((OUT_W, OUT_H), Image.Resampling.LANCZOS)
+    open_sky = ImageChops.difference(img.convert("RGB"), sky.convert("RGB")).convert("L")
+    open_sky = open_sky.point(lambda p: 255 if p < 4 else 0).filter(ImageFilter.MinFilter(9))
+    out = img.convert("RGB")
+    out.paste(layer.convert("RGB"), mask=ImageChops.multiply(layer.getchannel("A"), open_sky))
+    return out
 
 
 def main() -> None:
@@ -375,23 +530,32 @@ def main() -> None:
         v = {**V, **changes}
         svg = scene(v, random.Random(7)).replace(f'width="{W}" height="{H}"', 'width="100%" height="100%"', 1)
         grade = (
-            f'<div style="position:absolute;inset:0;background:{v["grade"]};mix-blend-mode:multiply"></div>'
+            f'<div style="position:absolute;inset:-30px;background:{v["grade"]};mix-blend-mode:multiply"></div>'
             if v["grade"] else ""
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            page, png = Path(tmp) / "scene.html", Path(tmp) / "scene.png"
-            page.write_text(
-                f'<!doctype html><html><body style="margin:0;width:{OUT_W}px;height:{OUT_H}px;'
-                f'overflow:hidden;background:{v["sky"][1]}"><div style="position:absolute;inset:-30px;'
-                f'filter:blur({BLUR}px) saturate(.85)">{svg}</div>{grade}</body></html>'
-            )
-            subprocess.run(
-                [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                 f"--window-size={OUT_W},{OUT_H}", f"--screenshot={png}", page.as_uri()],
-                check=True, capture_output=True,
-            )
-            out = OUT_DIR / name
-            Image.open(png).convert("RGB").save(out, quality=88, optimize=True, progressive=True)
+
+        def shoot(body):
+            with tempfile.TemporaryDirectory() as tmp:
+                page, png = Path(tmp) / "scene.html", Path(tmp) / "scene.png"
+                page.write_text(
+                    f'<!doctype html><html><body style="margin:0;width:{OUT_W}px;height:{OUT_H}px;'
+                    f'overflow:hidden;background:{v["sky"][1]}"><div style="position:absolute;inset:-30px;'
+                    f'filter:blur({BLUR}px) saturate(.85)">{body}</div>{grade}</body></html>'
+                )
+                subprocess.run(
+                    [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+                     f"--window-size={OUT_W},{OUT_H}", f"--screenshot={png}", page.as_uri()],
+                    check=True, capture_output=True,
+                )
+                return Image.open(png).convert("RGB")
+
+        img = shoot(svg)
+        if v["stars"]:
+            sky = shoot(svg.split("<!--sky-->")[0] + "</svg>")
+            mx, my, k = to_output(W * v["sun"][2], H * v["sun"][3])
+            img = add_stars(img, sky, v["stars"], (mx, my, v["sun"][4] * k * 1.6))
+        out = OUT_DIR / name
+        img.save(out, quality=88, optimize=True, progressive=True)
         print(out)
 
 
