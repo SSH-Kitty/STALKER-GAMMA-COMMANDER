@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QComboBox,
@@ -142,7 +142,39 @@ class _ElidedLabel(QLabel):
         )
 
 
-class _ComponentRow(QFrame):
+class _FocusClickGuard:
+    """Mixin for widgets that open a folder: tells apart the click that
+    only brings COMMANDER back to the front, so it can be ignored."""
+
+    _activated_at = 0.0
+    _window_active = True
+
+    def event(self, event) -> bool:
+        # Track activation from the events themselves: on KDE Wayland the
+        # focus click arrives before WindowActivate while isActiveWindow()
+        # already reports True. Child widgets never get ActivationChange.
+        if event.type() == QEvent.Type.WindowActivate:
+            self._window_active = True
+            self._activated_at = time.monotonic()
+        elif event.type() == QEvent.Type.WindowDeactivate:
+            self._window_active = False
+        return super().event(event)
+
+    def _is_focus_click(self) -> bool:
+        return not self._window_active or time.monotonic() - self._activated_at < 0.3
+
+
+class _FolderButton(_FocusClickGuard, QPushButton):
+    """A Quick actions folder button that ignores the focus click."""
+
+    def mousePressEvent(self, event) -> None:
+        if self._is_focus_click():
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class _ComponentRow(_FocusClickGuard, QFrame):
     """An Installation status row: bold name over a shortened path, a fix
     button shown only while the component is missing, and the state on the
     right. Clicking the row runs ``on_click``."""
@@ -164,6 +196,7 @@ class _ComponentRow(QFrame):
         self.state = "pending"
         self._on_click = on_click
         self._on_change = on_change
+        self._focus_click = False
         self._pending_text = pending_text or tr("Unknown")
         if on_click is not None:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -224,9 +257,14 @@ class _ComponentRow(QFrame):
     def set_status_tooltip(self, text: str) -> None:
         self.setToolTip(text)
 
+    def mousePressEvent(self, event) -> None:
+        self._focus_click = self._is_focus_click()
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:
         if (
             self._on_click is not None
+            and not self._focus_click
             and event.button() == Qt.MouseButton.LeftButton
             and self.rect().contains(event.position().toPoint())
         ):
@@ -258,6 +296,39 @@ def _field(label: str, control: QWidget) -> QVBoxLayout:
     column.addWidget(caption)
     column.addWidget(control)
     return column
+
+
+def _add_divided(
+    layout: QVBoxLayout,
+    title: QWidget,
+    right_header: QHBoxLayout,
+    left: QGridLayout,
+    right: QGridLayout,
+    *,
+    gap: int,
+) -> None:
+    """Title over `left`, `right_header` over `right`, a divider midway between.
+
+    The divider spans the header row too, so it ends as far from the card's
+    top edge as from its bottom. Both sides keep their natural width.
+    """
+    grid = QGridLayout()
+    # Columns 1 and 3 sit either side of the divider and add their own
+    # spacing even when empty, so half of `gap` each makes `gap` in all.
+    grid.setHorizontalSpacing(gap // 2)
+    grid.setVerticalSpacing(layout.spacing())
+    grid.addWidget(title, 0, 0, 1, 2)
+    grid.addLayout(right_header, 0, 3, 1, 2)
+    divider = QFrame()
+    divider.setObjectName("vDivider")
+    divider.setFixedWidth(1)
+    grid.addWidget(divider, 0, 2, 2, 1)
+    grid.addLayout(left, 1, 0)
+    grid.addLayout(right, 1, 4)
+    grid.setColumnStretch(1, 1)
+    grid.setColumnStretch(3, 1)
+    grid.setRowStretch(1, 1)
+    layout.addLayout(grid)
 
 
 class _Swatch(QWidget):
@@ -699,11 +770,6 @@ class DashboardPage(QWidget):
             _field(tr("Download threads"), self.download_threads_combo), 1, 1
         )
         body.addLayout(grid, 3)
-
-        divider = QFrame()
-        divider.setObjectName("vDivider")
-        divider.setFixedWidth(1)
-        body.addWidget(divider)
 
         state = load_gui_settings()
         playtime_seconds = state.get("playtime_seconds", {}).get(profile.profile_name, 0.0)
@@ -1326,7 +1392,6 @@ class DashboardPage(QWidget):
         # Achievements on the neighbouring cards.
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(section_label(tr("Updates")))
         header.addStretch(1)
         check_button = QPushButton(
             tr("Checking") if self._update_checking else "⟳  " + tr("Check for updates")
@@ -1341,17 +1406,14 @@ class DashboardPage(QWidget):
         )
         check_button.clicked.connect(self._start_update_check)
         header.addWidget(check_button)
-        layout.addLayout(header)
 
         rows = QGridLayout()
         rows.setHorizontalSpacing(16)
         rows.setVerticalSpacing(8)
-        rows.setColumnStretch(3, 1)
-        # History on the right, past a divider like Profile overview's.
+        # History on the right, past a divider.
         history = QGridLayout()
         history.setHorizontalSpacing(16)
         history.setVerticalSpacing(8)
-        history.setColumnStretch(2, 1)
 
         def add_row(name: str, value: str, state: str | None = None, ok=None, action=None, rows=rows):
             """One line: dim name | value | coloured dot + state | button."""
@@ -1438,15 +1500,7 @@ class DashboardPage(QWidget):
         # no install step, so its own package stands in.
         commander_file = commander_appimage_path() or Path(__file__).parent.parent / "__init__.py"
         add_row(tr("COMMANDER last updated"), ago(commander_file) or tr("Unknown"), rows=history)
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        body.addLayout(rows, 1)
-        divider = QFrame()
-        divider.setObjectName("vDivider")
-        divider.setFixedWidth(1)
-        body.addWidget(divider)
-        body.addLayout(history, 1)
-        layout.addLayout(body)
+        _add_divided(layout, section_label(tr("Updates")), header, rows, history, gap=16)
 
         # Errors and other long results get their own line under the rows.
         if status_kind == "warn":
@@ -1507,7 +1561,7 @@ class DashboardPage(QWidget):
                 (tr("Open log folder"), "logs"),
             ]
             for i, (text, target) in enumerate(buttons):
-                btn = QPushButton(text)
+                btn = _FolderButton(text)
                 if target == "logs":
                     from ..config import logs_dir
 

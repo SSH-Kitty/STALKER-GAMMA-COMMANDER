@@ -1146,7 +1146,7 @@ QPushButton#discordButton:hover {
     border: 1px solid #5865F2;
 }
 QPushButton#githubLink, QPushButton#discordLink {
-    color: $link;
+    color: $text;
     padding: 0 2px 0 8px;
     border: none;
     background: transparent;
