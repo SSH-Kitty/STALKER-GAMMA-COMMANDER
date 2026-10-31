@@ -1441,6 +1441,9 @@ class ModManagerPage(QWidget):
         self.tree.header().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
         )
+        # Sized from the rows on screen, not all ~1000: measuring every row
+        # on each layout made resizing the window with this page open lag.
+        self.tree.header().setResizeContentsPrecision(0)
         # MO2 writes modlist.txt with file-top as the HIGHEST-priority mod
         # (rendered at the BOTTOM of MO2's own list) and file-bottom as the
         # lowest-priority mod (rendered at the TOP) - confirmed directly

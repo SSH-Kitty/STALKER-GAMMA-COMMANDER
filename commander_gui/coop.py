@@ -864,15 +864,16 @@ def _options_file(anomaly, gamma, mo2_profile) -> Path:
     if install_kind(anomaly) == KIND_ANOMALY:
         return Path(anomaly).expanduser() / "gamedata" / "configs" / "axr_options.ltx"
     gamma = Path(gamma).expanduser()
-    candidates = dict(mcm_files(gamma))
     overwrite = "overwrite/gamedata/configs/axr_options.ltx"
-    if overwrite in candidates:
-        return candidates[overwrite]
+    if (gamma / overwrite).is_file():
+        return gamma / overwrite
+    # Looked up mod by mod, stopping at the first: globbing every mod folder
+    # for the file cost the Multiplayer page ~10 ms on each visit.
     try:
         for status_, name in modlist.entries(modlist.read_lines(_modlist(gamma, mo2_profile))):
-            rel = f"mods/{name}/gamedata/configs/axr_options.ltx"
-            if status_ == "Enabled" and rel in candidates:
-                return candidates[rel]
+            candidate = gamma / "mods" / name / "gamedata" / "configs" / "axr_options.ltx"
+            if status_ == "Enabled" and candidate.is_file():
+                return candidate
     except (CoopError, OSError, ValueError):
         pass
     return gamma / overwrite

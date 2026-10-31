@@ -550,6 +550,12 @@ def _apply_theme(app: QApplication, config: dict) -> None:
 
 
 def main() -> int:
+    # A video playing (a YouTube embed in the comments) asked the GPU for a
+    # frame buffer it couldn't make; the GPU context was lost and the whole
+    # page went black. Decoded on the CPU instead, it plays fine.
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(
+        filter(None, (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS"), "--disable-accelerated-video-decode"))
+    )
     app = QApplication(sys.argv)
     app.setApplicationName("ModDB Browser")
     app.setApplicationDisplayName("ModDB Browser")

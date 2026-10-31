@@ -16,6 +16,7 @@ _CLICKABLE = (QAbstractButton, QTabBar, QComboBox)
 # Show as well as Polish: a button polished while being built (before it sits
 # in a window) is only caught once it is shown.
 _EVENTS = (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.EnabledChange)
+_WHEEL = QEvent.Type.Wheel
 
 
 class PointerCursorFilter(QObject):
@@ -36,6 +37,36 @@ class PointerCursorFilter(QObject):
             widget.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             widget.unsetCursor()
+
+
+class AppEventFilter(QObject):
+    """Hand cursors and smooth wheel scrolling (:mod:`smooth_scroll`) in one
+    application-wide filter. Every Qt event in the app - each paint, layout
+    and resize - passes through every Python filter, so two separate ones
+    cost twice the trips into Python for what is almost always nothing."""
+
+    def __init__(self, window: QWidget) -> None:
+        super().__init__(window)
+        from .smooth_scroll import SmoothWheelScroller
+
+        self._scroller = SmoothWheelScroller(window)
+
+    def eventFilter(self, obj, event) -> bool:
+        kind = event.type()
+        if kind == _WHEEL:
+            return self._scroller.wheel(obj, event)
+        if kind in _EVENTS and isinstance(obj, _CLICKABLE):
+            PointerCursorFilter._apply(obj)
+        return False
+
+
+def install_app_filter(window: QWidget) -> AppEventFilter | None:
+    app = QApplication.instance()
+    if app is None:
+        return None
+    events = AppEventFilter(window)
+    app.installEventFilter(events)
+    return events
 
 
 def install(window: QWidget) -> PointerCursorFilter | None:

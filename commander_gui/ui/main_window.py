@@ -397,12 +397,11 @@ class MainWindow(QMainWindow):
         self.apply_title_bar(bool(gui_state.get("custom_title_bar", True)))
         # Mouse-wheel scrolling glides instead of jumping, in every page,
         # list and text box of this window.
-        from .smooth_scroll import install as install_smooth_scroll
+        # Hand cursor over everything clickable, too - one app-wide filter
+        # for both.
+        from .pointer_cursor import install_app_filter
 
-        self._smooth_scroll = install_smooth_scroll(self)
-        from .pointer_cursor import install as install_pointer_cursor
-
-        self._pointer_cursor = install_pointer_cursor(self)
+        self._app_filter = install_app_filter(self)
         self.tabs.setCurrentIndex(0)
         QTimer.singleShot(0, self._maybe_check_for_updates_in_background)
         QTimer.singleShot(0, self._check_commander_update_status)
@@ -1787,10 +1786,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             # Restyling sends every widget tens of thousands of Polish and
-            # StyleChange events; through the two Python app-wide filters
-            # they took half the switch. Neither needs them: a restyle
+            # StyleChange events; through the Python app-wide filter they
+            # took half the switch. It needs none of them: a restyle
             # neither scrolls nor touches cursors.
-            filters = [f for f in (getattr(self, "_smooth_scroll", None), getattr(self, "_pointer_cursor", None)) if f is not None]
+            filters = [f for f in (getattr(self, "_app_filter", None),) if f is not None]
             for event_filter in filters:
                 app.removeEventFilter(event_filter)
             try:

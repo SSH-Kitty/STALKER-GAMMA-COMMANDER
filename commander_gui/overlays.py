@@ -244,6 +244,14 @@ def colours_changed(data: dict) -> bool:
 
 def lut(data: dict, size: int = 17) -> str:
     """A .cube colour lookup table for the colour sliders (red runs fastest)."""
+    # Cached: the Play page's launch preview writes the config on every
+    # refresh, and the table takes ~5000 colour conversions.
+    return _lut(tuple(data[f"vkbasalt_{name}"] for name in VKBASALT_COLOURS), size)
+
+
+@functools.lru_cache(maxsize=4)
+def _lut(colours: tuple, size: int) -> str:
+    data = {f"vkbasalt_{name}": value for name, value in zip(VKBASALT_COLOURS, colours)}
     rows = [f"LUT_3D_SIZE {size}"]
     steps = [i / (size - 1) for i in range(size)]
     for b in steps:

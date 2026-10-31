@@ -801,7 +801,11 @@ def _set_ini_value(ini: Path, section: str, key: str, value: str) -> None:
         if current != header:
             out += ["", f"[{section}]"]
         out.append(wanted)
-    write_text(ini, newline.join(out) + newline)
+    new_text = newline.join(out) + newline
+    # Already set: no rewrite (the Play page's launch preview gets here on
+    # every refresh, and each write is an fsync).
+    if new_text != text:
+        write_text(ini, new_text)
 
 
 def _qt_ini_bytes(value: str) -> str:

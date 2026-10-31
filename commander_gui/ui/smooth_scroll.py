@@ -45,7 +45,11 @@ class SmoothWheelScroller(QObject):
 
     # -- filter -----------------------------------------------------------
     def eventFilter(self, obj, event) -> bool:
-        if event.type() != QEvent.Type.Wheel or not isinstance(obj, QWidget):
+        return event.type() == QEvent.Type.Wheel and self.wheel(obj, event)
+
+    def wheel(self, obj, event) -> bool:
+        """A wheel event: glide it, or False to let Qt have it."""
+        if not isinstance(obj, QWidget):
             return False
         area = obj.parentWidget()
         if not isinstance(area, QAbstractScrollArea) or area.viewport() is not obj:

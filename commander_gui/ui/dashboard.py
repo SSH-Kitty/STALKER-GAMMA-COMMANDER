@@ -26,6 +26,7 @@ from .. import __version_label__, coop, romeo
 from ..achievements import ACHIEVEMENTS, unlocked_count
 from ..game_stats import STAT_FIELDS, SaveStats, latest_save_stats, stat_value
 from ..gui_settings import configured_wine_prefix, load_gui_settings, save_gui_settings
+from ..i18n import active_language
 from ..launcher import find_extra_protons, select_mo2_profile
 from ..self_update import commander_appimage_path
 from ..settings import CliSettings
@@ -414,6 +415,7 @@ class DashboardPage(QWidget):
         self._size_task: BackgroundTask | None = None
         self._mo2_profiles_task: BackgroundTask | None = None
         self._set_mo2_selected_task: BackgroundTask | None = None
+        self._profile_card_key: tuple | None = None
         # Re-walking a ~150GB install tree on every Dashboard visit is
         # expensive; reuse a recent scan of the same paths instead.
         self._size_cache_key: tuple[str, str, str] | None = None
@@ -667,8 +669,32 @@ class DashboardPage(QWidget):
 
     def _render_profile(self) -> None:
         layout = self.profile_card.layout()
-        clear_layout(layout)
         profile = self.settings.active_profile
+        try:
+            coop_mode = (
+                coop.status(profile.anomaly)
+                if profile is not None and coop.is_active(profile.anomaly)
+                else None
+            )
+        except OSError:
+            coop_mode = None
+        # Building this card's four dropdowns is most of a Dashboard visit:
+        # skip it when nothing it shows changed - unless a dropdown is still
+        # greyed out by a switch in flight, which only a rebuild undoes.
+        state = load_gui_settings()
+        name = profile.profile_name if profile is not None else None
+        key = (
+            repr(profile), [p.profile_name for p in self.settings.profiles], coop_mode,
+            find_extra_protons(), state.get("runner"), active_language(),
+            format_playtime(state.get("playtime_seconds", {}).get(name, 0.0)),
+            format_last_played(state.get("last_played_ts", {}).get(name)),
+        )
+        if key == self._profile_card_key and all(
+            combo.isEnabled() for combo in self.profile_card.findChildren(QComboBox)
+        ):
+            return
+        self._profile_card_key = key
+        clear_layout(layout)
         if profile is None:
             layout.addWidget(section_label(tr("No Active Profile")))
             layout.addWidget(
@@ -686,10 +712,6 @@ class DashboardPage(QWidget):
         header.addStretch(1)
         # Co-op badge: the game's engine is not the stock one, worth seeing
         # before pressing Play. Click it to manage co-op.
-        try:
-            coop_mode = coop.status(profile.anomaly) if coop.is_active(profile.anomaly) else None
-        except OSError:
-            coop_mode = None
         if coop_mode is not None:
             reverted = coop_mode == coop.REVERTED
             badge = QPushButton(tr("Engine reverted") if reverted else tr("Co-op active"))
@@ -779,7 +801,6 @@ class DashboardPage(QWidget):
         )
         body.addWidget(_holder(grid), 3)
 
-        state = load_gui_settings()
         playtime_seconds = state.get("playtime_seconds", {}).get(profile.profile_name, 0.0)
         last_played_ts = state.get("last_played_ts", {}).get(profile.profile_name)
         tiles = QVBoxLayout()

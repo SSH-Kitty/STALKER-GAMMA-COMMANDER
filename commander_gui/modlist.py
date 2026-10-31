@@ -7,6 +7,7 @@ allowing per-mod status changes and deletion.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from datetime import datetime
@@ -16,14 +17,13 @@ from pathlib import Path
 from .atomic import split_lines, write_bytes, write_text
 
 
+#: Path separators and control characters - one regex search instead of a
+#: per-character loop, which made parsing a ~1000-line modlist slow.
+_BAD_NAME_CHARS = re.compile(r"[/\\\x00-\x1f\x7f]")
+
+
 def _valid_name(name: str) -> bool:
-    return (
-        bool(name)
-        and name not in {".", ".."}
-        and "/" not in name
-        and "\\" not in name
-        and not any(ord(char) < 32 or ord(char) == 127 for char in name)
-    )
+    return bool(name) and name not in {".", ".."} and not _BAD_NAME_CHARS.search(name)
 
 
 def _reject_status_prefix(name: str) -> None:
@@ -176,11 +176,12 @@ def count_mods(lines: list[str], mods_dir: str | Path | None = None) -> tuple[in
     """
     total = enabled = 0
     seen: set[str] = set()
-    base = Path(mods_dir) if mods_dir is not None else None
+    # One directory listing instead of a stat per mod.
+    folders = _mod_folders(mods_dir) if mods_dir is not None else None
     for status, name in entries(lines):
         if separator_name(name) is not None:
             continue
-        if base is not None and not (base / name).is_dir():
+        if folders is not None and name not in folders:
             continue
         if name in seen:
             continue
@@ -189,6 +190,15 @@ def count_mods(lines: list[str], mods_dir: str | Path | None = None) -> tuple[in
         if status == "Enabled":
             enabled += 1
     return enabled, total
+
+
+def _mod_folders(mods_dir: str | Path) -> set[str]:
+    """Names of the folders (or links to folders) in ``mods_dir``."""
+    try:
+        with os.scandir(mods_dir) as it:
+            return {entry.name for entry in it if entry.is_dir()}
+    except OSError:
+        return set()
 
 
 #: Only these top-level subfolders of a mod are actually virtualized into

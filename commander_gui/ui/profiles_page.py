@@ -668,7 +668,17 @@ class CompareView(QWidget):
         )
         self.compare_filter.show()
         shown = differences if self.compare_filter.currentIndex() == 0 else rows
-        self._fill_compare_table(shown, tint=self.compare_filter.currentIndex() == 1)
+        # Refilling and re-measuring ~1000 rows is the slow part of opening
+        # this page; skip both when nothing on screen would change.
+        signature = (
+            left_lines, right_lines, self.compare_filter.currentIndex(),
+            self.compare_left_combo.currentText(), self.compare_combo.currentText(),
+            tuple(active_theme_tokens().items()), tr("Enabled"),
+        )
+        unchanged = signature == getattr(self, "_compare_signature", None)
+        self._compare_signature = signature
+        if not unchanged:
+            self._fill_compare_table(shown, tint=self.compare_filter.currentIndex() == 1)
         # Nothing to list (identical lists, "Differences only"): say so
         # instead of showing an empty table.
         self.compare_table.setVisible(bool(shown))
@@ -695,6 +705,8 @@ class CompareView(QWidget):
             item = self.compare_table.horizontalHeaderItem(column)
             item.setText(text)
             item.setToolTip(label)
+        if unchanged:
+            return
         for column in (1, 2):
             self.compare_table.resizeColumnToContents(column)
             # A little breathing room between the two status columns.
@@ -703,6 +715,7 @@ class CompareView(QWidget):
             )
 
     def _compare_message(self, text: str) -> None:
+        self._compare_signature = None
         self.compare_empty.setText(text)
         self.compare_empty.show()
         self.compare_table.hide()
