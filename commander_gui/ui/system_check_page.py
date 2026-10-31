@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import gui_settings, overlays
+from .. import gui_settings, launch_options, overlays
 from ..cli_runner import cli_binary_path
 from ..dependencies import (
     configured_tool,
@@ -491,6 +491,19 @@ def _collect_checks() -> tuple[list[dict[str, str]], bool, dict[str, str]]:
             "manager": "" if mangohud_found else (manager or ""),
         }
     )
+    # Proton only uses NTSync when the kernel module is loaded and the
+    # device is open to the user; otherwise the launch option does nothing.
+    ntsync = launch_options.ntsync_available()
+    loaded = os.path.exists(launch_options.NTSYNC_DEVICE)
+    if ntsync:
+        detail, command = tr("Ready. Turn it on under Launch options on the Play page."), ""
+    elif loaded:
+        detail = tr("The ntsync module is loaded, but you can't open {path}.", path=launch_options.NTSYNC_DEVICE)
+        command = "echo 'KERNEL==\"ntsync\", MODE=\"0666\"' | sudo tee /etc/udev/rules.d/99-ntsync.rules && sudo udevadm trigger"
+    else:
+        detail = tr("Optional. Needs Linux 6.14 or newer with the ntsync module loaded.")
+        command = "echo ntsync | sudo tee /etc/modules-load.d/ntsync.conf && sudo modprobe ntsync"
+    checks.append({"label": "NTSync", "state": "ready" if ntsync else "optional", "detail": detail, "command": command})
     # Cross-reference checks with saved manual overrides — if the user set a
     # custom path that is invalid, downgrade the check to "missing".
     saved_overrides = gui_settings.load_gui_settings().get("tool_overrides") or {}
@@ -565,7 +578,7 @@ CHECK_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("Runtime Libraries", ("Runtime libraries",)),
     ("Proton Builds", ("Proton Builds",)),
-    ("Optional Enhancements", ("GameMode", "MangoHud")),
+    ("Optional Enhancements", ("GameMode", "MangoHud", "NTSync")),
 )
 
 

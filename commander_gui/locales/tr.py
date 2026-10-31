@@ -3643,4 +3643,9 @@ TRANSLATIONS: dict[str, str] = {
     'Turn these off, or your friend adds them.': 'Bunları kapat veya arkadaşın eklesin.',
     'Mods in a different place': 'Farklı yerdeki modlar',
     'Same mods, different load order. Match the order in Mod Manager.': "Aynı modlar, farklı yükleme sırası. Sırayı Mod Yöneticisi'nde eşitle.",
+    'NTSync': 'NTSync',
+    'Let the Linux kernel handle Windows sync (NTSync). Can raise FPS and smooth stutter. Needs Linux 6.14 or newer and GE-Proton 10-9 or newer. System Check shows if your system has it.': "Windows senkronizasyonunu Linux çekirdeğine bırakır (NTSync). FPS'i artırabilir ve takılmaları azaltabilir. Linux 6.14 veya üstü ve GE-Proton 10-9 veya üstü gerekir. Sistem Denetimi sisteminde olup olmadığını gösterir.",
+    'Ready. Turn it on under Launch options on the Play page.': 'Hazır. Oyna sayfasındaki Başlatma seçeneklerinden aç.',
+    "The ntsync module is loaded, but you can't open {path}.": 'ntsync modülü yüklü, ancak {path} açılamıyor.',
+    'Optional. Needs Linux 6.14 or newer with the ntsync module loaded.': 'İsteğe bağlı. ntsync modülü yüklü Linux 6.14 veya üstü gerekir.',
 }

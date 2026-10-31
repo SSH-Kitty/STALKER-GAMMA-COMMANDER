@@ -607,7 +607,7 @@ class MultiplayerPageTests(unittest.TestCase):
             page = MultiplayerPage(window)
             page.refresh()
             self.assertEqual(page.version_stat.value.text(), "Custom")
-            self.assertTrue(page.host_pill.isChecked())
+            self.assertTrue(page.role_combo.currentData())
             self.assertEqual(page.tab_group.checkedId(), 0)
         page.deleteLater()
 

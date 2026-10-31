@@ -1128,6 +1128,7 @@ class PlayPage(QWidget):
                 wrapper = option.split()[0]
                 ready = (
                     overlays.mangohud_available() if wrapper == overlays.MANGOHUD
+                    else launch_options.ntsync_available() if option == launch_options.NTSYNC
                     else "=" in wrapper or wrapper.startswith("-") or bool(shutil.which(wrapper))
                 )
                 chips.append((tr(label), ready))

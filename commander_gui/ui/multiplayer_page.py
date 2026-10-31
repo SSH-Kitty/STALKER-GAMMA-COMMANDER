@@ -56,7 +56,7 @@ from .common import (
     steam_running,
     tr,
 )
-from .dashboard import _TITLE_ROW_H, _card_title, _field
+from .dashboard import _TITLE_ROW_H, _card_title, _field, _field_combo
 from .dialogs import InputDialog as QInputDialog
 from .dialogs import MessageBox as QMessageBox
 
@@ -165,6 +165,22 @@ def _pills(*buttons: QPushButton) -> QWidget:
         layout.addWidget(button)
     layout.addStretch(1)
     return row
+
+
+def _choice(slot, *items: tuple) -> QWidget:
+    """A dropdown like the Dashboard's Profile overview ones; slot gets the
+    data of the item the user picks. Items are (text, data[, tooltip])."""
+    combo = _field_combo()
+    for text, data, *tip in items:
+        combo.addItem(text, data)
+        if tip:
+            combo.setItemData(combo.count() - 1, tip[0], Qt.ItemDataRole.ToolTipRole)
+    combo.activated.connect(lambda index: slot(combo.itemData(index)))
+    return combo
+
+
+def _select(combo, data) -> None:
+    combo.setCurrentIndex(combo.findData(data))
 
 
 def _tab(text: str, name: str = "segment") -> QPushButton:
@@ -538,13 +554,10 @@ class MultiplayerPage(QWidget):
         self.intro_label = info_label("")
         setup.addWidget(self.intro_label)
         # Only asked when the profile has GAMMA; plain Anomaly has no choice.
-        self.gamma_pill = _tab(tr("GAMMA"))
-        self.anomaly_pill = _tab(tr("Anomaly"))
-        for button, kind in ((self.gamma_pill, coop.KIND_GAMMA), (self.anomaly_pill, coop.KIND_ANOMALY)):
-            button.clicked.connect(lambda _c=False, k=kind: self._pick_kind(k))
+        self.kind_combo = _choice(self._pick_kind, (tr("GAMMA"), coop.KIND_GAMMA), (tr("Anomaly"), coop.KIND_ANOMALY))
         self.kind_box = QWidget()
         self.kind_box.setObjectName("panelTransparent")
-        kind_column = _field(tr("Play co-op on"), _pills(self.gamma_pill, self.anomaly_pill))
+        kind_column = _field(tr("Play co-op on"), self.kind_combo)
         kind_column.setContentsMargins(0, 0, 0, 0)
         self.kind_box.setLayout(kind_column)
         setup.addWidget(self.kind_box)
@@ -591,27 +604,20 @@ class MultiplayerPage(QWidget):
         dash.setSpacing(14)
         body = QHBoxLayout()
         body.setSpacing(24)
-        # Set by the pills below; kept as widgets so they save like the rest.
+        # Set by the dropdowns below; kept as widgets so they save like the rest.
         for key in ("xrr_host_session", "xrr_host_steam"):
             self._check(key, "").setParent(card)
             self._widgets[key].hide()
-        self.host_pill = _tab(tr("Hosting"))
-        self.join_pill = _tab(tr("Joining"))
-        for button, host in ((self.host_pill, True), (self.join_pill, False)):
-            button.clicked.connect(lambda _c=False, h=host: self._widgets["xrr_host_session"].setChecked(h))
+        self.role_combo = _choice(self._widgets["xrr_host_session"].setChecked, (tr("Hosting"), True), (tr("Joining"), False))
         # Steam or LAN networking: the whole party has to agree on it.
-        self.steam_pill = _tab(tr("Steam"))
-        self.lan_pill = _tab(tr("LAN"))
-        for button, steam in ((self.steam_pill, True), (self.lan_pill, False)):
-            button.clicked.connect(lambda _c=False, on=steam: self._widgets["xrr_host_steam"].setChecked(on))
+        self.session_combo = _choice(self._widgets["xrr_host_steam"].setChecked, (tr("Steam"), True), (tr("LAN"), False))
         # The Steam app a Steam session runs as. Applied at once (only the
         # steam_appid.txt files change), and the whole party must match.
-        self.cop_pill = _tab("Call of Pripyat")
-        self.cop_pill.setToolTip(tr("Everyone needs Call of Pripyat in their Steam library."))
-        self.spacewar_pill = _tab("Spacewar")
-        self.spacewar_pill.setToolTip(tr("Valve's free Steamworks test app: nothing to buy. Steam shows you as playing Spacewar."))
-        for button, appid in ((self.cop_pill, coop.COP_APPID), (self.spacewar_pill, coop.SPACEWAR_APPID)):
-            button.clicked.connect(lambda _c=False, a=appid: self._set_appid(a))
+        self.app_combo = _choice(
+            self._set_appid,
+            ("Call of Pripyat", coop.COP_APPID, tr("Everyone needs Call of Pripyat in their Steam library.")),
+            ("Spacewar", coop.SPACEWAR_APPID, tr("Valve's free Steamworks test app: nothing to buy. Steam shows you as playing Spacewar.")),
+        )
         port = self._spin("xrr_host_lan_port", 1024, 65535)
         port.setToolTip(tr("Only for LAN sessions. To play over the internet, forward this UDP port on your router."))
         port.setFixedWidth(160)
@@ -638,20 +644,17 @@ class MultiplayerPage(QWidget):
         port_row.addStretch(1)
         # GAMMA or Anomaly: only with GAMMA, plain Anomaly alone has nothing
         # to switch to. Moves the install at once, no zip needed.
-        self.dash_gamma_pill = _tab(tr("GAMMA"))
-        self.dash_anomaly_pill = _tab(tr("Anomaly"))
-        for button, kind in ((self.dash_gamma_pill, coop.KIND_GAMMA), (self.dash_anomaly_pill, coop.KIND_ANOMALY)):
-            button.clicked.connect(lambda _c=False, k=kind: self._switch_kind(k))
+        self.dash_kind_combo = _choice(self._switch_kind, (tr("GAMMA"), coop.KIND_GAMMA), (tr("Anomaly"), coop.KIND_ANOMALY))
         self.dash_kind_box = QWidget()
         self.dash_kind_box.setObjectName("panelTransparent")
         kind_row = QHBoxLayout(self.dash_kind_box)
         kind_row.setContentsMargins(0, 0, 0, 0)
         kind_row.setSpacing(24)
-        for index, (caption, pills, extras) in enumerate((
-            (tr("Role"), _pills(self.host_pill, self.join_pill), (self.role_hint,)),
-            (tr("Session type"), _pills(self.steam_pill, self.lan_pill), (self.session_hint, self.port_box)),
-            (tr("Run on Steam as"), _pills(self.cop_pill, self.spacewar_pill), (self.app_note,)),
-            (tr("Play co-op on"), _pills(self.dash_gamma_pill, self.dash_anomaly_pill),
+        for index, (caption, control, extras) in enumerate((
+            (tr("Role"), self.role_combo, (self.role_hint,)),
+            (tr("Session type"), self.session_combo, (self.session_hint, self.port_box)),
+            (tr("Run on Steam as"), self.app_combo, (self.app_note,)),
+            (tr("Play co-op on"), self.dash_kind_combo,
              (_hint(tr("Move co-op between GAMMA and Anomaly. No zip needed, and co-op stays on or off as it is.")),)),
         )):
             target = kind_row if index == 3 else body
@@ -663,7 +666,7 @@ class MultiplayerPage(QWidget):
                 if index == 3:
                     self._kind_line = line
             # Numbered like the Install page steps so the four choices read in order.
-            column = _field(f"<span style='color:{ACCENT.name()};'>{index + 1}.</span> {caption}", pills)
+            column = _field(f"<span style='color:{ACCENT.name()};'>{index + 1}.</span> {caption}", control)
             column.setSpacing(6)
             for widget in extras:
                 column.addWidget(widget)
@@ -1337,8 +1340,7 @@ class MultiplayerPage(QWidget):
             else tr("Play GAMMA with up to 4 friends. You can switch back to singleplayer any time.")
         )
         self.kind_box.setVisible(has_gamma)
-        self.gamma_pill.setChecked(not plain)
-        self.anomaly_pill.setChecked(plain)
+        _select(self.kind_combo, kind)
         if not has_gamma:
             hint = tr("No GAMMA found, so co-op is set up for Anomaly. Everything goes into your Anomaly folder.")
         elif plain:
@@ -1348,8 +1350,7 @@ class MultiplayerPage(QWidget):
         self.kind_hint.setText(hint)
         self.dash_kind_box.setVisible(installed and has_gamma)
         self._fit_dash()
-        self.dash_gamma_pill.setChecked(not plain)
-        self.dash_anomaly_pill.setChecked(plain)
+        _select(self.dash_kind_combo, kind)
         self.launcher_manage.setVisible(installed and plain)
         profile = self._profile()
         mismatch = installed and not has_gamma and coop.install_kind(profile.anomaly) == coop.KIND_GAMMA
@@ -1378,8 +1379,7 @@ class MultiplayerPage(QWidget):
         )
         self.sp_button.setVisible(self._status in (coop.COOP, coop.REVERTED))
         steam = self._widgets["xrr_host_steam"].isChecked()
-        for pill in (self.cop_pill, self.spacewar_pill):
-            pill.setEnabled(idle and steam)
+        self.app_combo.setEnabled(idle and steam)
         play = getattr(self.window, "_pages", {}).get("play")
         # Follow launches started anywhere (Play page, Dashboard, here).
         if play is not None and not self._play_bound:
@@ -1395,7 +1395,7 @@ class MultiplayerPage(QWidget):
             set_hover_grow_text(self.hero_button, tr("Quit Co-op"))
         self.hero_button.setEnabled(idle and (quit_coop or not launching) and not mismatch)
         self.sp_button.setEnabled(idle and not launching)
-        for button in (self.zip_button, self.other_zip_button, self.update_button, self.backup_button, self.uninstall_button, self.mismatch_button, self.dash_gamma_pill, self.dash_anomaly_pill):
+        for button in (self.zip_button, self.other_zip_button, self.update_button, self.backup_button, self.uninstall_button, self.mismatch_button, self.dash_kind_combo):
             button.setEnabled(idle)
         found = self._found is not None
         self.found_label.setVisible(found)
@@ -1466,7 +1466,7 @@ class MultiplayerPage(QWidget):
         port = self._widgets["xrr_host_lan_port"].value()
         steam = self._widgets["xrr_host_steam"].isChecked()
         host = self._widgets["xrr_host_session"].isChecked()
-        (self.host_pill if host else self.join_pill).setChecked(True)
+        _select(self.role_combo, host)
         # A joiner's server settings do nothing, so lock them out.
         # Picking a role opens its tab; other updates leave the tab alone.
         self.tab_group.button(0).setEnabled(host)
@@ -1475,11 +1475,10 @@ class MultiplayerPage(QWidget):
             tab = 0 if host else 1
             self.tab_group.button(tab).setChecked(True)
             self._show_tab(tab)
-        (self.steam_pill if steam else self.lan_pill).setChecked(True)
+        _select(self.session_combo, steam)
         # Greying the buttons for a few file writes only makes them flash.
         idle = self._quiet or (not self._busy and not self.window.install_busy)
-        for pill in (self.cop_pill, self.spacewar_pill):
-            pill.setEnabled(steam and idle)
+        self.app_combo.setEnabled(steam and idle)
         self._widgets["xrr_host_lan_port"].setEnabled(not steam)
         self.port_box.setVisible(not steam)
         self.app_note.setVisible(steam)
@@ -1494,7 +1493,7 @@ class MultiplayerPage(QWidget):
             else tr("Everyone keeps Steam open. Spacewar starts on its own, no game to buy.") if spacewar
             else tr("Everyone keeps Steam open and owns Call of Pripyat on Steam.")
         )
-        (self.spacewar_pill if spacewar else self.cop_pill).setChecked(True)
+        _select(self.app_combo, coop.SPACEWAR_APPID if spacewar else coop.COP_APPID)
         self.players_stat.set(str(self._widgets["xrr_max_players"].value()))
         # A Steam session as Call of Pripyat still joins by the host's public IP.
         steam_ip = steam and not spacewar
@@ -1678,7 +1677,7 @@ class MultiplayerPage(QWidget):
     def _switch_kind(self, kind: str) -> None:
         profile = self._ready() if kind != self._install_kind() else None
         if profile is None:
-            self._sync_enabled()  # puts the pills back
+            self._sync_enabled()  # puts the dropdown back
             return
         to_plain = kind == coop.KIND_ANOMALY
         self._start(
@@ -1691,7 +1690,7 @@ class MultiplayerPage(QWidget):
         profile = self._ready() if appid != self._appid else None
         # Unsaved edits would be lost to the refresh after the switch.
         if profile is None or (self._dirty and not self._save()):
-            self._update_address()  # puts the pills back
+            self._update_address()  # puts the dropdown back
             return
         # A few small file writes: no progress bar or "Done" popping in and out.
         self._start(tr("Switching Steam game"), coop.set_steam_appid, profile.anomaly, appid, quiet=True)

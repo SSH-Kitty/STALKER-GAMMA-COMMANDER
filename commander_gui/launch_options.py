@@ -33,6 +33,9 @@ GROUPS = (
         ("Fix audio crackle", "PULSE_LATENCY_MSEC=60", "Bigger sound buffer. Fixes crackling or stuttering audio."),
         ("No Steam overlay", "LD_PRELOAD=", "Keep the Steam overlay out of the game when COMMANDER was started from Steam. Can fix stutter. Co-op keeps the overlay for Steam invites."),
     )),
+    ("Performance", (
+        ("NTSync", "PROTON_USE_NTSYNC=1", "Let the Linux kernel handle Windows sync (NTSync). Can raise FPS and smooth stutter. Needs Linux 6.14 or newer and GE-Proton 10-9 or newer. System Check shows if your system has it."),
+    )),
     ("Overlay and logs", (
         ("Performance overlay", "mangohud", "Show FPS, frame times and temperatures over the game (MangoHud). Choose what it shows in Settings > Graphics."),
         ("FPS counter", "DXVK_HUD=fps", "Show DXVK's small FPS counter in the corner."),
@@ -51,6 +54,16 @@ _CONFLICTS = {
     "PROTON_LOG=1": "WINEDEBUG=-all", "WINEDEBUG=-all": "PROTON_LOG=1",
     "ENABLE_VKBASALT=1": "PROTON_ENABLE_WAYLAND=1", "PROTON_ENABLE_WAYLAND=1": "ENABLE_VKBASALT=1",
 }
+
+#: The NTSync option. Proton only uses it when the kernel offers /dev/ntsync
+#: and the user may open it.
+NTSYNC = "PROTON_USE_NTSYNC=1"
+NTSYNC_DEVICE = "/dev/ntsync"
+
+
+def ntsync_available() -> bool:
+    return os.access(NTSYNC_DEVICE, os.R_OK | os.W_OK)
+
 
 #: The "No Steam overlay" option. Co-op leaves it out (see
 #: play_page.coop_shortcut_fields): Steam invites need the overlay.

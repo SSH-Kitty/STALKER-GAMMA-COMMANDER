@@ -3665,4 +3665,9 @@ TRANSLATIONS: dict[str, str] = {
     'Turn these off, or your friend adds them.': '',
     'Mods in a different place': '',
     'Same mods, different load order. Match the order in Mod Manager.': '',
+    'NTSync': '',
+    'Let the Linux kernel handle Windows sync (NTSync). Can raise FPS and smooth stutter. Needs Linux 6.14 or newer and GE-Proton 10-9 or newer. System Check shows if your system has it.': '',
+    'Ready. Turn it on under Launch options on the Play page.': '',
+    "The ntsync module is loaded, but you can't open {path}.": '',
+    'Optional. Needs Linux 6.14 or newer with the ntsync module loaded.': '',
 }
