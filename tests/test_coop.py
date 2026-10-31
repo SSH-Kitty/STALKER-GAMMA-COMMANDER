@@ -835,3 +835,52 @@ class CoopHardeningTests(unittest.TestCase):
                 archive.writestr("../evil", "x")
             with zipfile.ZipFile(zip_path) as archive, self.assertRaises(coop.CoopError):
                 coop._extract(archive, "../evil", Path(tmp) / "out" / "evil")
+
+
+class ModListMatchTests(unittest.TestCase):
+    setUp, tearDown, _install = CoopTests.setUp, CoopTests.tearDown, CoopTests._install
+
+    def test_mode_does_not_change_the_code_and_shared_list_round_trips(self):
+        self._install()
+        (self.gamma / "version.txt").write_text("0.9.4\n")
+        coop_on = coop.mod_list(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(coop_on, {"gamma": "0.9.4", "xrrazom": "1.4", "mods": ["GAMMA Base"]})
+        coop.switch_to_singleplayer(self.anomaly, self.gamma, "G.A.M.M.A")
+        self.assertEqual(coop.mod_list(self.anomaly, self.gamma, "G.A.M.M.A"), coop_on)
+        # Pasted from a chat: code fence and Windows line ends.
+        pasted = "```\r\n" + coop.share_text(coop_on).replace("\n", "\r\n") + "```"
+        self.assertEqual(coop.parse_shared(pasted), coop_on)
+        self.assertEqual(coop.parse_shared(coop.mod_list_code(coop_on).lower()), coop.mod_list_code(coop_on))
+        self.assertIsNone(coop.parse_shared("hello"))
+
+    def test_compare_names_what_differs(self):
+        mine = {"gamma": "0.9.4", "xrrazom": "1.4", "mods": ["A", "B", "C", "D"]}
+        theirs = {"gamma": "0.9.3", "xrrazom": "1.4", "mods": ["A", "C", "B", "E"]}
+        self.assertEqual(coop.compare_mod_lists(mine, theirs), {
+            "missing": ["E"], "extra": ["D"], "moved": ["C"], "gamma": True, "xrrazom": False,
+        })
+
+    def test_page_shows_the_differences(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui.multiplayer_page import MultiplayerPage
+
+        QApplication.instance() or QApplication([])
+        self._install()
+        profile = SimpleNamespace(anomaly=str(self.anomaly), gamma=str(self.gamma), mo2_profile="G.A.M.M.A")
+        window = SimpleNamespace(settings=SimpleNamespace(active_profile=profile), install_busy=False)
+        with patch.object(coop, "find_downloaded_zip", return_value=None):
+            page = MultiplayerPage(window)
+            page.refresh()
+            page.mods_paste.setPlainText(page.mods_code.text())
+            self.assertEqual(page.mods_result.property("level"), "healthy")
+            friend = dict(page._mods, mods=["GAMMA Base", "Extra"])
+            page.mods_paste.setPlainText(coop.share_text(friend))
+            self.assertEqual(page.mods_result.property("level"), "attention")
+            self.assertEqual(page.mods_findings.count(), 1)
+            page.mods_paste.setPlainText("nonsense")
+            self.assertEqual(page.mods_result.property("level"), "failed")
+        page.deleteLater()

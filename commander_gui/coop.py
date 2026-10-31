@@ -28,6 +28,7 @@ inherits the current files.
 from __future__ import annotations
 
 import configparser
+import difflib
 import functools
 import hashlib
 import json
@@ -1059,3 +1060,91 @@ def lan_ip() -> str:
 def public_ip() -> str:
     with network.urlopen_with_retry("https://api.ipify.org", timeout=10) as response:
         return network.read_response_bytes(response, 64).decode().strip()
+
+
+# -- mod list match ----------------------------------------------------------------
+# xrRazom turns a join down when the host's gamedata differs, and only says
+# so as a cfg-diff line in the game log. Comparing mod lists first names the
+# mods that differ. The share text is plain, so it reads fine in a chat.
+MODS_HEADER = "COMMANDER co-op mod list"
+_CODE_RE = re.compile(r"^[0-9A-F]{4}-[0-9A-F]{4}$")
+
+
+def mod_list(anomaly, gamma, mo2_profile) -> dict:
+    """What players in one session must match: GAMMA and xrRazom versions and
+    the enabled mods in load order. The co-op mod itself is left out: it is
+    on only while co-op is, and its version is counted on its own."""
+    from .updates import installed_version
+
+    state = load_state(anomaly) or {}
+    gamma_kind = install_kind(anomaly) == KIND_GAMMA and _has_modlist(gamma, mo2_profile)
+    mods = []
+    if gamma_kind:
+        mods = [
+            name for status, name in modlist.entries(modlist.read_lines(_modlist(gamma, mo2_profile)))
+            if status == "Enabled" and name != MOD_NAME and modlist.separator_name(name) is None
+        ]
+    return {
+        "gamma": (installed_version(str(gamma)) or "") if gamma_kind else "",
+        "xrrazom": str(state.get("release", {}).get("version") or ""),
+        "mods": mods,
+    }
+
+
+def mod_list_code(mods: dict) -> str:
+    text = "\n".join([mods["gamma"], mods["xrrazom"], *mods["mods"]])
+    digest = hashlib.sha256(text.encode()).hexdigest()[:8].upper()
+    return f"{digest[:4]}-{digest[4:]}"
+
+
+def share_text(mods: dict) -> str:
+    return "\n".join([
+        f"{MODS_HEADER} {mod_list_code(mods)}",
+        f"GAMMA: {mods['gamma']}",
+        f"xrRazom: {mods['xrrazom']}",
+        "",
+        *mods["mods"],
+    ]) + "\n"
+
+
+def parse_shared(text: str) -> str | dict | None:
+    """A friend's code (str), full list (dict), or None if it is neither.
+    Chat code fences and Windows line ends are fine."""
+    lines = [line.strip() for line in text.splitlines() if not line.strip().startswith("```")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    if not lines:
+        return None
+    if _CODE_RE.match(lines[0].upper()) and not any(lines[1:]):
+        return lines[0].upper()
+    if not lines[0].startswith(MODS_HEADER):
+        return None
+    mods = {"gamma": "", "xrrazom": "", "mods": []}
+    body = lines[1:]
+    for index, line in enumerate(body):
+        if not line:
+            mods["mods"] = [name for name in body[index + 1:] if name]
+            break
+        key, _sep, value = line.partition(":")
+        if key == "GAMMA":
+            mods["gamma"] = value.strip()
+        elif key == "xrRazom":
+            mods["xrrazom"] = value.strip()
+    return mods
+
+
+def compare_mod_lists(mine: dict, theirs: dict) -> dict:
+    """Theirs against mine: what to install or turn on (missing), what to
+    turn off (extra), and shared mods in a different place (moved)."""
+    have, want = set(mine["mods"]), set(theirs["mods"])
+    common_mine = [name for name in mine["mods"] if name in want]
+    common_theirs = [name for name in theirs["mods"] if name in have]
+    matcher = difflib.SequenceMatcher(None, common_mine, common_theirs, autojunk=False)
+    in_place = {name for block in matcher.get_matching_blocks() for name in common_mine[block.a:block.a + block.size]}
+    return {
+        "missing": [name for name in theirs["mods"] if name not in have],
+        "extra": [name for name in mine["mods"] if name not in want],
+        "moved": [name for name in common_mine if name not in in_place],
+        "gamma": mine["gamma"] != theirs["gamma"],
+        "xrrazom": mine["xrrazom"] != theirs["xrrazom"],
+    }

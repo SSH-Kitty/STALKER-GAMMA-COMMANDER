@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import coop, gui_settings
+from ..integrity import Finding
 from . import reflow
 from .common import (
     ACCENT,
@@ -64,7 +66,7 @@ _STATUS = {
     coop.SINGLEPLAYER: ("Singleplayer", ""),
     coop.REVERTED: ("Engine reverted", "attention"),
 }
-_TABS = ("Hosting", "Joining", "Player", "Manage", "Help")
+_TABS = ("Hosting", "Joining", "Player", "Mod check", "Manage", "Help")
 
 
 class _Bridge(QObject):
@@ -444,6 +446,8 @@ class MultiplayerPage(QWidget):
         self._ip_shown = False
         self._found: Path | None = None
         self._appid = coop.COP_APPID
+        #: This profile's coop.mod_list(), None when it couldn't be read.
+        self._mods: dict | None = None
         #: Where a new install goes when the profile has GAMMA too: GAMMA
         #: and plain Anomaly share the Anomaly folder, so co-op is set up
         #: for one of them (see coop.KIND_ANOMALY).
@@ -753,7 +757,7 @@ class MultiplayerPage(QWidget):
         body = QVBoxLayout()
         body.setSpacing(0)
         for index, (name, page) in enumerate(zip(_TABS, (
-            self._host_tab(), self._join_tab(), self._player_tab(), self._manage_tab(), self._help_tab(),
+            self._host_tab(), self._join_tab(), self._player_tab(), self._mods_tab(), self._manage_tab(), self._help_tab(),
         ))):
             button = _tab(tr(name), "subTab")
             self.tab_group.addButton(button, index)
@@ -1003,6 +1007,122 @@ class MultiplayerPage(QWidget):
         ))
         travel.addStretch(1)
 
+    def _mods_tab(self) -> QWidget:
+        page, layout = _panel()
+        mine, left = _section(tr("Your mod list"))
+        self.mods_code = QLabel()
+        self.mods_code.setObjectName("statValue")
+        self.mods_code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        left.addWidget(self.mods_code)
+        self.mods_summary = _hint()
+        left.addWidget(self.mods_summary)
+        copy_code = QPushButton(tr("Copy code"))
+        copy_code.clicked.connect(lambda: self._copy_mods(False))
+        copy_list = QPushButton(tr("Copy full list"))
+        copy_list.clicked.connect(lambda: self._copy_mods(True))
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        for button in (copy_code, copy_list):
+            button.setMinimumSize(150, 34)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        left.addLayout(buttons)
+        left.addStretch(1)
+        left.addWidget(_divider())
+        left.addWidget(_hint(tr("Everyone in a session needs the same code. If yours differ, send your full list instead.")))
+
+        friend, right = _section(tr("Compare with a friend"))
+        self.mods_paste = QPlainTextEdit()
+        self.mods_paste.setObjectName("noteEdit")
+        self.mods_paste.setPlaceholderText(tr("Paste your friend's code or full list here"))
+        self.mods_paste.setFixedHeight(90)
+        self.mods_paste.textChanged.connect(self._compare_mods)
+        right.addWidget(self.mods_paste)
+        self.mods_result = QLabel()
+        self.mods_result.setObjectName("verifyPill")
+        self.mods_result.hide()
+        right.addWidget(self.mods_result)
+        self.mods_findings = QVBoxLayout()
+        self.mods_findings.setSpacing(8)
+        right.addLayout(self.mods_findings)
+        right.addStretch(1)
+        _columns(layout, mine, friend)
+        return page
+
+    def _refresh_mods(self) -> None:
+        profile = self._profile()
+        try:
+            self._mods = coop.mod_list(profile.anomaly, profile.gamma, profile.mo2_profile) if profile else None
+        except (OSError, ValueError, coop.CoopError):
+            self._mods = None
+        if self._mods is None:
+            self.mods_code.setText("—")
+            self.mods_summary.setText(tr("Couldn't read your mod list"))
+        else:
+            self.mods_code.setText(coop.mod_list_code(self._mods))
+            self.mods_summary.setText(tr("{count} mods turned on", count=len(self._mods["mods"])))
+        self._compare_mods()
+
+    def _copy_mods(self, full: bool) -> None:
+        if self._mods is None:
+            return
+        QGuiApplication.clipboard().setText(coop.share_text(self._mods) if full else coop.mod_list_code(self._mods))
+        self._say(tr("Mod list copied.") if full else tr("Code copied."))
+
+    def _compare_mods(self) -> None:
+        from .install_page import _FindingRow  # install_page imports this module
+
+        while self.mods_findings.count():
+            self.mods_findings.takeAt(0).widget().deleteLater()
+        text = self.mods_paste.toPlainText()
+        theirs = coop.parse_shared(text)
+        findings: list[Finding] = []
+        if not text.strip():
+            level, result = "", ""
+        elif self._mods is None:
+            level, result = "failed", tr("Couldn't read your mod list")
+        elif theirs is None:
+            level, result = "failed", tr("Not a COMMANDER code or mod list")
+        elif (theirs if isinstance(theirs, str) else coop.mod_list_code(theirs)) == coop.mod_list_code(self._mods):
+            level, result = "healthy", tr("Same mod list as yours")
+            # Names, order and versions only: xrRazom compares the files inside.
+            findings.append(Finding("info", tr("If xrRazom still turns the join down, a file inside a mod differs. Search the game log for [xrRazom] cfg-diff to find it.")))
+        else:
+            level, result = "attention", tr("Different mods")
+            if isinstance(theirs, str):
+                findings.append(Finding("info", tr("Ask your friend to copy their full list and paste it here to see which mods differ.")))
+            else:
+                findings = self._mod_findings(coop.compare_mod_lists(self._mods, theirs), theirs)
+        self.mods_result.setText(result)
+        self.mods_result.setProperty("level", level)
+        self.mods_result.style().unpolish(self.mods_result)
+        self.mods_result.style().polish(self.mods_result)
+        self.mods_result.setVisible(bool(result))
+        for finding in findings:
+            self.mods_findings.addWidget(_FindingRow(finding))
+
+    def _mod_findings(self, diff: dict, theirs: dict) -> list[Finding]:
+        from .install_page import _FINDING_ITEMS_SHOWN
+
+        def listed(level: str, title: str, detail: str, names: list[str]) -> Finding:
+            shown = names[:_FINDING_ITEMS_SHOWN]
+            if len(names) > len(shown):
+                shown.append(tr("and {count} more", count=len(names) - len(shown)))
+            return Finding(level, title, detail, shown, len(names))
+
+        findings = []
+        for key, title in (("gamma", tr("Different GAMMA version")), ("xrrazom", tr("Different xrRazom version"))):
+            if diff[key]:
+                findings.append(Finding("warn", title, tr("Yours: {mine}. Theirs: {theirs}.", mine=self._mods[key] or "-", theirs=theirs[key] or "-")))
+        if diff["missing"]:
+            findings.append(listed("problem", tr("Mods only your friend has"), tr("Install these or turn them on."), diff["missing"]))
+        if diff["extra"]:
+            findings.append(listed("problem", tr("Mods only you have"), tr("Turn these off, or your friend adds them."), diff["extra"]))
+        if diff["moved"]:
+            findings.append(listed("warn", tr("Mods in a different place"), tr("Same mods, different load order. Match the order in Mod Manager."), diff["moved"]))
+        return findings
+
     def _manage_tab(self) -> QWidget:
         page, layout = _panel()
         layout.setSpacing(8)
@@ -1165,6 +1285,7 @@ class MultiplayerPage(QWidget):
             self._load_settings(profile)
         self._update_address()
         self._sync_enabled()
+        self._refresh_mods()
 
     def _load_settings(self, profile) -> None:
         values, _present = coop.read_settings(profile.anomaly)
