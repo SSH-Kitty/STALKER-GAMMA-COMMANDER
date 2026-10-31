@@ -1,11 +1,13 @@
-"""Red Forest (Live) theme extras: swaying trees, a flickering campfire and
-falling leaves over the painted scene (see live_scene.py).
+"""Live theme extras: swaying trees (Red Forest and Winter), and Red Forest's
+flickering campfire and falling leaves, over the painted scene (see
+live_scene.py).
 
-Shared by the desktop window and Deck Mode. The scene comes from
-build-redforest-backdrop.py: the backdrop image without the big edge trees
-or the fire's flames, plus one see-through layer per edge (``<phase>_left.png``
-pinned to the image's left edge, ``<phase>_right.png`` to its right), which
-this module draws gently bent back and forth.
+Shared by the desktop window and Deck Mode. The scenes come from
+build-redforest-backdrop.py and build-winter-backdrop.py: the backdrop image
+without the edge trees (or the fire's flames), plus one see-through layer per
+edge (``<back_trees>_left.png`` pinned to the image's left edge,
+``<back_trees>_right.png`` to its right), which this module draws gently bent
+back and forth, once every ``back_sway_s`` seconds.
 """
 
 from __future__ import annotations
@@ -72,7 +74,7 @@ class RedForest:
 
     def sync(self, visible: bool) -> None:
         tokens = active_theme_tokens()
-        enabled = bool(tokens.get("back_redforest")) and gui_settings.load_gui_settings().get(
+        enabled = bool(tokens.get("back_trees")) and gui_settings.load_gui_settings().get(
             "live_animation", True
         )
         wanted = enabled and visible
@@ -81,7 +83,7 @@ class RedForest:
         elif not wanted and self._timer.isActive():
             self._timer.stop()
         # Paused leaves stay put; switched-off ones (or another theme's) go.
-        if not enabled and self.leaves:
+        if not (enabled and tokens.get("back_redforest")) and self.leaves:
             self.leaves.clear()
             self._host.update()
 
@@ -89,7 +91,7 @@ class RedForest:
     def paint(self, painter: QPainter) -> None:
         """The trees, the fire and the leaves, over the scene image."""
         tokens = active_theme_tokens()
-        prefix = tokens.get("back_redforest")
+        prefix = tokens.get("back_trees")
         image = scene_pixmap(tokens.get("back_image", "")) if prefix else None
         if image is None or image.isNull():
             return
@@ -210,7 +212,8 @@ class RedForest:
         self._ticks += 1
         host = self._host
         w, h = host.width(), host.height()
-        if not self.leaves:
+        tokens = active_theme_tokens()
+        if not self.leaves and tokens.get("back_redforest"):
             rnd = random.random
             self.leaves = [
                 [rnd() * w, rnd() * h, size, 0.5 + size * 0.09, rnd() * 6.3, rnd() * 360,
@@ -230,6 +233,7 @@ class RedForest:
             leaf[0], leaf[1], leaf[4], leaf[5] = x, y, phase, (angle + spin) % 360
             host.update(old.united(QRect(int(x) - reach, int(y) - reach, 2 * reach, 2 * reach)))
         if self._ticks % 2 == 0:
-            self._sway += 2 * math.pi * 2 * self.INTERVAL_MS / 1000 / self.SWAY_PERIOD_S
+            period = float(tokens.get("back_sway_s", self.SWAY_PERIOD_S))
+            self._sway += 2 * math.pi * 2 * self.INTERVAL_MS / 1000 / period
             for rect in self._moving:
                 host.update(rect)

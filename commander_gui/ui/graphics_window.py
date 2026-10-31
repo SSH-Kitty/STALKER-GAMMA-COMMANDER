@@ -683,7 +683,12 @@ class _KeyGrab:
         if not self._display:
             raise OSError("no X display")
         self._root = x.XDefaultRootWindow(self._display)
-        self._keycode = x.XKeysymToKeycode(self._display, x.XStringToKeysym(keysym.encode()))
+        # The console key is the one left of 1 whatever it prints (49, TLDE):
+        # layouts like German have no "grave" there, or anywhere.
+        self._keycode = 49 if keysym == "grave" else x.XKeysymToKeycode(self._display, x.XStringToKeysym(keysym.encode()))
+        if not self._keycode:  # 0 is AnyKey: it would grab Shift+every key
+            x.XCloseDisplay(self._display)
+            raise OSError(f"no key for {keysym}")
         self._modifiers = modifiers
         for lock in self._LOCKS:
             # GrabModeAsync (1) for pointer and keyboard: events keep flowing.

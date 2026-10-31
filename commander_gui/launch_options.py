@@ -39,6 +39,9 @@ GROUPS = (
         ("Proton log", "PROTON_LOG=1", "Write a Proton log file to your home folder. Useful for crash reports."),
         ("Quiet Wine logs", "WINEDEBUG=-all", "Turn off Wine's debug messages. Slightly less CPU work. Switches Proton log off, since it would leave the log empty."),
     )),
+    ("Game", (
+        ("Debug mode", "-dbg", "Start Anomaly in debug mode, as the Anomaly launcher's Debug mode box does. Works with every renderer, DX11 included."),
+    )),
 )
 
 #: Options that undo each other: switching one on switches the other off.
@@ -340,7 +343,12 @@ def toggle(text: str, option: str, on: bool) -> str:
         if at >= 0:
             del tokens[at : at + len(drop)]
     if on:
-        if "=" in seq[0]:
+        if seq[0].startswith("-"):
+            # Game arguments go after %command%.
+            if "%command%" not in tokens:
+                tokens.append("%command%")
+            at = len(tokens)
+        elif "=" in seq[0]:
             # Variables go in front of the game, so before %command% when
             # the user wrote one.
             at = tokens.index("%command%") if "%command%" in tokens else len(tokens)

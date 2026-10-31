@@ -5601,11 +5601,18 @@ class ModCounterTests(unittest.TestCase):
                 window.resize(960, 800)
                 app.processEvents()
                 self.assertLessEqual(window.statusBar().minimumSizeHint().width(), 960)
+                # Too narrow for everything: the Font, Theme and Language
+                # boxes go first, the version and profile stay.
+                self.assertTrue(window._status_info_label.isVisible())
+                self.assertFalse(window._status_font_combo.isVisible())
+                window.resize(600, 800)
+                app.processEvents()
                 self.assertFalse(window._status_info_label.isVisible())
                 self.assertEqual(play._cards_row.direction(), QBoxLayout.Direction.TopToBottom)
                 window.resize(1600, 800)
                 app.processEvents()
                 self.assertTrue(window._status_info_label.isVisible())
+                self.assertTrue(window._status_font_combo.isVisible())
                 self.assertEqual(play._cards_row.direction(), QBoxLayout.Direction.LeftToRight)
             finally:
                 window._mod_counter_timer.stop()
@@ -13738,6 +13745,8 @@ class WinterTimeOfDayTests(unittest.TestCase):
         for key in set(hours.values()):
             self.assertLessEqual(set(THEMES["reactor"]), set(THEMES[key]), key)
             self.assertTrue((assets / THEMES[key]["back_image"]).is_file(), key)
+            for side in ("left", "right"):
+                self.assertTrue((assets / f"{THEMES[key]['back_trees']}_{side}.png").is_file(), key)
             self.assertEqual(set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key)
 
 
@@ -14468,7 +14477,7 @@ class TokenColorTests(unittest.TestCase):
         try:
             themes.set_active_theme("winter_dawn")
             card = themes.token_color("card", "#000000")
-            self.assertEqual((card.red(), card.green(), card.blue(), card.alpha()), (240, 244, 248, 160))
+            self.assertEqual((card.red(), card.green(), card.blue(), card.alpha()), (218, 226, 233, 185))
             themes.set_active_theme("gamma")
             self.assertEqual(themes.token_color("card", "#000000").name(), "#141b15")
             self.assertEqual(themes.token_color("no_such_token", "#123456").name(), "#123456")
@@ -14543,7 +14552,7 @@ class RedForestTests(unittest.TestCase):
             self.assertNotIn("back_snow", THEMES[key])
             self.assertTrue((assets / THEMES[key]["back_image"]).is_file(), key)
             for side in ("left", "right"):
-                self.assertTrue((assets / f"{THEMES[key]['back_redforest']}_{side}.png").is_file(), key)
+                self.assertTrue((assets / f"{THEMES[key]['back_trees']}_{side}.png").is_file(), key)
             self.assertEqual(set(assistant_theme.THEMES[key]), set(assistant_theme.THEMES["gamma"]), key)
 
     def test_trees_fire_and_leaves_follow_theme_and_setting(self):
@@ -14574,7 +14583,20 @@ class RedForestTests(unittest.TestCase):
             self.assertFalse(forest._timer.isActive())
             forest.sync(True)
             self.assertTrue(forest._timer.isActive())
-            themes.set_active_theme("winter")
+            # Winter sways its trees too, slower, but drops no leaves.
+            themes.set_active_theme("winter_night")
+            forest.sync(True)
+            self.assertTrue(forest._timer.isActive())
+            self.assertEqual(forest.leaves, [])
+            forest._tick()
+            forest._tick()
+            self.assertEqual(forest.leaves, [])
+            self.assertGreater(float(themes.THEMES["winter_night"]["back_sway_s"]), RedForest.SWAY_PERIOD_S)
+            painter = QPainter(canvas)
+            forest.paint(painter)
+            painter.end()
+            self.assertEqual(len(forest._moving), 2)
+            themes.set_active_theme("reactor")
             forest.sync(True)
             self.assertFalse(forest._timer.isActive())
             forest._moving = []
@@ -14585,3 +14607,15 @@ class RedForestTests(unittest.TestCase):
         finally:
             themes.set_active_theme(previous)
             host.deleteLater()
+
+
+class WineUnsafeFolderTests(unittest.TestCase):
+    """Wine drops a dot or space at the end of a folder name, so an install
+    in "G.A.M.M.A./gamma" can't start (MO2 lands in a folder that doesn't exist)."""
+
+    def test_flags_folder_name_ending_in_dot_or_space(self):
+        from commander_gui.ui.common import wine_unsafe_folder
+
+        self.assertEqual(wine_unsafe_folder("/home/a/G.A.M.M.A./gamma"), "/home/a/G.A.M.M.A.")
+        self.assertEqual(wine_unsafe_folder("/home/a/ok", "/home/a/GAMMA /anomaly"), "/home/a/GAMMA ")
+        self.assertIsNone(wine_unsafe_folder("/home/a/G.A.M.M.A/gamma", "/home/a/.cache"))

@@ -1072,6 +1072,18 @@ class SettingsPage(QWidget):
         ):
             line.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
         rows.addWidget(row)
+
+        self._plugin_folder_change = _action(tr("Choose"))
+        self._plugin_folder_change.clicked.connect(self._pick_plugin_downloads)
+        self._plugin_folder_reset = _action(tr("Reset"))
+        self._plugin_folder_reset.setToolTip(tr("Save to COMMANDER's own folder again."))
+        self._plugin_folder_reset.clicked.connect(lambda: self._set_plugin_downloads(""))
+        self._plugin_folder = _setting_row(
+            tr("Download folder"), " ", self._plugin_folder_change, self._plugin_folder_reset
+        )
+        self._plugin_folder.layout().setContentsMargins(0, 0, 0, 8)
+        self._plugin_folder_path = self._plugin_folder.findChild(QLabel, "dim")
+        rows.addWidget(self._plugin_folder)
         layout.addWidget(frame)
 
         self._moddb.changed.connect(self._render_plugins)
@@ -1113,6 +1125,13 @@ class SettingsPage(QWidget):
         self._plugin_remove.setEnabled(not moddb.running)
         downloads = bool(plugins.downloaded_files())
         self._plugin_open_folder.setVisible(info is not None or downloads)
+        self._plugin_folder.setVisible(info is not None)
+        self._plugin_folder_path.setText(str(plugins.downloads_dir()))
+        custom = bool(gui_settings.load_gui_settings().get("moddb_downloads"))
+        self._plugin_folder_reset.setVisible(custom)
+        # The running browser keeps saving where it started.
+        for button in (self._plugin_folder_change, self._plugin_folder_reset):
+            button.setEnabled(not moddb.running)
         self._plugin_delete_downloads.setVisible(info is not None or downloads)
         # A download in progress, or one being installed, would break.
         self._plugin_delete_downloads.setEnabled(
@@ -1141,6 +1160,17 @@ class SettingsPage(QWidget):
             plugins.delete_downloads()
         except OSError as exc:
             QMessageBox.warning(self, tr("Couldn't delete the downloads"), str(exc))
+        self._render_plugins()
+
+    def _pick_plugin_downloads(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, tr("Pick the download folder"), str(plugins.downloads_dir())
+        )
+        if folder:
+            self._set_plugin_downloads(folder)
+
+    def _set_plugin_downloads(self, folder: str) -> None:
+        gui_settings.save_gui_settings(moddb_downloads=folder)
         self._render_plugins()
 
     def _open_plugin_downloads(self) -> None:

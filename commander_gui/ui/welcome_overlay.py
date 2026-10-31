@@ -79,7 +79,7 @@ def version_status(latest_title: str | None) -> tuple[str, str]:
     if installed is None or latest is None:
         return tr("Couldn't check"), "dim"
     if installed > latest:
-        return tr("Development build"), "ok"
+        return tr("Unreleased build"), "ok"
     if installed == latest:
         return tr("Up to date"), "ok"
     return tr("Update available"), "warn"

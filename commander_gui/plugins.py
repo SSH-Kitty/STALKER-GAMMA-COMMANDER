@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import __version__, network
+from .atomic import write_text
 from .proton_installer import SHA512_RE, _safe_extract, host_arch, sha512_file
 from .repair import USER_AGENT
 from .self_update import CommanderSelfUpdateError, _published_sha512
@@ -43,7 +44,7 @@ from .updates import _COMMANDER_REPO, _feed_tags, is_unstable_version
 #: anything it imports - not only how COMMANDER talks to it. Installed
 #: plugins carry their own copy of that code and are only asked to update
 #: when this number (or, in the AppImage, the Qt version) moves.
-PROTOCOL = 5
+PROTOCOL = 6
 MODDB = "moddb-browser"
 _MAX_ARCHIVE_BYTES = 2 * 1024**3
 #: Releases tried, newest first, when the running version's has no plugin.
@@ -68,8 +69,41 @@ def browser_data_dir() -> Path:
     return data_root() / f"{MODDB}-data"
 
 
-def downloads_dir() -> Path:
+def default_downloads_dir() -> Path:
     return data_root() / "downloads"
+
+
+def downloads_dir() -> Path:
+    """Where the browser saves: the folder picked in Settings > Plugins, or
+    COMMANDER's own."""
+    from .gui_settings import load_gui_settings
+
+    chosen = str(load_gui_settings().get("moddb_downloads") or "")
+    return Path(chosen) if chosen else default_downloads_dir()
+
+
+def _download_record() -> Path:
+    return data_root() / "downloads.json"
+
+
+def _load_download_record() -> dict:
+    try:
+        record = json.loads(_download_record().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def remember_download(path: Path) -> None:
+    """Note a file the browser saved, so Delete downloads finds it in a
+    folder the player shares with their own files."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return
+    record = _load_download_record()
+    record[str(path)] = [stat.st_size, stat.st_mtime_ns]
+    write_text(_download_record(), json.dumps(record))
 
 
 def asset_name() -> str:
@@ -244,16 +278,30 @@ def remove() -> None:
 
 
 def downloaded_files() -> list[Path]:
+    """The browser's downloads still on disk: everything in COMMANDER's own
+    folder, and elsewhere only the files it saved, unchanged since - a file
+    the player put there later, even under the same name, isn't one."""
+    files = set()
     try:
-        return [path for path in downloads_dir().iterdir() if path.is_file()]
+        files.update(path for path in default_downloads_dir().iterdir() if path.is_file())
     except OSError:
-        return []
+        pass
+    for name, saved in _load_download_record().items():
+        path = Path(name)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if path.is_file() and saved == [stat.st_size, stat.st_mtime_ns]:
+            files.add(path)
+    return sorted(files)
 
 
 def delete_downloads() -> None:
     """Delete the browser's downloads. Installed mods live in GAMMA's mods folder, untouched."""
     for path in downloaded_files():
         path.unlink(missing_ok=True)
+    _download_record().unlink(missing_ok=True)
 
 
 def parse_event(line: str) -> Path | None:

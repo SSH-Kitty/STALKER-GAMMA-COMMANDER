@@ -107,7 +107,6 @@ from ..steam_shortcuts import (
 )
 from . import game_splash, graphics_window
 from .common import (
-    ACCENT,
     WARN,
     BackgroundTask,
     CenteredFlowLayout,
@@ -135,6 +134,8 @@ from .common import (
     set_hover_grow_text,
     steam_running,
     tr,
+    warn_wine_unsafe_folder,
+    wine_unsafe_folder,
 )
 from .dialogs import MessageBox as QMessageBox
 from .frame_gen_card import FrameGenCard
@@ -1130,7 +1131,8 @@ class PlayPage(QWidget):
             gamemoderun = available_commands().get("gamemoderun")
             chips.append(("GameMode", bool(gamemoderun)))
         # One per quick toggle the launch options use. A wrapper
-        # (mangohud, gamescope) is red when it isn't installed. Co-op
+        # (mangohud, gamescope) is red when it isn't installed; variables
+        # and game arguments (-dbg) need nothing installed. Co-op
         # leaves the COOP_DROPS options out (see coop_shortcut_fields).
         text = self.custom_options_edit.text()
         for _heading, options in launch_options.GROUPS:
@@ -1142,7 +1144,7 @@ class PlayPage(QWidget):
                 wrapper = option.split()[0]
                 ready = (
                     overlays.mangohud_available() if wrapper == overlays.MANGOHUD
-                    else "=" in wrapper or bool(shutil.which(wrapper))
+                    else "=" in wrapper or wrapper.startswith("-") or bool(shutil.which(wrapper))
                 )
                 chips.append((tr(label), ready))
         if launch_options.is_on(text, launch_options.FRAME_GEN):
@@ -1590,6 +1592,9 @@ class PlayPage(QWidget):
         profile = self.window.settings.active_profile
         if profile is None or self._launching or self._install_busy:
             return
+        if os.name != "nt" and (bad := wine_unsafe_folder(profile.anomaly)):
+            warn_wine_unsafe_folder(self, bad)
+            return
         exe = Mo2Executable(
             title="Anomaly Launcher", binary=str(Path(profile.anomaly) / "AnomalyLauncher.exe"),
             working_directory=str(profile.anomaly),
@@ -1676,6 +1681,10 @@ class PlayPage(QWidget):
             if reason:
                 self._set_launch_button_state(False)
                 refuse_launch(self.window, self, reason)
+                return
+            if os.name != "nt" and (bad := wine_unsafe_folder(profile.anomaly, profile.gamma)):
+                self._set_launch_button_state(False)
+                warn_wine_unsafe_folder(self, bad)
                 return
             if not direct:
                 try:
@@ -2520,9 +2529,12 @@ class PlayPage(QWidget):
         return readable_log_tail(read_log_tail(path), limit)
 
     def _set_result(self, text: str, *, error: bool = False) -> None:
-        color = WARN.name() if error else ACCENT.name()
+        # Coloured by the theme's #accent / #warn rules, not a frozen inline
+        # colour: one set by day stayed day's dark orange after dusk began.
         self._launch_status_clear_timer.stop()
-        self.launch_live_status.setStyleSheet(f"color: {color};")
+        self.launch_live_status.setObjectName("warn" if error else "accent")
+        self.launch_live_status.style().unpolish(self.launch_live_status)
+        self.launch_live_status.style().polish(self.launch_live_status)
         self.launch_live_status.setText(notice(text))
         self.launch_status_changed.emit()
 

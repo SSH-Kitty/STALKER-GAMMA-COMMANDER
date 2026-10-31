@@ -121,6 +121,32 @@ def normalize_path(raw: str) -> str:
     return str(Path(value).expanduser().resolve())
 
 
+def wine_unsafe_folder(*paths: str) -> str | None:
+    """First folder in *paths* that Wine can't open, else None.
+
+    Windows path rules drop a dot or space at the end of a folder name, so
+    Wine turns ``G.A.M.M.A./gamma`` into ``G.A.M.M.A\\gamma``, a folder that
+    doesn't exist, and MO2 and the game fail to start.
+    """
+    for path in paths:
+        parts = Path(path).expanduser().parts
+        for depth, name in enumerate(parts):
+            if name not in (".", "..") and name.endswith((".", " ")):
+                return str(Path(*parts[: depth + 1]))
+    return None
+
+
+def warn_wine_unsafe_folder(parent, folder: str) -> None:
+    QMessageBox.warning(
+        parent,
+        tr("Rename this folder"),
+        tr(
+            "Wine can't use a folder whose name ends with a dot or a space, so the game can't start from this one:\n{folder}\n\nRename it without the dot or space at the end, then choose it again on the Install page.",
+            folder=folder,
+        ),
+    )
+
+
 def count_cached_archives(cache_path: str) -> int:
     """Count .zip archives in *cache_path*."""
     if not cache_path:

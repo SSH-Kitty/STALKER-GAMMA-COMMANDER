@@ -159,9 +159,9 @@ New install options:
 
 - **Steam-style launch options.** `NAME=value` sets an environment variable, words before `%command%` wrap the game
   (for example `mangohud %command%`), and words after it are passed to the game.
-- **Quick toggles** in three groups. **Display**: Gamescope, FSR upscaling, vkBasalt and OpenGL. **Fixes**: No
+- **Quick toggles** in four groups. **Display**: Gamescope, FSR upscaling, vkBasalt and OpenGL. **Fixes**: No
   Esync, No Fsync, Fix audio crackle and No Steam overlay. **Overlay and logs**: MangoHud, an FPS counter, Proton log
-  and Quiet Wine logs.
+  and Quiet Wine logs. **Game**: Debug mode (`-dbg`), which also works with DX11.
 - **Used for every launch.** Launch options apply to singleplayer, desktop shortcuts, Deck Mode (which has a switch for
   each toggle in Settings) and the co-op Steam shortcut. Co-op keeps the Steam overlay for Steam invites.
 - **Crash loop detection.** If Wine starts crashing repeatedly, the launch is stopped before it exhausts system memory.

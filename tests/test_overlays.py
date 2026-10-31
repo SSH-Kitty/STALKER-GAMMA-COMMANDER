@@ -387,6 +387,14 @@ class OverlayTests(unittest.TestCase):
         text = launch_options.toggle(text, launch_options.NATIVE_WAYLAND, True)
         self.assertEqual(text, "PROTON_ENABLE_WAYLAND=1 %command%")
 
+    def test_debug_mode_goes_after_command(self):
+        text = launch_options.toggle("PROTON_LOG=1", "-dbg", True)
+        self.assertEqual(text, "PROTON_LOG=1 %command% -dbg")
+        text = launch_options.toggle(text, "mangohud", True)
+        command = launch_options.apply(["mo2", "run", "-e", "Anomaly (DX11)"], {}, text, resolve=False, game_mode=False)
+        self.assertEqual(command, ["mangohud", "mo2", "run", "--arguments=-dbg", "-e", "Anomaly (DX11)"])
+        self.assertEqual(launch_options.toggle(text, "-dbg", False), "mangohud PROTON_LOG=1 %command%")
+
     def test_a_look_sets_the_sliders(self):
         gui_settings.save_gui_settings(vkbasalt_preset="warm", vkbasalt_warmth=-40)
         self.assertEqual(overlays.settings()["vkbasalt_warmth"], overlays.VKBASALT_LOOKS["warm"][3])

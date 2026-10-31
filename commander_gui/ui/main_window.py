@@ -78,9 +78,9 @@ from .common import (
     BackgroundTask,
     NoWheelComboBox,
     count_active_mods,
+    game_running,
     human_size,
     instance_window_title,
-    game_running,
     notice,
     notify_desktop,
     open_url,
@@ -93,11 +93,13 @@ from .dashboard import DashboardPage
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import ProgressDialog
 from .install_page import InstallPage, _resume_state_matches
+from .live_scene import paint_scene
 from .mod_manager_page import ModManagerPage
 from .moddb_plugin import controller as moddb_controller
 from .multiplayer_page import MultiplayerPage
 from .play_page import PlayPage
 from .profiles_page import ProfilesPage
+from .redforest import RedForest
 from .settings_page import SettingsPage
 from .system_check_page import SystemCheckPage
 from .title_bar import (
@@ -110,8 +112,6 @@ from .title_bar import (
 )
 from .update_page import UpdatePage
 from .utilities_page import UtilitiesPage
-from .live_scene import paint_scene
-from .redforest import RedForest
 from .winter import ChristmasLights, Snowfall
 
 NAV_ITEMS = [
@@ -903,6 +903,10 @@ class MainWindow(QMainWindow):
         self._status_info_label.setStyleSheet(_STATUS_LABEL_STYLE)
         self.statusBar().addWidget(self._status_info_label)
 
+        self._status_language_label = QLabel()
+        self._status_language_label.setStyleSheet(_STATUS_LABEL_STYLE)
+        self.statusBar().addWidget(self._status_language_label)
+
         self._status_language_combo = NoWheelComboBox()
         self._status_language_combo.setStyleSheet(_STATUS_COMBO_STYLE)
         self._status_language_combo.setFixedHeight(21)
@@ -1388,8 +1392,8 @@ class MainWindow(QMainWindow):
         self._status_info_label.setText(
             f"COMMANDER {__version_label__}   |   "
             + tr("Active profile: {name}", name=self._active_name())
-            + f"   |   {tr('Language:')}"
         )
+        self._status_language_label.setText(f"   |   {tr('Language:')}")
         self._status_theme_label.setText(f"   |   {tr('Theme:')}")
         lang_index = self._status_language_combo.findData(active_language())
         self._status_language_combo.blockSignals(True)
@@ -1413,32 +1417,30 @@ class MainWindow(QMainWindow):
         self._fit_status_bar()
 
     def _fit_status_bar(self) -> None:
-        """Hide the version, profile and Language/Theme/Font boxes when the
-        window is too narrow for them; all of it is on Settings too. The
-        update status, Discord and GitHub stay."""
+        """Drop the Font, then Theme, then Language boxes, then the version
+        and profile, as the window gets too narrow for them; all of it is on
+        Settings too. The update status, Discord and GitHub stay."""
         if getattr(self, "_status_update_area", None) is None:  # not built yet
             return
-        left = (
-            self._status_info_label,
-            self._status_language_combo,
-            self._status_theme_label,
-            self._status_theme_combo,
-            self._status_font_label,
-            self._status_font_combo,
-            self._status_fontsize_combo,
+        groups = (
+            (self._status_info_label,),
+            (self._status_language_label, self._status_language_combo),
+            (self._status_theme_label, self._status_theme_combo),
+            (self._status_font_label, self._status_font_combo, self._status_fontsize_combo),
         )
-        bar = self.statusBar()
-        margins = bar.contentsMargins()
+        margins = self.statusBar().contentsMargins()
         need = (
             margins.left()
             + margins.right()
-            + sum(w.sizeHint().width() + 6 for w in left)
             + self._status_update_area.sizeHint().width()
             + 24  # slack between the groups, so text never clips
         )
-        fits = need <= self.width()
-        for widget in left:
-            widget.setVisible(fits)
+        fits = True
+        for group in groups:
+            need += sum(w.sizeHint().width() + 6 for w in group)
+            fits = fits and need <= self.width()
+            for widget in group:
+                widget.setVisible(fits)
 
     def _on_status_language(self, *_args) -> None:
         code = self._status_language_combo.currentData()
@@ -1623,7 +1625,7 @@ class MainWindow(QMainWindow):
         else:
             self.open_settings()
 
-    def _reject_language_or_theme_change(self, busy_message: str, force: bool = True) -> bool:
+    def _reject_language_or_theme_change(self, busy_message: str | None, force: bool = True) -> bool:
         """Show why a language/theme change is refused and revert both pickers.
 
         Returns True if the change was refused (caller should stop), False
@@ -1637,13 +1639,21 @@ class MainWindow(QMainWindow):
         """
         # The ModDB plugin's download isn't install_busy, but the rebuild
         # would orphan its task the same way and leave it "busy" for good.
-        if self.install_busy or moddb_controller(self).busy:
+        # No busy_message: only the game blocks it.
+        if busy_message and (self.install_busy or moddb_controller(self).busy):
             QMessageBox.warning(self, tr("Please wait"), busy_message)
         elif game_running(force=force):
             QMessageBox.warning(
                 self,
                 tr("Please wait"),
                 tr("Mod Organizer or the game is still open. Close it, then try again."),
+            )
+        elif moddb_controller(self).running:
+            # It got the theme, fonts and language once, when it opened.
+            QMessageBox.warning(
+                self,
+                tr("Please wait"),
+                tr("The ModDB browser is open. Close it, then try again."),
             )
         else:
             return False
@@ -1669,18 +1679,32 @@ class MainWindow(QMainWindow):
         self._apply_style()
 
     def _follow_time_of_day(self) -> None:
-        if resolve_theme(active_theme()) != self._painted_theme:
+        # Not while the game or the ModDB browser runs: they keep the look
+        # they started with, so COMMANDER catches up after they close.
+        if (
+            resolve_theme(active_theme()) != self._painted_theme
+            and not game_running()
+            and not moddb_controller(self).running
+        ):
             self._apply_style()
 
+    # The overlay and the ModDB browser read the look once, when they start,
+    # so it can't change while either runs: they would differ.
     def apply_font_size(self, size: int) -> None:
+        if self._reject_language_or_theme_change(None, force=False):
+            return
         gui_settings.save_gui_settings(font_size=int(size))
         self._apply_style()
 
     def apply_live_time(self, live_time: str) -> None:
+        if self._reject_language_or_theme_change(None, force=False):
+            return
         gui_settings.save_gui_settings(live_time=live_time)
         self._apply_style()
 
     def apply_font_family(self, family: str) -> None:
+        if self._reject_language_or_theme_change(None, force=False):
+            return
         gui_settings.save_gui_settings(font_family=family)
         self._apply_style()
 

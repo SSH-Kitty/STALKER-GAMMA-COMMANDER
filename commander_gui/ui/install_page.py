@@ -105,6 +105,8 @@ from .common import (
     make_header_row,
     game_running,
     normalize_path,
+    warn_wine_unsafe_folder,
+    wine_unsafe_folder,
     notify_desktop,
     paused_dependency_status,
     save_profile_dirs,
@@ -1557,6 +1559,9 @@ class InstallPage(QWidget):
                 return
             self.root_card_edit.setText(root)
         base = Path(root).expanduser()
+        if bad := wine_unsafe_folder(str(base)):
+            warn_wine_unsafe_folder(self, bad)
+            return
         folders = {
             "Anomaly folder": base / "anomaly",
             "GAMMA folder": base / "gamma",
@@ -1766,6 +1771,10 @@ class InstallPage(QWidget):
                 tr("Pick a cache folder"),
                 tr("The cache folder can't be empty, so COMMANDER put the saved one back."),
             )
+            self.refresh()
+            return False
+        if bad := wine_unsafe_folder(anomaly, gamma, cache):
+            warn_wine_unsafe_folder(self, bad)
             self.refresh()
             return False
         if (

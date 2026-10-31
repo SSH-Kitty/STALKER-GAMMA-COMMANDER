@@ -174,6 +174,7 @@ class ModDBPlugin(QObject):
         for raw in lines:
             path = plugins.parse_event(raw.decode("utf-8", "replace"))
             if path is not None:
+                plugins.remember_download(path)
                 self.changed.emit()
                 self._hand_to_mod_manager(path)
 

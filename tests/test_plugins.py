@@ -115,6 +115,23 @@ class PluginTests(unittest.TestCase):
         self.assertIsNone(plugins.parse_event("Qt: some warning"))
         self.assertIsNone(plugins.parse_event("[1, 2]"))
 
+    def test_delete_downloads_in_a_shared_folder_only_deletes_the_browsers_files(self) -> None:
+        shared = self.tmp / "Downloads"
+        shared.mkdir()
+        ours, theirs, replaced = shared / "mod.7z", shared / "photo.jpg", shared / "other.7z"
+        for path in (ours, theirs, replaced):
+            path.write_text("x")
+        with mock.patch("commander_gui.gui_settings.load_gui_settings", return_value={"moddb_downloads": str(shared)}):
+            self.assertEqual(plugins.downloads_dir(), shared)
+            plugins.remember_download(ours)
+            plugins.remember_download(replaced)
+            replaced.write_text("the player's own file, same name")
+            self.assertEqual(plugins.downloaded_files(), [ours])
+            plugins.delete_downloads()
+        self.assertFalse(ours.exists())
+        self.assertTrue(theirs.exists())
+        self.assertTrue(replaced.exists())
+
     def test_release_candidates_own_release_first_and_stable_skips_prereleases(self) -> None:
         feed = ["v1.5.0-Unstable1", "v1.4.1", "v1.4.0", "v1.4.0-Unstable2"]
         self.assertEqual(plugins.release_candidates(feed, "1.4.0"), ["v1.4.0", "v1.4.1"])

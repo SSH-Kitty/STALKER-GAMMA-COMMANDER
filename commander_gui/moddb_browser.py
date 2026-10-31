@@ -99,6 +99,20 @@ _TRIM_CSS = (
     " #downloadsbrowse form.filter, .normalcorner .options, #adBanner"
     " { display: none !important; }"
     " .column.span-300-alt { width: 100% !important; margin: 0 !important; }"
+    # Rows inside it keep their fixed widths, sized for the narrower column
+    # beside the sidebar: let their text run to the box's right edge.
+    " .span-300-alt .table .row .content, .span-300-alt .table .row .summary"
+    " { display: block; width: auto !important; float: none !important; overflow: hidden; }"
+    " .span-300-alt .table .row .content > h4, .span-300-alt .table .row .content > p,"
+    " .span-300-alt .table .row .comment, .span-300-alt .table .row .comment p"
+    " { width: auto !important; }"
+    # Their gap to the picture beside them was a margin, which a box next to
+    # a float no longer keeps.
+    " .span-300-alt .table .row .content { padding-left: 10px; }"
+    " .span-300-alt .table .row .summary { padding-left: 5px; }"
+    # The sort links have no picture beside them, and "Posted" at their
+    # right end lines up with the dates under it.
+    " .span-300-alt .table .rowsort .content { padding: 0 6px 0 0; }"
     # The comment form's sign-up and social sign-in, which can't work here
     # (they leave ModDB), cut down to its first sentence. CSS can't cut a text
     # node, so the paragraph's text shrinks to nothing and the line is redrawn.
@@ -218,6 +232,12 @@ class BrowserWindow(QMainWindow):
         self.resize(1200, 800)
         self._downloads = Path(config["downloads"])
         self._downloads.mkdir(parents=True, exist_ok=True)
+        # Ctrl+scroll's zoom, shared by every tab and kept for next time.
+        self._zoom_file = Path(config["data"]) / "zoom"
+        try:
+            self._zoom = min(max(float(self._zoom_file.read_text()), 0.25), 5.0)
+        except (OSError, ValueError):
+            self._zoom = 1.0
 
         # Owned by the app, not this window: it must outlive the page using it.
         profile = QWebEngineProfile("commander-moddb", QApplication.instance())
@@ -290,6 +310,8 @@ class BrowserWindow(QMainWindow):
         page = _Page(self._profile, view)
         page.settings().setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
         view.setPage(page)
+        page.setZoomFactor(self._zoom)
+        page.zoomFactorChanged.connect(self._zoom_changed)
         # A redirect is let through for download mirrors; one that lands on a
         # page outside ModDB goes to the normal browser instead.
         view.urlChanged.connect(lambda url: self._left_moddb(view, url))
@@ -306,6 +328,17 @@ class BrowserWindow(QMainWindow):
         if focus:
             self.tabs.setCurrentIndex(index)
         return view
+
+    def _zoom_changed(self, factor: float) -> None:
+        if abs(factor - self._zoom) < 0.001:
+            return
+        self._zoom = factor
+        for index in range(self.tabs.count()):
+            self.tabs.widget(index).page().setZoomFactor(factor)
+        try:
+            write_bytes(self._zoom_file, str(factor).encode())
+        except OSError:
+            pass  # only next time's zoom depends on it
 
     def _new_home_tab(self) -> None:
         self.new_tab().load(QUrl(HOME))
@@ -364,7 +397,15 @@ class BrowserWindow(QMainWindow):
         self.search.setFixedHeight(_BAR_HEIGHT)
         self.search.returnPressed.connect(self._search)
         row.addWidget(self.search, 1, Qt.AlignmentFlag.AlignVCenter)
-        row.addStretch(0)  # only what the search box can't take; Open downloads stays right
+        row.addStretch(0)  # only what the search box can't take; the buttons stay right
+        browser = QPushButton(tr("Open in browser"))
+        browser.setObjectName("settingAction")
+        browser.setToolTip(tr("Open this page in your web browser, to sign in and comment with your account."))
+        browser.setCursor(Qt.CursorShape.PointingHandCursor)
+        browser.setFixedHeight(_BAR_HEIGHT)
+        browser.setStyleSheet("padding: 0 12px;")
+        browser.clicked.connect(lambda: open_url(self.view.url().toString()))
+        row.addWidget(browser, 0, Qt.AlignmentFlag.AlignVCenter)
         downloads = QPushButton(tr("Open downloads"))
         downloads.setObjectName("settingAction")
         downloads.setCursor(Qt.CursorShape.PointingHandCursor)
