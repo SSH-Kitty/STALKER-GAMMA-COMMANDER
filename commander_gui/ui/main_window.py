@@ -1390,7 +1390,7 @@ class MainWindow(QMainWindow):
         change instead of getting it "for free" via reconstruction.
         """
         self._status_info_label.setText(
-            f"COMMANDER {__version_label__}   |   "
+            f"v{__version_label__}   |   "
             + tr("Active profile: {name}", name=self._active_name())
         )
         self._status_language_label.setText(f"   |   {tr('Language:')}")
