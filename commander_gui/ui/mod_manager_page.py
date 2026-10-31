@@ -108,6 +108,7 @@ from ..romeo import install as install_romeo
 from ..themes import token_color
 from ..updates import local_modpack_records
 from .about_page import _copy_button
+from . import reflow
 from .common import (
     ACCENT,
     ITEM_GREEN,
@@ -889,19 +890,18 @@ class ModManagerPage(QWidget):
         # it (with a one-click fix when it doesn't), and Open MO2. Row 2 is
         # the toolbar for the list below: add content, the backup safety
         # nets folded into one menu, search, and the view controls.
-        title_row = QHBoxLayout()
-        title_row.setSpacing(8)
+        # Both rows are groups that take a line each when the window is
+        # too narrow for them side by side.
+        title_row = reflow.row(8)
         title_row.addWidget(section_label(tr("Profile Mods")))
         title_row.addSpacing(16)
         profile_caption = QLabel(tr("MO2 profile"))
         profile_caption.setObjectName("dim")
-        title_row.addWidget(profile_caption)
         self.profile_combo = QComboBox()
         self.profile_combo.setMinimumWidth(220)
         self.profile_combo.setMinimumHeight(32)
         self.profile_combo.currentIndexChanged.connect(self._load_mods)
         self.profile_combo.currentIndexChanged.connect(self._sync_selected_status)
-        title_row.addWidget(self.profile_combo)
         self.manage_profile_button = QPushButton("⋯")
         self.manage_profile_button.setObjectName("iconButton")
         self.manage_profile_button.setToolTip(tr("Manage Profile"))
@@ -911,49 +911,43 @@ class ModManagerPage(QWidget):
         manage_profile_menu.addAction(tr("Rename Profile"), self._rename_mo2_profile)
         manage_profile_menu.addAction(tr("Delete Profile"), self._delete_mo2_profile)
         self.manage_profile_button.setMenu(manage_profile_menu)
-        title_row.addWidget(self.manage_profile_button)
+        title_row.addWidget(reflow.group(profile_caption, self.profile_combo, self.manage_profile_button))
         title_row.addSpacing(8)
         # Whether MO2 opens this profile: a green chip when it does; the
         # profile MO2 uses instead plus a button to switch when it doesn't
         # (see _sync_selected_status()).
         self.selected_label = QLabel(tr("MO2 selected profile: -"))
         self.selected_label.setObjectName("chip")
-        title_row.addWidget(self.selected_label)
         self.set_selected_button = QPushButton(tr("Use in MO2"))
         self.set_selected_button.setToolTip(tr("Use as MO2 selected profile"))
         self.set_selected_button.clicked.connect(self._set_selected)
-        title_row.addWidget(self.set_selected_button)
+        title_row.addWidget(reflow.group(self.selected_label, self.set_selected_button))
         title_row.addStretch(1)
         self.count_label = QLabel("")
         self.count_label.setObjectName("chip")
-        title_row.addWidget(self.count_label)
-        title_row.addSpacing(4)
         self.open_mo2_button = QPushButton(tr("Open MO2"))
         self.open_mo2_button.clicked.connect(self._open_mo2)
-        title_row.addWidget(self.open_mo2_button)
+        title_row.addWidget(reflow.group(self.count_label, 4, self.open_mo2_button))
         layout.addLayout(title_row)
 
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        toolbar = reflow.row(8)
         self.install_button = QPushButton("＋  " + tr("Install Mod"))
         self.install_button.setObjectName("primary")
         self.install_button.setToolTip(
             tr("Install a local ZIP, 7Z, RAR, or FOMOD archive into the GAMMA mods folder.")
         )
         self.install_button.clicked.connect(self._install_mod)
-        toolbar.addWidget(self.install_button)
         self.moddb_button = QPushButton(tr("Get mods from ModDB"))
         self.moddb_button.setToolTip(
             tr("Browse ModDB and install what you download. Needs the ModDB browser plugin from Settings > Plugins.")
         )
         self.moddb_button.clicked.connect(lambda: moddb_controller(self.window).open())
-        toolbar.addWidget(self.moddb_button)
+        toolbar.addWidget(reflow.group(self.install_button, self.moddb_button))
         self.new_category_button = QPushButton(tr("New Category"))
         self.new_category_button.setToolTip(
             tr("Add an MO2 separator category to this modlist.")
         )
         self.new_category_button.clicked.connect(self._create_category)
-        toolbar.addWidget(self.new_category_button)
 
         # The three backup actions share one menu: they are occasional
         # safety nets, not everyday controls, and as three buttons they
@@ -977,7 +971,7 @@ class ModManagerPage(QWidget):
             tr("Restore the modlist saved automatically before the first Commander edit.")
         )
         self.backups_button.setMenu(backups_menu)
-        toolbar.addWidget(self.backups_button)
+        toolbar.addWidget(reflow.group(self.new_category_button, self.backups_button))
         toolbar.addSpacing(12)
 
         self.search = QLineEdit()
@@ -985,7 +979,6 @@ class ModManagerPage(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumHeight(32)
         self.search.textChanged.connect(self._apply_filter)
-        toolbar.addWidget(self.search, 1)
 
         # Toggles between collapsing every category and expanding them
         # all back - tracked via _all_collapsed rather than the button's
@@ -994,13 +987,14 @@ class ModManagerPage(QWidget):
         self._all_collapsed = False
         self.collapse_all_button = QPushButton(tr("Collapse All"))
         self.collapse_all_button.clicked.connect(self._toggle_collapse_all)
-        toolbar.addWidget(self.collapse_all_button)
         self.refresh_button = QPushButton("⟳")
         self.refresh_button.setObjectName("iconButton")
         self.refresh_button.setToolTip(tr("Refresh"))
         self.refresh_button.setFixedWidth(40)
         self.refresh_button.clicked.connect(self.refresh)
-        toolbar.addWidget(self.refresh_button)
+        search_group = reflow.group(self.search, self.collapse_all_button, self.refresh_button)
+        search_group.layout().setStretch(0, 1)
+        toolbar.addWidget(search_group, 1)
         layout.addLayout(toolbar)
 
         self.guard_label = QLabel(

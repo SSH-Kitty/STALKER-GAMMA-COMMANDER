@@ -37,6 +37,7 @@ from ..config import project_root
 from ..themes import active_theme, active_theme_tokens
 from .about_page import _DISCORD, _GITHUB
 from .brand_icons import brand_icon, icon_size
+from . import reflow
 from .common import info_label, make_card, open_url, section_label, tr
 from .dialogs import add_close_button, style_window
 
@@ -221,7 +222,7 @@ class CreditsPage(QWidget):
         row.addLayout(text, 1)
         layout.addLayout(row)
 
-        buttons = QHBoxLayout()
+        buttons = reflow.mark_row(QHBoxLayout())
         icon_color = active_theme_tokens().get("text_btn_hover", "#e0e0e0")
         for label, url, name, logo_name in (
             (tr("Join the Discord"), _DISCORD, "discordButton", "discord"),
@@ -314,7 +315,7 @@ class CreditsPage(QWidget):
                 tr("COMMANDER comes with ABSOLUTELY NO WARRANTY, to the extent permitted by law. See sections 15 and 16 of the license.")
             )
         )
-        buttons = QHBoxLayout()
+        buttons = reflow.mark_row(QHBoxLayout())
         root = project_root()
         for label, action in (
             (tr("Read the license"), lambda: show_text_files(self, tr("License"), [root / "LICENSE"])),

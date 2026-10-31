@@ -5618,6 +5618,75 @@ class ModCounterTests(unittest.TestCase):
                 window._mod_counter_timer.stop()
                 window.close()
 
+    def test_reflow_stacks_divided_grid_and_puts_it_back(self):
+        # Narrow window: each side of a divided card goes under the one
+        # before it, a full-width row stays last, and widening restores it.
+        from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QLabel, QWidget
+
+        from commander_gui.ui import reflow
+
+        QApplication.instance() or QApplication([])
+        owner = QWidget()
+        grid = reflow.divided(QGridLayout(owner))
+        divider = QFrame()
+        divider.setObjectName("vDivider")
+        left, right, console = QLabel("left"), QLabel("right"), QLabel("console")
+        grid.addWidget(left, 0, 0)
+        grid.addWidget(divider, 0, 1)
+        grid.addWidget(right, 0, 2)
+        grid.addWidget(console, 1, 0, 1, 3)
+        before = [grid.getItemPosition(grid.indexOf(w)) for w in (left, right, console)]
+        reflow._set_stacked(grid, True)
+        self.assertTrue(reflow.is_stacked(grid))
+        self.assertEqual(grid.getItemPosition(grid.indexOf(left))[:2], (0, 0))
+        right_row, right_column = grid.getItemPosition(grid.indexOf(right))[:2]
+        console_row = grid.getItemPosition(grid.indexOf(console))[0]
+        self.assertEqual(right_column, 0)
+        self.assertGreater(right_row, 0)
+        self.assertGreater(console_row, right_row)
+        self.assertTrue(divider.isHidden())
+        reflow._set_stacked(grid, False)
+        self.assertFalse(reflow.is_stacked(grid))
+        self.assertEqual([grid.getItemPosition(grid.indexOf(w)) for w in (left, right, console)], before)
+        self.assertFalse(divider.isHidden())
+        # The page swapping an item while stacked (deleting the old one)
+        # must not break going back: the Install page does this.
+        reflow._set_stacked(grid, True)
+        grid.removeWidget(right)
+        replacement = QLabel("replacement")
+        grid.addWidget(replacement, 5, 0)
+        reflow._set_stacked(grid, False)
+        self.assertEqual(grid.getItemPosition(grid.indexOf(left)), before[0])
+        self.assertEqual(grid.getItemPosition(grid.indexOf(console)), before[2])
+        self.assertGreaterEqual(grid.indexOf(replacement), 0)
+
+    def test_reflow_fits_only_the_page_not_its_scroll_content(self):
+        # Regression: a resize of the page's scroll content was taken for a
+        # page resize and started a fit on the content mid-fit - a loop that
+        # froze the app and kept growing its memory.
+        from unittest.mock import patch
+
+        from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget
+
+        from commander_gui.ui import reflow
+
+        QApplication.instance() or QApplication([])
+        page = QWidget()
+        area = QScrollArea(page)
+        area.setWidgetResizable(True)
+        QVBoxLayout(page).addWidget(area)
+        content = QWidget()
+        QVBoxLayout(content)
+        area.setWidget(content)
+        reflow.watch(page)
+        page.show()
+        try:
+            with patch.object(reflow, "fit") as fit:
+                content.resize(content.width() + 40, content.height())
+            self.assertNotIn(content, [call.args[0] for call in fit.call_args_list])
+        finally:
+            page.close()
+
     def test_switching_pages_refreshes_the_mod_counter_immediately(self):
         from PySide6.QtWidgets import QApplication
 
@@ -14575,8 +14644,19 @@ class RedForestTests(unittest.TestCase):
             painter = QPainter(canvas)
             forest.paint(painter)
             painter.end()
-            # Both tree layers and the fire get repainted as they move.
-            self.assertEqual(len(forest._moving), 3)
+            # Both tree layers and the fire get repainted as they move, the
+            # trees only where they have branches: less than their whole box.
+            self.assertEqual(len(forest._trees), 2)
+            self.assertIsNotNone(forest._fire)
+            for rects in forest._trees:
+                self.assertGreater(len(rects), 1)
+            with patch.object(host, "update") as update:
+                forest._tick()
+                # Every band of both trees, and the fire (every second tick).
+                self.assertEqual(update.call_count - RedForest.LEAVES, sum(map(len, forest._trees)) + 1)
+                update.reset_mock()
+                forest._tick()  # a crown 33 ms on has moved under half a pixel
+                self.assertEqual(update.call_count, RedForest.LEAVES)
             with patch("commander_gui.gui_settings.load_gui_settings", return_value={"live_animation": False}):
                 forest.sync(True)
             self.assertEqual(forest.leaves, [])
@@ -14595,15 +14675,16 @@ class RedForestTests(unittest.TestCase):
             painter = QPainter(canvas)
             forest.paint(painter)
             painter.end()
-            self.assertEqual(len(forest._moving), 2)
+            self.assertEqual(len(forest._trees), 2)
+            self.assertIsNone(forest._fire)
             themes.set_active_theme("reactor")
             forest.sync(True)
             self.assertFalse(forest._timer.isActive())
-            forest._moving = []
+            forest._trees = []
             painter = QPainter(canvas)
             forest.paint(painter)
             painter.end()
-            self.assertEqual(forest._moving, [])
+            self.assertEqual(forest._trees, [])
         finally:
             themes.set_active_theme(previous)
             host.deleteLater()

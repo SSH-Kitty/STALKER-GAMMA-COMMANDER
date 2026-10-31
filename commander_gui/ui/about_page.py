@@ -39,6 +39,7 @@ from ..config import (
 )
 from ..themes import active_theme_tokens
 from .about_docs import TOPICS
+from . import reflow
 from .common import (
     info_label,
     make_card,
@@ -299,7 +300,9 @@ class AboutPage(QWidget):
         side.addWidget(self.search)
         self.topics = QListWidget()
         self.topics.setObjectName("helpTopics")
-        self.topics.setFixedWidth(250)
+        # Narrower when the window is, so the topic beside it still fits.
+        self.topics.setMinimumWidth(150)
+        self.topics.setMaximumWidth(250)
         self.topics.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for index, topic in enumerate(self._topics):
             item = QListWidgetItem(topic["title"])
@@ -428,7 +431,7 @@ class AboutPage(QWidget):
         hero, layout = make_card()
         layout.addWidget(section_label(topic["title"], level=1))
         layout.addWidget(_text(topic["summary"]))
-        buttons = QHBoxLayout()
+        buttons = reflow.mark_row(QHBoxLayout())  # one above the other when narrow
         if topic["page"] is not None:
             buttons.addWidget(open_page_button(self.window, topic["page"], "primary"))
         expand = QPushButton()

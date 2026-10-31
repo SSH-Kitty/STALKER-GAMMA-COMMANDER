@@ -32,6 +32,7 @@ from ..settings import CliSettings
 from ..themes import active_theme_tokens
 from ..updates import UpdateStatus, check_updates, format_version, status_summary
 from ..winetricks import check_winetricks_full_status
+from . import reflow
 from .common import (
     OK_GREEN,
     STATUS_GREY,
@@ -312,7 +313,7 @@ def _add_divided(
     The divider spans the header row too, so it ends as far from the card's
     top edge as from its bottom. Both sides keep their natural width.
     """
-    grid = QGridLayout()
+    grid = reflow.divided(QGridLayout())
     # Columns 1 and 3 sit either side of the divider and add their own
     # spacing even when empty, so half of `gap` each makes `gap` in all.
     grid.setHorizontalSpacing(gap // 2)
@@ -329,6 +330,15 @@ def _add_divided(
     grid.setColumnStretch(3, 1)
     grid.setRowStretch(1, 1)
     layout.addLayout(grid)
+
+
+def _holder(layout) -> QWidget:
+    """``layout`` in a plain widget, so it can glide as one piece."""
+    widget = QWidget()
+    widget.setObjectName("panelTransparent")
+    layout.setContentsMargins(0, 0, 0, 0)
+    widget.setLayout(layout)
+    return widget
 
 
 class _Swatch(QWidget):
@@ -434,16 +444,15 @@ class DashboardPage(QWidget):
 
         # Two rows of two: Installation status | Updates, then
         # Game stats | Storage usage.
-        status_row = QHBoxLayout()
-        status_row.setSpacing(16)
+        # Each pair goes one above the other when the window is narrow.
+        status_row = reflow.row(16)
         root.addLayout(status_row)
         self.install_status_card, _ = make_card(expand=True)
         status_row.addWidget(self.install_status_card, 1)
         self.updates_card, _ = make_card(expand=True)
         status_row.addWidget(self.updates_card, 1)
 
-        bottom = QHBoxLayout()
-        bottom.setSpacing(16)
+        bottom = reflow.row(16)
         root.addLayout(bottom)
         self._save: SaveStats | None = None
         self._stats_task: BackgroundTask | None = None
@@ -704,8 +713,7 @@ class DashboardPage(QWidget):
         # full-width row - and the session numbers as tiles on the right.
         # Anomaly/GAMMA/Cache folder paths are deliberately not repeated
         # here: the Installation status card already shows them.
-        body = QHBoxLayout()
-        body.setSpacing(24)
+        body = reflow.row(24)
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(10)
@@ -769,7 +777,7 @@ class DashboardPage(QWidget):
         grid.addLayout(
             _field(tr("Download threads"), self.download_threads_combo), 1, 1
         )
-        body.addLayout(grid, 3)
+        body.addWidget(_holder(grid), 3)
 
         state = load_gui_settings()
         playtime_seconds = state.get("playtime_seconds", {}).get(profile.profile_name, 0.0)
@@ -794,7 +802,7 @@ class DashboardPage(QWidget):
             tiles.addWidget(caption_label)
             tiles.addSpacing(4)
         tiles.addStretch(1)
-        body.addLayout(tiles, 1)
+        body.addWidget(_holder(tiles), 1)
         layout.addLayout(body)
 
     def _sync_profile_combo(self, combo: NoWheelComboBox) -> None:
@@ -1130,7 +1138,7 @@ class DashboardPage(QWidget):
         layout.addWidget(_SegmentedBar(segments))
 
         # Legend: a swatch per folder.
-        legend = QHBoxLayout()
+        legend = reflow.mark_row(QHBoxLayout())
         legend.setSpacing(18)
         for (key, value), (_value, token) in zip(sizes.items(), segments, strict=True):
             item = QHBoxLayout()

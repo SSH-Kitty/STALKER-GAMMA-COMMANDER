@@ -70,6 +70,7 @@ from ..updates import (
     check_updates,
     effective_update_channel,
 )
+from . import reflow
 from .about_page import _DISCORD, AboutPage
 from .common import (
     OK_GREEN,
@@ -1502,6 +1503,7 @@ class MainWindow(QMainWindow):
         page = self._create_page(key)
         self._pages[key] = page
         self.stack.addWidget(page)
+        reflow.watch(page)  # rows stack when the window gets narrow
         # A page built after an install/task already started must reflect
         # that immediately - set_install_busy() only notifies pages that
         # exist at the moment it's called (see its own loop below).
@@ -1784,10 +1786,21 @@ class MainWindow(QMainWindow):
         self._painted_theme = resolve_theme(name)
         app = QApplication.instance()
         if app is not None:
-            app.setPalette(build_palette(name))
-            app.setStyleSheet(
-                build_stylesheet(name, font_size=font_size, font_family=font_family)
-            )
+            # Restyling sends every widget tens of thousands of Polish and
+            # StyleChange events; through the two Python app-wide filters
+            # they took half the switch. Neither needs them: a restyle
+            # neither scrolls nor touches cursors.
+            filters = [f for f in (getattr(self, "_smooth_scroll", None), getattr(self, "_pointer_cursor", None)) if f is not None]
+            for event_filter in filters:
+                app.removeEventFilter(event_filter)
+            try:
+                app.setPalette(build_palette(name))
+                app.setStyleSheet(
+                    build_stylesheet(name, font_size=font_size, font_family=font_family)
+                )
+            finally:
+                for event_filter in filters:
+                    app.installEventFilter(event_filter)
         self.tabs.update()
         QTimer.singleShot(0, self._update_overflow)
         self.backdrop.update()

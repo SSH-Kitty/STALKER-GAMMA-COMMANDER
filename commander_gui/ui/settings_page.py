@@ -54,7 +54,7 @@ from ..steam_shortcuts import (
 )
 from ..themes import LIVE_THEMES, LIVE_TIME_CHOICES, THEME_INFO, active_theme, active_theme_tokens
 from ..updates import is_unstable_version, newer_unstable_tag
-from . import graphics_window
+from . import graphics_window, reflow
 from .common import (
     OK_GREEN,
     WARN,
@@ -550,8 +550,7 @@ class SettingsPage(QWidget):
     # ----------------------------------------------------------------- header
     def _header_card(self) -> QWidget:
         card, layout = make_card()
-        row = QHBoxLayout()
-        row.setSpacing(16)
+        row = reflow.row(16, natural=True)  # the version tiles go under when narrow
         text = QVBoxLayout()
         text.setSpacing(4)
         text.addWidget(_card_title(tr("Settings")))
@@ -575,8 +574,9 @@ class SettingsPage(QWidget):
         # one page shown at a time.
         card, layout = make_card()
         layout.setSpacing(14)
-        header = QHBoxLayout()
-        header.setSpacing(4)
+        # Two lines of tabs when they don't fit on one.
+        header = reflow.row(4)
+        halves = (QHBoxLayout(), QHBoxLayout())
         self.tab_group = QButtonGroup(self)
         self._tab_pages: list[QWidget] = []
         body = QVBoxLayout()
@@ -584,11 +584,15 @@ class SettingsPage(QWidget):
         for index, (name, key) in enumerate(_TABS):
             button = _tab(tr(name), "subTab")
             self.tab_group.addButton(button, index)
-            header.addWidget(button)
+            halves[index >= 4].addWidget(button)
             page = getattr(self, f"_{key}_tab")()
             body.addWidget(page)
             self._tab_pages.append(page)
         self.tab_group.idClicked.connect(self._show_tab)
+        for half in halves:
+            half.setSpacing(4)
+            half.addStretch(1)  # stacked: tabs stay their size, on the left
+            header.addWidget(reflow.group(half))
         header.addStretch(1)
         tabs = QVBoxLayout()
         tabs.setSpacing(0)
@@ -1175,7 +1179,15 @@ class SettingsPage(QWidget):
 
     def _open_plugin_downloads(self) -> None:
         folder = plugins.downloads_dir()
-        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # a picked folder on a drive that's gone
+            QMessageBox.warning(
+                self,
+                tr("Couldn't create a folder"),
+                tr("COMMANDER couldn't create this folder:\n{folder}\n\n{exc}", folder=folder, exc=exc),
+            )
+            return
         open_in_file_manager(folder)
 
     def _maintenance_tab(self) -> QWidget:

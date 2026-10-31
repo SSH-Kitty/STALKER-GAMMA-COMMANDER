@@ -357,6 +357,9 @@ def toggle(text: str, option: str, on: bool) -> str:
             # other way round.
             at = 0
         tokens[at:at] = seq
+    elif seq[0].startswith("-") and tokens and tokens[-1] == "%command%":
+        # Nothing after it any more: a bare %command% at the end does nothing.
+        tokens.pop()
     return shlex.join(tokens)
 
 

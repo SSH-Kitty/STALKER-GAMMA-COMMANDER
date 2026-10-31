@@ -127,6 +127,8 @@ class PluginTests(unittest.TestCase):
             plugins.remember_download(replaced)
             replaced.write_text("the player's own file, same name")
             self.assertEqual(plugins.downloaded_files(), [ours])
+            plugins.remember_download(ours)  # drops the stale entry
+            self.assertEqual(set(plugins._load_download_record()), {str(ours)})
             plugins.delete_downloads()
         self.assertFalse(ours.exists())
         self.assertTrue(theirs.exists())

@@ -101,9 +101,13 @@ def remember_download(path: Path) -> None:
         stat = path.stat()
     except OSError:
         return
-    record = _load_download_record()
+    # Only files still there unchanged: the rest would pile up for good.
+    record = {name: saved for name, saved in _load_download_record().items() if _unchanged(name, saved)}
     record[str(path)] = [stat.st_size, stat.st_mtime_ns]
-    write_text(_download_record(), json.dumps(record))
+    try:
+        write_text(_download_record(), json.dumps(record))
+    except OSError:
+        pass  # only Delete downloads misses it; the install goes on
 
 
 def asset_name() -> str:
@@ -286,15 +290,18 @@ def downloaded_files() -> list[Path]:
         files.update(path for path in default_downloads_dir().iterdir() if path.is_file())
     except OSError:
         pass
-    for name, saved in _load_download_record().items():
-        path = Path(name)
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        if path.is_file() and saved == [stat.st_size, stat.st_mtime_ns]:
-            files.add(path)
+    files.update(Path(name) for name, saved in _load_download_record().items() if _unchanged(name, saved))
     return sorted(files)
+
+
+def _unchanged(name: str, saved) -> bool:
+    """True when the file at *name* is still the one the browser saved."""
+    path = Path(name)
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return path.is_file() and saved == [stat.st_size, stat.st_mtime_ns]
 
 
 def delete_downloads() -> None:

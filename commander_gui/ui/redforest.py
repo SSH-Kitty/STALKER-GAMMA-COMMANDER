@@ -12,6 +12,7 @@ back and forth, once every ``back_sway_s`` seconds.
 
 from __future__ import annotations
 
+import functools
 import math
 import random
 
@@ -32,6 +33,34 @@ FLAMES = (("#d9481c", 15, 38), ("#f08a2a", 10, 28), ("#ffd46a", 5, 16))
 #: The scene's blur, in image pixels (build-redforest-backdrop.py's BLUR).
 BLUR = 2
 LEAF_COLORS = ("#c2501f", "#d97a2b", "#a8341c", "#e0a33a")
+#: Horizontal bands a tree layer is cut into for repainting (see _opaque_bands).
+BANDS = 24
+
+
+@functools.cache
+def _opaque_bands(name: str) -> tuple[tuple[float, float, float, float], ...]:
+    """(top, bottom, left, right) of the trees in each band of a tree layer,
+    in image pixels. Half of a layer's box is empty sky, so its sway repaints
+    just these."""
+    image = scene_pixmap(name).toImage()
+    if image.isNull():
+        return ()
+    # Shrinking averages every pixel in, so a band keeps any tree in it.
+    step = 4
+    small = image.scaled(
+        max(1, image.width() // step), BANDS,
+        Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation,
+    )
+    bands = []
+    for b in range(BANDS):
+        xs = [x for x in range(small.width()) if small.pixelColor(x, b).alpha()]
+        if xs:
+            # One shrunk pixel of slack each side, for the faintest edges.
+            bands.append((
+                b * image.height() / BANDS, (b + 1) * image.height() / BANDS,
+                max(0, xs[0] - 1) * step, min(image.width(), (xs[-1] + 2) * step),
+            ))
+    return tuple(bands)
 
 
 def _leaf_path() -> QPainterPath:
@@ -49,8 +78,9 @@ class RedForest:
     The edge trees and the fire are part of the scene and always painted; only
     the movement stops - in the background, minimized, while a game has
     focus, in other themes and when switched off in Settings. Leaves repaint
-    the small area under each one every tick, the trees and fire every second
-    tick: their slow movement needs no more.
+    the small area under each one every tick, the fire every second tick, and
+    a tree only once its crown has moved half a pixel: every repaint redraws
+    the see-through cards over it too.
     """
 
     LEAVES = 40
@@ -65,8 +95,13 @@ class RedForest:
         self._ticks = 0
         self._sway = 0.0
         self._layers: dict[tuple, QPixmap] = {}
-        #: Areas the trees and fire covered at the last paint: repainted as they move.
-        self._moving: list[QRect] = []
+        #: Per tree, the areas it covered at the last paint: repainted as it moves.
+        self._trees: list[list[QRect]] = []
+        #: Per tree, its height (px) at the last paint and the crown's shift there.
+        self._heights: list[float] = []
+        self._shown: list[float] = []
+        #: The fire's area at the last paint, if lit.
+        self._fire: QRect | None = None
         self._leaf = _leaf_path()
         self._timer = QTimer(host)
         self._timer.setInterval(self.INTERVAL_MS)
@@ -100,9 +135,10 @@ class RedForest:
         k = target.width() / image.width()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        moving = []
+        trees, heights = [], []
         for i, side in enumerate(("left", "right")):
-            layer = self._layer(f"{prefix}_{side}.png", k)
+            name = f"{prefix}_{side}.png"
+            layer = self._layer(name, k)
             if layer.isNull():
                 continue
             w = layer.width() / layer.devicePixelRatio()
@@ -115,12 +151,20 @@ class RedForest:
             painter.shear(shear, 0)
             painter.drawPixmap(QPointF(0, -h), layer)
             painter.restore()
-            reach = math.ceil(self.SWAY * h) + 2
-            moving.append(QRect(int(x) - reach, target.top(), int(w) + 2 * reach, int(h) + 1))
+            # A band's crown moves less the nearer it is to the roots.
+            s = h / scene_pixmap(name).height()
+            rects = []
+            for top, bottom, left, right in _opaque_bands(name):
+                reach = math.ceil(self.SWAY * (h - top * s)) + 2
+                rects.append(QRect(
+                    int(x + left * s) - reach, int(target.top() + top * s) - 1,
+                    math.ceil((right - left) * s) + 2 * reach + 1, math.ceil((bottom - top) * s) + 2,
+                ))
+            trees.append(rects)
+            heights.append(h)
+        self._trees, self._heights = trees, heights
         # Lit at dusk and night only; at dawn just the baked-in smoke is left.
-        if tokens.get("back_fire"):
-            moving.append(self._paint_fire(painter, target, k))
-        self._moving = moving
+        self._fire = self._paint_fire(painter, target, k) if tokens.get("back_fire") else None
         self.paint_leaves(painter)
 
     def _layer(self, name: str, k: float) -> QPixmap:
@@ -232,8 +276,17 @@ class RedForest:
                 y, x = -size, random.random() * w
             leaf[0], leaf[1], leaf[4], leaf[5] = x, y, phase, (angle + spin) % 360
             host.update(old.united(QRect(int(x) - reach, int(y) - reach, 2 * reach, 2 * reach)))
-        if self._ticks % 2 == 0:
-            period = float(tokens.get("back_sway_s", self.SWAY_PERIOD_S))
-            self._sway += 2 * math.pi * 2 * self.INTERVAL_MS / 1000 / period
-            for rect in self._moving:
-                host.update(rect)
+        period = float(tokens.get("back_sway_s", self.SWAY_PERIOD_S))
+        self._sway += 2 * math.pi * self.INTERVAL_MS / 1000 / period
+        if len(self._shown) != len(self._trees):
+            self._shown = [math.inf] * len(self._trees)
+        for i, (rects, h) in enumerate(zip(self._trees, self._heights)):
+            crown = self.SWAY * h * math.sin(self._sway + i * 1.9)
+            # Near the ends of a sway the crown barely moves: no repaint
+            # until it has moved enough to see.
+            if abs(crown - self._shown[i]) >= 0.5:
+                self._shown[i] = crown
+                for rect in rects:
+                    host.update(rect)
+        if self._ticks % 2 == 0 and self._fire is not None:
+            host.update(self._fire)

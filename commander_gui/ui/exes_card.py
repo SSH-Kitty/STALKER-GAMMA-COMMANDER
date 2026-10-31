@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QPushButton
 
 from .. import coop, modded_exes
+from . import reflow
 from .common import (
     BackgroundTask,
     NoWheelComboBox,
@@ -43,8 +44,8 @@ class ModdedExesCard:
         self.status.setObjectName("")
         layout.addWidget(self.status)
 
-        row = QHBoxLayout()
-        row.setSpacing(8)
+        # The buttons go under the version list when the window is narrow.
+        row = reflow.row(8)
         self.versions = NoWheelComboBox()
         self.versions.setMinimumWidth(260)
         self.versions.setFixedHeight(38)
@@ -54,8 +55,11 @@ class ModdedExesCard:
         self.back_button = self._button("", self._go_back)
         self.restore_button = self._button(tr("Restore original exes"), self._restore)
         self.cancel_button = self._button(tr("Cancel"), lambda: self._task and self._task.cancel())
-        for button in (self.install_button, self.file_button, self.back_button, self.restore_button, self.cancel_button):
-            row.addWidget(button)
+        row.addWidget(
+            reflow.group(
+                self.install_button, self.file_button, self.back_button, self.restore_button, self.cancel_button
+            )
+        )
         layout.addLayout(row)
         note_row = QHBoxLayout()
         note_row.setSpacing(8)

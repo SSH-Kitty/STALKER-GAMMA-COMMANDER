@@ -51,6 +51,7 @@ from ..profile_bundle import (
 )
 from ..settings import CliProfile, cli_ok, run_config_command
 from ..themes import active_theme_tokens
+from . import reflow
 from .common import (
     GAMMA_MARKERS,
     GAMMA_PROFILE,
@@ -475,8 +476,9 @@ class CompareView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
-        top = QHBoxLayout()
-        top.setSpacing(10)
+        # Title, the two pickers and the filter: each its own line when the
+        # window is narrow.
+        top = reflow.row(10)
         top.addWidget(section_label(tr("Compare profiles"), level=2))
         top.addSpacing(12)
         # Any two profiles: the left one starts as the profile on screen,
@@ -489,7 +491,7 @@ class CompareView(QWidget):
         self.compare_swap_button.setToolTip(tr("Swap sides"))
         self.compare_swap_button.clicked.connect(self._swap_compare)
         for combo in (self.compare_left_combo, self.compare_combo):
-            combo.setMinimumWidth(220)
+            combo.setMinimumWidth(160)
             combo.setSizeAdjustPolicy(NoWheelComboBox.SizeAdjustPolicy.AdjustToContents)
         self.compare_left_combo.currentIndexChanged.connect(
             lambda _i: self._on_compare_picked(self.compare_left_combo, self.compare_combo)
@@ -497,18 +499,17 @@ class CompareView(QWidget):
         self.compare_combo.currentIndexChanged.connect(
             lambda _i: self._on_compare_picked(self.compare_combo, self.compare_left_combo)
         )
-        top.addWidget(self.compare_left_combo)
-        top.addWidget(self.compare_swap_button)
-        top.addWidget(self.compare_combo)
+        top.addWidget(
+            reflow.group(self.compare_left_combo, self.compare_swap_button, self.compare_combo, spacing=10)
+        )
         top.addStretch(1)
         self.compare_count = QLabel()
         self.compare_count.setObjectName("dim")
-        top.addWidget(self.compare_count)
         self.compare_filter = NoWheelComboBox()
         self.compare_filter.addItems([tr("Differences only"), tr("All mods")])
         self.compare_filter.setCurrentIndex(1)
         self.compare_filter.currentIndexChanged.connect(lambda _i: self._refresh_compare())
-        top.addWidget(self.compare_filter)
+        top.addWidget(reflow.group(self.compare_count, self.compare_filter, spacing=10))
         layout.addLayout(top)
 
         self.compare_empty = info_label("")
@@ -546,6 +547,9 @@ class CompareView(QWidget):
         # Tall by default so a long list of differences reads at a glance.
         self.compare_table.setMinimumHeight(480)
         layout.addWidget(self.compare_table, 1)
+        # Soaks up the height only while the table is hidden, so the
+        # compare row and its hint stay at the top instead of floating.
+        layout.addStretch(0)
         # Profile the left side last followed (see show_for).
         self._synced_to = ""
 
@@ -866,12 +870,20 @@ class ProfilesPage(QWidget):
     def _build_main(self) -> QWidget:
         page = QWidget()
         page.setObjectName("pageContent")
-        root = QHBoxLayout(page)
+        # A very narrow window puts the profile list above the details.
+        list_panel = self._build_list_panel()
+        root = reflow.row(
+            20,
+            need=lambda: 24 + list_panel.minimumWidth() + 20 + holder.minimumSizeHint().width() + 16 + 24,
+        )
+        page.setLayout(root)
         root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(20)
-        root.addWidget(self._build_list_panel())
+        root.addWidget(list_panel)
 
-        column = QVBoxLayout()
+        details = QWidget()
+        details.setObjectName("panelTransparent")
+        column = QVBoxLayout(details)
+        column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(12)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -881,8 +893,7 @@ class ProfilesPage(QWidget):
         holder_layout = QVBoxLayout(holder)
         holder_layout.setContentsMargins(0, 0, 0, 0)
         holder_layout.setSpacing(16)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(16)
+        top_row = reflow.row(16)  # the note goes under when narrow
         top_row.addWidget(self._build_detail_card(), 2)
         top_row.addWidget(self._build_note_card(), 1)
         holder_layout.addLayout(top_row)
@@ -897,13 +908,15 @@ class ProfilesPage(QWidget):
         scroll.setWidget(holder)
         column.addWidget(scroll, 1)
         column.addWidget(self._build_footer())
-        root.addLayout(column, 1)
+        root.addWidget(details, 1)
         return page
 
     def _build_list_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("panelTransparent")
-        panel.setFixedWidth(290)
+        # Narrower when the window is: the details beside it need the room.
+        panel.setMinimumWidth(210)
+        panel.setMaximumWidth(290)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)

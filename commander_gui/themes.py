@@ -934,6 +934,29 @@ QComboBox::separator {
     background: $border_input;
     margin: 4px 8px;
 }
+QMenu {
+    background-color: $card;
+    color: $text;
+    border: 1px solid $border_input;
+    padding: 4px;
+}
+QMenu::item {
+    background: transparent;
+    padding: 6px 20px 6px 12px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: $selection;
+    color: $selection_text;
+}
+QMenu::item:disabled {
+    color: $text_disabled;
+}
+QMenu::separator {
+    height: 1px;
+    background: $border_input;
+    margin: 4px 8px;
+}
 QProgressBar {
     background-color: $input;
     border: 1px solid $border_input;

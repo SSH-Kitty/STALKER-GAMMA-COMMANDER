@@ -84,6 +84,7 @@ from ..winetricks import (
     winetricks_install_command,
     winetricks_tool_install_command,
 )
+from . import reflow
 from .common import (
     ACCENT,
     STATUS_RED,
@@ -1048,7 +1049,7 @@ class InstallPage(QWidget):
         # Anomaly/GAMMA card below. --
         self.directory_deps_card, dd_layout = make_card()
         root.addWidget(self.directory_deps_card)
-        dd_grid = QGridLayout()
+        dd_grid = reflow.divided(QGridLayout(), natural=True)
         dd_grid.setHorizontalSpacing(32)
         dd_grid.setVerticalSpacing(10)
         dd_grid.setColumnStretch(0, 1)
@@ -1127,7 +1128,7 @@ class InstallPage(QWidget):
         # two columns - everything below it still lines back up).
         self.anomaly_gamma_card, ag_layout = make_card()
         root.addWidget(self.anomaly_gamma_card)
-        grid = QGridLayout()
+        grid = reflow.divided(QGridLayout())
         grid.setHorizontalSpacing(32)
         grid.setVerticalSpacing(10)
         grid.setColumnStretch(0, 1)
@@ -1315,7 +1316,7 @@ class InstallPage(QWidget):
                 tr("<span style='color:{arg};'>Step 5.</span> Find and repair missing or changed game files. Your saves and settings are left alone.", arg=ACCENT.name())
             )
         )
-        tiles = QGridLayout()
+        tiles = reflow.divided(QGridLayout())
         tiles.setSpacing(10)
         self.verify_tiles = {
             "anomaly": _CheckTile(tr("Anomaly files")),
@@ -1621,6 +1622,8 @@ class InstallPage(QWidget):
         margins = card.layout().contentsMargins()
         inner = card.width() - margins.left() - margins.right()
         half = (inner - 2 * self._ag_grid.horizontalSpacing() - 1) // 2
+        if reflow.is_stacked(self._ag_grid):  # GAMMA under Anomaly: all of it
+            half = inner
         columns = 2 if half >= two_wide else 1
         if columns == self._opts_columns:
             return
@@ -1773,7 +1776,8 @@ class InstallPage(QWidget):
             )
             self.refresh()
             return False
-        if bad := wine_unsafe_folder(anomaly, gamma, cache):
+        # Not the cache: only the CLI reads it, never Wine.
+        if bad := wine_unsafe_folder(anomaly, gamma):
             warn_wine_unsafe_folder(self, bad)
             self.refresh()
             return False

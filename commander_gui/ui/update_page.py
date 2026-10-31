@@ -52,6 +52,7 @@ from ..updates import (
     release_title,
     status_summary,
 )
+from . import reflow
 from .common import (
     ACCENT,
     LIGHT_GREY,
@@ -147,7 +148,9 @@ class _Release(QFrame):
         layout.setSpacing(8)
         header = QHBoxLayout()
         header.setSpacing(10)
-        header.addWidget(section_label(release_title(title), level=2))
+        title_label = section_label(release_title(title), level=2)
+        title_label.setWordWrap(True)  # a long title wraps in a narrow window
+        header.addWidget(title_label, 1)
         if badge:
             chip = QLabel(badge)
             chip.setObjectName("chip")
@@ -278,8 +281,7 @@ class UpdatePage(QWidget):
         self.note_label.setVisible(False)
         layout.addWidget(self.note_label)
 
-        tiles = QHBoxLayout()
-        tiles.setSpacing(12)
+        tiles = reflow.row(12)
         self.installed_stat = _Stat(tr("Installed version"))
         self.latest_stat = _Stat(tr("Latest version"))
         self.changes_stat = _Stat(tr("Mod changes"))

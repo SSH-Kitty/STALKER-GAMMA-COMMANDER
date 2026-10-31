@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import coop, gui_settings
+from . import reflow
 from .common import (
     ACCENT,
     BackgroundTask,
@@ -284,9 +285,9 @@ def _section(title: str, *, warn: bool = False) -> tuple[QFrame, QVBoxLayout]:
 
 
 def _columns(layout: QVBoxLayout, *columns) -> None:
-    """Side-by-side section boxes (or stacks of them), equal widths."""
-    row = QHBoxLayout()
-    row.setSpacing(12)
+    """Side-by-side section boxes (or stacks of them), equal widths.
+    Stacked when the window is narrow, see reflow."""
+    row = reflow.row()
     for column in columns:
         if isinstance(column, QWidget):
             row.addWidget(column, 1)
@@ -469,10 +470,42 @@ class MultiplayerPage(QWidget):
         root.setSpacing(16)
         scroll.setWidget(content)
 
-        root.addWidget(self._status_card())
+        self.status_card = self._status_card()
+        root.addWidget(self.status_card)
         self.settings_card = self._settings_card()
         root.addWidget(self.settings_card)
         root.addStretch(1)
+
+    def reflow_extra(self) -> bool:
+        """Run by reflow on every fit, so this move glides with the rest."""
+        return self._fit_dash()
+
+    def _fit_dash(self) -> bool:
+        """"Play co-op on" and the tiles drop to a second row when the four
+        choices don't fit side by side, instead of the page scrolling
+        sideways."""
+        moved = self._dash_row2.count() > 0
+        if not moved:  # one row now: remember how wide that needs to be
+            self._one_row_need = (
+                self.status_card.minimumSizeHint().width()
+                + 64 + 16  # the page's side margins, and a scroll bar
+            )
+        narrow = self.width() < self._one_row_need
+        if narrow == moved:
+            return False
+        body, row2 = self._dash_body, self._dash_row2
+        for widget in (self.dash_kind_box, self._stats_box):
+            (body if narrow else row2).removeWidget(widget)
+        if narrow:
+            row2.addWidget(self.dash_kind_box, 1)
+            row2.addWidget(self._stats_box)
+        else:
+            body.insertWidget(body.indexOf(self._stats_line), self.dash_kind_box, 1)
+            body.addWidget(self._stats_box)
+        # Each row starts at the card's edge, so no divider in front.
+        self._kind_line.setVisible(not narrow)
+        self._stats_line.setVisible(not narrow)
+        return True
 
     # ---------------------------------------------------------- status card
     def _status_card(self) -> QWidget:
@@ -621,7 +654,10 @@ class MultiplayerPage(QWidget):
             if index == 3:
                 body.addWidget(self.dash_kind_box, 1)
             if index:
-                target.addWidget(_vline())
+                line = _vline()
+                target.addWidget(line)
+                if index == 3:
+                    self._kind_line = line
             # Numbered like the Install page steps so the four choices read in order.
             column = _field(f"<span style='color:{ACCENT.name()};'>{index + 1}.</span> {caption}", pills)
             column.setSpacing(6)
@@ -629,16 +665,26 @@ class MultiplayerPage(QWidget):
                 column.addWidget(widget)
             column.addStretch(1)
             target.addLayout(column, 1)
-        body.addWidget(_vline())
-        stats = QVBoxLayout()
+        self._stats_line = _vline()
+        body.addWidget(self._stats_line)
+        self._stats_box = QWidget()
+        self._stats_box.setObjectName("panelTransparent")
+        stats = QVBoxLayout(self._stats_box)
+        stats.setContentsMargins(0, 0, 0, 0)
         stats.setSpacing(8)
         self.version_stat = _Stat(tr("xrRazom version"))
         self.players_stat = _Stat(tr("Player slots"))
         self.players_stat.setToolTip(tr("How many friends can join, up to 4."))
         stats.addWidget(self.version_stat)
         stats.addWidget(self.players_stat)
-        body.addLayout(stats)
+        body.addWidget(self._stats_box)
         dash.addLayout(body)
+        # Narrow window: "Play co-op on" and the tiles move down here, see
+        # resizeEvent. Empty while everything fits on one row.
+        self._dash_body = body
+        self._dash_row2 = QHBoxLayout()
+        self._dash_row2.setSpacing(24)
+        dash.addLayout(self._dash_row2)
         self.reverted_label = info_label(tr("A GAMMA update or repair put the original game files back. Re-apply co-op to play together again."))
         self.reverted_label.setObjectName("warn")
         dash.addWidget(self.reverted_label)
@@ -1180,6 +1226,7 @@ class MultiplayerPage(QWidget):
             hint = tr("The co-op files are added to GAMMA as a Mod Organizer mod.")
         self.kind_hint.setText(hint)
         self.dash_kind_box.setVisible(installed and has_gamma)
+        self._fit_dash()
         self.dash_gamma_pill.setChecked(not plain)
         self.dash_anomaly_pill.setChecked(plain)
         self.launcher_manage.setVisible(installed and plain)
@@ -1242,7 +1289,10 @@ class MultiplayerPage(QWidget):
         label = self.launch_live_status
         if play.launch_live_status.text():
             _unfade(label)
-            label.setStyleSheet(play.launch_live_status.styleSheet())
+            # Play colours it by object name (#accent / #warn), not a stylesheet.
+            label.setObjectName(play.launch_live_status.objectName())
+            label.style().unpolish(label)
+            label.style().polish(label)
             label.setText(play.launch_live_status.text())
             label.show()
         elif label.graphicsEffect().opacity() == 1.0 and label._fade.state() != QAbstractAnimation.State.Running:

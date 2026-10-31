@@ -138,6 +138,18 @@ class ModDBPlugin(QObject):
         except plugins.PluginError as exc:
             QMessageBox.warning(self.window, tr("The ModDB browser can't start"), str(exc))
             return
+        downloads = plugins.downloads_dir()
+        try:
+            # The picked folder may be on a drive that's gone; the browser
+            # would crash on it at start.
+            downloads.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(
+                self.window,
+                tr("Couldn't create a folder"),
+                tr("COMMANDER couldn't create this folder:\n{folder}\n\n{exc}", folder=downloads, exc=exc),
+            )
+            return
         process = QProcess(self)
         env = QProcessEnvironment()
         for key, value in child_environment().items():
@@ -160,7 +172,7 @@ class ModDBPlugin(QObject):
             "language": active_language(),
             "tokens": active_theme_tokens(),
             "stylesheet": QApplication.instance().styleSheet(),
-            "downloads": str(plugins.downloads_dir()),
+            "downloads": str(downloads),
             "data": str(plugins.browser_data_dir()),
             "custom_title_bar": bool(gui_settings.load_gui_settings().get("custom_title_bar", True)),
         }

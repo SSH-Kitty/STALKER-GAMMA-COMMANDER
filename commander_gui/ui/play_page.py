@@ -20,7 +20,6 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
-    QBoxLayout,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -105,7 +104,7 @@ from ..steam_shortcuts import (
     setup_coop_shortcut,
     steam_root_for,
 )
-from . import game_splash, graphics_window
+from . import game_splash, graphics_window, reflow
 from .common import (
     WARN,
     BackgroundTask,
@@ -479,7 +478,7 @@ class PlayPage(QWidget):
         # Same grid + divider pattern as the Install page's cards; each
         # row holds the matching piece of both columns so they line up.
         config_card, config_layout = make_card()
-        grid = QGridLayout()
+        grid = reflow.divided(QGridLayout())
         grid.setHorizontalSpacing(32)
         grid.setVerticalSpacing(10)
         grid.setColumnStretch(0, 1)
@@ -601,7 +600,8 @@ class PlayPage(QWidget):
         options_layout.addWidget(section_label(tr("Launch options"), level=2))
         # One labelled row per group; equal-width columns line the chips up
         # across rows and fill the card.
-        toggles_grid = QGridLayout()
+        # Narrow: each group's name above its chips, two to a line.
+        toggles_grid = reflow.labelled(QGridLayout())
         toggles_grid.setHorizontalSpacing(8)
         toggles_grid.setVerticalSpacing(8)
         columns = max(len(options) for _, options in launch_options.GROUPS)
@@ -649,9 +649,10 @@ class PlayPage(QWidget):
         )
         self.custom_options_edit.textChanged.connect(self._sync_option_toggles)
         options_layout.addWidget(self.custom_options_edit)
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(16)
-        self._cards_row = cards_row  # stacked when narrow, see resizeEvent
+        # Launch options above Frame generation when they don't fit side by
+        # side: tiling compositors give the window a narrow column.
+        cards_row = reflow.row(16)
+        self._cards_row = cards_row
         cards_row.addWidget(options_card, 3)
         self._frame_gen = FrameGenCard(self.custom_options_edit.text, self.custom_options_edit.setText)
         self._frame_gen.dll_changed.connect(self._refresh_preview)
@@ -701,23 +702,6 @@ class PlayPage(QWidget):
         self._load_state()
         self._refresh_preview()
         self._update_playtime_label()
-
-    def resizeEvent(self, event) -> None:
-        """Launch options above Frame generation when they don't fit side
-        by side: tiling compositors give the window a narrow column."""
-        super().resizeEvent(event)
-        row = self._cards_row
-        need = (
-            self._options_card.minimumSizeHint().width()
-            + self._frame_gen.minimumSizeHint().width()
-            + row.spacing()
-            + 64 + 16  # the page's side margins, and a scroll bar
-        )
-        row.setDirection(
-            QBoxLayout.Direction.LeftToRight
-            if self.width() >= need
-            else QBoxLayout.Direction.TopToBottom
-        )
 
     @property
     def is_launching(self) -> bool:
