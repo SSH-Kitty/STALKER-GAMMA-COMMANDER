@@ -372,10 +372,11 @@ QPushButton#winClose:pressed {
     padding: 0;
     color: $text_info;
 }
-/* Fixed green, same as InstallStatusRow's OK_GREEN "Installed". */
-#verifyPill[level="healthy"] { color: $status_ok; }
+/* Fixed green, same as InstallStatusRow's OK_GREEN "Installed". A snapshot
+   run is a pass too: everything but mod file edits was checked. */
+#verifyPill[level="healthy"],
+#verifyPill[level="snapshot"] { color: $status_ok; }
 #verifyPill[level="running"] { color: $accent_strong; }
-#verifyPill[level="snapshot"] { color: $text_bright; }
 #verifyPill[level="attention"] { color: $warn; }
 #verifyPill[level="failed"] { color: $danger_text; }
 #verifyTile {
@@ -975,7 +976,6 @@ QProgressBar[full="true"] {
     color: $accent_text;
 }
 /* Verify Integrity results that aren't a pass (see set_success_state). */
-QProgressBar[level="snapshot"]::chunk { background: $text_info; }
 QProgressBar[level="attention"]::chunk { background: $warn; }
 QProgressBar::text {
     color: $text_btn;

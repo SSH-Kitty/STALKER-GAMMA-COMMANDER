@@ -233,6 +233,7 @@ def classify_problems(
     scan: Md5ScanResult,
     records: dict[str, ModPackRecord],
     extra_broken_folders: Iterable[str] = (),
+    repo_owned: Iterable[str] = (),
 ) -> RepairPlan:
     """Split the scan problems into repairable / unrepairable / added.
 
@@ -247,8 +248,14 @@ def classify_problems(
     MD5 baseline in the first place produces no changed/removed entries of
     its own, so without this it would be reported forever but never
     actually offered for repair.
+
+    ``repo_owned`` lists the files that come from GAMMA's own repositories
+    (``integrity.gamma_repo_files``): those are checked and repaired against
+    the repositories, so they are left out here - and so is a missing or
+    empty folder made of them, which has no modpack record to repair from.
     """
     plan = RepairPlan()
+    repo_owned = set(repo_owned)
 
     def folder_of(rel: str) -> str | None:
         parts = rel.split("/")
@@ -256,8 +263,10 @@ def classify_problems(
             return parts[1]
         return None
 
-    for key, rels in (("changed", scan.changed), ("removed", scan.removed)):
-        for rel in set(rels):
+    changed_rels = set(scan.changed) - repo_owned
+    removed_rels = set(scan.removed) - repo_owned
+    for key, rels in (("changed", changed_rels), ("removed", removed_rels)):
+        for rel in rels:
             folder = folder_of(rel)
             if folder is None:
                 continue
@@ -265,18 +274,21 @@ def classify_problems(
             plan.file_counts[folder] = (
                 (changed + 1, removed) if key == "changed" else (changed, removed + 1)
             )
-    broken_folders = {folder_of(rel) for rel in set(scan.changed) | set(scan.removed)}
-    broken_folders.discard(None)
-    broken_folders.update(extra_broken_folders)
+    scan_folders = {folder_of(rel) for rel in changed_rels | removed_rels}
+    scan_folders.discard(None)
+    repo_folders = {folder_of(rel) for rel in repo_owned}
+    broken_folders = scan_folders | set(extra_broken_folders)
     unrepairable_rels = [
         rel
-        for rel in sorted(set(scan.changed) | set(scan.removed))
+        for rel in sorted(changed_rels | removed_rels)
         if folder_of(rel) is None
     ]
 
     by_name = records_by_name(records)
     for folder in sorted(broken_folders):
         record = find_record_for_folder(folder, records, by_name=by_name)
+        if record is None and folder in repo_folders and folder not in scan_folders:
+            continue
         if record is not None:
             if folder not in plan.repairable:
                 plan.repairable.append(folder)
@@ -291,7 +303,11 @@ def classify_problems(
     return plan
 
 
-def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()) -> str:
+def repair_preview(
+    plan: RepairPlan | None,
+    anomaly_problems: Iterable[str] = (),
+    repo_files: Iterable[str] = (),
+) -> str:
     """The full, plain-text list of what a repair will do - shown behind
     "Show Details..." in the repair prompt, so nothing it touches is hidden
     behind a "... and N more"."""
@@ -300,6 +316,13 @@ def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()
     if anomaly_problems:
         out.append(f"Anomaly files to re-install ({len(anomaly_problems)}):")
         out.extend(f"  {line}" for line in anomaly_problems)
+        out.append("")
+    repo_files = list(repo_files)
+    if repo_files:
+        out.append(
+            f"GAMMA's own files to copy back from the download cache ({len(repo_files)}):"
+        )
+        out.extend(f"  {rel.removeprefix('mods/')}" for rel in repo_files)
         out.append("")
     if plan is not None and plan.repairable:
         out.append(f"GAMMA mods to re-install ({len(plan.repairable)}):")
@@ -325,11 +348,80 @@ def repair_preview(plan: RepairPlan | None, anomaly_problems: Iterable[str] = ()
         )
         out.extend(f"  {name}" for name in plan.added_only)
         out.append("")
+    if plan is not None and plan.repairable:
+        out.append(
+            "Mods whose archive in the download cache is intact are unpacked again"
+        )
+        out.append("from it; only the others are downloaded.")
+        out.append("")
     out.append("Also kept safe:")
     out.append("  - your modlist.txt (order, enabled/disabled, your own mods) is restored afterwards")
     out.append("  - user.ltx and MCM settings are backed up first (a repair never touches saves)")
     out.append("  - mod folders are set aside, not deleted, until their reinstall succeeds")
     return "\n".join(out).rstrip()
+
+
+# ------------------------------------------- unpacking again from the cache
+
+RESUME_FILENAME = "resume.txt"
+
+
+def resume_keys(records: dict[str, ModPackRecord]) -> dict[str, str]:
+    """Record folder name -> the key full-install's resume.txt tracks it by.
+
+    The CLI groups ModDB addons sharing an archive and keys the group by its
+    first addon: ``"<AddonName> | <ZipName>"`` (IDownloadableRecord.ResumeKey,
+    DownloadableRecordFactory). Only ModDB addons with an MD5-checked archive
+    are listed: GitHub archives have no checksum to trust, and addons
+    without a ZipName are keyed by their download link instead.
+    """
+    leaders: dict[str, ModPackRecord] = {}
+    keys: dict[str, str] = {}
+    for record in sorted(records.values(), key=lambda record: record.counter):
+        if "moddb" not in record.dl_link or not (record.patch and record.zip_name):
+            continue
+        leader = leaders.setdefault(record.zip_name, record)
+        key = f"{leader.addon_name} | {leader.zip_name}"
+        if not any(char in key for char in "\t\r\n"):
+            keys[record.folder_name] = key
+    return keys
+
+
+def write_reextract_resume(gamma_dir: str, keys: Iterable[str]) -> bool:
+    """Make ``full-install --resume`` unpack these archives again.
+
+    A resume.txt entry in the "Extract" state means "downloaded, not yet
+    unpacked": the CLI unpacks it even with --skip-extract-on-hash-match,
+    and downloads it only if the cached archive fails its MD5 check. Every
+    other addon is handled as in a plain run. Returns False, writing
+    nothing, when a resume.txt already exists - that one belongs to an
+    interrupted install and must survive.
+    """
+    keys = sorted(set(keys))
+    path = Path(gamma_dir) / RESUME_FILENAME
+    if not keys or path.exists() or path.is_symlink():
+        return False
+    lines = [
+        "# stalker-gamma resume file. Run the same command with --resume to continue.",
+        "# command: full-install",
+        "# status\trecord",
+        *(f"Extract\t{key}" for key in keys),
+    ]
+    try:
+        write_bytes(path, ("\n".join(lines) + "\n").encode("utf-8"), lock=False)
+    except OSError:
+        return False
+    return True
+
+
+def remove_resume_file(gamma_dir: str) -> None:
+    """Drop the resume.txt a repair wrote (or the CLI left after it failed):
+    the repair puts everything back itself, and a later install must not
+    resume from it."""
+    try:
+        (Path(gamma_dir) / RESUME_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 _QUARANTINE_DIRNAME = ".verify-quarantine"

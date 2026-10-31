@@ -109,6 +109,131 @@ class StaleSnapshotAfterRepairTests(unittest.TestCase):
             result = scan_mods_md5(str(gamma))  # hung forever before
             self.assertIn("mods/1- A/pipe", result.errors)
 
+def _git(*args, cwd=None):
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "needs git")
+class GammaRepoFilesTests(unittest.TestCase):
+    """GAMMA's own files are judged against its repositories in the cache."""
+
+    def _install(self, tmp):
+        from commander_gui.integrity import MANIFEST_FILENAME
+
+        work = Path(tmp) / "work"
+        addon = work / "G.A.M.M.A" / "modpack_addons" / "G.A.M.M.A. Fixes" / "gamedata"
+        addon.mkdir(parents=True)
+        (addon / "fix.ltx").write_text("original")
+        (addon / "axr_options.ltx").write_text("mcm")
+        (work / "README.md").write_text("not copied")
+        _git("init", "-q", cwd=work)
+        _git("add", ".", cwd=work)
+        _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x", cwd=work)
+        gamma = Path(tmp) / "gamma"
+        repo = gamma / "downloads" / "Stalker_GAMMA.git"
+        _git("clone", "-q", "--bare", str(work), str(repo))
+        _git("--git-dir", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD")
+        mod = gamma / "mods" / "G.A.M.M.A. Fixes" / "gamedata"
+        mod.mkdir(parents=True)
+        (mod / "fix.ltx").write_text("original")
+        (mod / "axr_options.ltx").write_text("my own MCM values")
+        return gamma, gamma / MANIFEST_FILENAME
+
+    def test_a_damaged_file_is_found_and_copied_back_from_the_cache(self):
+        from commander_gui.integrity import (
+            compare_repo_files,
+            gamma_repo_files,
+            repo_branches,
+            restore_repo_files,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma, manifest = self._install(tmp)
+            rel = "mods/G.A.M.M.A. Fixes/gamedata/fix.ltx"
+            files, unreadable = gamma_repo_files(str(gamma), repo_branches(CliProfile()))
+            # MCM's saved settings and files that land outside mods/ are left out.
+            self.assertEqual(list(files), [rel])
+            self.assertEqual(sorted(unreadable), ["gamma_large_files_v2", "gamma_setup", "teivaz_anomaly_gunslinger"])
+            scan_mods_md5(str(gamma), git_blobs=files)  # first run: snapshot only
+            self.assertEqual(compare_repo_files(files, scan_mods_md5(str(gamma), git_blobs=files)).broken, [])
+
+            (gamma / rel).write_text("broken")
+            check = compare_repo_files(files, scan_mods_md5(str(gamma), git_blobs=files))
+            self.assertEqual(check.changed, [rel])
+
+            stamp = manifest.stat().st_mtime_ns
+            result = restore_repo_files(str(gamma), files, check.broken)
+            self.assertEqual((result.restored, result.failed), ([rel], []))
+            self.assertEqual((gamma / rel).read_text(), "original")
+            # The snapshot learns the repaired file and keeps its date.
+            self.assertEqual(scan_mods_md5(str(gamma)).changed, [])
+            self.assertEqual(manifest.stat().st_mtime_ns, stamp)
+
+    def test_a_symlinked_destination_is_never_written_through(self):
+        from commander_gui.integrity import (
+            gamma_repo_files,
+            repo_branches,
+            restore_repo_files,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gamma, _ = self._install(tmp)
+            outside = Path(tmp) / "outside.ltx"
+            outside.write_text("keep")
+            target = gamma / "mods" / "G.A.M.M.A. Fixes" / "gamedata" / "fix.ltx"
+            target.unlink()
+            target.symlink_to(outside)
+            files, _ = gamma_repo_files(str(gamma), repo_branches(CliProfile()))
+            result = restore_repo_files(str(gamma), files, list(files))
+            self.assertEqual(result.failed, list(files))
+            self.assertEqual(outside.read_text(), "keep")
+
+
+class ReextractFromCacheTests(unittest.TestCase):
+    def test_resume_keys_follow_the_cli_grouping(self):
+        from commander_gui.repair import parse_modpack_records, resume_keys
+
+        rows = [
+            "https://www.moddb.com/a\t0\tp1\tShared A\thttps://m/a\tshared.7z\t" + "a" * 32,
+            "https://www.moddb.com/b\t0\tp2\tShared B\thttps://m/b\tshared.7z\t" + "a" * 32,
+            "https://github.com/o/repo/archive/main.zip\t0\tp\tGit Mod\t\t\t",
+            "https://www.moddb.com/c\t0\t\tNo Zip\thttps://m/c\t\t",
+        ]
+        records = parse_modpack_records("\n".join(rows))
+        keys = resume_keys(records)
+        # Both share one archive: the CLI keys the group by its first addon.
+        self.assertEqual(keys["1- Shared A p1"], "Shared A | shared.7z")
+        self.assertEqual(keys["2- Shared B p2"], "Shared A | shared.7z")
+        self.assertEqual(len(keys), 2)  # no GitHub, no ZipName-less addon
+
+    def test_an_interrupted_installs_resume_file_is_never_overwritten(self):
+        from commander_gui.repair import write_reextract_resume
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(write_reextract_resume(tmp, ["A | a.7z"]))
+            text = (Path(tmp) / "resume.txt").read_text()
+            self.assertIn("# command: full-install\n", text)
+            self.assertIn("Extract\tA | a.7z\n", text)
+            self.assertFalse(write_reextract_resume(tmp, ["B | b.7z"]))
+            self.assertEqual((Path(tmp) / "resume.txt").read_text(), text)
+
+    def test_files_from_gammas_repositories_are_left_to_the_git_check(self):
+        from commander_gui.repair import ModPackRecord, classify_problems
+
+        scan = Md5ScanResult(changed=["mods/1- A x/f.txt", "mods/G Fix/g.ltx"])
+        record = ModPackRecord(1, "A", "x", "https://moddb", "", "a.7z", "", "")
+        plan = classify_problems(
+            scan,
+            {record.folder_name: record},
+            extra_broken_folders=["G Empty"],
+            repo_owned={"mods/G Fix/g.ltx", "mods/G Empty/e.ltx"},
+        )
+        self.assertEqual(plan.repairable, ["1- A x"])
+        self.assertEqual(plan.unrepairable, [])
+
+
 def _page(tmp):
     from PySide6.QtWidgets import QApplication
 
@@ -227,6 +352,49 @@ class VerifyPageTests(unittest.TestCase):
             ):
                 page._start_repair_install()
             self.assertFalse(capture.call_args.kwargs["keep_exes"])
+
+    def test_a_verified_archive_is_unpacked_again_then_downloaded_if_skipped(self):
+        from commander_gui.repair import (
+            ModPackRecord,
+            QuarantineItem,
+            QuarantineRecord,
+            RepairPlan,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page, profile = _page(tmp)
+            gamma = Path(profile.gamma)
+            (gamma / "mods").mkdir(parents=True)
+            record = ModPackRecord(1, "A", "x", "https://www.moddb.com/a", "", "a.7z", "f" * 32, "")
+            page._verify_records = {record.folder_name: record}
+            page._repair_records = {record.folder_name: record}
+            page._repair_plan = RepairPlan(repairable=[record.folder_name])
+            page._cache_archive_result = CacheArchiveVerifyResult(verified=["a.7z"])
+            page._begin_repair_run()
+            self.assertEqual(page._archive_reuse_keys(), {record.folder_name: "A | a.7z"})
+            page._repair_reuse_keys = page._archive_reuse_keys()
+            mod = gamma / "mods" / record.folder_name
+            set_aside = QuarantineRecord(
+                record.folder_name, [QuarantineItem(mod, gamma / "q" / "A", is_mod=True)]
+            )
+            (gamma / "q" / "A").mkdir(parents=True)
+            (gamma / "q" / "A" / "f").write_text("old")
+            with patch("commander_gui.ui.install_page.CommandRunner") as runner:
+                page._on_repair_quarantined([set_aside])
+            self.assertIn("--resume", runner.call_args.args[0])
+            self.assertTrue((gamma / "resume.txt").is_file())
+            # The installer skipped it anyway: one more round, downloading.
+            page._repair_runner = Mock(was_cancelled=False)
+            with (
+                patch("commander_gui.ui.install_page.cli_ok", return_value=True),
+                patch.object(page, "_restore_user_modlist"),
+                patch.object(page, "_start_gamma_repair_deletion") as again,
+            ):
+                page._on_repair_install_finished(0, "")
+            again.assert_called_once()
+            self.assertTrue(page._repair_retrying)
+            self.assertFalse((gamma / "resume.txt").exists())
+            self.assertEqual((mod / "f").read_text(), "old")  # old copy back meanwhile
 
     def test_result_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,7 +4,9 @@ The Anomaly side is handled by the CLI's ``anomaly check`` command (hash
 verification against ``anomaly/tools/checksums.md5``). The GAMMA side has no
 CLI command, so it is verified here: every enabled mod in the profile's
 ``modlist.txt`` must have a non-empty folder under ``gamma/mods``, and the
-core Mod Organizer files must be present.
+core Mod Organizer files must be present. GAMMA's own files (copied out of
+its git repositories in the download cache) are checked against those
+repositories exactly; everything else is compared with a snapshot.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -345,6 +347,21 @@ def _format_duration(seconds: float) -> str:
 
 def _md5_file(path: Path) -> tuple[str, int] | None:
     """Return (md5, size) for a file, or None if it cannot be read."""
+    hashed = _hash_file(path, git_blob=False)
+    return None if hashed is None else hashed[:2]
+
+
+def _md5_and_blob(path: Path) -> tuple[str, int, str] | None:
+    """(md5, size, git blob id) in one read - the blob id is what a git
+    repository stores the file under, so it compares with ``ls-tree``."""
+    return _hash_file(path, git_blob=True)
+
+
+def _git_blob_id(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def _hash_file(path: Path, git_blob: bool) -> tuple[str, int, str] | None:
     digest = hashlib.md5(usedforsecurity=False)
     try:
         # O_NONBLOCK: opening a FIFO left in mods/ would otherwise wait for
@@ -352,15 +369,22 @@ def _md5_file(path: Path) -> tuple[str, int] | None:
         fd = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         )
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             os.close(fd)
             return None
+        # The blob id hashes the size first, so it needs it up front.
+        blob = hashlib.sha1(b"blob %d\0" % info.st_size, usedforsecurity=False) if git_blob else None
         with os.fdopen(fd, "rb") as f:
             size = 0
             for chunk in iter(lambda: f.read(1 << 16), b""):
                 digest.update(chunk)
+                if blob is not None:
+                    blob.update(chunk)
                 size += len(chunk)
-        return digest.hexdigest(), size
+        # A file that changed size while being read matches nothing.
+        blob_id = blob.hexdigest() if blob is not None and size == info.st_size else ""
+        return digest.hexdigest(), size, blob_id
     except OSError:
         return None
 
@@ -511,6 +535,8 @@ class Md5ScanResult:
     #: relpath -> md5 of every file hashed, so a caller can record exactly
     #: this state as the baseline without hashing the whole tree again.
     digests: dict[str, str] = field(default_factory=dict, repr=False)
+    #: relpath -> git blob id, for the files asked for with ``git_blobs``.
+    blobs: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def problems(self) -> int:
@@ -618,12 +644,14 @@ def build_findings(
     plan=None,
     official_missing: bool = False,
     gamma_skipped: bool = False,
+    repo: RepoCheckResult | None = None,
 ) -> list[Finding]:
     """Turn the raw check results into plain-language rows, worst first.
 
     Nothing here is checked again: this only explains what the Anomaly
-    check, ``verify_gamma``, ``scan_mods_md5``, ``verify_cache_archives``
-    and ``classify_problems`` (``plan``) already found.
+    check, ``verify_gamma``, ``scan_mods_md5``, ``verify_cache_archives``,
+    ``compare_repo_files`` (``repo``) and ``classify_problems`` (``plan``)
+    already found.
     """
     found: list[Finding] = list(extra)
 
@@ -693,6 +721,30 @@ def build_findings(
                 tr("Some of your own mods have no files"),
                 tr("These mods aren't part of GAMMA, so COMMANDER can't download them again. Reinstall them yourself, or turn them off in the Mod Manager."),
                 own_broken,
+            )
+
+    if repo is not None:
+        if repo.broken:
+            add(
+                "problem",
+                tr("GAMMA's own files are damaged or missing"),
+                tr("These files come from GAMMA's own repositories in the download cache. Repair copies the originals back from there - nothing is downloaded. If you edited them on purpose, you don't need to repair."),
+                [rel.removeprefix("mods/") for rel in repo.broken],
+            )
+        elif repo.checked:
+            found.append(
+                Finding(
+                    "ok",
+                    tr("GAMMA's own files match the originals"),
+                    tr("{count} files were checked against GAMMA's repositories in the download cache.", count=repo.checked),
+                )
+            )
+        if repo.unreadable_repos:
+            add(
+                "info",
+                tr("Some of GAMMA's own files couldn't be checked"),
+                tr("Their repository isn't in the download cache, or git isn't installed. Those files were still compared with the snapshot."),
+                repo.unreadable_repos,
             )
 
     if plan is not None:
@@ -873,6 +925,7 @@ def scan_mods_md5(
     cancel=None,
     rebaseline: bool = False,
     trust_baseline: bool = False,
+    git_blobs: Container[str] = (),
 ) -> Md5ScanResult:
     """Hash every file under ``gamma/mods`` and compare against a baseline.
 
@@ -885,6 +938,8 @@ def scan_mods_md5(
     ``trust_baseline`` compares against the baseline even when a GAMMA
     install ran after it: the repair's own ``full-install`` rewrites the
     modpack list, and its re-check must still compare, not start over.
+    Files listed in ``git_blobs`` also get their git blob id (``blobs``),
+    from the same read.
     """
     result = Md5ScanResult()
     base = Path(gamma_dir)
@@ -925,12 +980,14 @@ def scan_mods_md5(
             # unreadable rather than ever writing it into the baseline.
             result.errors.append(rel)
             continue
-        digest = _md5_file(path)
+        digest = _md5_and_blob(path) if rel in git_blobs else _md5_file(path)
         if digest is None:
             result.errors.append(rel)
         else:
             current[rel] = digest[0]
             bytes_total += digest[1]
+            if len(digest) > 2:
+                result.blobs[rel] = digest[2]
         if on_progress is not None and (index % 5000 == 0 or index == total):
             on_progress(index, total, format_size(bytes_total))
 
@@ -1125,3 +1182,334 @@ def restore_gamma_overlay(
             continue
         result.restored.append(name)
     return result
+
+
+# ---------------------------------------- GAMMA's own files (git repositories)
+
+#: GAMMA's own repositories, cloned into the download cache by full-install
+#: and copied from there into gamma/mods - listed in the order it copies
+#: them, each with the profile field holding its branch.
+GAMMA_REPOS = (
+    ("gamma_setup", "gamma_setup_repo_branch"),
+    ("gamma_large_files_v2", "gamma_large_files_repo_branch"),
+    ("teivaz_anomaly_gunslinger", "teivaz_anomaly_gunslinger_repo_branch"),
+    ("Stalker_GAMMA", "stalker_gamma_repo_branch"),
+)
+_TEIVAZ_MOD = "312- Gunslinger Guns for Anomaly - Teivazcz & Gunslinger Team"
+#: MCM's saved settings ship in a GAMMA repo, but players change them.
+_USER_EDITED_NAMES = frozenset({"axr_options.ltx"})
+
+
+def _repo_mod_path(repo: str, path: str) -> str | None:
+    """Where full-install copies repo file ``path``: ``mods/...``, or None.
+
+    Mirrors GetDestinationPath of each special repo in stalker-gamma-cli
+    (Stalker.Gamma/GammaInstallerServices/SpecialRepos). GAMMA's patches
+    over Anomaly land outside gamma/mods and are left to ``anomaly check``.
+    """
+    parts = path.split("/")
+    rest: list[str] = []
+    if repo == "gamma_setup" and parts[0] == "modpack_addons":
+        rest = parts[1:]
+    elif repo == "gamma_large_files_v2":
+        rest = parts
+    elif repo == "teivaz_anomaly_gunslinger" and "gamedata" in parts[:-1]:
+        rest = [_TEIVAZ_MOD, "gamedata", *parts[parts.index("gamedata") + 1 :]]
+    elif repo == "Stalker_GAMMA" and parts[:2] == ["G.A.M.M.A", "modpack_addons"]:
+        rest = parts[2:]
+    if not rest or any(part in ("", ".", "..") for part in rest):
+        return None
+    rel = "mods/" + "/".join(rest)
+    return None if "\n" in rel or "\r" in rel else rel
+
+
+@dataclass
+class RepoFile:
+    repo: str
+    blob: str
+
+
+def repo_branches(profile) -> dict[str, str]:
+    """Repo name -> the branch the CLI profile installs it from."""
+    return {name: getattr(profile, attr, "") or "main" for name, attr in GAMMA_REPOS}
+
+
+def _git_command(git: str, repo: Path, *args: str) -> list[str]:
+    return [git, "-c", f"safe.directory={repo}", "--git-dir", str(repo), *args]
+
+
+def _git_env() -> dict[str, str]:
+    from .config import child_environment
+
+    env = child_environment()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _installed_commit(git: str, repo: Path, branch: str) -> str | None:
+    """The commit full-install last copied out of ``repo``.
+
+    ``update apply`` records it next to the repo; without that record it is
+    the branch tip (the CLI's GitService.LookupCommit).
+    """
+    import subprocess
+
+    applied = repo.with_suffix(".applied-commit")
+    if applied.is_file():
+        try:
+            candidates = [applied.read_text(encoding="utf-8").strip()]
+        except OSError:
+            return None
+    else:
+        ref = f"refs/remotes/origin/{branch}" if branch in ("main", "dev2") else branch
+        candidates = [ref, f"refs/remotes/Grokitach/{branch}"]
+    for candidate in candidates:
+        if not candidate or candidate.startswith("-"):
+            continue
+        try:
+            done = subprocess.run(
+                _git_command(git, repo, "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"),
+                capture_output=True, text=True, timeout=30, env=_git_env(), check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", done.stdout.strip()):
+            return done.stdout.strip()
+    return None
+
+
+def gamma_repo_files(
+    gamma_dir: str, branches: Mapping[str, str]
+) -> tuple[dict[str, RepoFile], list[str]]:
+    """GAMMA's own files in gamma/mods, and the git blob each must match.
+
+    Returns ``{"mods/<folder>/...": RepoFile}`` and the repos that could not
+    be read (not cloned, git missing). Read from ``gamma/downloads``, the
+    link full-install keeps to the cache. A path two repos write with
+    different contents is left out: which one is current depends on what an
+    update touched last. So are MCM's saved settings.
+    """
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    downloads = Path(gamma_dir) / "downloads"
+    claims: dict[str, list[RepoFile]] = {}
+    unreadable: list[str] = []
+    for name, _attr in GAMMA_REPOS:
+        repo = downloads / f"{name}.git"
+        commit = (
+            _installed_commit(git, repo, branches.get(name, "main"))
+            if git is not None and (repo / "HEAD").is_file()
+            else None
+        )
+        try:
+            if commit is None:
+                raise ValueError(name)
+            listing = subprocess.run(
+                _git_command(git, repo, "ls-tree", "-r", "-z", commit),
+                capture_output=True, timeout=120, env=_git_env(), check=True,
+            ).stdout
+        except (OSError, subprocess.SubprocessError, ValueError):
+            unreadable.append(name)
+            continue
+        for entry in listing.split(b"\0"):
+            meta, _tab, path = entry.partition(b"\t")
+            fields = meta.split()
+            # Regular files only: no symlinks (120000) or submodules.
+            if len(fields) != 3 or fields[0] not in (b"100644", b"100755"):
+                continue
+            try:
+                rel = _repo_mod_path(name, path.decode("utf-8"))
+            except UnicodeDecodeError:
+                continue
+            if rel is None or rel.rsplit("/", 1)[-1].lower() in _USER_EDITED_NAMES:
+                continue
+            claims.setdefault(rel, []).append(RepoFile(name, fields[2].decode()))
+    files = {
+        rel: found[-1] for rel, found in claims.items() if len({f.blob for f in found}) == 1
+    }
+    return files, unreadable
+
+
+@dataclass
+class RepoCheckResult:
+    """GAMMA's own files compared with its repositories."""
+
+    checked: int = 0
+    changed: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    unreadable_repos: list[str] = field(default_factory=list)
+
+    @property
+    def broken(self) -> list[str]:
+        return sorted(self.changed + self.missing)
+
+    def lines(self) -> list[str]:
+        out = [
+            (
+                f"GAMMA's own files: {self.checked} match GAMMA's repositories, "
+                f"{len(self.changed)} differ, {len(self.missing)} missing"
+            )
+        ]
+        if self.unreadable_repos:
+            out.append(
+                "  Not checked (repository not in the download cache): "
+                + ", ".join(self.unreadable_repos)
+            )
+        for label, items in (("Differ", self.changed), ("Missing", self.missing)):
+            out.extend(f"  {label}: {rel}" for rel in items)
+        return out
+
+
+def compare_repo_files(
+    files: Mapping[str, RepoFile], scan: Md5ScanResult, unreadable_repos: Iterable[str] = ()
+) -> RepoCheckResult:
+    """Judge GAMMA's own files from the blob ids ``scan_mods_md5`` took."""
+    result = RepoCheckResult(unreadable_repos=list(unreadable_repos))
+    errors = set(scan.errors)
+    for rel, expected in files.items():
+        if rel in errors:
+            continue  # reported as unreadable already
+        actual = scan.blobs.get(rel)
+        if actual is None:
+            result.missing.append(rel)
+            continue
+        result.checked += 1
+        if actual != expected.blob:
+            result.changed.append(rel)
+    result.changed.sort()
+    result.missing.sort()
+    return result
+
+
+def _mods_destination(mods_root: Path, rel: str) -> Path | None:
+    """``mods_root``/rel, unless a part is a symlink (which a write would
+    follow out of gamma/mods)."""
+    parts = rel.split("/")
+    if parts[0] != "mods" or len(parts) < 2:
+        return None
+    path = mods_root
+    for part in parts[1:]:
+        if part in ("", ".", ".."):
+            return None
+        path = path / part
+        if path.is_symlink():
+            return None
+    return path
+
+
+@dataclass
+class RepoRepairResult:
+    restored: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+def restore_repo_files(
+    gamma_dir: str, files: Mapping[str, RepoFile], rels: Iterable[str], cancel=None
+) -> RepoRepairResult:
+    """Write GAMMA's own copy of each file back from the download cache.
+
+    Read with ``git cat-file`` from the repositories full-install cloned, so
+    nothing is downloaded. Each copy is checked against its blob id before
+    it is written (atomically), and the snapshot is told about it, so the
+    next check doesn't report the repaired file as changed.
+    """
+    import shutil
+    import subprocess
+
+    from .atomic import write_bytes
+
+    result = RepoRepairResult()
+    rels = [rel for rel in rels if rel in files]
+    git = shutil.which("git")
+    if git is None:
+        result.failed, result.reason = rels, "git is not installed"
+        return result
+    base = Path(gamma_dir)
+    try:
+        mods_root = (base / "mods").resolve()
+    except OSError as exc:
+        result.failed, result.reason = rels, str(exc)
+        return result
+    by_repo: dict[str, list[str]] = {}
+    for rel in rels:
+        by_repo.setdefault(files[rel].repo, []).append(rel)
+    new_digests: dict[str, str] = {}
+    for name, group in by_repo.items():
+        repo = base / "downloads" / f"{name}.git"
+        try:
+            proc = subprocess.Popen(
+                _git_command(git, repo, "cat-file", "--batch"),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=_git_env(),
+            )
+        except OSError as exc:
+            result.failed.extend(group)
+            result.reason = str(exc)
+            continue
+        try:
+            for index, rel in enumerate(group):
+                if cancel is not None and cancel.is_set():
+                    result.failed.extend(group[index:])
+                    break
+                blob = files[rel].blob
+                destination = _mods_destination(mods_root, rel)
+                current = _md5_and_blob(destination) if destination is not None else None
+                if current is not None and current[2] == blob:
+                    # Already right again (an earlier repair step reinstalled it).
+                    result.restored.append(rel)
+                    new_digests[rel] = current[0]
+                    continue
+                proc.stdin.write(f"{blob}\n".encode())
+                proc.stdin.flush()
+                header = proc.stdout.readline().split()
+                if len(header) != 3 or header[1] != b"blob":
+                    result.failed.append(rel)  # "<id> missing"
+                    continue
+                data = proc.stdout.read(int(header[2]))
+                proc.stdout.read(1)  # the newline after each object
+                if destination is None or _git_blob_id(data) != blob:
+                    result.failed.append(rel)
+                    continue
+                try:
+                    write_bytes(destination, data, lock=False)
+                except OSError:
+                    result.failed.append(rel)
+                    continue
+                result.restored.append(rel)
+                new_digests[rel] = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        except (OSError, ValueError) as exc:
+            # git died mid-stream: whatever wasn't answered isn't restored.
+            done = set(result.restored) | set(result.failed)
+            result.failed.extend(rel for rel in group if rel not in done)
+            result.reason = str(exc)
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    _update_baseline(base / MANIFEST_FILENAME, new_digests)
+    return result
+
+
+def _update_baseline(manifest: Path, digests: Mapping[str, str]) -> None:
+    """Record repaired files in an existing snapshot, keeping its date:
+    ``_updated_since`` reads that date to spot updates run from a terminal."""
+    if not digests or not manifest.is_file():
+        return
+    baseline = _read_manifest(manifest)
+    if baseline is None:
+        return
+    baseline.update(digests)
+    try:
+        times = manifest.stat()
+        _write_manifest(manifest, baseline)
+        os.utime(manifest, ns=(times.st_atime_ns, times.st_mtime_ns))
+    except OSError:
+        pass

@@ -12768,7 +12768,7 @@ class UserModsTrackerTests(unittest.TestCase):
             page._verify_anomaly_ok = True
             presence = GammaVerifyResult(used_official_list=True)
             scan = Md5ScanResult(manifest_path=str(Path(tmp) / "gamma-md5.txt"))
-            result = (presence, scan, None, {}, False, None)
+            result = (presence, scan, None, {}, False, None, None, {})
             with patch.object(page, "_finish_verify") as mock_finish:
                 page._on_gamma_verify_done(result)
             self.assertIsNone(page._repair_plan)
@@ -12790,13 +12790,13 @@ class UserModsTrackerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page, _profile = self._make_install_page_for_repair(tmp)
             page._verify_counts = {"OK": 1, "CORRUPT": 2, "NOT FOUND": 0}
-            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None)
+            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None, None, {})
             with (
                 patch.object(page, "_offer_repair") as mock_offer,
                 patch.object(page, "_finish_verify"),
             ):
                 page._on_gamma_verify_done(result)
-            mock_offer.assert_called_once_with(True, False)
+            mock_offer.assert_called_once_with(True, False, False)
             self.assertTrue(page._gamma_skipped)
 
     def test_gamma_not_installed_with_clean_anomaly_still_concludes(self):
@@ -12810,7 +12810,7 @@ class UserModsTrackerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page, _profile = self._make_install_page_for_repair(tmp)
             page._verify_counts = {"OK": 5, "CORRUPT": 0, "NOT FOUND": 0}
-            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None)
+            result = (_GAMMA_NOT_INSTALLED, None, None, {}, False, None, None, {})
             with (
                 patch.object(page, "_offer_repair") as mock_prompt,
                 patch.object(page, "_conclude_verify") as mock_conclude,

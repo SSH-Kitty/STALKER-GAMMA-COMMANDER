@@ -42,14 +42,19 @@ from ..integrity import (
     MANIFEST_FILENAME,
     CacheArchiveVerifyResult,
     Finding,
+    RepoRepairResult,
     anomaly_status,
     build_findings,
+    compare_repo_files,
     fetch_official_mod_names,
     format_size,
+    gamma_repo_files,
     invalidate_baseline,
     is_expected_gamma_overlay_corrupt,
     overall_verdict,
+    repo_branches,
     restore_gamma_overlay,
+    restore_repo_files,
     reverted_gamma_overlay,
     scan_mods_md5,
     verify_cache_archives,
@@ -61,16 +66,20 @@ from ..launcher import LaunchError
 from ..modlist import modlist_path_for
 from ..parsers import ProgressEvent, parse_progress_line, strip_ansi
 from ..repair import (
+    RESUME_FILENAME,
     classify_problems,
     expected_archive_md5s,
     fetch_modpack_records,
     purge_quarantine,
     quarantine_mod_and_archive,
+    remove_resume_file,
     repair_preview,
     restore_from_quarantine,
     restore_modlist_after_repair,
+    resume_keys,
     settle_quarantine,
     snapshot_modlist,
+    write_reextract_resume,
 )
 from ..settings import cli_ok
 from ..themes import active_theme_tokens
@@ -99,20 +108,20 @@ from .common import (
     count_cached_archives,
     display_state,
     free_space_bytes,
+    game_running,
     gamma_installed,
     human_size,
     info_label,
     make_card,
     make_header_row,
-    game_running,
     normalize_path,
-    warn_wine_unsafe_folder,
-    wine_unsafe_folder,
     notify_desktop,
     paused_dependency_status,
     save_profile_dirs,
     tr,
     use_stock_mo2_profile_if_missing,
+    warn_wine_unsafe_folder,
+    wine_unsafe_folder,
     winetricks_tooltip,
 )
 from .dialogs import MessageBox as QMessageBox
@@ -367,10 +376,12 @@ def _anomaly_tally(counts: dict[str, int]) -> str:
     )
 
 
-def _remaining_problems(post, presence) -> int:
+def _remaining_problems(post, presence, repo_owned=()) -> int:
     """Problems left after a repair. New files are expected then: the
-    reinstalled mods' own, absent from a snapshot taken while broken."""
-    count = len(post.changed) + len(post.removed) + len(post.errors)
+    reinstalled mods' own, absent from a snapshot taken while broken.
+    GAMMA's own files (``repo_owned``) are judged by their repositories."""
+    owned = set(repo_owned)
+    count = len(set(post.changed) - owned) + len(set(post.removed) - owned) + len(post.errors)
     return count + (presence.problems if presence is not None else 0)
 
 
@@ -1018,6 +1029,15 @@ class InstallPage(QWidget):
         self._gamma_skipped = False
         self._official_missing = False
         self._cache_archive_result: CacheArchiveVerifyResult | None = None
+        self._repo_check = None
+        self._repo_files = {}
+        self._repo_repair_pending = False
+        self._repo_restored: list[str] = []
+        # Unpacking broken mods again from their cached archives.
+        self._repair_reuse_keys: dict[str, str] = {}
+        self._repair_reused: set[str] = set()
+        self._repair_resume_written = False
+        self._repair_retrying = False
         self._anomaly_recheck_done = False
         self._wt_runner = None
         self._wt_task = None
@@ -2593,6 +2613,10 @@ class InstallPage(QWidget):
         self._gamma_skipped = False
         self._official_missing = False
         self._cache_archive_result = None
+        self._repo_check = None
+        self._repo_files = {}
+        self._repo_repair_pending = False
+        self._repo_restored = []
         self._anomaly_recheck_done = False
         self._pending_repair = None
         self.repair_button.hide()
@@ -2715,7 +2739,7 @@ class InstallPage(QWidget):
         from .common import gamma_installed
 
         if _gamma_verify_gate(gamma_installed(profile.gamma, profile.mo2_profile)) is not None:
-            return (_GAMMA_NOT_INSTALLED, None, None, {}, False, None)
+            return (_GAMMA_NOT_INSTALLED, None, None, {}, False, None, None, {})
         report("Downloading official GAMMA mod list")
         official = fetch_official_mod_names(profile.mod_list_url)
         official_missing = official is None or len(official) == 0
@@ -2737,6 +2761,8 @@ class InstallPage(QWidget):
             ),
             official_mods=official,
         )
+        report("Reading GAMMA's own files from the download cache")
+        repo_files, unreadable_repos = gamma_repo_files(profile.gamma, repo_branches(profile))
         report("Starting full MD5 scan of mod files")
         scan = scan_mods_md5(
             profile.gamma,
@@ -2746,6 +2772,10 @@ class InstallPage(QWidget):
                 )
             ),
             cancel=self._scan_cancel,
+            git_blobs=repo_files,
+        )
+        repo_check = (
+            None if scan.cancelled else compare_repo_files(repo_files, scan, unreadable_repos)
         )
         plan = None
         report("Checking GAMMA download cache")
@@ -2773,8 +2803,12 @@ class InstallPage(QWidget):
         extra_broken = presence.missing + presence.empty
         if not scan.cancelled and (scan.problems or extra_broken):
             report("Looking up download sources for broken mods")
-            plan = classify_problems(scan, records, extra_broken_folders=extra_broken)
-        return (presence, scan, plan, records, official_missing, cache_result)
+            plan = classify_problems(
+                scan, records, extra_broken_folders=extra_broken, repo_owned=repo_files
+            )
+        return (
+            presence, scan, plan, records, official_missing, cache_result, repo_check, repo_files
+        )
 
     def _on_gamma_verify_progress(self, text):
         # The worker reports fixed English lines (matched by the patterns
@@ -2808,6 +2842,8 @@ class InstallPage(QWidget):
             records,
             official_missing,
             cache_result,
+            repo_check,
+            repo_files,
         ) = result
         self._verify_records = records or {}
         if presence_or_sentinel == _GAMMA_NOT_INSTALLED:
@@ -2832,10 +2868,15 @@ class InstallPage(QWidget):
         self._repair_records = plan.matched_records if plan is not None else {}
         self._official_missing = official_missing
         self._cache_archive_result = cache_result
+        self._repo_check = repo_check
+        self._repo_files = repo_files or {}
         for line in presence.lines():
             self.verify_progress.log.append_line(line)
         for line in scan.lines():
             self.verify_progress.log.append_line(line)
+        if repo_check is not None:
+            for line in repo_check.lines():
+                self.verify_progress.log.append_line(line)
         if cache_result is not None:
             for line in cache_result.lines():
                 self.verify_progress.log.append_line(line)
@@ -2855,7 +2896,9 @@ class InstallPage(QWidget):
             return
         self._conclude_verify()
 
-    def _offer_repair(self, anomaly_needs_repair: bool, gamma_repairable: bool) -> None:
+    def _offer_repair(
+        self, anomaly_needs_repair: bool, gamma_repairable: bool, repo_repairable: bool = False
+    ) -> None:
         """Show the Repair button for what this check found.
 
         Repairing is the user's call, made after reading the findings, so
@@ -2868,6 +2911,7 @@ class InstallPage(QWidget):
         self._pending_repair = (
             anomaly_needs_repair,
             gamma_repairable,
+            repo_repairable,
             (profile.anomaly, profile.gamma, profile.cache),
         )
         self.repair_button.show()
@@ -2878,7 +2922,7 @@ class InstallPage(QWidget):
         if (
             pending is None
             or profile is None
-            or pending[2] != (profile.anomaly, profile.gamma, profile.cache)
+            or pending[3] != (profile.anomaly, profile.gamma, profile.cache)
         ):
             self._pending_repair = None
             self.repair_button.hide()
@@ -2898,7 +2942,7 @@ class InstallPage(QWidget):
                 tr("Mod Organizer or the game is still open. Close it, then run Verify Integrity again."),
             )
             return
-        if not self._prompt_repair(pending[0], pending[1]):
+        if not self._prompt_repair(pending[0], pending[1], pending[2]):
             return
         self._pending_repair = None
         self.repair_button.hide()
@@ -2910,6 +2954,11 @@ class InstallPage(QWidget):
         self._repair_runner = None
         self._quarantine_records = []
         self._repaired_folders = []
+        self._repo_restored = []
+        self._repair_reuse_keys = {}
+        self._repair_reused = set()
+        self._repair_resume_written = False
+        self._repair_retrying = False
         self.window.set_install_busy(True)
         self.verify_button.setEnabled(False)
         self.verify_progress.on_started()
@@ -2922,7 +2971,7 @@ class InstallPage(QWidget):
             self.verify_progress.log.append_line(f"Settings backup failed: {error}")
 
     def _prompt_repair(
-        self, anomaly_needs_repair: bool, gamma_repairable: bool
+        self, anomaly_needs_repair: bool, gamma_repairable: bool, repo_repairable: bool = False
     ) -> bool:
         """Confirm the repair. Returns True and schedules it on Yes."""
         sections: list[str] = []
@@ -2942,12 +2991,21 @@ class InstallPage(QWidget):
             shown = "\n".join(f"• {name}" for name in names[:8])
             if len(names) > 8:
                 shown += "\n• " + tr("and {count} more", count=len(names) - 8)
-            sections.append(tr("GAMMA mods to download again:") + "\n\n" + shown)
+            sections.append(tr("GAMMA mods to reinstall:") + "\n\n" + shown)
             sections.append(
                 tr(
                     "The old copies are set aside first, not deleted. If the "
                     "repair fails or you stop it, they're put back. Your own "
                     "mods and files are never touched."
+                )
+                + " "
+                + tr("Mods whose archive in the download cache is intact are unpacked again from it; only the others are downloaded.")
+            )
+        if repo_repairable:
+            sections.append(
+                tr(
+                    "GAMMA's own files: {count} damaged or missing. The originals are copied back from GAMMA's repositories in the download cache - nothing is downloaded.",
+                    count=len(self._repo_check.broken),
                 )
             )
         dialog = QMessageBox(self)
@@ -2959,6 +3017,7 @@ class InstallPage(QWidget):
             repair_preview(
                 self._repair_plan if gamma_repairable else None,
                 getattr(self, "_anomaly_problem_lines", []) if anomaly_needs_repair else [],
+                self._repo_check.broken if repo_repairable else (),
             )
         )
         dialog.setStandardButtons(
@@ -2973,6 +3032,7 @@ class InstallPage(QWidget):
             return False
         self._repair_anomaly_pending = anomaly_needs_repair
         self._gamma_repair_pending = gamma_repairable
+        self._repo_repair_pending = repo_repairable
         # An Anomaly repair (`anomaly install`) unconditionally re-extracts
         # vanilla Anomaly over everything, reverting GAMMA's own file
         # overlay (its replacement engine executables/DLLs, copied
@@ -3000,7 +3060,57 @@ class InstallPage(QWidget):
             self._gamma_overlay_restore_pending = False
             self._start_gamma_overlay_restore()
             return
+        # Last: the installer runs above copy GAMMA's repositories out again,
+        # which may already have fixed these.
+        if self._repo_repair_pending:
+            self._repo_repair_pending = False
+            self._start_repo_repair()
+            return
         self._conclude_verify()
+
+    def _start_repo_repair(self) -> None:
+        """Copy GAMMA's own damaged files back from its repositories."""
+        profile = self.window.settings.active_profile
+        broken = self._repo_check.broken if self._repo_check is not None else []
+        if profile is None or not broken:
+            self._advance_repair_pipeline()
+            return
+        self.verify_progress.cancel_button.show()
+        self._verify_phase_busy(tr("Copying GAMMA's own files back"))
+        self.verify_progress.log.append_line("")
+        self.verify_progress.log.append_line("== Restoring GAMMA's own files ==")
+        task = BackgroundTask(
+            restore_repo_files, profile.gamma, self._repo_files, broken, self._scan_cancel,
+            parent=self,
+        )
+        task.result.connect(self._on_repo_repaired)
+        task.error.connect(
+            lambda message: self._on_repo_repaired(
+                RepoRepairResult(failed=list(broken), reason=message)
+            )
+        )
+        self._verify_task = task
+        task.start()
+
+    def _on_repo_repaired(self, result) -> None:
+        failed = set(result.failed)
+        for rel in result.restored:
+            self.verify_progress.log.append_line(f"Copied back: {rel}")
+        for rel in result.failed:
+            self.verify_progress.log.append_line(f"Could not copy back: {rel}")
+        if result.reason:
+            self.verify_progress.log.append_line(f"Reason: {result.reason}")
+        check = self._repo_check
+        check.changed = [rel for rel in check.changed if rel in failed]
+        check.missing = [rel for rel in check.missing if rel in failed]
+        check.checked += len(result.restored)
+        self._repo_restored = list(result.restored)
+        if self._scan_cancel is not None and self._scan_cancel.is_set():
+            self._finish_verify(
+                ok=False, message=tr("Repair cancelled."), summary=tr("Repair cancelled")
+            )
+            return
+        self._advance_repair_pipeline()
 
     def _start_gamma_overlay_restore(self) -> None:
         """Re-apply GAMMA's file overlay (including its replacement engine
@@ -3141,10 +3251,20 @@ class InstallPage(QWidget):
             extra.append(
                 Finding(
                     "ok",
-                    tr("GAMMA mods downloaded again"),
+                    tr("GAMMA mods reinstalled"),
                     tr("Your saves, user.ltx and MCM settings were kept."),
                     list(self._repaired_folders),
                     len(self._repaired_folders),
+                )
+            )
+        if self._repo_restored:
+            extra.append(
+                Finding(
+                    "ok",
+                    tr("GAMMA's own files copied back"),
+                    tr("They came from GAMMA's repositories in the download cache."),
+                    [rel.removeprefix("mods/") for rel in self._repo_restored],
+                    len(self._repo_restored),
                 )
             )
         profile = self.window.settings.active_profile
@@ -3159,6 +3279,7 @@ class InstallPage(QWidget):
             plan=self._repair_plan,
             official_missing=self._official_missing,
             gamma_skipped=self._gamma_skipped,
+            repo=self._repo_check,
         )
         verdict = overall_verdict(findings, self._scan)
         self.verify_progress.log.append_line("")
@@ -3173,8 +3294,9 @@ class InstallPage(QWidget):
         counts = self._verify_counts
         anomaly_needs_repair = counts["CORRUPT"] > 0 or counts["NOT FOUND"] > 0
         gamma_repairable = self._repair_plan is not None and self._repair_plan.has_repairable
-        if anomaly_needs_repair or gamma_repairable:
-            self._offer_repair(anomaly_needs_repair, gamma_repairable)
+        repo_repairable = self._repo_check is not None and bool(self._repo_check.broken)
+        if anomaly_needs_repair or gamma_repairable or repo_repairable:
+            self._offer_repair(anomaly_needs_repair, gamma_repairable, repo_repairable)
         message, summary = {
             "healthy": (
                 tr("No problems found"),
@@ -3199,12 +3321,38 @@ class InstallPage(QWidget):
         self.verify_progress.status_message(tr("Setting broken mods aside"))
         self.verify_progress.log.append_line("")
         self.verify_progress.log.append_line("== Repairing GAMMA mods ==")
+        self._repair_reuse_keys = {} if self._repair_retrying else self._archive_reuse_keys()
         task = StreamTask(self._run_repair_quarantine, parent=self)
         task.line.connect(self._on_gamma_verify_progress)
         task.result.connect(self._on_repair_quarantined)
         task.error.connect(self._on_gamma_verify_error)
         self._verify_task = task
         task.start()
+
+    def _archive_reuse_keys(self) -> dict[str, str]:
+        """Broken mod folder -> resume key, for each mod the installer can
+        unpack again from its cached archive instead of downloading it.
+
+        Only archives this check just MD5-verified, and never while an
+        interrupted install's resume.txt is waiting (that file is the
+        channel used to ask for it - see repair.write_reextract_resume).
+        """
+        profile = self.window.settings.active_profile
+        cache = self._cache_archive_result
+        if profile is None or cache is None or self._repair_plan is None:
+            return {}
+        if (Path(profile.gamma) / RESUME_FILENAME).exists():
+            return {}
+        verified = set(cache.verified)
+        keys = resume_keys(self._verify_records)
+        reuse: dict[str, str] = {}
+        for folder in self._repair_plan.repairable:
+            record = self._repair_records.get(folder)
+            key = keys.get(record.folder_name) if record is not None else None
+            names = record.archive_names() if record is not None else []
+            if key and names and set(names) <= verified:
+                reuse[folder] = key
+        return reuse
 
     def _run_repair_quarantine(self, report):
         """Move each broken mod/archive aside instead of deleting it.
@@ -3220,15 +3368,20 @@ class InstallPage(QWidget):
             raise RuntimeError("No active profile")
         quarantined = []
         failed: list[str] = []
+        # Read once: set on the GUI thread before this task started.
+        reuse = dict(self._repair_reuse_keys)
         for folder in self._repair_plan.repairable:
             if self._scan_cancel is not None and self._scan_cancel.is_set():
                 report("Repair cancelled - quarantine aborted.")
                 break
             report(f"Setting aside {folder}")
             try:
+                # A reusable archive stays where the installer looks for it.
                 quarantined.append(
                     quarantine_mod_and_archive(
-                        profile.gamma, folder, self._repair_records.get(folder)
+                        profile.gamma,
+                        folder,
+                        None if folder in reuse else self._repair_records.get(folder),
                     )
                 )
             except (OSError, ValueError) as exc:
@@ -3268,6 +3421,26 @@ class InstallPage(QWidget):
         self.verify_progress.log.append_line(
             f"Set aside {len(quarantined)} mod(s) pending reinstall"
         )
+        reused: dict[str, str] = {}
+        if self._repair_reuse_keys:
+            set_aside = {record.folder for record in quarantined}
+            reused = {
+                folder: key
+                for folder, key in self._repair_reuse_keys.items()
+                if folder in set_aside
+            }
+        profile = self.window.settings.active_profile
+        self._repair_resume_written = bool(reused) and write_reextract_resume(
+            profile.gamma, reused.values()
+        )
+        # Not written: their archives are still in place, so the installer
+        # skips them and the fallback below downloads them instead.
+        self._repair_reused = set(reused)
+        if self._repair_resume_written:
+            self.verify_progress.log.append_line(
+                f"{len(reused)} mod(s) will be unpacked again from the download "
+                f"cache, {len(quarantined) - len(reused)} downloaded"
+            )
         self._start_repair_install()
 
     def _restore_all_quarantined(self) -> str:
@@ -3329,8 +3502,11 @@ class InstallPage(QWidget):
             self._repair_kept.modlist = None
         # Preservation flags are mandatory: a repair must never touch
         # user.ltx or MCM settings.
+        args = _repair_install_args()
+        if self._repair_resume_written:
+            args.append("--resume")
         runner = CommandRunner(
-            cli_command(_repair_install_args(), progress_interval_ms=200),
+            cli_command(args, progress_interval_ms=200),
             parent=self,
         )
         runner.line.connect(self._on_verify_line)
@@ -3361,6 +3537,12 @@ class InstallPage(QWidget):
         # A cancelled repair must not fall through to the post-scan: that scan
         # re-baselines the MD5 manifest and would record the broken state as
         # the new reference.
+        if self._repair_resume_written:
+            # Done with it either way: the CLI deletes it after a success,
+            # and after a failure everything set aside is put back below, so
+            # a later install must not resume from it.
+            self._repair_resume_written = False
+            remove_resume_file(self.window.settings.active_profile.gamma)
         if self._repair_runner is not None and self._repair_runner.was_cancelled:
             # Only now has full-install actually exited: putting the
             # set-aside mods back (or unlocking the app) any earlier raced
@@ -3398,6 +3580,24 @@ class InstallPage(QWidget):
         # old one back where it doesn't (see settle_quarantine).
         settled = settle_quarantine(self._quarantine_records)
         self._quarantine_records = []
+        self._repaired_folders = [*self._repaired_folders, *settled.reinstalled]
+        self._repair_quarantined_count = len(self._repaired_folders)
+        for line in settled.failures:
+            self.verify_progress.log.append_line(f"WARNING: {line}")
+        # Mods meant to be unpacked from the cache that the installer skipped
+        # anyway (a newer CLI keying resume.txt differently): one more round,
+        # with their archives set aside so they're downloaded instead.
+        retry = [folder for folder in settled.restored if folder in self._repair_reused]
+        self._repair_reused = set()
+        if retry and not self._repair_retrying:
+            self.verify_progress.log.append_line(
+                f"The installer did not unpack {len(retry)} mod(s) from the "
+                "download cache; downloading them instead"
+            )
+            self._repair_retrying = True
+            self._repair_plan.repairable = retry
+            self._start_gamma_repair_deletion()
+            return
         if settled.restored:
             self.verify_progress.log.append_line(
                 "WARNING: the installer did not reinstall "
@@ -3406,10 +3606,6 @@ class InstallPage(QWidget):
             )
             for folder in settled.restored:
                 self.verify_progress.log.append_line(f"  {folder}")
-        for line in settled.failures:
-            self.verify_progress.log.append_line(f"WARNING: {line}")
-        self._repair_quarantined_count = len(settled.reinstalled)
-        self._repaired_folders = list(settled.reinstalled)
         # Leftovers from an older, interrupted run can go now - but never
         # while something just failed to move back: that copy may be the
         # only one left.
@@ -3474,7 +3670,7 @@ class InstallPage(QWidget):
             ),
             official_mods=self._official_names,
         )
-        if _remaining_problems(post, presence) == 0:
+        if _remaining_problems(post, presence, self._repo_files) == 0:
             # Only establish a new baseline after both the content and presence
             # checks have passed. A failed repair must never bless corruption.
             # New files (the reinstalled mods' own) are expected here.
@@ -3500,6 +3696,7 @@ class InstallPage(QWidget):
             post,
             self._verify_records,
             extra_broken_folders=presence.missing + presence.empty,
+            repo_owned=self._repo_files,
         )
         return (post, presence, plan)
 
@@ -3519,7 +3716,7 @@ class InstallPage(QWidget):
             )
             return
         repaired = self._repair_quarantined_count
-        remaining = _remaining_problems(post, presence)
+        remaining = _remaining_problems(post, presence, self._repo_files)
         self._gamma_repair_done = True
         self._scan = post
         if presence is not None:
@@ -3580,11 +3777,10 @@ class InstallPage(QWidget):
             "cancelled": tr("Cancelled"),
         }.get(verdict)
         if verdict in ("healthy", "snapshot", "attention"):
-            # Never the success colour for snapshot/attention: a snapshot run
-            # proved nothing about mod file contents, and "attention" is not
-            # a pass (QProgressBar[level=...] in the theme).
+            # A snapshot run is a pass (only mod file edits can't be judged
+            # yet); "attention" is not (QProgressBar[level=...] in the theme).
             self.verify_progress.set_success_state(
-                bar_text, "" if verdict == "healthy" else verdict
+                bar_text, "attention" if verdict == "attention" else ""
             )
         elif verdict == "cancelled":
             self.verify_progress.on_cancelled()

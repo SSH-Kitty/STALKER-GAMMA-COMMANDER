@@ -654,6 +654,7 @@ TOPICS: list[dict] = [
                 "The MD5 snapshot",
                 [
                     "The first run only saves a snapshot of every mod file's MD5 to gamma/gamma-md5.txt. Later runs list files that changed since. These are shown in amber rather than red, because a changed file is often your own edit, such as a tweaked config. The snapshot is replaced automatically after a GAMMA update or a repair, so legitimate changes are not reported forever.",
+                    "GAMMA's own files - the ones copied from its git repositories in the download cache - don't depend on the snapshot: every run, the first one included, compares them with the exact copy in those repositories. MCM's saved settings (axr_options.ltx) are skipped, because players change them.",
                     ("live", [
                         ("MD5 snapshot", "md5_baseline"),
                     ]),
@@ -666,9 +667,10 @@ TOPICS: list[dict] = [
                         "Each problem is matched against GAMMA's official modpack list. Problems are split into repairable (an official GAMMA mod), not repairable (no known download source) and your own additions, which are never touched.",
                         "You are shown the full list of what will happen before anything starts.",
                         "Your modlist.txt and settings are backed up.",
-                        "Each broken mod folder and its cached archive are moved aside into gamma/mods/.verify-quarantine. Nothing is deleted.",
-                        "The repair install runs (full-install with --skip-extract-on-hash-match, --skip-github-downloads and both preserve flags). Only the set-aside mods are downloaded, MD5-checked and unpacked again.",
+                        "Each broken mod folder is moved aside into gamma/mods/.verify-quarantine, with its cached archive unless that archive passed its MD5 check. Nothing is deleted.",
+                        "The repair install runs (full-install with --skip-extract-on-hash-match, --skip-github-downloads and both preserve flags). Mods whose archive was kept are unpacked again from the download cache; the rest are downloaded, MD5-checked and unpacked. If the installer skips a mod it should have unpacked, that mod is downloaded instead.",
                         "Mods that were reinstalled successfully are kept; for anything that was not, the set-aside copy is moved back. Only then is the quarantine emptied. If you cancel, everything is moved back.",
+                        "GAMMA's own files that still differ from its repositories are copied back from the git repositories in the download cache and checked again.",
                         "Your modlist.txt is put back if the installer changed it.",
                     ]),
                     "Verify also notices Anomaly files that GAMMA patches but which have gone back to the vanilla version (for example after a Steam or GOG file check) and can put GAMMA's copies back.",
