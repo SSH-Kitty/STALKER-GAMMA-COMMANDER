@@ -14,7 +14,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -57,6 +56,7 @@ from .common import (
     tr,
     winetricks_tooltip,
 )
+from .file_dialog import FileDialog as QFileDialog
 
 
 def _manual_command(

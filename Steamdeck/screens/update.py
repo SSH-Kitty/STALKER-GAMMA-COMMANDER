@@ -11,6 +11,8 @@ interface.
 from __future__ import annotations
 
 import re
+import shutil
+from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
@@ -23,6 +25,7 @@ from commander_gui.integrity import invalidate_baseline
 from commander_gui.keep_state import capture, discard, restore
 from commander_gui.parsers import parse_progress_line, strip_ansi
 from commander_gui.settings import cli_ok
+from commander_gui.modlist import modlist_path_for
 from commander_gui.themes import active_theme_tokens
 from commander_gui.ui.common import (
     BackgroundTask,
@@ -31,6 +34,7 @@ from commander_gui.ui.common import (
     game_running,
     notice,
 )
+from commander_gui.ui.update_page import UpdatePage, _format_relative_time
 from commander_gui.updates import (
     check_updates,
     parse_patchnotes_sections,
@@ -43,12 +47,15 @@ from ..exes_card import DeckExesCard
 from ..scale import px
 from ..widgets import (
     ROW_GAP,
+    DeckCard,
     DeckProgress,
     DeckRow,
     DeckTextPanel,
+    DeckToggleRow,
     deck_button,
     deck_label,
     repolish,
+    side_by_side,
 )
 from .base import DeckScreen
 from .install import battery_warning
@@ -129,6 +136,25 @@ class UpdateScreen(DeckScreen):
             widget.hide()
             self.body.addWidget(widget)
 
+        # Update options: the desktop Options tab's two that matter on a
+        # handheld - space on a 64 GB Deck, and a way back from a bad update.
+        options = DeckCard()
+        options.body.addWidget(deck_label(tr("Update options"), role="rowTitle"))
+        self.minimal_row = DeckToggleRow(tr("Delete downloads after unpacking"), False)
+        self.undo_row = DeckRow(tr("Undo last update"))
+        self.undo_row.activated.connect(self._undo_last_update)
+        options.body.addLayout(side_by_side(self.minimal_row, self.undo_row))
+        options.body.addWidget(
+            deck_label(
+                tr("Saves disk space, but the next update has to download everything it needs again.")
+                + "  "
+                + tr("Restore the modlist.txt saved right before the last update was applied."),
+                role="caption",
+                wrap=True,
+            )
+        )
+        self.body.addWidget(options)
+
         self.body.addWidget(deck_label(tr("Patch notes"), role="rowTitle"))
         # One collapsible entry per release, newest first and all closed:
         # the whole history as one wall of text filled most of the screen.
@@ -148,6 +174,7 @@ class UpdateScreen(DeckScreen):
     # -- state ------------------------------------------------------------
     def refresh(self) -> None:
         self.exes.refresh()
+        self._render_undo()
         profile = self.profile()
         if profile is None:
             self.summary_label.setText(
@@ -190,6 +217,68 @@ class UpdateScreen(DeckScreen):
     def on_busy_changed(self, busy: bool) -> None:
         self.action_button.setEnabled(not busy and self._runner is None)
         self.exes.refresh()
+        self._render_undo()
+
+    # -- undo last update -------------------------------------------------
+    # The snapshot is the desktop page's own (modlist.txt.pre-update.bak),
+    # so an update applied in either interface can be undone in either.
+    _pre_update_snapshot_path = UpdatePage._pre_update_snapshot_path
+    _snapshot_modlist_before_update = UpdatePage._snapshot_modlist_before_update
+
+    def _render_undo(self) -> None:
+        snapshot = self._pre_update_snapshot_path()
+        self.undo_row.setEnabled(
+            snapshot is not None and not self.window.install_busy and self._runner is None
+        )
+        self.minimal_row.setEnabled(self._runner is None)
+        if snapshot is None:
+            self.undo_row.set_value(tr("Nothing to undo yet."))
+            return
+        try:
+            saved = datetime.fromtimestamp(snapshot.stat().st_mtime, timezone.utc)
+        except OSError:
+            self.undo_row.set_value("")
+            return
+        self.undo_row.set_value(tr("Saved {when}", when=_format_relative_time(saved)))
+
+    def _undo_last_update(self) -> None:
+        if self.window.install_busy or self._runner is not None:
+            return
+        snapshot = self._pre_update_snapshot_path()
+        profile = self.profile()
+        if snapshot is None or profile is None:
+            return
+        modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
+        if modlist_path is None:
+            return
+
+        def _undo() -> None:
+            # Re-checked: an update may have started while this was open.
+            if self.window.install_busy or self._runner is not None:
+                self.window.notify(tr("Another task is already running."))
+                return
+            # Forced: modlist.txt is about to be overwritten.
+            if game_running(force=True):
+                self.window.notify(tr("Mod Organizer or the game is still open. Close it, then undo the update."), 6000)
+                return
+            try:
+                shutil.copy2(snapshot, modlist_path)
+            except OSError as exc:
+                self.window.notify(tr("The old mod list couldn't be put back.\n\n{exc}", exc=exc), 8000)
+                return
+            self.window.update_mod_counter()
+            self.window.notify(tr("Your mod list is back to how it was before the last update."), 5000)
+            self._render_undo()
+
+        self.window.confirm(
+            tr("Undo the last update?"),
+            tr("Your mod list (modlist.txt) goes back to how it was just before the last update.")
+            + "\n\n"
+            + tr("Changes made to the mod list since then are lost."),
+            _undo,
+            confirm_text=tr("Undo update"),
+            confirm_role="danger",
+        )
 
     def _on_action(self) -> None:
         if self._resume_args() or (self._status is not None and self._status.update_available):
@@ -428,13 +517,20 @@ class UpdateScreen(DeckScreen):
         self._apply()
 
     def _apply(self) -> None:
+        resume = self._resume_args()
         args = [
             "update",
             "apply",
             "--preserve-user-settings",
             "--preserve-mcm-settings",
-            *self._resume_args(),
+            *resume,
         ]
+        if self.minimal_row.is_checked():
+            args.append("--minimal")
+        # A resumed run keeps the snapshot from the run that stopped: that
+        # run may already have replaced the mod list.
+        if not resume or self._pre_update_snapshot_path() is None:
+            self._snapshot_modlist_before_update()
         error = backup_settings_before(self.profile(), "update")
         if error:
             self.window.notify(tr("Settings backup failed: {message}", message=error), 6000)
@@ -492,6 +588,7 @@ class UpdateScreen(DeckScreen):
         self.progress.hide()
         self.action_button.show()
         self.action_button.setFocus()
+        self._render_undo()
         if cancelled:
             self.window.notify(tr("Cancelled"))
         elif cli_ok(rc, output, ""):

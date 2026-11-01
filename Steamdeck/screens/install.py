@@ -74,8 +74,10 @@ from commander_gui.winetricks import (
 
 from .. import gamepad as pad
 from ..folder_picker import show_folder_picker
+from ..install_switcher import InstallSwitcher
 from ..power import on_battery
 from ..scale import px
+from ..verify import DeckVerifyCard
 from ..welcome import open_url
 from ..widgets import (
     DeckCard,
@@ -229,6 +231,16 @@ class InstallScreen(DeckScreen):
         deps_card.body.addWidget(self.deps_button)
         self.body.addWidget(deps_card)
 
+        self.verify_card = DeckVerifyCard(
+            self.window, 4, lambda: self.anomaly_mirror_row.is_checked()
+        )
+        self.body.addWidget(self.verify_card)
+
+        # GAMMA in more than one folder (internal storage and an SD card):
+        # which one the active profile plays.
+        self.install_switcher = InstallSwitcher(self.window, self._on_install_switched)
+        self.body.addWidget(self.install_switcher)
+
         # Compatibility tool | Install options, side by side.
         # The GE-Proton downloader (commander_gui/proton_installer.py) is
         # independent of which runner is selected, so it is its own tool
@@ -290,6 +302,8 @@ class InstallScreen(DeckScreen):
         # is a system-wide action, not something tied to one GAMMA install.
         self._update_proton_button()
 
+        self.verify_card.refresh()
+        self.install_switcher.refresh()
         profile = self.profile()
         if profile is None:
             for row in (self.anomaly_row, self.gamma_row, self.deps_row):
@@ -298,6 +312,7 @@ class InstallScreen(DeckScreen):
             self.anomaly_button.setEnabled(False)
             self.install_button.setEnabled(False)
             self.deps_button.setEnabled(False)
+            self.verify_card.set_enabled(False)
             self.note.setText(
                 tr("Create or activate a profile first (Dashboard → Profiles).")
             )
@@ -354,6 +369,8 @@ class InstallScreen(DeckScreen):
         )
         self.install_button.setEnabled(idle and has_profile)
         self.deps_button.setEnabled(idle and has_profile)
+        self.verify_card.set_enabled(idle)
+        self.install_switcher.setEnabled(idle and has_profile)
         offline = self.offline_row.is_checked()
         if not getattr(self, "_resuming", False):
             if getattr(self, "_gamma_installed", False):
@@ -960,6 +977,10 @@ class InstallScreen(DeckScreen):
         self.deps_button.show()
         self.refresh()
 
+    def _on_install_switched(self) -> None:
+        # Other folders: every screen's cached state belongs to the old ones.
+        self.window.profile_changed()
+
     def on_action(self, action: str) -> bool:
         if action == pad.CONTEXT:
             if self.install_button.isEnabled() and self.install_button.isVisible():
@@ -996,6 +1017,7 @@ class InstallScreen(DeckScreen):
             self._runner is not None
             or self._proton_task is not None
             or self._proton_manage_task is not None
+            or self.verify_card.busy()
         ):
             self.window.notify(tr("An install is already running."))
             return True

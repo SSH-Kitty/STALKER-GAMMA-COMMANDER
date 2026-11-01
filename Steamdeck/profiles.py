@@ -9,7 +9,7 @@ screen you look at first.
 The active profile is one row; A on it opens a list of every profile to
 switch to (a dropdown, rather than every profile stacked on the Dashboard).
 Edit profile opens the editor, where the name and the three install folders - Anomaly,
-GAMMA, cache - are changed with the on-screen keyboard and Deck Mode's own
+GAMMA, cache - are changed (or the profile deleted) with the on-screen keyboard and Deck Mode's own
 folder browser. That is what the desktop Profiles page's Browse buttons are
 for: pointing COMMANDER at an install on another drive, or at a second copy
 of the game. Repository URLs and branches stay a desktop job.
@@ -27,8 +27,9 @@ from pathlib import Path
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
 
 from commander_gui.i18n import tr
-from commander_gui.ui.common import activate_profile, game_running, mo2_running
-from commander_gui.ui.profiles_page import check_cli_values, save_profile
+from commander_gui.settings import cli_ok, run_config_command
+from commander_gui.ui.common import BackgroundTask, activate_profile, game_running, mo2_running
+from commander_gui.ui.profiles_page import check_cli_values, forget_profile_extras, save_profile
 
 from . import gamepad as pad
 from .folder_picker import show_folder_picker
@@ -222,10 +223,11 @@ class ProfilePanel(QWidget):
             self._editor,
             [
                 (tr("Save"), self._save, "primary"),
+                (tr("Delete profile"), self._confirm_delete, "danger"),
                 (tr("Cancel"), self.window.dismiss_overlay, "normal"),
             ],
             panel_width=1100,
-            default_index=1,
+            default_index=2,
         )
         overlay.default_button = self._editor.name_edit
         self.window.show_overlay(overlay)
@@ -284,9 +286,75 @@ class ProfilePanel(QWidget):
         self._editor = None
         self.window.refresh_settings()
         # Every screen reads the profile's folders; bring them all up to date.
-        for page in list(self.window._pages.values()):
-            page.refresh()
+        self.window.profile_changed()
         self.window.notify(tr("Profile '{profile_name}' saved.", profile_name=name))
+
+    # -- deleting ---------------------------------------------------------
+    def _confirm_delete(self) -> None:
+        name = self._editing_name
+        profile = next(
+            (p for p in self.window.settings.profiles if p.profile_name == name), None
+        )
+        if profile is None:
+            return
+        if self.window.install_busy or self._task is not None:
+            self.window.notify(tr("An install is already running."))
+            return
+        folders = tr(
+            "Anomaly: {anomaly}\nGAMMA: {gamma}\nCache: {cache}",
+            anomaly=profile.anomaly or "-",
+            gamma=profile.gamma or "-",
+            cache=profile.cache or "-",
+        )
+        message = (
+            tr("Only the profile is removed from COMMANDER. Your game files stay on disk:")
+            + "\n\n"
+            + folders
+        )
+        if profile.active and game_running(force=True):
+            message += "\n\n" + tr(
+                "Mod Organizer or the game is running on this profile. Deleting the profile won't close it, but COMMANDER will stop tracking it."
+            )
+        self._editor = None
+        self.window.confirm(
+            tr("Delete the profile '{name}'?", name=name),
+            message,
+            lambda: self._delete(name),
+            confirm_text=tr("Delete profile"),
+            confirm_role="danger",
+        )
+
+    def _delete(self, name: str) -> None:
+        if self.window.install_busy or self._task is not None:
+            self.window.notify(tr("An install is already running."))
+            return
+        # The CLI owns settings.json's profile list, as on the desktop page.
+        self._task = BackgroundTask(run_config_command, ["delete", name], timeout=300, parent=self)
+        self._task.result.connect(lambda result: self._deleted(name, *result))
+        self._task.error.connect(lambda message: self._delete_failed(message))
+        self._task.start()
+        self.chooser.setEnabled(False)
+
+    def _delete_failed(self, message: str) -> None:
+        self._task = None
+        self.chooser.setEnabled(True)
+        self.window.notify(tr("Couldn't delete the profile") + ": " + message, 8000)
+
+    def _deleted(self, name: str, rc: int, out: str, err: str) -> None:
+        self._task = None
+        self.chooser.setEnabled(True)
+        if not cli_ok(rc, out, err):
+            self._delete_failed((out + "\n" + err).strip() or tr("The profile couldn't be deleted."))
+            return
+        self.window.refresh_settings()
+        if any(p.profile_name == name for p in self.window.settings.profiles):
+            self._delete_failed(
+                tr("The profile '{name}' couldn't be deleted. Try again, or restart COMMANDER.", name=name)
+            )
+            return
+        forget_profile_extras(name)
+        self.window.profile_changed()
+        self.window.notify(tr("Profile '{name}' deleted.", name=name))
 
     # -- switching --------------------------------------------------------
     def _confirm_switch(self, name: str) -> None:
@@ -335,8 +403,4 @@ class ProfilePanel(QWidget):
             )
         # A different profile means different folders, mods and updates -
         # and results cached for the old one must not be shown for it.
-        for page in list(self.window._pages.values()):
-            forget = getattr(page, "forget_cached_checks", None)
-            if callable(forget):
-                forget()
-            page.refresh()
+        self.window.profile_changed()

@@ -18,7 +18,6 @@ from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QFileDialog,
     QFrame,
     QGraphicsBlurEffect,
     QGraphicsOpacityEffect,
@@ -59,6 +58,7 @@ from .common import (
 from .dashboard import _TITLE_ROW_H, _card_title, _field, _field_combo
 from .dialogs import InputDialog as QInputDialog
 from .dialogs import MessageBox as QMessageBox
+from .file_dialog import FileDialog as QFileDialog
 
 _STATUS = {
     coop.NOT_INSTALLED: ("Not installed", ""),
@@ -433,6 +433,50 @@ def _unfade(label: QLabel) -> None:
     label._fade.stop()
     label.graphicsEffect().setOpacity(1.0)
 
+
+
+def compare_with_friend(mods: dict | None, text: str) -> tuple[str, str, list[Finding]]:
+    """(level, verdict, findings) for a friend's pasted code or full list
+    against *mods* (``coop.mod_list``) - here and in Deck Mode."""
+    theirs = coop.parse_shared(text)
+    findings: list[Finding] = []
+    if not text.strip():
+        return "", "", findings
+    if mods is None:
+        return "failed", tr("Couldn't read your mod list"), findings
+    if theirs is None:
+        return "failed", tr("Not a COMMANDER code or mod list"), findings
+    if (theirs if isinstance(theirs, str) else coop.mod_list_code(theirs)) == coop.mod_list_code(mods):
+        # Names, order and versions only: xrRazom compares the files inside.
+        findings.append(Finding("info", tr("If xrRazom still turns the join down, a file inside a mod differs. Search the game log for [xrRazom] cfg-diff to find it.")))
+        return "healthy", tr("Same mod list as yours"), findings
+    if isinstance(theirs, str):
+        findings.append(Finding("info", tr("Ask your friend to copy their full list and paste it here to see which mods differ.")))
+    else:
+        findings = _mod_findings(mods, coop.compare_mod_lists(mods, theirs), theirs)
+    return "attention", tr("Different mods"), findings
+
+
+def _mod_findings(mods: dict, diff: dict, theirs: dict) -> list[Finding]:
+    from .install_page import _FINDING_ITEMS_SHOWN
+
+    def listed(level: str, title: str, detail: str, names: list[str]) -> Finding:
+        shown = names[:_FINDING_ITEMS_SHOWN]
+        if len(names) > len(shown):
+            shown.append(tr("and {count} more", count=len(names) - len(shown)))
+        return Finding(level, title, detail, shown, len(names))
+
+    findings = []
+    for key, title in (("gamma", tr("Different GAMMA version")), ("xrrazom", tr("Different xrRazom version"))):
+        if diff[key]:
+            findings.append(Finding("warn", title, tr("Yours: {mine}. Theirs: {theirs}.", mine=mods[key] or "-", theirs=theirs[key] or "-")))
+    if diff["missing"]:
+        findings.append(listed("problem", tr("Mods only your friend has"), tr("Install these or turn them on."), diff["missing"]))
+    if diff["extra"]:
+        findings.append(listed("problem", tr("Mods only you have"), tr("Turn these off, or your friend adds them."), diff["extra"]))
+    if diff["moved"]:
+        findings.append(listed("warn", tr("Mods in a different place"), tr("Same mods, different load order. Match the order in Mod Manager."), diff["moved"]))
+    return findings
 
 class MultiplayerPage(QWidget):
     def __init__(self, window) -> None:
@@ -1078,25 +1122,7 @@ class MultiplayerPage(QWidget):
 
         while self.mods_findings.count():
             self.mods_findings.takeAt(0).widget().deleteLater()
-        text = self.mods_paste.toPlainText()
-        theirs = coop.parse_shared(text)
-        findings: list[Finding] = []
-        if not text.strip():
-            level, result = "", ""
-        elif self._mods is None:
-            level, result = "failed", tr("Couldn't read your mod list")
-        elif theirs is None:
-            level, result = "failed", tr("Not a COMMANDER code or mod list")
-        elif (theirs if isinstance(theirs, str) else coop.mod_list_code(theirs)) == coop.mod_list_code(self._mods):
-            level, result = "healthy", tr("Same mod list as yours")
-            # Names, order and versions only: xrRazom compares the files inside.
-            findings.append(Finding("info", tr("If xrRazom still turns the join down, a file inside a mod differs. Search the game log for [xrRazom] cfg-diff to find it.")))
-        else:
-            level, result = "attention", tr("Different mods")
-            if isinstance(theirs, str):
-                findings.append(Finding("info", tr("Ask your friend to copy their full list and paste it here to see which mods differ.")))
-            else:
-                findings = self._mod_findings(coop.compare_mod_lists(self._mods, theirs), theirs)
+        level, result, findings = compare_with_friend(self._mods, self.mods_paste.toPlainText())
         self.mods_result.setText(result)
         self.mods_result.setProperty("level", level)
         self.mods_result.style().unpolish(self.mods_result)
@@ -1104,27 +1130,6 @@ class MultiplayerPage(QWidget):
         self.mods_result.setVisible(bool(result))
         for finding in findings:
             self.mods_findings.addWidget(_FindingRow(finding))
-
-    def _mod_findings(self, diff: dict, theirs: dict) -> list[Finding]:
-        from .install_page import _FINDING_ITEMS_SHOWN
-
-        def listed(level: str, title: str, detail: str, names: list[str]) -> Finding:
-            shown = names[:_FINDING_ITEMS_SHOWN]
-            if len(names) > len(shown):
-                shown.append(tr("and {count} more", count=len(names) - len(shown)))
-            return Finding(level, title, detail, shown, len(names))
-
-        findings = []
-        for key, title in (("gamma", tr("Different GAMMA version")), ("xrrazom", tr("Different xrRazom version"))):
-            if diff[key]:
-                findings.append(Finding("warn", title, tr("Yours: {mine}. Theirs: {theirs}.", mine=self._mods[key] or "-", theirs=theirs[key] or "-")))
-        if diff["missing"]:
-            findings.append(listed("problem", tr("Mods only your friend has"), tr("Install these or turn them on."), diff["missing"]))
-        if diff["extra"]:
-            findings.append(listed("problem", tr("Mods only you have"), tr("Turn these off, or your friend adds them."), diff["extra"]))
-        if diff["moved"]:
-            findings.append(listed("warn", tr("Mods in a different place"), tr("Same mods, different load order. Match the order in Mod Manager."), diff["moved"]))
-        return findings
 
     def _manage_tab(self) -> QWidget:
         page, layout = _panel()

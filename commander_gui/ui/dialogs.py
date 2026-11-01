@@ -15,7 +15,7 @@ whose lines all start with "• " becomes a bullet list.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -355,10 +355,28 @@ def style_window(dialog: QDialog, heading: str = "", *, resizable: bool = True) 
         if heading:
             layout.insertWidget(0, _label(heading, "section1"))
     if _frameless(dialog, dialog.parentWidget(), dialog.reject) and resizable:
-        from .title_bar import EdgeResizeFilter, attach_resize_filter
+        from .title_bar import EdgeResizeFilter
 
         dialog._resize_filter = EdgeResizeFilter(dialog)
-        attach_resize_filter(dialog, dialog._resize_filter, True)
+        # Hooked up once shown: making the native window early (winId())
+        # turned the page behind into native windows on Wayland, and its
+        # right-click menus then failed ("must be a top level window").
+        dialog._resize_hook = _AttachOnShow(dialog)
+
+
+class _AttachOnShow(QObject):
+    """Attaches a window's ``_resize_filter`` each time it is shown."""
+
+    def __init__(self, dialog: QDialog) -> None:
+        super().__init__(dialog)
+        dialog.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Show:
+            from .title_bar import attach_resize_filter
+
+            attach_resize_filter(obj, obj._resize_filter, True)
+        return False
 
 
 class ProgressDialog(QDialog):

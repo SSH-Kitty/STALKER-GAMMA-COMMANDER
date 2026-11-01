@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QPushButton
+from PySide6.QtWidgets import QHBoxLayout, QPushButton
 
 from .. import coop, modded_exes
 from . import reflow
@@ -19,6 +19,7 @@ from .common import (
     tr,
 )
 from .dialogs import MessageBox as QMessageBox
+from .file_dialog import FileDialog as QFileDialog
 from .multiplayer_page import _hint, _section
 
 

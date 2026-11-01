@@ -11,7 +11,6 @@ from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -74,6 +73,7 @@ from .common import (
 )
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import add_buttons, style_window
+from .file_dialog import FileDialog as QFileDialog
 
 #: How long a success message stays in the editor's footer.
 _STATUS_TIMEOUT_MS = 6000

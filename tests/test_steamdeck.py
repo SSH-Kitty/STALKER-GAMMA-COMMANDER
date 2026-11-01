@@ -783,7 +783,7 @@ class DeckLayoutTests(DeckWindowFixture):
         overlay = self.window.current_overlay()
         self.assertIsNotNone(overlay)
         texts = " ".join(label.text() for label in overlay.findChildren(QLabel))
-        self.assertIn("Game Crashed", texts)
+        self.assertIn("The game crashed", texts)
         rumble.assert_called_once()
         self.window.dismiss_overlay()
 
@@ -3597,3 +3597,149 @@ class DeckMultiplayerTests(DeckWindowFixture):
         for button in self.window.current_overlay().buttons:
             self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
         self.window.dismiss_overlay()
+
+
+# =====================================================================
+# Features ported from the desktop: Verify Integrity, Undo last update,
+# mod list backups, Delete profile, Switch install, default prefix,
+# Compare with a friend
+# =====================================================================
+class DeckVerifyEngineContractTests(unittest.TestCase):
+    """Deck Verify runs the desktop Install page's own methods (see
+    Steamdeck/verify.py). A desktop change that makes them touch a widget
+    the Deck card doesn't have, or open a desktop dialog, fails here
+    instead of in Game Mode."""
+
+    def _engine_sources(self):
+        import ast
+        import inspect
+        import textwrap
+
+        from commander_gui.ui.install_page import InstallPage
+        from Steamdeck.verify import _ENGINE
+
+        for name in _ENGINE:
+            self.assertTrue(hasattr(InstallPage, name), name)
+            source = textwrap.dedent(inspect.getsource(getattr(InstallPage, name)))
+            yield name, ast.parse(source)
+
+    def test_engine_methods_open_no_desktop_dialogs(self):
+        import ast
+
+        for name, tree in self._engine_sources():
+            names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            for dialog in ("QMessageBox", "QFileDialog", "QDialog"):
+                self.assertNotIn(dialog, names, f"InstallPage.{name} opens a {dialog}; override it in DeckVerifyCard")
+
+    def test_engine_only_uses_what_the_deck_card_provides(self):
+        import ast
+
+        from Steamdeck.verify import DeckVerifyCard
+
+        read, written = set(), set()
+        trees = list(self._engine_sources())
+        for _name, tree in trees:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+                    (written if isinstance(node.ctx, ast.Store) else read).add(node.attr)
+        card_init = DeckVerifyCard.__init__.__code__.co_names
+        missing = sorted(
+            attr for attr in read - written
+            if not hasattr(DeckVerifyCard, attr) and attr not in card_init
+        )
+        self.assertEqual(missing, [], "give DeckVerifyCard a stand-in for these")
+
+
+class DeckPortedFeatureTests(DeckWindowFixture):
+    def test_verify_runs_through_the_desktop_engine_and_releases_the_lock(self):
+        page = self.goto("install")
+        card = page.verify_card
+        card.anomaly_row.set_checked(False)
+        with patch("commander_gui.ui.common.gamma_installed", return_value=False):
+            card._start_verify()
+            for _ in range(400):
+                self.pump(2)
+                if not card.busy():
+                    break
+        self.assertFalse(card.busy())
+        self.assertFalse(self.window.install_busy)
+        self.assertTrue(card.verify_button.isEnabled())
+        self.assertTrue(card.verify_findings.count() >= 1)
+
+    def test_repair_question_is_a_deck_overlay_with_cancel_first(self):
+        card = self.goto("install").verify_card
+        profile = self.window.settings.active_profile
+        card._pending_repair = (False, True, False, (profile.anomaly, profile.gamma, profile.cache))
+        with patch.object(type(card), "_repair_prompt_text", return_value=("Reinstall Mod A", "mods/Mod A")):
+            card._on_repair_clicked()
+        overlay = self.window.current_overlay()
+        self.assertIsNotNone(overlay)
+        self.assertIs(overlay.default_button, overlay.buttons[-1])
+
+    def test_mods_restore_original_order_and_backups(self):
+        page = self.goto("mods")
+        pristine = self.modlist.with_name(self.modlist.name + ".gammagui.bak")
+        pristine.write_text(self.modlist.read_text(encoding="utf-8"), encoding="utf-8")
+        self.modlist.write_text(
+            "+Weapons_separator\n+Gamma Mod\n-Beta Mod\n+Alpha Mod\n", encoding="utf-8"
+        )
+        page.refresh()
+        with patch("Steamdeck.modlist_io.mo2_running", return_value=False):
+            page._restore_original_order()
+            self.window.current_overlay().buttons[0].click()
+            self.pump()
+            self.assertEqual(
+                self.modlist.read_text(encoding="utf-8").splitlines()[1:],
+                ["+Alpha Mod", "-Beta Mod", "+Gamma Mod"],
+            )
+            page._create_backup()
+        self.assertTrue(list(self.modlist.parent.glob("modlist-*.bak")))
+
+    def test_undo_last_update_puts_the_snapshot_back(self):
+        page = self.goto("update")
+        self.assertFalse(page.undo_row.isEnabled())
+        before = self.modlist.read_text(encoding="utf-8")
+        page._snapshot_modlist_before_update()
+        self.modlist.write_text("+Other\n", encoding="utf-8")
+        page._render_undo()
+        self.assertTrue(page.undo_row.isEnabled())
+        with patch("Steamdeck.screens.update.game_running", return_value=False):
+            page._undo_last_update()
+            self.window.current_overlay().buttons[0].click()
+            self.pump()
+        self.assertEqual(self.modlist.read_text(encoding="utf-8"), before)
+
+    def test_default_prefix_forgets_the_custom_one(self):
+        from commander_gui.ui.utilities_page import custom_prefix
+
+        gui_settings.save_gui_settings(runner="umu", prefixes={"umu": str(self.tmp / "pfx")})
+        kind, _default, saved = custom_prefix()
+        self.assertEqual(saved, str(self.tmp / "pfx"))
+        page = self.goto("utilities")
+        with patch("Steamdeck.screens.utilities.game_running", return_value=False):
+            page._reset_prefix()
+            self.window.current_overlay().buttons[0].click()
+            self.pump()
+        self.assertIsNone(custom_prefix()[2])
+
+    def test_switch_install_lists_saved_installs(self):
+        other = [str(self.tmp / "sd" / name) for name in ("anomaly", "gamma", "cache")]
+        gui_settings.save_gui_settings(game_installs=[other])
+        page = self.goto("install")
+        page.install_switcher.open()
+        from Steamdeck.widgets import DeckPicker
+
+        picker = self.window.current_overlay().findChild(DeckPicker)
+        self.assertEqual(picker.list.count(), 2)  # the one in use, then the SD card
+
+    def test_compare_with_friend(self):
+        from commander_gui import coop
+        from commander_gui.ui.multiplayer_page import compare_with_friend
+
+        mine = {"gamma": "1", "xrrazom": "2", "mods": ["A", "B"]}
+        self.assertEqual(compare_with_friend(mine, coop.mod_list_code(mine))[0], "healthy")
+        level, _text, findings = compare_with_friend(
+            mine, coop.share_text({"gamma": "1", "xrrazom": "2", "mods": ["A", "C"]})
+        )
+        self.assertEqual(level, "attention")
+        self.assertEqual({f.title for f in findings}, {"Mods only your friend has", "Mods only you have"})

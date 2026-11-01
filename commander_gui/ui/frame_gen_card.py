@@ -9,7 +9,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from .. import gui_settings, launch_options
 from .common import exe_pids, info_label, make_card, open_url, section_label, tr
+from .file_dialog import FileDialog as QFileDialog
 
 
 class FrameGenCard(QWidget):

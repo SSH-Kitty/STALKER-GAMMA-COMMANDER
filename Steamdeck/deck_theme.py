@@ -795,6 +795,18 @@ QLabel#deckStatValue {
     color: $accent;
     background: transparent;
 }
+/* A Verify Integrity tile's number, coloured by what it found. */
+QLabel#deckStatValue[state="problem"] {
+    color: $danger_text;
+}
+QLabel#deckStatValue[state="warn"] {
+    color: $warn;
+}
+QLabel#deckStatValue[state="idle"],
+QLabel#deckStatValue[state="running"],
+QLabel#deckStatValue[state="info"] {
+    color: $text_info;
+}
 QLabel#deckSection {
     font-size: 17px;
     font-weight: bold;

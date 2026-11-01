@@ -1,8 +1,9 @@
 """Turning mods on and off, and installing new ones.
 
-Enable, disable, search, reorder, and Install mod (an archive from
+Enable, disable, search, reorder, Install mod (an archive from
 Downloads or an SD card, FOMOD installers included - see
-``Steamdeck/mod_installer.py``). Reordering is the desktop's drag and drop
+``Steamdeck/mod_installer.py``), and Backups (the desktop's create /
+restore / restore original order, on the same backup files). Reordering is the desktop's drag and drop
 done with the pad: hold A on a mod to pick it up, D-pad up/down to carry it
 (across category headers too), A to put it down, B to put it back. Nothing
 is written until it is put down, and then once. Deleting mod folders stays
@@ -25,6 +26,7 @@ Two implementation choices are worth knowing about:
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
@@ -40,18 +42,21 @@ from PySide6.QtWidgets import (
 
 from commander_gui.i18n import tr
 from commander_gui.modlist import (
+    _backups_newest_first,
     grouped,
     modlist_path_for,
     move_mod,
     read_lines,
+    reorder_to_original,
     set_status_at,
+    snapshot_modlist_backup,
 )
 from commander_gui.themes import active_theme_tokens, token_color
 from commander_gui.ui.common import mo2_running
 
 from .. import gamepad as pad
 from ..focus import enable_kinetic_scroll
-from ..modlist_io import ModlistWriteBlocked, write_lines
+from ..modlist_io import ModlistWriteBlocked, backup_path, guard_reason, write_lines
 from ..scale import px
 from ..widgets import (
     MIN_TOUCH,
@@ -288,6 +293,10 @@ class ModsScreen(DeckScreen):
             "＋  " + tr("Install mod"), role="chip", on_click=self._install_mod
         )
         chips.addWidget(self.install_button, 1)
+        self.backups_button = deck_button(
+            "↺  " + tr("Backups"), role="chip", on_click=self._show_backups
+        )
+        chips.addWidget(self.backups_button, 1)
         self.body.addLayout(chips)
         self._installer = None
 
@@ -350,6 +359,7 @@ class ModsScreen(DeckScreen):
         blocked = self.window.install_busy or mo2_running()
         self.list.setEnabled(not blocked)
         self.install_button.setEnabled(not blocked)
+        self.backups_button.setEnabled(not blocked and self._path is not None)
         if blocked:
             self.status.setText(
                 tr(
@@ -764,6 +774,147 @@ class ModsScreen(DeckScreen):
                 self.list.scrollToItem(item)
                 self.list.setFocus(Qt.FocusReason.OtherFocusReason)
                 return
+
+    # -- backups ----------------------------------------------------------
+    # The desktop Mod Manager's three backup tools, on the same files: the
+    # pristine .gammagui.bak and the timestamped modlist-*.bak snapshots.
+    def _show_backups(self) -> None:
+        if self._path is None or not self._path.is_file():
+            return
+        if self._refuse_if_blocked():
+            return
+        pristine = backup_path(self._path)
+        if pristine.is_file():
+            stamp = datetime.fromtimestamp(pristine.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            status = tr("Backup: {name} ({stamp})", name=pristine.name, stamp=stamp)
+        else:
+            status = tr("No backup yet")
+        self.window.show_overlay(
+            DeckOverlay(
+                tr("Backups"),
+                deck_label(
+                    tr("Save a backup of the current MO2 modlist.") + "\n\n" + status,
+                    role="body",
+                    wrap=True,
+                ),
+                [
+                    (tr("Create backup"), self._create_backup, "primary"),
+                    (tr("Restore backup"), self._pick_backup, "normal"),
+                    (tr("Restore original order"), self._restore_original_order, "normal"),
+                    (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                ],
+                panel_width=1100,
+                default_index=3,
+            )
+        )
+
+    def _refuse_if_blocked(self) -> bool:
+        reason = guard_reason(self.window)
+        if reason is not None:
+            self.window.notify(reason, 6000)
+            self._update_guard()
+            return True
+        return False
+
+    def _create_backup(self) -> None:
+        self.window.dismiss_overlay()
+        if self._path is None or self._refuse_if_blocked():
+            return
+        try:
+            snapshot_modlist_backup(self._path)
+        except OSError as exc:
+            self.window.notify(tr("Couldn't create the backup") + ": " + str(exc), 8000)
+            return
+        newest = _backups_newest_first(self._path)
+        name = newest[0].name if newest else self._path.name
+        self.window.notify(tr("Backup saved: {backup}", backup=name), 5000)
+
+    def _pick_backup(self) -> None:
+        self.window.dismiss_overlay()
+        if self._path is None:
+            return
+        backups = _backups_newest_first(self._path)
+        if not backups:
+            self.window.notify(tr("No backup yet"))
+            return
+        options = []
+        for bak in backups:
+            try:
+                stamp = datetime.fromtimestamp(bak.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                continue
+            options.append((f"{stamp}   ·   {bak.name}", str(bak)))
+        picker = DeckPicker("", options, 0)
+        picker.chosen.connect(lambda value: self._confirm_restore(Path(str(value))))
+        self.window.show_overlay(
+            picker_overlay(self.window, tr("Restore backup"), picker, panel_width=1100)
+        )
+
+    def _confirm_restore(self, bak: Path) -> None:
+        self.window.dismiss_overlay()
+
+        def _restore() -> None:
+            if self._path is None:
+                return
+            try:
+                lines = read_lines(bak)
+            except (OSError, ValueError) as exc:
+                self.window.notify(tr("Couldn't restore the backup") + ": " + str(exc), 8000)
+                return
+            # A snapshot of the list being replaced goes first, so this
+            # restore can itself be undone from the same picker.
+            try:
+                write_lines(self.window, self._path, lines, snapshot=True)
+            except ModlistWriteBlocked as exc:
+                self.window.notify(str(exc), 6000)
+                self._update_guard()
+                return
+            self._snapshot_taken = True
+            self.window.update_mod_counter()
+            self.refresh()
+            self.window.notify(tr("Restored from: {bak}", bak=bak.name), 5000)
+
+        self.window.confirm(
+            tr("Restore backup"),
+            tr("Your mod list is replaced with this backup:\n{bak}", bak=bak.name)
+            + "\n\n"
+            + tr("Changes you made since then are lost."),
+            _restore,
+            confirm_text=tr("Restore"),
+            confirm_role="danger",
+        )
+
+    def _restore_original_order(self) -> None:
+        self.window.dismiss_overlay()
+        if self._path is None or self._refuse_if_blocked():
+            return
+        pristine = backup_path(self._path)
+        try:
+            original = read_lines(pristine)
+        except (OSError, ValueError):
+            self.window.notify(tr("The original order isn't available"), 6000)
+            return
+        new_lines = reorder_to_original(self._lines, original)
+        if new_lines == self._lines:
+            self.window.notify(tr("The GAMMA mods are already in their original order."), 5000)
+            return
+
+        def _restore() -> None:
+            if self._write(new_lines):
+                self.refresh()
+                self.window.notify(
+                    tr("GAMMA mods restored to order from: {name}", name=pristine.name), 5000
+                )
+
+        self.window.confirm(
+            tr("Put GAMMA back in its original order?"),
+            tr("The GAMMA mods go back to their default load order.")
+            + "\n\n•  " + tr("Mods you installed yourself are kept.")
+            + "\n•  " + tr("Your categories are kept.")
+            + "\n•  " + tr("Mods stay on or off as they are."),
+            _restore,
+            confirm_text=tr("Restore order"),
+        )
 
     # -- editing ----------------------------------------------------------
     def _toggle(self, item: QListWidgetItem) -> None:

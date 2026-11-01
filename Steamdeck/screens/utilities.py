@@ -62,6 +62,8 @@ from commander_gui.ui.utilities_page import (
     _save_moved_profile,
     _validate_move_destination,
     _validate_wipe_paths,
+    custom_prefix,
+    use_default_prefix,
 )
 
 from ..folder_picker import show_folder_picker
@@ -149,10 +151,8 @@ class UtilitiesScreen(DeckScreen):
         self.progress.hide()
         self.body.addWidget(self.progress)
 
-        # Two columns balanced by height: the two one- and two-tool groups
-        # stacked on the left, the three-tool group on the right. Paired
-        # strictly two-by-two, the lone Wine / Proton tool sat in a card
-        # half as tall as the one beside it.
+        # Two columns balanced by height: the two two-tool groups (cache,
+        # Wine) stacked on the left, game files and backups on the right.
         cache, files, wine, installation, backups = self._tool_cards()
         left = QVBoxLayout()
         left.setSpacing(px(12))
@@ -241,6 +241,16 @@ class UtilitiesScreen(DeckScreen):
                             "crashes immediately, then reinstall the dependencies."
                         ),
                         self._repair_prefix,
+                        "normal",
+                    ),
+                    (
+                        tr("Use the default Wine prefix"),
+                        tr(
+                            "Switch the selected runner back to its own default prefix "
+                            "if a custom prefix folder was set and no longer works. "
+                            "The custom folder itself is not deleted."
+                        ),
+                        self._reset_prefix,
                         "normal",
                     ),
                 ],
@@ -680,6 +690,33 @@ class UtilitiesScreen(DeckScreen):
         self._set_actions_enabled(True)
         self.window.notify(tr("Repair failed: {message}", message=message), 8000)
 
+    def _reset_prefix(self) -> None:
+        if not self._tasks_idle() or self.window.install_busy:
+            self.window.notify(tr("Another task is already running."))
+            return
+        if self._reject_if_mo2_running():
+            return
+        kind, default, saved = custom_prefix()
+        if saved is None:
+            self.window.notify(
+                tr("The selected runner already uses its default prefix:\n{path}", path=default), 6000
+            )
+            return
+
+        def _go() -> None:
+            use_default_prefix(kind)
+            self.status.setText(tr("The game now runs in:\n{path}", path=default))
+            self.window.notify(tr("Default prefix set"), 5000)
+
+        self.window.confirm(
+            tr("Use the default prefix?"),
+            tr("The game will run in the default prefix again instead of:\n{path}", path=saved)
+            + "\n\n"
+            + tr("The custom folder is not deleted. If the default prefix is new, install the dependencies again on the Install page."),
+            _go,
+            confirm_text=tr("Use default"),
+        )
+
     # -- saves & settings backup ---------------------------------------------
     def _run_backup_task(self, fn, status: str, on_done) -> None:
         if not self._tasks_idle() or self.window.install_busy:
@@ -908,7 +945,7 @@ class UtilitiesScreen(DeckScreen):
             skipped = int(stats.get("skipped", 0))
             size_mb = float(stats.get("bytes", 0)) / (1024 * 1024)
         except (TypeError, ValueError, KeyError):
-            self.status.setText(tr("Log Dump Failed"))
+            self.status.setText(tr("Couldn't create the log dump"))
             return
         self.status.setText(
             tr(

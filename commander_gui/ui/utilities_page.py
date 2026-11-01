@@ -17,7 +17,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -56,14 +55,15 @@ from .common import (
     StreamTask,
     assistant_token,
     dir_size,
+    game_running,
     info_label,
     make_card,
-    game_running,
     section_label,
     tr,
 )
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import style_window
+from .file_dialog import FileDialog as QFileDialog
 from .multiplayer_page import confirm_singleplayer
 
 #: System directories that must never be handed to rmtree, whatever a
@@ -755,6 +755,29 @@ class _MoveDialog(QDialog):
             super().reject()
 
 
+
+def custom_prefix() -> tuple[str, str, str | None]:
+    """(runner kind, its default prefix, the custom prefix it uses instead
+    or None) - for Use the default Wine prefix, here and in Deck Mode."""
+    from ..launcher import DEFAULT_PROTON_PREFIX, DEFAULT_UMU_PREFIX
+
+    state = gui_settings.load_gui_settings()
+    kind = state.get("runner") or "auto"
+    default = str(DEFAULT_PROTON_PREFIX if kind.startswith("proton:") else DEFAULT_UMU_PREFIX)
+    saved = gui_settings.saved_prefix_for(kind, state)
+    if not saved or os.path.normpath(os.path.expanduser(saved)) == default:
+        return kind, default, None
+    return kind, default, saved
+
+
+def use_default_prefix(kind: str) -> None:
+    """Forget the custom prefix saved for runner *kind*."""
+    prefixes = dict(gui_settings.load_gui_settings().get("prefixes") or {})
+    # An empty entry, not a removed one: with no prefixes map at all the
+    # old single wine_prefix setting would be used again.
+    prefixes[kind] = ""
+    gui_settings.save_gui_settings(prefixes=prefixes, wine_prefix="")
+
 class UtilitiesPage(QWidget):
     def __init__(self, window) -> None:
         super().__init__()
@@ -932,8 +955,6 @@ class UtilitiesPage(QWidget):
 
     def _reset_prefix(self) -> None:
         """Forget the custom prefix saved for the selected runner."""
-        from ..launcher import DEFAULT_PROTON_PREFIX, DEFAULT_UMU_PREFIX
-
         if self.window.install_busy:
             QMessageBox.warning(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
@@ -944,11 +965,8 @@ class UtilitiesPage(QWidget):
                 tr("Mod Organizer or the game is still open. Close it, then try again."),
             )
             return
-        state = gui_settings.load_gui_settings()
-        kind = state.get("runner") or "auto"
-        default = str(DEFAULT_PROTON_PREFIX if kind.startswith("proton:") else DEFAULT_UMU_PREFIX)
-        saved = gui_settings.saved_prefix_for(kind, state)
-        if not saved or os.path.normpath(os.path.expanduser(saved)) == default:
+        kind, default, saved = custom_prefix()
+        if saved is None:
             QMessageBox.information(
                 self,
                 tr("Already using the default prefix"),
@@ -965,11 +983,7 @@ class UtilitiesPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        prefixes = dict(state.get("prefixes") or {})
-        # An empty entry, not a removed one: with no prefixes map at all the
-        # old single wine_prefix setting would be used again.
-        prefixes[kind] = ""
-        gui_settings.save_gui_settings(prefixes=prefixes, wine_prefix="")
+        use_default_prefix(kind)
         QMessageBox.information(
             self,
             tr("Default prefix set"),
@@ -1363,7 +1377,7 @@ class UtilitiesPage(QWidget):
 
     def _browse_move_dest(self) -> None:
         path = QFileDialog.getExistingDirectory(
-            self, "Select destination folder", self._move_dest_edit.text()
+            self, tr("Select destination folder"), self._move_dest_edit.text()
         )
         if path:
             self._move_dest_edit.setText(path)

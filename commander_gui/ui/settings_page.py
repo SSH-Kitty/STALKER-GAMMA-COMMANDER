@@ -14,7 +14,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -83,6 +82,7 @@ from .common import (
 )
 from .dashboard import _card_title
 from .dialogs import MessageBox as QMessageBox
+from .file_dialog import FileDialog as QFileDialog
 from .install_page import _PathEdit
 from .moddb_plugin import controller as moddb_controller
 from .multiplayer_page import (

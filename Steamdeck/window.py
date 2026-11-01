@@ -827,6 +827,20 @@ class DeckWindow(QMainWindow):
         self.settings = load_settings()
         self.update_mod_counter()
 
+    def profile_changed(self) -> None:
+        """Another profile, or other folders: every screen's cached results
+        belong to the old ones. Only the shown screen refreshes now - each
+        refresh starts CLI and network checks, and the rest refresh anyway
+        when set_page() shows them."""
+        for page in self._pages.values():
+            forget = getattr(page, "forget_cached_checks", None)
+            if callable(forget):
+                forget()
+        page = self._pages.get(self._current_key)
+        if page is not None:
+            page.refresh()
+        self.update_mod_counter()
+
     def update_clock(self) -> None:
         self.clock_label.setText(time.strftime("%H:%M"))
         # The Live themes move on to dawn, day, dusk and night with the clock.

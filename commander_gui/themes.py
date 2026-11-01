@@ -640,6 +640,29 @@ QPushButton#docSection {
 QPushButton#docSection:hover {
     color: $accent_strong;
 }
+QScrollArea#crumbs, QScrollArea#crumbs > QWidget > QWidget {
+    background: transparent;
+}
+QWidget#sideRow {
+    background: transparent;
+}
+QListWidget#fileList::item {
+    padding: 5px 6px;
+}
+QPushButton#crumb {
+    background: transparent;
+    border: none;
+    padding: 4px 6px;
+    min-width: 0;
+    color: $text_dim;
+}
+QPushButton#crumb:hover {
+    color: $accent_strong;
+}
+QPushButton#crumb[current="true"] {
+    color: $text_bright;
+    font-weight: bold;
+}
 QProgressBar#storageMeter, QProgressBar#storageMeterLow {
     border: none;
     border-radius: 4px;
@@ -998,28 +1021,38 @@ QComboBox::separator {
     background: $border_input;
     margin: 4px 8px;
 }
+/* Rounded like the pop-ups: context_menu.polish_menu makes the window
+   see-through so the corners really are round. */
 QMenu {
     background-color: $card;
     color: $text;
-    border: 1px solid $border_input;
-    padding: 4px;
+    border: 1px solid $border_strong;
+    border-radius: 10px;
+    padding: 6px;
 }
 QMenu::item {
     background: transparent;
-    padding: 6px 20px 6px 12px;
-    border-radius: 4px;
+    padding: 7px 28px 7px 10px;
+    border-radius: 6px;
+    border-left: 3px solid transparent;
 }
 QMenu::item:selected {
-    background-color: $selection;
-    color: $selection_text;
+    background-color: $btn_hover;
+    color: $text_bright;
+    border-left: 3px solid $accent_strong;
 }
 QMenu::item:disabled {
     color: $text_disabled;
+    background: transparent;
+    border-left: 3px solid transparent;
+}
+QMenu::icon {
+    padding-left: 8px;
 }
 QMenu::separator {
     height: 1px;
-    background: $border_input;
-    margin: 4px 8px;
+    background: $border;
+    margin: 5px 10px;
 }
 QProgressBar {
     background-color: $input;

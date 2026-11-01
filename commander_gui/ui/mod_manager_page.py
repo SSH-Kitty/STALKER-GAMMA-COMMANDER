@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -136,6 +135,7 @@ from .common import (
 from .dialogs import InputDialog as QInputDialog
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import add_buttons, add_close_button, style_window
+from .file_dialog import FileDialog as QFileDialog
 from .fomod_dialog import FomodWizardDialog
 from .moddb_plugin import controller as moddb_controller
 

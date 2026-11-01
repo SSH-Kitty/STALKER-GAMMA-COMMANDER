@@ -693,7 +693,7 @@ class PlayScreen(DeckScreen):
     # -- crash analysis -----------------------------------------------------
     def _on_crashed(self) -> None:
         """A session ended with a new crash dump: offer to analyze it."""
-        title = tr("Game Crashed")
+        title = tr("The game crashed")
         message = tr("The game appears to have crashed - a new crash log was written.")
         message += "\n\n" + tr(
             "Analyze Crash collects the logs into a log dump and opens it in "

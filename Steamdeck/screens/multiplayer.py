@@ -51,12 +51,14 @@ from commander_gui.steam_shortcuts import (
 from commander_gui.ui import game_splash
 from commander_gui.ui.common import (
     BackgroundTask,
+    clear_layout,
     game_running,
     gamma_installed,
     mo2_running,
     notice,
     play_click_sound,
 )
+from commander_gui.ui.multiplayer_page import compare_with_friend
 from commander_gui.ui.play_page import (
     coop_options_only_change,
     coop_shortcut_fields,
@@ -68,6 +70,7 @@ from .. import gamepad as pad
 from ..folder_picker import show_folder_picker
 from ..mod_installer import DeckArchivePicker
 from ..scale import px
+from ..verify import finding_row
 from ..welcome import open_url
 from ..widgets import (
     BUTTON_H,
@@ -97,7 +100,7 @@ _STATUS = {
     coop.SINGLEPLAYER: ("Singleplayer", "ok"),
     coop.REVERTED: ("Engine reverted", "bad"),
 }
-_TABS = ("Hosting", "Joining", "Player", "Manage", "Help")
+_TABS = ("Hosting", "Joining", "Player", "Mods", "Manage", "Help")
 
 
 class _Bridge(QObject):
@@ -433,7 +436,8 @@ class MultiplayerScreen(DeckScreen):
         self.tab_choice.changed.connect(self._show_tab)
         box.addWidget(self.tab_choice)
         self._pages = [
-            self._host_tab(), self._join_tab(), self._player_tab(), self._manage_tab(), self._help_tab(),
+            self._host_tab(), self._join_tab(), self._player_tab(), self._mods_tab(),
+            self._manage_tab(), self._help_tab(),
         ]
         for page in self._pages:
             box.addWidget(page)
@@ -576,6 +580,71 @@ class MultiplayerScreen(DeckScreen):
             layout.addWidget(self._toggle(key, title))
         return page
 
+    def _mods_tab(self) -> QWidget:
+        """Your mod list's code, and a friend's checked against it - the
+        usual reason a join is turned down."""
+        page, layout = _panel()
+        layout.addWidget(deck_label(tr("Your mod list"), role="section"))
+        self.mods_row = DeckRow(tr("Code"), chevron=False)
+        self.mods_row.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.mods_row.value_label.setObjectName("deckStatValue")
+        layout.addWidget(self.mods_row)
+        self.mods_summary = _caption()
+        layout.addWidget(self.mods_summary)
+        layout.addWidget(_caption(tr("Everyone in a session needs the same code. If yours differ, send your full list instead.")))
+        layout.addWidget(deck_label(tr("Compare with a friend"), role="section"))
+        self.friend_row = DeckRow(tr("Friend's code"))
+        self.friend_row.activated.connect(self._edit_friend_code)
+        self.friend_result = deck_chip("", "warn")
+        self.friend_row.layout().insertWidget(
+            self.friend_row.layout().count() - 1, self.friend_result, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addWidget(self.friend_row)
+        self.friend_findings = QVBoxLayout()
+        self.friend_findings.setSpacing(px(8))
+        layout.addLayout(self.friend_findings)
+        self._friend_text = ""
+        return page
+
+    def _refresh_mods(self, profile) -> None:
+        try:
+            self._mods = coop.mod_list(profile.anomaly, profile.gamma, profile.mo2_profile) if profile else None
+        except (OSError, ValueError, coop.CoopError):
+            self._mods = None
+        if self._mods is None:
+            self.mods_row.set_value("—")
+            self.mods_summary.setText(tr("Couldn't read your mod list"))
+        else:
+            self.mods_row.set_value(coop.mod_list_code(self._mods))
+            self.mods_summary.setText(tr("{count} mods turned on", count=len(self._mods["mods"])))
+        self._compare_mods()
+
+    def _edit_friend_code(self) -> None:
+        def _done(text: str) -> None:
+            self._friend_text = text
+            self._compare_mods()
+
+        # A full list is far longer than a code; pasted in Desktop Mode it
+        # still fits.
+        self._keyboard(tr("Compare with a friend"), self._friend_text, _done, max_length=100000,
+                       placeholder=tr("Paste your friend's code or full list here"))
+
+    def _compare_mods(self) -> None:
+        clear_layout(self.friend_findings)
+        level, result, findings = compare_with_friend(getattr(self, "_mods", None), self._friend_text)
+        theirs = coop.parse_shared(self._friend_text)
+        # A pasted full list carries its code; show that, not its first line.
+        shown = coop.mod_list_code(theirs) if isinstance(theirs, dict) else self._friend_text.strip()
+        self.friend_row.set_value((shown[:24] + "…" if len(shown) > 24 else shown) or tr("Not set"))
+        self.friend_result.setText(f"●  {result}")
+        self.friend_result.setObjectName(
+            {"healthy": "deckChipOk", "failed": "deckChipBad", "attention": "deckChipBad"}.get(level, "deckChipWarn")
+        )
+        repolish(self.friend_result)
+        self.friend_result.setVisible(bool(result))
+        for finding in findings:
+            self.friend_findings.addWidget(finding_row(finding))
+
     def _manage_tab(self) -> QWidget:
         page, layout = _panel()
         tile, self.update_button = _tool_row(
@@ -709,6 +778,7 @@ class MultiplayerScreen(DeckScreen):
             self._values, _present = coop.read_settings(profile.anomaly)
             self._join_ip = coop.read_last_ip(profile.anomaly, profile.gamma, profile.mo2_profile)
             self._settings_from = profile
+        self._refresh_mods(profile)
         self._render_values()
         self._sync()
 

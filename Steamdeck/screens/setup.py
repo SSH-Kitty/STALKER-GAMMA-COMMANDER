@@ -298,4 +298,4 @@ class SetupScreen(DeckScreen):
         self.window.toast.hide()
         if hasattr(self, "create_button"):
             self.create_button.setEnabled(True)
-        self.window.notify(tr("Create Failed") + ": " + message, 8000)
+        self.window.notify(tr("Couldn't create the profile") + ": " + message, 8000)

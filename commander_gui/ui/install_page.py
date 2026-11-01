@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
-    QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -154,6 +153,7 @@ from .common import (
 from .dashboard import _SEGMENT_TOKENS, _SegmentedBar, _Swatch
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import ProgressDialog, add_close_button, style_window
+from .file_dialog import FileDialog as QFileDialog
 from .multiplayer_page import confirm_singleplayer
 
 #: tr() msgid shared between the Install button's own label and the failure
@@ -4730,6 +4730,32 @@ class InstallPage(QWidget):
         self, anomaly_needs_repair: bool, gamma_repairable: bool, repo_repairable: bool = False
     ) -> bool:
         """Confirm the repair. Returns True and schedules it on Yes."""
+        text, details = self._repair_prompt_text(
+            anomaly_needs_repair, gamma_repairable, repo_repairable
+        )
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle(tr("Repair now?"))
+        dialog.setText(text)
+        dialog.setInformativeText(tr("Show details lists every file and mod the repair will touch."))
+        dialog.setDetailedText(details)
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        dialog.set_labels({
+            QMessageBox.StandardButton.Yes: tr("Repair"),
+            QMessageBox.StandardButton.No: tr("Cancel"),
+        })
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return False
+        self._arm_repair(anomaly_needs_repair, gamma_repairable, repo_repairable)
+        return True
+
+    def _repair_prompt_text(
+        self, anomaly_needs_repair: bool, gamma_repairable: bool, repo_repairable: bool
+    ) -> tuple[str, str]:
+        """The repair question and its full file list (Deck Mode shares it)."""
         sections: list[str] = []
         if anomaly_needs_repair:
             counts = self._verify_counts
@@ -4764,28 +4790,17 @@ class InstallPage(QWidget):
                     count=len(self._repo_check.broken),
                 )
             )
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Icon.Question)
-        dialog.setWindowTitle(tr("Repair now?"))
-        dialog.setText("\n\n".join(sections))
-        dialog.setInformativeText(tr("Show details lists every file and mod the repair will touch."))
-        dialog.setDetailedText(
-            repair_preview(
-                self._repair_plan if gamma_repairable else None,
-                getattr(self, "_anomaly_problem_lines", []) if anomaly_needs_repair else [],
-                self._repo_check.broken if repo_repairable else (),
-            )
+        details = repair_preview(
+            self._repair_plan if gamma_repairable else None,
+            getattr(self, "_anomaly_problem_lines", []) if anomaly_needs_repair else [],
+            self._repo_check.broken if repo_repairable else (),
         )
-        dialog.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        dialog.set_labels({
-            QMessageBox.StandardButton.Yes: tr("Repair"),
-            QMessageBox.StandardButton.No: tr("Cancel"),
-        })
-        dialog.setDefaultButton(QMessageBox.StandardButton.No)
-        if dialog.exec() != QMessageBox.StandardButton.Yes:
-            return False
+        return "\n\n".join(sections), details
+
+    def _arm_repair(
+        self, anomaly_needs_repair: bool, gamma_repairable: bool, repo_repairable: bool
+    ) -> None:
+        """Queue the repairs the player said yes to."""
         self._repair_anomaly_pending = anomaly_needs_repair
         self._gamma_repair_pending = gamma_repairable
         self._repo_repair_pending = repo_repairable
@@ -4800,7 +4815,6 @@ class InstallPage(QWidget):
         self._gamma_overlay_restore_pending = anomaly_needs_repair and not gamma_repairable
         self._gamma_overlay_restored = False
         self._gamma_repair_done = False
-        return True
 
     def _advance_repair_pipeline(self) -> None:
         """Run pending repairs in order, then deliver the final verdict."""
@@ -5809,11 +5823,13 @@ class InstallPage(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._stop_verify()
+
+    def _stop_verify(self) -> None:
         if self._verify_runner is not None:
             self._verify_runner.cancel()
         if self._scan_cancel is not None:
             self._scan_cancel.set()
-            return
 
     def _on_verify_cancelled(self, stage: str = "Anomaly check"):
         # The CLI is still exiting (an Anomaly repair may still be writing

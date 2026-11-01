@@ -251,7 +251,7 @@ class DeckLaunchController(QObject):
             profile.anomaly, coop_launch=coop.is_active(profile.anomaly), direct=direct is not None
         )
         if reason:
-            self.failed.emit(tr("Launch Failed"), tr(reason))
+            self.failed.emit(tr("Couldn't start the game"), tr(reason))
             return
         scope = ptrace_scope()
         if direct is None and scope >= 2:
@@ -346,7 +346,7 @@ class DeckLaunchController(QObject):
             return  # stopped meanwhile
         self._launch_task = None
         self._set_active(False)
-        self.failed.emit(tr("Launch Failed"), message)
+        self.failed.emit(tr("Couldn't start the game"), message)
 
     def _start_prepared(self, task, profile, prepared: dict) -> None:
         if task is not self._launch_task:
@@ -371,7 +371,7 @@ class DeckLaunchController(QObject):
             )
         except Exception as exc:  # noqa: BLE001 - never leave the session stuck "active"
             self._set_active(False)
-            self.failed.emit(tr("Launch Failed"), str(exc))
+            self.failed.emit(tr("Couldn't start the game"), str(exc))
             return
         if prepared["splash"]:
             self._start_splash(profile)
@@ -440,7 +440,7 @@ class DeckLaunchController(QObject):
             self._kill_stray_debuggers()
             self._stop_watching()
             self.failed.emit(
-                tr("Launch Failed"),
+                tr("Couldn't start the game"),
                 tr(
                     "Wine crashed repeatedly while starting Mod Organizer, and "
                     "COMMANDER stopped it before it could exhaust memory. This "
@@ -487,7 +487,7 @@ class DeckLaunchController(QObject):
         if runner_prefix_error(log):
             self._stop_watching()
             self.failed.emit(
-                tr("Launch Failed"),
+                tr("Couldn't start the game"),
                 tr(
                     "The selected runner could not use this Wine prefix. "
                     "Pick a different runner, or let the full interface "
@@ -498,7 +498,7 @@ class DeckLaunchController(QObject):
         if runner_graphics_error(log):
             self._stop_watching()
             self.failed.emit(
-                tr("Launch Failed"),
+                tr("Couldn't start the game"),
                 tr(
                     "The game could not start its graphics backend. Check "
                     "the Vulkan entries on the System screen."
