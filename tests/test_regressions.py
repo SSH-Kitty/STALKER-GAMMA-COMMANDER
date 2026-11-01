@@ -719,6 +719,24 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(page.verify_pill.text(), "Snapshot saved · 10 min ago")
             page.on_install_activity_changed("gamma")
             self.assertEqual(page._step, 3)
+            # While Anomaly installs, GAMMA's step says so in one line; the
+            # progress panel (table always open) sits on Anomaly's step, or
+            # on the Automatic card while that shows.
+            FakeWindow.install_operation = "anomaly"
+            page._show_step(3)
+            self.assertTrue(page.progress_panel.isHidden())
+            self.assertIn("Anomaly is installing", page.progress_note.text())
+            page._show_step(2)
+            self.assertFalse(page.progress_panel.isHidden())
+            self.assertTrue(page.progress_note.isHidden())
+            self.assertTrue(page.full_progress.table_toggle.isHidden())
+            page._show_view("auto")
+            self.assertIs(page.progress_panel.parentWidget(), page._auto_card)
+            self.assertFalse(page.progress_panel.isHidden())
+            page._show_view("manual", 3)
+            self.assertIs(page.progress_panel.parentWidget(), page._fade_box)
+            FakeWindow.install_operation = None
+            page._show_step(3)
             # Step 3 names the step 4 options a chained GAMMA install uses.
             self.assertFalse(page.gamma_chain_note.isHidden())
             self.assertIn("Auto-retry", page.gamma_chain_note.text())
@@ -755,6 +773,106 @@ class RegressionTests(unittest.TestCase):
             Path(profile.cache).mkdir()
             (Path(profile.cache) / "addon.zip").write_bytes(b"")
             self.assertIsNone(offline_install_problem(lists, profile.cache))
+
+    def test_automatic_install_chains_dependencies_into_anomaly_and_gamma(self):
+        """Automatic: defaults back on, no dependencies pop-up, and their
+        end starts Anomaly + GAMMA instead of the "installed" pop-up."""
+        from PySide6.QtWidgets import QApplication
+
+        from commander_gui.ui import install_page as ip
+
+        QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = CliProfile(
+                active=True,
+                profile_name="Test",
+                anomaly=str(Path(tmp) / "anomaly"),
+                gamma=str(Path(tmp) / "gamma"),
+                cache=str(Path(tmp) / "cache"),
+                mo2_profile="G.A.M.M.A",
+            )
+
+            class FakeWindow:
+                settings = CliSettings(profiles=[profile])
+                install_busy = False
+                install_operation = None
+
+                def refresh_settings(self):
+                    pass
+
+                def set_install_busy(self, *a, **kw):
+                    pass
+
+                def statusBar(self):
+                    return Mock()
+
+            page = ip.InstallPage(FakeWindow())
+            # Nothing installed: the tab opens on the Automatic / Manual choice.
+            page.show()
+            self.assertFalse(page._chooser_card.isHidden())
+            self.assertTrue(page._wizard_card.isHidden())
+            page.checkboxes["minimal"].setChecked(True)
+            page.auto_root_edit.setText(str(Path(tmp) / "root"))
+            page._wt_installed = False
+            yes = ip.QMessageBox.StandardButton.Yes
+            # Offline without an extracted cache stops before anything is made.
+            page.auto_offline.setChecked(True)
+            with (
+                patch.object(ip, "game_running", return_value=False),
+                patch.object(ip.QMessageBox, "question") as question,
+                patch.object(ip.QMessageBox, "warning") as warning,
+            ):
+                page._start_automatic_install()
+            warning.assert_called_once()
+            question.assert_not_called()
+            self.assertFalse((Path(tmp) / "root").exists())
+            page.auto_offline.setChecked(False)
+            with (
+                patch.object(ip, "game_running", return_value=False),
+                patch.object(ip.QMessageBox, "question", return_value=yes) as question,
+                patch.object(ip.QMessageBox, "information") as info,
+                patch.object(page, "_persist_dirs", return_value=True),
+                patch.object(page, "_start_winetricks") as winetricks,
+                patch.object(page, "start_auto_install", return_value=True) as chain,
+            ):
+                page._start_automatic_install()
+                self.assertEqual(question.call_count, 1)
+                info.assert_not_called()
+                self.assertTrue((Path(tmp) / "root" / "gamma").is_dir())
+                self.assertFalse(page.checkboxes["minimal"].isChecked())
+                winetricks.assert_called_once_with(then_install=True)
+                self.assertTrue(page._auto_active)
+                page._wt_then_install = True
+                page._wt_dialog_done(0)
+                chain.assert_called_once_with(include_anomaly=True)
+                info.assert_not_called()
+                self.assertFalse(page._wt_then_install)
+                # A plain Install Dependencies run still reports its result.
+                page._wt_dialog_done(0)
+                info.assert_called_once()
+                chain.assert_called_once()
+            # Over an installed GAMMA, Automatic would reset Preserve
+            # user.ltx/MCM: it is greyed out and refuses to start.
+            with patch.object(ip, "gamma_installed", return_value=True):
+                page._show_view("chooser")
+                self.assertFalse(page._auto_choice.isEnabled())
+                self.assertEqual(page._auto_choice.tag.text(), "For new installs")
+                with patch.object(page, "_create_install_folders") as folders:
+                    page._start_automatic_install()
+                folders.assert_not_called()
+                # Developer mode unlocks it, and Start install then runs.
+                with (
+                    patch.object(ip.gui_settings, "developer_feature", return_value=True),
+                    patch.object(ip, "game_running", return_value=False),
+                    patch.object(ip.QMessageBox, "question", return_value=yes),
+                    patch.object(page, "_create_install_folders", return_value=False) as folders,
+                ):
+                    page._show_view("chooser")
+                    self.assertTrue(page._auto_choice.isEnabled())
+                    page._start_automatic_install()
+                folders.assert_called_once_with(quiet=True)
+            page._show_view("chooser")
+            self.assertTrue(page._auto_choice.isEnabled())
 
     def test_offline_lists_found_beside_cache_folder_and_nested_extract_flagged(self):
         """The archive holds cache/ plus both lists, so they sit beside the cache folder."""
@@ -897,6 +1015,17 @@ class RegressionTests(unittest.TestCase):
             outside.write_bytes(b"x")
             self.assertIsNone(_replace_broken_archive(str(outside), url, gamma))
             self.assertTrue(outside.exists())
+
+        # 7zz's wording for a cut-off .7z saved under a .zip name (FDDA).
+        self.assertIsNotNone(
+            _broken_archive(
+                output.replace(
+                    "StdErr:   End-of-central-directory signature not found.  Either this file is not\n",
+                    "StdErr: ERROR: x.zip\nOpen ERROR: Cannot open the file as [zip] archive\n"
+                    "ERRORS:\nIs not archive\n",
+                )
+            )
+        )
 
         # A failure that isn't a broken archive (full disk) is left alone.
         self.assertIsNone(
@@ -1278,9 +1407,11 @@ class RegressionTests(unittest.TestCase):
         # The current item contributes fractionally instead of making the bar
         # wait for the archive to finish.
         area.on_line("[00:00:01] Mod A | Download | 50% | [1/10]")
-        self.assertEqual(area.bar.value(), 5)  # 0.5/10 * 100
+        # Ordinary archives share half the bar (the heavy repos hold the
+        # rest): 7 of the 10 items are ordinary.
+        self.assertEqual(area.bar.value(), 4)  # 0.5/7 * 50
         area.on_line("[00:00:02] Mod B | Download | 80% | [2/10]")
-        self.assertEqual(area.bar.value(), 18)  # (1 + 0.8)/10 * 100 = 18
+        self.assertEqual(area.bar.value(), 13)  # (1 + 0.8)/7 * 50
 
     def test_aggregate_progress_value_is_bounded(self):
         self.assertEqual(aggregate_progress_value(1, 10, 0.5), 5)
@@ -1393,6 +1524,18 @@ class RegressionTests(unittest.TestCase):
             "[00:00:08] gamma_large_files_v2 | Extract | 100% | [577/577]"
         )
         self.assertEqual(area.bar.value(), 100)
+
+    def test_gamma_progress_resume_does_not_jump_to_98(self):
+        """A resume reports every finished mod as Skipped before the heavy
+        repos say anything - the bar must keep their half free, not pin at
+        ~98% (it never goes back down)."""
+        from commander_gui.ui.common import ProgressArea
+
+        area = ProgressArea(show_table=True)
+        area.on_line("[00:00:01] Mod A | Skipped | 100% | [566/577]")
+        self.assertEqual(area.bar.value(), 49)
+        area.on_line("[00:00:02] stalker_gamma | Extract | 100% | [567/577]")
+        self.assertEqual(area.bar.value(), 66)
 
     def test_gamma_progress_table_hides_row_stuck_on_a_stale_line(self):
         """Regression test for the reported frozen-addon-row bug.
@@ -3261,11 +3404,7 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn("secret", redacted)
         self.assertIn("[REDACTED]", redacted)
 
-    @patch("commander_gui.ui.common.shutil.which", return_value="/usr/bin/pgrep")
-    @patch("commander_gui.ui.common.subprocess.run")
-    def test_mo2_running_uses_self_excluding_case_insensitive_pattern(
-        self, run, _which
-    ):
+    def test_mo2_running_uses_self_excluding_case_insensitive_pattern(self):
         """Regression test: a bracket expression on only the first letter
 
         (the previous pattern) does not catch Wine/umu-run reporting the
@@ -3276,12 +3415,17 @@ class RegressionTests(unittest.TestCase):
         session (see commander.log evidence: "wrapper exited" followed by
         no "mo2 handoff detected" line at all, ever, for a real session).
         """
-        common._MO2_RUNNING_CACHE = 0.0
-        run.return_value = Mock(returncode=1)
-        self.assertFalse(common.mo2_running())
-        self.assertEqual(run.call_args.args[0], [
-            "/usr/bin/pgrep", "-if", r"ModOrganizer\.exe"
-        ])
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "z:/mo2/modorganizer.exe"]
+        )
+        try:
+            common._MO2_RUNNING_CACHE = 0.0
+            self.assertTrue(common.mo2_running())
+        finally:
+            child.kill()
+            child.wait()
+        # A pattern that no running process matches.
+        self.assertFalse(common.process_running(r"no-such-process-[0-9a-f]{32}"))
 
     def test_diagnostics_redacts_quoted_values_with_spaces(self):
         redacted = _redact(
@@ -3832,6 +3976,7 @@ class RegressionTests(unittest.TestCase):
             page.anomaly_button = Mock()
             page._checked_archives = set()
             page._cache_timer = Mock()
+            page._auto_active = True
 
             with (
                 patch(
@@ -3846,6 +3991,11 @@ class RegressionTests(unittest.TestCase):
             ):
                 runner_cls.return_value = Mock()
                 page._start_full_install()
+
+            # Marked as started before it runs (closing mid-install never
+            # reaches the finished handler), remembering it was Automatic.
+            self.assertEqual(page._resume_state["gamma"], profile.gamma)
+            self.assertTrue(page._resume_state["auto"])
 
             self.assertTrue((base / "anomaly").is_dir())
             self.assertTrue((base / "gamma").is_dir())
@@ -6109,17 +6259,13 @@ class ModCounterTests(unittest.TestCase):
 
         with (
             patch.object(common, "mo2_running", return_value=False),
-            patch.object(common.shutil, "which", return_value="/usr/bin/pgrep"),
-            patch.object(
-                common.subprocess, "run", return_value=SimpleNamespace(returncode=0)
-            ) as run,
+            patch.object(common, "process_running", return_value=True) as running,
         ):
             self.assertTrue(common.game_running(force=True))
-        self.assertIn("Anomaly", run.call_args.args[0][-1])
+        self.assertIn("Anomaly", running.call_args.args[0])
         with (
             patch.object(common, "mo2_running", return_value=False),
-            patch.object(common.shutil, "which", return_value="/usr/bin/pgrep"),
-            patch.object(common.subprocess, "run", return_value=SimpleNamespace(returncode=1)),
+            patch.object(common, "process_running", return_value=False),
         ):
             self.assertFalse(common.game_running(force=True))
 

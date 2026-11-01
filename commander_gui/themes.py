@@ -508,6 +508,20 @@ QPushButton#winClose:pressed {
 #installPage QLabel#wizardStepStatus[state="busy"],
 #installPage QLabel#wizardStepStatus[state="warn"] { color: $warn; }
 #installPage QLabel#wizardStepStatus[state="bad"] { color: $danger_text; }
+/* Install page's Automatic / Manual choice: a whole half of the card is
+   the click target, with the step track's soft hover tile. */
+#installPage QFrame#installChoice {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+}
+#installPage QFrame#installChoice[hover="true"] {
+    background-color: $input;
+    border-color: $border_strong;
+}
+#installPage QLabel#installChoiceTag {
+    color: $accent_strong;
+}
 QFrame#rowDivider {
     background-color: $border;
 }
@@ -1055,6 +1069,22 @@ QFrame#statTile {
     background-color: $input;
     border: 1px solid $border;
     border-radius: 8px;
+}
+/* Install page: the running install's bar and addon table in one
+   panel; the table sits flat inside it, not as a box in a box. */
+QFrame#installProgress {
+    background-color: $input;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QFrame#installProgress QTableWidget {
+    background: transparent;
+    border: none;
+    border-top: 1px solid $border;
+    border-radius: 0px;
+}
+QFrame#installProgress QHeaderView::section {
+    background: transparent;
 }
 #statValue[state="bad"] {
     color: $text_dim;

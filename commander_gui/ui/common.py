@@ -197,6 +197,31 @@ def format_last_played(timestamp: float | None) -> str:
     return datetime.fromtimestamp(timestamp).astimezone().strftime("%d/%m/%Y %H:%M")
 
 
+def process_running(pattern: str) -> bool:
+    """True when another process's command line matches ``pattern``,
+    ignoring case - ``pgrep -if`` without the subprocess. Spawning pgrep
+    from this process cost about 27 ms on the GUI thread, a hitch on every
+    page that checks; reading /proc takes about 5 ms.
+
+    Case-insensitive: Wine/umu-run can report the running process's own
+    path in a different case than the real filename (e.g. fully lowercased).
+    """
+    regex = re.compile(pattern.encode(), re.IGNORECASE)
+    own = str(os.getpid())
+    try:
+        pids = [name for name in os.listdir("/proc") if name.isdigit() and name != own]
+    except OSError:
+        return False
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as cmdline:
+                if regex.search(cmdline.read().replace(b"\0", b" ")):
+                    return True
+        except OSError:
+            continue  # exited meanwhile, or not ours to read
+    return False
+
+
 _MO2_RUNNING_CACHE: float = 0.0
 _MO2_RUNNING_RESULT: bool = False
 _MO2_CACHE_TTL: float = 3.0
@@ -220,35 +245,8 @@ def mo2_running(*, force: bool = False) -> bool:
     now = time.monotonic()
     if not force and now - _MO2_RUNNING_CACHE < _MO2_CACHE_TTL:
         return _MO2_RUNNING_RESULT
-    exe = shutil.which("pgrep")
-    if not exe:
-        # Cache the "pgrep unavailable" answer too, or every caller re-probes
-        # the PATH on each poll.
-        _MO2_RUNNING_CACHE = now
-        _MO2_RUNNING_RESULT = False
-        return False
-    try:
-        proc = subprocess.run(
-            # Case-insensitive: Wine/umu-run can report the running
-            # process's own path in a different case than the literal
-            # "ModOrganizer.exe" filename (e.g. fully lowercased) - a
-            # bracket expression on just the first letter (the previous
-            # form of this pattern) does not cover that. pgrep excludes
-            # its own PID by default, so this cannot self-match.
-            [exe, "-if", r"ModOrganizer\.exe"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        # Cache the failure for the TTL as well; a missing/slow pgrep must
-        # not block the GUI thread on every poll.
-        _MO2_RUNNING_CACHE = now
-        _MO2_RUNNING_RESULT = False
-        return False
     _MO2_RUNNING_CACHE = now
-    _MO2_RUNNING_RESULT = proc.returncode == 0
+    _MO2_RUNNING_RESULT = process_running(r"ModOrganizer\.exe")
     return _MO2_RUNNING_RESULT
 
 
@@ -274,20 +272,7 @@ def game_running(*, force: bool = False) -> bool:
     now = time.monotonic()
     if not force and now - _GAME_RUNNING_CACHE < _MO2_CACHE_TTL:
         return _GAME_RUNNING_RESULT
-    exe = shutil.which("pgrep")
-    result = False
-    if exe:
-        try:
-            proc = subprocess.run(
-                [exe, "-if", r"Anomaly[A-Za-z0-9]*\.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-                check=False,
-            )
-            result = proc.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            result = False
+    result = process_running(r"Anomaly[A-Za-z0-9]*\.exe")
     _GAME_RUNNING_CACHE = now
     _GAME_RUNNING_RESULT = result
     return result
@@ -2118,20 +2103,22 @@ def aggregate_progress_value(
 ) -> int:
     """Return overall progress using the CLI counter and current item fraction.
 
-    Once a known-heavy git-cloned repo (see ``_HEAVY_ARCHIVE_NAMES``) has
-    reported progress, its collective share of the bar is fixed at
-    ``_HEAVY_ARCHIVE_SHARE`` instead of the flat ``1/total`` every other
-    item gets - otherwise those 3 items, which dominate real install time,
-    would only ever move the bar by a fraction of a percent each.
+    A caller that passes ``heavy_progress`` (a GAMMA install) gets the
+    known-heavy git-cloned repos (see ``_HEAVY_ARCHIVE_NAMES``) a fixed
+    ``_HEAVY_ARCHIVE_SHARE`` of the bar from the first line, instead of the
+    flat ``1/total`` every other item gets - otherwise those 3 items, which
+    dominate real install time, would only ever move the bar by a fraction
+    of a percent each. Reserved up front, not once a heavy repo reports: a
+    resume reports hundreds of Skipped mods first and would pin the bar at
+    ~98% before the repos even start.
     """
     if total <= 0:
         return 0
     current = max(0.0, min(1.0, percent))
-    heavy_progress = {} if heavy_progress is None else heavy_progress
     key = name.strip().lower()
-    if key in _HEAVY_ARCHIVE_NAMES:
+    if heavy_progress is not None and key in _HEAVY_ARCHIVE_NAMES:
         heavy_progress[key] = _heavy_item_phase_value(operation, current)
-    if not heavy_progress:
+    if heavy_progress is None:
         completed_before_current = max(0, complete - 1)
         fraction = (completed_before_current + current) / total
         return max(0, min(100, round(fraction * 100)))

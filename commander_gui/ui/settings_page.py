@@ -171,6 +171,16 @@ def _rows(layout: QVBoxLayout, *rows: QWidget) -> None:
         layout.addWidget(row)
 
 
+#: Developer mode features: settings key, label, what it does.
+_DEVELOPER_FEATURES = (
+    (
+        "auto_reinstall",
+        "Automatic install on existing GAMMA",
+        "Keeps Automatic install available after GAMMA is installed. It reinstalls with the default options, which replace your keybindings and MCM settings.",
+    ),
+)
+
+
 #: Tab names, in order. Each one is built by the matching ``_<name>_tab``.
 _TABS = (
     ("General", "general"),
@@ -681,6 +691,30 @@ class SettingsPage(QWidget):
             ),
         )
         layout.addWidget(behaviour)
+
+        developer, box = _card(tr("Developer mode"))
+        self._developer_check = QCheckBox(tr("Turn on developer mode"))
+        self._developer_check.toggled.connect(self._on_developer_toggled)
+        box.addWidget(_check_row(
+            self._developer_check,
+            tr("Unlocks extra features for testing. Some of them can overwrite your game settings."),
+        ))
+        # Each feature has its own box, shown only while developer mode is on.
+        self._developer_features = QWidget()
+        self._developer_features.setObjectName("panelTransparent")
+        features = QVBoxLayout(self._developer_features)
+        features.setContentsMargins(26, 0, 0, 0)
+        self._developer_feature_checks: dict[str, QCheckBox] = {}
+        rows = []
+        for key, label, text in _DEVELOPER_FEATURES:
+            check = QCheckBox(tr(label))
+            check.toggled.connect(lambda on, key=key: self._on_developer_feature(key, on))
+            self._developer_feature_checks[key] = check
+            rows.append(_check_row(check, tr(text)))
+        _rows(features, *rows)
+        self._developer_features.setVisible(False)
+        box.addWidget(self._developer_features)
+        layout.addWidget(developer)
 
         # Stable or unstable COMMANDER: which one is running (header tile),
         # and one button to move to the other. The update channel follows
@@ -1404,6 +1438,15 @@ class SettingsPage(QWidget):
     def _on_discord_playtime_toggled(self, checked: bool) -> None:
         gui_settings.save_gui_settings(discord_show_playtime=bool(checked))
 
+    def _on_developer_toggled(self, on: bool) -> None:
+        gui_settings.save_gui_settings(developer_mode=on)
+        self._developer_features.setVisible(on)
+
+    def _on_developer_feature(self, key: str, on: bool) -> None:
+        features = gui_settings.load_gui_settings()["developer_features"]
+        features[key] = on
+        gui_settings.save_gui_settings(developer_features=features)
+
     def _on_discord_advanced_toggled(self, checked: bool) -> None:
         self._discord_advanced.setVisible(checked)
 
@@ -1723,6 +1766,14 @@ class SettingsPage(QWidget):
         self._update_notify_check.blockSignals(True)
         self._update_notify_check.setChecked(bool(state.get("update_notifications", True)))
         self._update_notify_check.blockSignals(False)
+        self._developer_check.blockSignals(True)
+        self._developer_check.setChecked(state["developer_mode"])
+        self._developer_check.blockSignals(False)
+        self._developer_features.setVisible(state["developer_mode"])
+        for key, check in self._developer_feature_checks.items():
+            check.blockSignals(True)
+            check.setChecked(state["developer_features"].get(key) is True)
+            check.blockSignals(False)
 
         self._render_build()
 

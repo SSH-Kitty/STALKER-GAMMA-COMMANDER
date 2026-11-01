@@ -125,10 +125,12 @@ from .common import (
     human_size,
     info_label,
     make_card,
+    make_header_row,
     normalize_path,
     notify_desktop,
     paused_dependency_status,
     save_profile_dirs,
+    section_label,
     tr,
     use_stock_mo2_profile_if_missing,
     warn_wine_unsafe_folder,
@@ -536,6 +538,125 @@ class _PathEdit(QLineEdit):
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class _ChoiceIcon(QWidget):
+    """The big line icon on an Automatic / Manual choice, drawn in the
+    accent like the tiles' state badges: a download into a tray, or three
+    sliders."""
+
+    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.setFixedSize(110, 110)
+
+    def paintEvent(self, _event) -> None:
+        ink = token_color("accent_strong", "#8fe45c")
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(ink, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if self.kind == "auto":
+                painter.drawLine(QPointF(55, 14), QPointF(55, 66))
+                head = QPainterPath(QPointF(35, 47))
+                head.lineTo(55, 67)
+                head.lineTo(75, 47)
+                painter.drawPath(head)
+                tray = QPainterPath(QPointF(16, 66))
+                tray.lineTo(16, 92)
+                tray.lineTo(94, 92)
+                tray.lineTo(94, 66)
+                painter.drawPath(tray)
+                painter.setPen(QPen(ink, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawLine(QPointF(86, 10), QPointF(86, 26))
+                painter.drawLine(QPointF(78, 18), QPointF(94, 18))
+            else:
+                for x, knob in ((26, 66), (55, 34), (84, 56)):
+                    painter.drawLine(QPointF(x, 14), QPointF(x, knob - 9))
+                    painter.drawLine(QPointF(x, knob + 9), QPointF(x, 96))
+                    painter.drawEllipse(QPointF(x, knob), 9, 9)
+        finally:
+            painter.end()
+
+
+class _InstallChoice(QFrame):
+    """One half of the Automatic / Manual card: title, intro, icon and
+    tiles, all one click target (or Enter/Space with keyboard focus)."""
+
+    clicked = Signal()
+
+    def __init__(self, kind: str, title: str, tag: str, intro: str, tiles, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("installChoice")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(12)
+        head = QHBoxLayout()
+        head.addWidget(section_label(title, level=2))
+        head.addStretch(1)
+        self.tag = QLabel(tag)
+        self.tag.setObjectName("installChoiceTag")
+        head.addWidget(self.tag)
+        layout.addLayout(head)
+        layout.addWidget(info_label(intro))
+        layout.addWidget(_ChoiceIcon(kind), 0, Qt.AlignmentFlag.AlignHCenter)
+        cells = []
+        for value, name, caption in tiles:
+            tile = _CheckTile(name)
+            tile.set_state("ok", value, caption)
+            cells.append(tile)
+        layout.addLayout(_tile_row(cells))
+        layout.addStretch(1)
+        for child in self.findChildren(QWidget):
+            child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def set_available(self, available: bool, tag: str, tooltip: str = "") -> None:
+        """Offer this choice, or show it dimmed and unclickable."""
+        self.setEnabled(available)
+        self.tag.setText(tag)
+        self.setToolTip(tooltip)
+        if available:
+            self.setGraphicsEffect(None)
+        else:
+            dim = QGraphicsOpacityEffect(self)
+            dim.setOpacity(0.45)
+            self.setGraphicsEffect(dim)
+            self._set_hover(False)
+
+    def _set_hover(self, hover: bool) -> None:
+        self.setProperty("hover", hover and self.isEnabled())
+        _repolish(self)
+
+    def enterEvent(self, event) -> None:
+        self._set_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._set_hover(False)
+        super().leaveEvent(event)
+
+    def focusInEvent(self, event) -> None:
+        self._set_hover(True)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        self._set_hover(self.underMouse())
+        super().focusOutEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
@@ -1063,6 +1184,9 @@ _BROKEN_ARCHIVE_MARKERS = (
     "end-of-central-directory signature not found",
     "cannot find zipfile directory",
     "can not open the file as archive",
+    # 7zz: "Cannot open the file as [zip] archive" / "Is not archive"
+    "cannot open the file as",
+    "is not archive",
     "unexpected end of archive",
 )
 
@@ -1286,10 +1410,123 @@ class InstallPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
+        # -- First view: Automatic or Manual. Automatic has its own card
+        # (folder, progress tiles, Start); Manual is the step card below. --
+        self._chooser_card, chooser_layout = make_card()
+        root.addWidget(self._chooser_card)
+        choices = QHBoxLayout()
+        choices.setSpacing(16)
+        self._auto_choice = _InstallChoice(
+            "auto",
+            tr("Automatic install"),
+            tr("Recommended"),
+            tr("<span style='color:{arg};'>Hands-off.</span> Pick a folder and COMMANDER installs Anomaly and GAMMA for you.", arg=ACCENT.name()),
+            (
+                (tr("Folder"), tr("You choose"), tr("everything else is automatic")),
+                (tr("New installs"), tr("Best for"), tr("first time on this PC")),
+                (tr("Default"), tr("Settings"), tr("GAMMA's recommended setup")),
+            ),
+        )
+        self._auto_choice.clicked.connect(lambda: self._show_view("auto"))
+        self._manual_choice = _InstallChoice(
+            "manual",
+            tr("Manual install"),
+            "",
+            tr("<span style='color:{arg};'>Step by step.</span> Go through each step yourself and choose every option.", arg=ACCENT.name()),
+            (
+                (tr("Everything"), tr("You choose"), tr("folders, options and each step")),
+                (tr("Any install"), tr("Best for"), tr("reinstall, update or repair")),
+                (tr("Your choice"), tr("Settings"), tr("Default, Minimal or keep yours")),
+            ),
+        )
+        self._manual_choice.clicked.connect(lambda: self._show_view("manual"))
+        choice_divider = QFrame()
+        choice_divider.setObjectName("vDivider")
+        choice_divider.setFixedWidth(1)
+        choices.addWidget(self._auto_choice, 1)
+        choices.addWidget(choice_divider)
+        choices.addWidget(self._manual_choice, 1)
+        chooser_layout.addLayout(choices)
+
+        self._auto_card, auto_layout = make_card()
+        root.addWidget(self._auto_card)
+        auto_layout.setSpacing(14)
+        auto_layout.addLayout(make_header_row("Automatic install"))
+        auto_layout.addWidget(info_label(tr(
+            "COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, one after another, with the default settings."
+        )))
+        self.auto_root_edit, auto_root_row = self._make_folder_row(
+            tr("Installation directory:"), self._browse_auto_root
+        )
+        # Folder and offline choice: hidden while Automatic runs, when the
+        # card is only tiles and progress.
+        self._auto_setup = QWidget()
+        self._auto_setup.setObjectName("panelTransparent")
+        setup_layout = QVBoxLayout(self._auto_setup)
+        setup_layout.setContentsMargins(0, 0, 0, 0)
+        setup_layout.setSpacing(14)
+        auto_layout.addWidget(self._auto_setup)
+        setup_layout.addLayout(auto_root_row)
+        auto_folder_hint = info_label(tr(
+            "Pick an empty folder on a drive with about 150 GB free. COMMANDER makes anomaly, gamma and cache folders inside it."
+        ))
+        # Offline: the same install from an extracted cache archive. Above
+        # the hints it swaps, so it stays put when clicked.
+        self.auto_offline = QCheckBox(tr("Offline install (cache only)"))
+        self.auto_offline.setToolTip(tr("Install from a cache you already extracted into the cache folder. Nothing is downloaded."))
+        setup_layout.addWidget(self.auto_offline)
+        setup_layout.addWidget(auto_folder_hint)
+        self.auto_offline_box = QWidget()
+        self.auto_offline_box.setObjectName("panelTransparent")
+        offline_layout = QVBoxLayout(self.auto_offline_box)
+        offline_layout.setContentsMargins(0, 0, 0, 0)
+        offline_layout.addWidget(info_label(tr(
+            "Extract the offline cache archive into the installation directory first, so the cache folder and both list files sit inside it. Only the Windows runtimes are downloaded, about 150 MB."
+        )))
+        auto_guide = QLabel(
+            f'<a href="{OFFLINE_GUIDE_URL}" style="color: {ACCENT.name()};">'
+            + html.escape(tr("Where to download the offline cache"))
+            + " ↗</a>"
+        )
+        auto_guide.setOpenExternalLinks(True)
+        offline_layout.addWidget(auto_guide)
+        self.auto_offline_box.setVisible(False)
+        self.auto_offline.toggled.connect(self.auto_offline_box.setVisible)
+        # Offline wants the folder the archive went into, not an empty one.
+        self.auto_offline.toggled.connect(lambda on: auto_folder_hint.setVisible(not on))
+        setup_layout.addWidget(self.auto_offline_box)
+        self.auto_tiles = {
+            "deps": _CheckTile(tr("Runtimes")),
+            "anomaly": _CheckTile(tr("Anomaly")),
+            "gamma": _CheckTile(tr("GAMMA")),
+            "space": _CheckTile(tr("Free space")),
+        }
+        auto_layout.addLayout(_tile_row(self.auto_tiles.values()))
+        self.auto_start_button = QPushButton(tr("Start install"))
+        self.auto_start_button.setObjectName("hero")
+        self.auto_start_button.clicked.connect(self._start_automatic_install)
+        auto_layout.addWidget(self.auto_start_button)
+        auto_nav = QHBoxLayout()
+        self.auto_back_button = QPushButton(tr("Back"))
+        self.auto_back_button.setObjectName("secondary")
+        self.auto_back_button.setProperty("compact", True)
+        self.auto_back_button.clicked.connect(lambda: self._show_view("chooser"))
+        auto_nav.addWidget(self.auto_back_button)
+        auto_nav.addStretch(1)
+        auto_layout.addLayout(auto_nav)
+        # The install progress panel goes above Back while Automatic runs
+        # (see _place_progress).
+        self._auto_layout = auto_layout
+        #: Set while Automatic runs the dependencies, so their end starts
+        #: Anomaly and GAMMA instead of showing the result pop-up.
+        self._wt_then_install = False
+        #: An Automatic install is running; the tab reopens on its card.
+        self._auto_active = False
+
         # -- One card: a track of the five steps, and under it the picked
         # step's page. Every step keeps its own widgets; only one shows. --
-        wizard_card, w_layout = make_card()
-        root.addWidget(wizard_card)
+        self._wizard_card, w_layout = make_card()
+        root.addWidget(self._wizard_card)
         w_layout.setSpacing(14)
         # The track's underlines sit on the divider, like the main nav bar.
         track_box = QVBoxLayout()
@@ -1672,13 +1909,33 @@ class InstallPage(QWidget):
         extra_layout.addLayout(self.verify_findings)
         step_extra(4, verify_extra)
 
-        # -- Shared progress console for both Anomaly and GAMMA installs,
-        # under steps 3 and 4 - there is only ever one install running at
-        # a time, so one console (with the Addon/Operation/Percent table)
-        # is clearer than two separate bars. --
-        self.full_progress = ProgressArea(show_log=False)
+        # -- One progress panel for the Anomaly and GAMMA installs (only
+        # one runs at a time): on the running step of the Manual card, or
+        # on the Automatic card while Automatic runs - see _place_progress. --
+        self.progress_panel = QFrame()
+        self.progress_panel.setObjectName("installProgress")
+        panel_layout = QVBoxLayout(self.progress_panel)
+        panel_layout.setContentsMargins(14, 12, 14, 14)
+        panel_layout.setSpacing(8)
+        self.progress_title = QLabel()
+        self.progress_title.setObjectName("cardTitle")
+        panel_layout.addWidget(self.progress_title)
+        # No status line: the table already names each file and step.
+        self.full_progress = ProgressArea(show_log=False, show_status=False)
         self.full_progress.cancel_button.clicked.connect(self._cancel_full_install)
-        fade_layout.addWidget(self.full_progress)
+        # The addon table is the console, always open: no Show Console.
+        self.full_progress.table_toggle.hide()
+        self.full_progress.table.show()
+        self.full_progress.table.setMinimumHeight(170)
+        self.full_progress.table.setMaximumHeight(240)
+        self.full_progress.table.setShowGrid(False)
+        self.full_progress.table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft)
+        panel_layout.addWidget(self.full_progress)
+        self._panel_index = fade_layout.count()
+        fade_layout.addWidget(self.progress_panel)
+        # The other steps say in one line what is running instead.
+        self.progress_note = info_label("")
+        fade_layout.addWidget(self.progress_note)
 
         # -- Back / Next, under every step --
         step_nav = QHBoxLayout()
@@ -1687,7 +1944,7 @@ class InstallPage(QWidget):
         for button, delta in ((self.step_back_button, -1), (self.step_next_button, 1)):
             button.setObjectName("secondary")
             button.setProperty("compact", True)
-            button.clicked.connect(lambda _checked=False, d=delta: self._go_to_step(self._step + d))
+            button.clicked.connect(lambda _checked=False, d=delta: self._step_nav(d))
         # In Next's place on the last step: everything is done, go play.
         self.step_play_button = QPushButton(tr("Play"))
         self.step_play_button.setObjectName("secondary")
@@ -1717,6 +1974,8 @@ class InstallPage(QWidget):
         self.gamma_status.changed.connect(lambda state, text: self._steps[3].set_status(state, text))
         self.wt_status.changed.connect(lambda state, text: self._steps[1].set_status(state, text))
         self.wt_status.changed.connect(lambda _state, _text: self._refresh_deps_tiles())
+        for key, row in (("deps", self.wt_status), ("anomaly", self.anomaly_status), ("gamma", self.gamma_status)):
+            row.changed.connect(lambda state, text, k=key: self._set_auto_tile(k, state, text))
         for cb in (*self.checkboxes.values(), self.anomaly_checkboxes["auto_continue_gamma"]):
             cb.toggled.connect(lambda _on: self._update_chain_note())
         self._update_chain_note()
@@ -1726,12 +1985,16 @@ class InstallPage(QWidget):
         root.addStretch(1)
         self._pending_repair: tuple | None = None
         self.refresh()
-        self._show_step(0)
+        self._show_view("manual")
         QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
         # The snapshot age counts up while the page stays open.
         self._age_timer = QTimer(self)
         self._age_timer.timeout.connect(lambda: self.isVisible() and self._refresh_verify_age())
         self._age_timer.start(60_000)
+        # Free space counts down live while Anomaly or GAMMA downloads.
+        self._space_timer = QTimer(self)
+        self._space_timer.timeout.connect(self._refresh_live_space)
+        self._space_timer.start(2_000)
 
     def enable_winetricks_status(self):
         self._winetricks_status_enabled = True
@@ -1770,6 +2033,8 @@ class InstallPage(QWidget):
 
     def on_busy_changed(self, _busy):
         """Global install lock changed; re-evaluate this page's controls."""
+        if not self.window.install_busy and not self._wt_then_install and not self._auto_chain:
+            self._auto_active = False
         self._update_button_states()
 
     def on_install_activity_changed(self, operation):
@@ -1786,16 +2051,239 @@ class InstallPage(QWidget):
             self._show_step(self._step)
 
     def showEvent(self, event) -> None:
-        """Opening the Install tab starts at step 1, Folder - or at the
-        step with something running (its progress and Cancel live there).
+        """Opening the Install tab starts on the Automatic / Manual choice -
+        or on whatever is running (its progress and Cancel live there).
         Not when the window is merely restored (a spontaneous show)."""
         super().showEvent(event)
         if not event.spontaneous():
-            op = getattr(self.window, "install_operation", None)
-            step = {"dependencies": 1, "anomaly": 2, "gamma": 3}.get(op, 0)
-            if self.verify_pill.property("level") == "running":  # a check or repair
-                step = 4
+            step = self._running_step()
+            if self._auto_running():
+                self._show_view("auto")
+            elif step:
+                self._show_view("manual", step)
+            elif self._resume_state is not None:
+                # Back where the stopped install was started, on its Resume button.
+                if self._resume_state.get("auto"):
+                    self._show_view("auto")
+                else:
+                    self._show_view("manual", 3)
+            else:
+                self._show_view("chooser")
+
+    def _running_step(self) -> int:
+        """The step with something running, or 0 (Folder) when idle."""
+        if self.verify_pill.property("level") == "running":  # a check or repair
+            return 4
+        op = getattr(self.window, "install_operation", None)
+        return {"dependencies": 1, "anomaly": 2, "gamma": 3}.get(op, 0)
+
+    def _auto_running(self) -> bool:
+        """An Automatic install is somewhere in its chain."""
+        return self._auto_active
+
+    def _show_view(self, view: str, step: int = 0) -> None:
+        """Show the Automatic / Manual choice, the Automatic card, or the
+        Manual step card at ``step``."""
+        if view == "chooser":
+            self._refresh_auto_choice()
+        self._chooser_card.setVisible(view == "chooser")
+        self._auto_card.setVisible(view == "auto")
+        self._wizard_card.setVisible(view == "manual")
+        if view == "manual":
             self._show_step(step)
+        elif view == "auto":
+            if not self.auto_root_edit.text():
+                self.auto_root_edit.setText(self.root_card_edit.text())
+            self._refresh_auto_space()
+            # The Runtimes tile needs the dependencies check.
+            self.enable_winetricks_status()
+            self._update_button_states()
+            self._place_progress()
+
+    def _place_progress(self) -> None:
+        """Put the install progress panel where the install is watched:
+        on the Automatic card while it shows, else on the Manual card's
+        running step. Only while Anomaly or GAMMA installs - the step's
+        status pill says Installed / Not installed the rest of the time."""
+        op = getattr(self.window, "install_operation", None)
+        running = {"anomaly": 2, "gamma": 3}.get(op)
+        auto = not self._auto_card.isHidden()
+        panel = self.progress_panel
+        self._auto_layout.removeWidget(panel)
+        self._extras_layout.removeWidget(panel)
+        if auto:
+            self._auto_layout.insertWidget(self._auto_layout.count() - 1, panel)
+        else:
+            self._extras_layout.insertWidget(self._panel_index, panel)
+        panel.setVisible(running is not None and (auto or self._step == running))
+        # The panel stands in for the running step's greyed-out button.
+        self._action_stack.setVisible(running is None or self._step != running)
+        self.progress_title.setText(tr("Installing STALKER Anomaly") if op == "anomaly" else tr("Installing GAMMA"))
+        note = ""
+        if running is not None and not auto and self._step != running:
+            if op == "anomaly" and self._step == 3:
+                note = (
+                    tr("Anomaly is installing. GAMMA starts as soon as it is done.")
+                    if self._auto_chain
+                    else tr("Anomaly is installing. GAMMA can be installed once it is done.")
+                )
+            else:
+                note = tr(
+                    "{name} is installing. Its progress is on step {step}.",
+                    name="Anomaly" if op == "anomaly" else "GAMMA",
+                    step=running + 1,
+                )
+        self.progress_note.setText(note)
+        self.progress_note.setVisible(bool(note))
+
+    def _gamma_already_installed(self) -> bool:
+        profile = self.window.settings.active_profile
+        return profile is not None and gamma_installed(profile.gamma, profile.mo2_profile)
+
+    def _refresh_auto_choice(self) -> None:
+        """Automatic is for new installs only: over an existing GAMMA its
+        default options would replace the player's keybindings and MCM
+        settings. Reinstalls go through Manual, which asks. Developer mode
+        lifts the lock."""
+        if self._resume_state is not None:
+            self._auto_choice.set_available(True, tr("Incomplete"))
+        elif not self._gamma_already_installed():
+            self._auto_choice.set_available(True, tr("Recommended"))
+        elif gui_settings.developer_feature("auto_reinstall"):
+            self._auto_choice.set_available(
+                True,
+                tr("Developer mode"),
+                tr("GAMMA is already installed. Automatic installs with the default options, so your keybindings and MCM settings are replaced."),
+            )
+        else:
+            self._auto_choice.set_available(
+                False,
+                tr("For new installs"),
+                tr("GAMMA is already installed. Use Manual to reinstall, update or repair it."),
+            )
+
+    def _step_nav(self, delta: int) -> None:
+        if self._step == 0 and delta < 0:
+            self._show_view("chooser")
+        else:
+            self._go_to_step(self._step + delta)
+
+    def _browse_auto_root(self) -> None:
+        if self._pick_folder(self.auto_root_edit, tr("Select install root directory")):
+            self._refresh_auto_space()
+
+    def _refresh_auto_space(self) -> None:
+        root = self.auto_root_edit.text().strip()
+        tile = self.auto_tiles["space"]
+        _space_tile(tile, root)
+        free = free_space_bytes(root) if root else None
+        # Not mid-install: the install itself is what uses the space up.
+        if free is not None and free < 150 * 1024**3 and not self.window.install_busy:
+            tile.set_state("warn", human_size(free), tr("free on this drive, about 150 GB needed"))
+
+    def _refresh_live_space(self) -> None:
+        """The Free space tiles, while an install fills the drive."""
+        profile = self.window.settings.active_profile
+        if not self.isVisible() or profile is None:
+            return
+        if getattr(self.window, "install_operation", None) not in ("anomaly", "gamma"):
+            return
+        self._refresh_auto_space()
+        _space_tile(self.anomaly_tiles["space"], profile.anomaly)
+        _space_tile(self.gamma_tiles["space"], profile.gamma)
+
+    def _set_auto_tile(self, key: str, state: str, text: str) -> None:
+        """Mirror a step's status (from its InstallStatusRow) on the
+        Automatic card's tile for it."""
+        tile_state, caption = {
+            "ok": ("ok", tr("Done")),
+            "busy": ("running", tr("Running now")),
+            "warn": ("warn", tr("Picks up where it stopped")),
+        }.get(state, ("idle", ""))
+        self.auto_tiles[key].set_state(tile_state, text, caption)
+
+    def _reset_install_options(self) -> None:
+        """Put the Anomaly and GAMMA options back to their defaults:
+        Automatic always installs with them. Offline first, since turning
+        it off puts back the boxes it had cleared."""
+        boxes = {"offline": self.checkboxes["offline"], **self.checkboxes, **self.anomaly_checkboxes}
+        for key, cb in boxes.items():
+            cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
+
+    def _start_automatic_install(self) -> None:
+        """Automatic: make the folders, then the dependencies, Anomaly and
+        GAMMA one after another with the default options. Each runs only
+        if it isn't installed yet."""
+        if self.window.install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            return
+        self._refresh_auto_choice()
+        if not self._auto_choice.isEnabled():
+            # GAMMA got installed while this card was open.
+            self._show_view("chooser")
+            return
+        if game_running(force=True):
+            self._warn_game_open()
+            return
+        root = self.auto_root_edit.text().strip()
+        if not root:
+            self._browse_auto_root()
+            root = self.auto_root_edit.text().strip()
+            if not root:
+                return
+        offline = self.auto_offline.isChecked()
+        if offline:
+            cache = str(Path(root).expanduser() / "cache")
+            problem = offline_install_problem(offline_list_paths(cache), cache)
+            if problem:
+                QMessageBox.warning(self, tr("Offline install"), problem)
+                return
+        # Offline: the cache is already on disk, only the install remains.
+        required = 100 if offline else 150
+        free = free_space_bytes(root)
+        note = None
+        if self._resume_state is not None:
+            note = tr("This picks up the install where it stopped. Mods that are already installed are skipped.")
+        elif free is not None and free < required * 1024**3:
+            note = tr(
+                "Only {free} is free on this drive. This install needs about {required} GB.",
+                free=human_size(free),
+                required=required,
+            )
+        answer = QMessageBox.question(
+            self,
+            tr("Install GAMMA automatically?"),
+            tr("COMMANDER installs the Windows runtimes, then Anomaly, then GAMMA, into:\n{path}\n\nThis can take a few hours. You can keep using your computer meanwhile.", path=root),
+            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+            note=note,
+            labels={QMessageBox.StandardButton.Yes: tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.root_card_edit.setText(root)
+        if not self._create_install_folders(quiet=True):
+            return
+        self._reset_install_options()
+        # Ticked after the reset: it switches off the download-only options
+        # and fills in the two list files found beside the cache.
+        self.checkboxes["offline"].setChecked(offline)
+        self._auto_active = True
+        if self._wt_installed is True:
+            self._start_auto_gamma()
+        else:
+            self._start_winetricks(then_install=True)
+
+    def _start_auto_gamma(self) -> None:
+        """Automatic, after the dependencies: Anomaly (if missing), then GAMMA."""
+        profile = self.window.settings.active_profile
+        include_anomaly = profile is not None and not anomaly_installed(profile.anomaly)
+        if not self.start_auto_install(include_anomaly=include_anomaly):
+            self._auto_active = False
+            QMessageBox.warning(
+                self,
+                tr("Couldn't start the install"),
+                tr("Another install is still running, or no profile is selected. Check the Profiles page, then try again."),
+            )
 
     def _show_step(self, index: int) -> None:
         """Show one step's page on the Install card and mark it on the track."""
@@ -1809,12 +2297,10 @@ class InstallPage(QWidget):
             if extra is not None:
                 extra.setVisible(i == index)
         self._refresh_wt_extra()
-        op = getattr(self.window, "install_operation", None)
-        # Only while Anomaly or GAMMA is installing: the step's status pill
-        # already says Installed / Not installed the rest of the time.
-        self.full_progress.setVisible(op in ("anomaly", "gamma"))
+        self._place_progress()
         # Nowhere to go before the first step or after the last: no button.
-        self.step_back_button.setVisible(index > 0)
+        # On step 1, Back goes to the Automatic / Manual choice.
+        self.step_back_button.setVisible(True)
         self.step_next_button.setVisible(index < len(self._steps) - 1)
         self.step_play_button.setVisible(index == len(self._steps) - 1)
 
@@ -2022,12 +2508,22 @@ class InstallPage(QWidget):
         busy = self.window.install_busy
         self.root_card_edit.setEnabled(not busy)
         self.create_folders_button.setEnabled(not busy)
+        self.auto_root_edit.setEnabled(not busy)
+        self.auto_offline.setEnabled(not busy)
+        self.auto_start_button.setEnabled(not busy)
+        # While Automatic runs its card is only the tiles and the progress.
+        auto_running = busy and self._auto_active
+        self._auto_setup.setVisible(not auto_running)
+        self.auto_start_button.setVisible(not auto_running)
         profile = self.window.settings.active_profile
         resumable = profile is not None and self._resume_state is not None
         reinstall = (
             not resumable
             and profile is not None
             and gamma_installed(profile.gamma, profile.mo2_profile)
+        )
+        self.auto_start_button.setText(
+            tr(_RESUME_BUTTON_LABEL) if resumable else tr("Start install")
         )
         if resumable:
             label = tr(_RESUME_BUTTON_LABEL)
@@ -2125,12 +2621,6 @@ class InstallPage(QWidget):
             )
         else:
             self.gamma_status.set_state(bool(gamma_state))
-        # Nothing left to watch once both are installed and idle.
-        done = anomaly_state is True and gamma_state is True and self._resume_state is None
-        toggle = self.full_progress.table_toggle
-        toggle.setVisible(not done)
-        if done and self.full_progress.table.isVisible():
-            self.full_progress._toggle_table()
 
     def _browse_install_root(self):
         if self._pick_folder(self.root_card_edit, tr("Select install root directory")):
@@ -2149,27 +2639,28 @@ class InstallPage(QWidget):
             if self._step == 1:
                 self._refresh_winetricks_status()
 
-    def _create_install_folders(self):
+    def _create_install_folders(self, quiet: bool = False) -> bool:
         """Create the anomaly/gamma/cache folders under the chosen install root.
 
         When no root is entered, prompt the user to pick one. Always fills and
         persists the three per-step folder paths so installs just work.
+        ``quiet`` skips the "folders ready" pop-up; True when they're set.
         """
         if self.window.install_busy:
             self._update_button_states()
-            return
+            return False
         root = self.root_card_edit.text().strip()
         if not root:
             root = QFileDialog.getExistingDirectory(
                 self, tr("Select install root directory"), str(Path.home())
             )
             if not root:
-                return
+                return False
             self.root_card_edit.setText(root)
         base = Path(root).expanduser()
         if bad := wine_unsafe_folder(str(base)):
             warn_wine_unsafe_folder(self, bad)
-            return
+            return False
         folders = {
             "Anomaly folder": base / "anomaly",
             "GAMMA folder": base / "gamma",
@@ -2184,15 +2675,17 @@ class InstallPage(QWidget):
                     tr("Couldn't create a folder"),
                     tr("COMMANDER couldn't create this folder:\n{folder}\n\n{exc}", folder=folder, exc=exc),
                 )
-                return
+                return False
         self.anomaly_edit.setText(str(folders["Anomaly folder"]))
         self.gamma_edit.setText(str(folders["GAMMA folder"]))
         self.cache_edit.setText(str(folders["Cache folder"]))
         if not self._persist_dirs():
-            return
+            return False
         self.window.statusBar().showMessage(
             tr("Created and set install folders: Anomaly, GAMMA, cache"), 6000
         )
+        if quiet:
+            return True
         # Creating the folders used to be silent apart from the status bar,
         # and people could not tell whether it had worked.
         QMessageBox.information(
@@ -2205,6 +2698,7 @@ class InstallPage(QWidget):
                 tr("Cache: {path}", path=str(folders["Cache folder"])),
             ),
         )
+        return True
 
     def _make_folder_row(self, label_text, on_browse, placeholder="Click to choose a folder"):
         edit = _PathEdit()
@@ -2584,6 +3078,9 @@ class InstallPage(QWidget):
                 tr("Resuming the GAMMA install. Mods that are already installed are skipped."),
                 6000,
             )
+        # Marked before it runs, not only on failure: closing COMMANDER
+        # mid-install (paused or not) never reaches _on_full_finished.
+        self._save_resume_state()
         self._runner = CommandRunner(cmd, parent=self)
         self._checked_archives = set()
         self._runner.line.connect(self._on_full_install_line)
@@ -2762,6 +3259,7 @@ class InstallPage(QWidget):
             "anomaly": profile.anomaly,
             "gamma": profile.gamma,
             "cache": profile.cache,
+            "auto": getattr(self, "_auto_active", False),
         }
         self._write_resume_state(self._resume_state)
 
@@ -4768,8 +5266,11 @@ class InstallPage(QWidget):
         self.wt_status.set_status_tooltip(tr("Could not query dependencies: {error}", error=message))
         self._update_button_states()
 
-    def _start_winetricks(self):
+    def _start_winetricks(self, then_install: bool = False):
+        """``then_install``: Automatic - no confirm pop-up, and Anomaly and
+        GAMMA start once the dependencies are in."""
         self._winetricks_status_enabled = True
+        self._wt_then_install = then_install
         if self._wt_runner is not None and self._wt_runner.is_running():
             return
         if self.window.install_busy:
@@ -4842,17 +5343,18 @@ class InstallPage(QWidget):
         ]
         details = tr("Libraries: {verbs}", verbs=", ".join(WINETRICKS_VERBS))
         self._wt_force = self._wt_installed is True or self._wt_partial
-        answer = QMessageBox.question(
-            self,
-            tr("Reinstall the dependencies?") if self._wt_force else tr("Install the dependencies?"),
-            message,
-            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
-            points=tuple(missing),
-            info=details,
-            labels={QMessageBox.StandardButton.Yes: tr("Reinstall now") if self._wt_force else tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        if not self._wt_then_install:
+            answer = QMessageBox.question(
+                self,
+                tr("Reinstall the dependencies?") if self._wt_force else tr("Install the dependencies?"),
+                message,
+                (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+                points=tuple(missing),
+                info=details,
+                labels={QMessageBox.StandardButton.Yes: tr("Reinstall now") if self._wt_force else tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         # install_busy/mo2 state may have changed while the dialog was open;
         # winetricks must never touch a prefix the game is holding.
         if self.window.install_busy:
@@ -5054,12 +5556,17 @@ class InstallPage(QWidget):
     def _wt_dialog_done(self, rc, detail: str = "") -> None:
         """Close the progress pop-up; report the outcome (rc None = cancelled)."""
         dialog, self._wt_dialog = self._wt_dialog, None
+        then_install, self._wt_then_install = self._wt_then_install, False
         if dialog is not None:
             dialog.hide()
             dialog.deleteLater()
+        if rc != 0:
+            self._auto_active = False
         if rc is None:
             return
-        if rc == 0:
+        if rc == 0 and then_install:
+            self._start_auto_gamma()
+        elif rc == 0:
             QMessageBox.information(self, tr("Dependencies installed"), tr("The Windows libraries are ready."))
         else:
             lines = [ln for ln in (detail or "").strip().splitlines() if ln.strip()]

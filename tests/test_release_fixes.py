@@ -199,7 +199,7 @@ def test_install_page_never_writes_to_the_log_less_full_progress():
     from commander_gui.ui import install_page
 
     source = Path(install_page.__file__).read_text()
-    assert "ProgressArea(show_log=False)" in source
+    assert "ProgressArea(show_log=False, show_status=False)" in source
     assert "full_progress.log" not in source
 
 

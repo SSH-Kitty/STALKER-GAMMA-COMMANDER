@@ -66,6 +66,8 @@ _DEFAULTS = {
     "window_maximized": False,  # reopen maximized when it was closed maximized
     "last_update_check_ts": 0.0,  # time.time() of the last scheduled background update check
     "update_notifications": True,  # desktop notification when a GAMMA or COMMANDER update comes out
+    "developer_mode": False,  # unlocks features normally kept from players (Settings > General)
+    "developer_features": {},  # developer mode feature key -> on, each picked under the toggle
     "notified_gamma_version": "",  # latest GAMMA version already notified about (notify once per version)
     "notified_commander_tag": "",  # COMMANDER release tag already notified about
     "dismissed_update_tag": "",  # COMMANDER release tag whose update banner was closed
@@ -246,6 +248,10 @@ def load_gui_settings() -> dict:
         data["discord_client_id"] = ""
     if not isinstance(data.get("update_notifications"), bool):
         data["update_notifications"] = True
+    if not isinstance(data.get("developer_mode"), bool):
+        data["developer_mode"] = False
+    if not isinstance(data.get("developer_features"), dict):
+        data["developer_features"] = {}
     if not isinstance(data.get("animations_enabled"), bool):
         data["animations_enabled"] = True
     if not isinstance(data.get("live_animation"), bool):
@@ -391,6 +397,12 @@ def _settings_update_lock(path: Path):
             yield
         finally:
             os.close(fd)  # releases the flock
+
+
+def developer_feature(key: str) -> bool:
+    """A developer mode feature is on only while developer mode is too."""
+    data = load_gui_settings()
+    return data["developer_mode"] and data["developer_features"].get(key) is True
 
 
 def save_gui_settings(**changes) -> None:
