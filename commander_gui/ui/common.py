@@ -615,6 +615,10 @@ class StatusDot(QLabel):
 class InstallStatusRow(QWidget):
     """A coloured dot + status (Installed / Not installed / Unknown) for a target."""
 
+    #: (state, status text) after every change; state is "ok", "missing",
+    #: "busy", "warn" or "pending". The Install page's step track follows it.
+    changed = Signal(str, str)
+
     def __init__(
         self,
         name: str,
@@ -707,6 +711,7 @@ class InstallStatusRow(QWidget):
         self._status.setText(text)
         self._dot.setStyleSheet(f"color: {color};")
         self._status.setStyleSheet(f"color: {color};")
+        self.changed.emit({True: "ok", False: "missing"}.get(ok, "pending"), text)
 
     def set_installing(self, detail: str = "") -> None:
         """Show the transient orange state used while an install is running."""
@@ -716,6 +721,7 @@ class InstallStatusRow(QWidget):
         self._status.setText(tr("Installing"))
         self._dot.setStyleSheet(f"color: {color};")
         self._status.setStyleSheet(f"color: {color};")
+        self.changed.emit("busy", tr("Installing"))
 
     def set_incomplete(self, detail: str = "") -> None:
         """Show the amber "incomplete" state - present on disk, but the last
@@ -730,6 +736,7 @@ class InstallStatusRow(QWidget):
         self._status.setText(tr("Incomplete"))
         self._dot.setStyleSheet(f"color: {color};")
         self._status.setStyleSheet(f"color: {color};")
+        self.changed.emit("warn", tr("Incomplete"))
 
     def set_status_tooltip(self, text: str) -> None:
         """Show the same status details when hovering any part of the row."""

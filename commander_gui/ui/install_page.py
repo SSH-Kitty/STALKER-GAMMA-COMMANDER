@@ -1,6 +1,7 @@
 """
-Install page: Anomaly + GAMMA install (top), cache folder (middle),
-winetricks and verify (bottom).
+Install page: one card that walks through the five install steps
+(folder, dependencies, Anomaly, GAMMA, verify) with a clickable step
+track on top and the picked step's page under it.
 """
 
 from __future__ import annotations
@@ -15,19 +16,24 @@ from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -36,7 +42,11 @@ from .. import gui_settings
 from ..cli_runner import cli_command, cli_resume_args
 from ..config import logs_dir
 from ..dependencies import check_all_dependencies
-from ..game_backup import apply_pending_settings_restore, backup_settings_before
+from ..game_backup import (
+    apply_pending_settings_restore,
+    backup_settings_before,
+    prepare_anomaly_reinstall,
+)
 from ..gui_settings import configured_runner, configured_wine_prefix
 from ..integrity import (
     MANIFEST_FILENAME,
@@ -82,7 +92,7 @@ from ..repair import (
     write_reextract_resume,
 )
 from ..settings import cli_ok
-from ..themes import active_theme_tokens
+from ..themes import active_theme_tokens, token_color
 from ..winetricks import (
     WINETRICKS_VERBS,
     check_winetricks_full_status,
@@ -105,7 +115,9 @@ from .common import (
     StreamTask,
     anomaly_installed,
     clear_layout,
+    count_active_mods,
     count_cached_archives,
+    disk_usage_bytes,
     display_state,
     free_space_bytes,
     game_running,
@@ -113,7 +125,6 @@ from .common import (
     human_size,
     info_label,
     make_card,
-    make_header_row,
     normalize_path,
     notify_desktop,
     paused_dependency_status,
@@ -124,6 +135,7 @@ from .common import (
     wine_unsafe_folder,
     winetricks_tooltip,
 )
+from .dashboard import _SEGMENT_TOKENS, _SegmentedBar, _Swatch
 from .dialogs import MessageBox as QMessageBox
 from .dialogs import ProgressDialog
 from .multiplayer_page import confirm_singleplayer
@@ -190,12 +202,15 @@ _OFFLINE_DISABLES = ("minimal", "redownload_github", "auto_retry_large_files")
 #: only the initial state each time the page is constructed, same as
 #: every other checkbox here; the user can still uncheck for the current
 #: session.
-_DEFAULT_CHECKED_OPTIONS = {"auto_retry_large_files", "auto_continue_gamma", "anomaly_mirror"}
+_DEFAULT_CHECKED_OPTIONS = {
+    "auto_retry_large_files", "auto_continue_gamma", "anomaly_mirror",
+    "check_mods", "check_anomaly", "check_cache",
+}
 
 _ANOMALY_CHECKBOXES = [
     (
         "verify_after_install",
-        "Verify files after install",
+        "Check Anomaly files after install",
         "Run an integrity check on Anomaly after it finishes installing.",
     ),
     (
@@ -209,6 +224,78 @@ _ANOMALY_CHECKBOXES = [
         "Download Anomaly from the GAMMA installer author's mirror instead of ModDB. It unpacks about 9 times faster but needs about 5 GB of free memory while unpacking. If the mirror fails, ModDB is used.",
     ),
 ]
+
+_VERIFY_CHECKBOXES = [
+    (
+        "check_mods",
+        "GAMMA mods and mod files",
+        "Always checked: the repair is worked out from this part.",
+    ),
+    (
+        "check_anomaly",
+        "Anomaly files",
+        "Compare every Anomaly file with Anomaly's own list of original checksums.",
+    ),
+    (
+        "check_cache",
+        "Download cache",
+        "Check downloaded archives against GAMMA's list. When skipped, a repair downloads broken mods again instead of reusing the cache.",
+    ),
+    (
+        "repair_prompt",
+        "Show the repair list right away",
+        "When problems are found, show what Repair would fix without clicking Repair now first.",
+    ),
+    (
+        "verify_after_gamma",
+        "Check after a GAMMA install",
+        "Run Verify Integrity as soon as a GAMMA install or reinstall finishes.",
+    ),
+]
+
+#: The step track's names, in order: one page each on the Install card.
+_STEP_NAMES = ("Folder", "Dependencies", "Anomaly", "GAMMA", "Verify")
+
+#: How each step's options are grouped, by key, in two columns of groups
+#: (two fit beside each other down to a small window; three stacked).
+_ANOMALY_OPTION_GROUPS = (
+    (("Install", ("verify_after_install", "anomaly_mirror")),),
+    (("After install", ("auto_continue_gamma",)),),
+)
+_GAMMA_OPTION_GROUPS = (
+    (
+        ("Install", ("auto_retry_large_files", "minimal", "offline")),
+        ("Addons", ("redownload_github",)),
+    ),
+    (("Keep my settings", ("preserve_user", "preserve_mcm", "keep_engine_exes")),),
+)
+_VERIFY_OPTION_GROUPS = (
+    (("What to check", ("check_mods", "check_anomaly", "check_cache")),),
+    (("Automatic", ("repair_prompt", "verify_after_gamma")),),
+)
+
+#: Shown on the Anomaly step while Offline install is ticked on the GAMMA step.
+_ANOMALY_OFFLINE_NOTE = "Offline install is on. Anomaly is unpacked from the cache together with GAMMA in step 4."
+
+#: What the dependency check covers, as (group title, keys): the
+#: winetricks verbs, then the tools that run the installers. The first
+#: group is one column, the rest share the second.
+_DEPENDENCY_GROUPS = (
+    ("DirectX", ("d3dcompiler_43", "d3dcompiler_47", "d3dx9", "d3dx10", "d3dx11_43", "dx8vb")),
+    ("Other runtimes", ("vcrun2022", "quartz")),
+    ("Tools", ("umu", "wine")),
+)
+
+#: Free space a fresh Anomaly + GAMMA + cache install needs (see step 1).
+_INSTALL_SPACE_BYTES = 150 * 1024**3
+
+#: Length of a step change on the Install card: fade out, then back in.
+_STEP_FADE_MS = 260
+
+#: Verify pill level -> step track state.
+_VERIFY_STEP_STATES = {
+    "healthy": "ok", "snapshot": "ok", "running": "busy", "attention": "warn", "failed": "bad",
+}
 
 _WT_PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})\s*%")
 
@@ -457,6 +544,75 @@ class _PathEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _WizardStep(QPushButton):
+    """One step on the Install card's track: number and name, with the
+    step's status under it. Its ``state`` property (ok, missing, busy,
+    warn, bad, pending) colours the status in themes.py. The picked step
+    gets the main nav bar's rounded accent underline, hugging the text."""
+
+    def __init__(self, number: int, name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("wizardStep")
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(2)
+        self._name = QLabel(f"{number} · {name}")
+        self._name.setObjectName("wizardStepName")
+        self._status = QLabel()
+        self._status.setObjectName("wizardStepStatus")
+        for label in (self._name, self._status):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            # May be cut short in a narrow window, rather than widening the
+            # page past it.
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            layout.addWidget(label)
+        self.state = "pending"
+        self.setAccessibleName(name)
+
+    def sizeHint(self):
+        return self.layout().sizeHint()
+
+    def minimumSizeHint(self):
+        return QSize(0, self.layout().minimumSize().height())
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        width = max(
+            label.fontMetrics().horizontalAdvance(label.text())
+            for label in (self._name, self._status)
+        )
+        left = self.layout().contentsMargins().left()
+        width = min(width, self.width() - 2 * left)
+        if width <= 0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(token_color("accent_strong", "#9fe96f"))
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        y = self.height() - 3
+        painter.drawLine(QPointF(left, y), QPointF(left + width, y))
+        painter.end()
+
+    def set_status(self, state: str, text: str) -> None:
+        self.state = state
+        self._status.setText(text)
+        self.setToolTip(text)
+        for widget in (self, self._status):
+            widget.setProperty("state", state)
+        _repolish(self, self._status)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setChecked(selected)
+        self._name.setProperty("selected", selected)
+        _repolish(self, self._name)
+
+
 class _StateIcon(QWidget):
     """A tile's state badge, painted so it stays crisp at any font size:
     a ring with a drawn tick, cross, ! or i, and a turning arc while running."""
@@ -591,6 +747,69 @@ class _CheckTile(QFrame):
 
     def snapshot(self) -> list[str]:
         return [self.state, self.value.text(), self.caption.text()]
+
+
+def _step_intro(text: str, status: QWidget | None = None) -> QHBoxLayout:
+    """A step page's opening line ("Step 1. ..."), with the step's status
+    badge, if any, at its right; the step track already names the step."""
+    row = QHBoxLayout()
+    row.addWidget(info_label(text), 1)
+    if status is not None:
+        row.addWidget(status, 0, Qt.AlignmentFlag.AlignTop)
+    return row
+
+
+def _folder_tile(tile: _CheckTile, path: str) -> None:
+    """Ready or Missing, with the folder's path under it."""
+    if not path:
+        tile.set_state("idle", "-", tr("Not set"))
+    elif Path(path).expanduser().is_dir():
+        tile.set_state("ok", tr("Ready"), path)
+    else:
+        tile.set_state("warn", tr("Missing"), path)
+
+
+def _space_tile(tile: _CheckTile, path: str) -> None:
+    """Free space on the drive that holds (or will hold) ``path``."""
+    free = free_space_bytes(path) if path else None
+    if free is None:
+        tile.set_state("idle", "-", tr("Choose a folder first"))
+    else:
+        tile.set_state("ok", human_size(free), tr("free on this drive"))
+
+
+class _DependencyRow(QWidget):
+    """One runtime or tool on the Dependencies step: the tiles' state
+    badge (tick, cross, or empty ring before the check) and its name."""
+
+    def __init__(self, name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("panelTransparent")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 3, 0, 3)  # a checkbox row's height
+        layout.setSpacing(10)
+        self.icon = _StateIcon()
+        layout.addWidget(self.icon)
+        layout.addWidget(QLabel(name), 1)
+
+    def set_state(self, state: str) -> None:
+        self.icon.set_state(state)
+
+
+def _tile_row(tiles) -> QGridLayout:
+    """Check tiles side by side with dividers between, as on the Verify
+    step; each side goes under the one before when the window is narrow."""
+    grid = reflow.divided(QGridLayout())
+    grid.setSpacing(10)
+    for index, tile in enumerate(tiles):
+        if index:
+            divider = QFrame()
+            divider.setObjectName("vDivider")
+            divider.setFixedWidth(1)
+            grid.addWidget(divider, 0, index * 2 - 1)
+        grid.addWidget(tile, 0, index * 2)
+        grid.setColumnStretch(index * 2, 1)
+    return grid
 
 
 class _FindingRow(QFrame):
@@ -994,6 +1213,9 @@ class InstallPage(QWidget):
         self._anomaly_failure: tuple[int, str] | None = None
         self._anomaly_failed = False
         self._auto_chain = False
+        #: Keep-settings choice from the Reinstall Anomaly pop-up, handed to
+        #: the GAMMA reinstall it chains into. None = the GAMMA step's boxes.
+        self._chain_preserve: bool | None = None
         self._resume_state: dict[str, str] | None = None
         self._auto_cancelled = False
         self._auto_retry_count = 0
@@ -1064,68 +1286,172 @@ class InstallPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(16)
         scroll.setWidget(content)
-        # -- Installation Directory / Install Dependencies - merged into
-        # one card, side by side, same grid+divider pattern as the
-        # Anomaly/GAMMA card below. --
-        self.directory_deps_card, dd_layout = make_card()
-        root.addWidget(self.directory_deps_card)
-        dd_grid = reflow.divided(QGridLayout(), natural=True)
-        dd_grid.setHorizontalSpacing(32)
-        dd_grid.setVerticalSpacing(10)
-        dd_grid.setColumnStretch(0, 1)
-        dd_grid.setColumnStretch(1, 0)
-        dd_grid.setColumnStretch(2, 1)
-        dd_layout.addLayout(dd_grid)
+        # -- One card: a track of the five steps, and under it the picked
+        # step's page. Every step keeps its own widgets; only one shows. --
+        wizard_card, w_layout = make_card()
+        root.addWidget(wizard_card)
+        w_layout.setSpacing(14)
+        # The track's underlines sit on the divider, like the main nav bar.
+        track_box = QVBoxLayout()
+        track_box.setSpacing(0)
+        track = reflow.row(0)
+        track_box.addLayout(track)
+        track_line = QFrame()
+        track_line.setObjectName("rowDivider")
+        track_line.setFixedHeight(1)
+        track_box.addWidget(track_line)
+        w_layout.addLayout(track_box)
+        # Faded as one when the step changes: the page, its button and the
+        # console under it.
+        self._fade_box = QWidget()
+        self._fade_box.setObjectName("panelTransparent")
+        fade_layout = QVBoxLayout(self._fade_box)
+        fade_layout.setContentsMargins(0, 0, 0, 0)
+        fade_layout.setSpacing(14)
+        w_layout.addWidget(self._fade_box)
+        # As tall as the tallest step, so every step's button below sits
+        # at the same height.
+        self._page_stack = QStackedWidget()
+        self._page_stack.setObjectName("panelTransparent")
+        fade_layout.addWidget(self._page_stack)
+        # Each step's main button, all the same size in the same place.
+        self._action_stack = QStackedWidget()
+        self._action_stack.setObjectName("panelTransparent")
+        fade_layout.addWidget(self._action_stack)
+        # Under the button: the console of the step that has one.
+        self._step_extras: list[QWidget | None] = [None] * len(_STEP_NAMES)
+        self._extras_layout = fade_layout
+        self._steps: list[_WizardStep] = []
+        self._step_pages: list[QWidget] = []
+        self._step = 0
+        for number, name in enumerate(_STEP_NAMES, start=1):
+            step = _WizardStep(number, tr(name))
+            step.clicked.connect(lambda _checked=False, i=number - 1: self._go_to_step(i))
+            track.addWidget(step, 1)
+            self._steps.append(step)
 
-        dd_divider = QFrame()
-        dd_divider.setObjectName("installDivider")
-        dd_divider.setFrameShape(QFrame.Shape.NoFrame)
-        dd_divider.setFixedWidth(1)
-        dd_grid.addWidget(dd_divider, 0, 1, 5, 1)
+        def step_page(intro: str, status: QWidget | None = None) -> QVBoxLayout:
+            """One step's page, laid out like every other: the "Step N."
+            line, the step's own fields and options, then (see step_tiles)
+            its row of tiles kept at the bottom, so tiles and button sit at
+            the same height on every step."""
+            page = QWidget()
+            page.setObjectName("panelTransparent")
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(12)
+            layout.addLayout(_step_intro(intro, status))
+            body = QVBoxLayout()
+            body.setSpacing(10)
+            layout.addLayout(body)
+            layout.addStretch(1)
+            self._page_stack.addWidget(page)
+            self._step_pages.append(page)
+            return body
 
-        self.wt_status = InstallStatusRow("", ok=None, pending_text="Checking")
-        dd_grid.addLayout(make_header_row("Installation Directory"), 0, 0)
-        dd_grid.addLayout(
-            make_header_row("Install Dependencies", self.wt_status), 0, 2
+        def step_tiles(tiles: dict) -> dict:
+            layout = self._step_pages[-1].layout()
+            line = QFrame()
+            line.setObjectName("rowDivider")
+            line.setFixedHeight(1)
+            layout.addWidget(line)
+            layout.addLayout(_tile_row(tiles.values()))
+            return tiles
+
+        def step_action(*buttons: QPushButton) -> None:
+            box = QWidget()
+            box.setObjectName("panelTransparent")
+            row = QHBoxLayout(box)
+            row.setContentsMargins(0, 0, 0, 0)
+            for button in buttons:
+                row.addWidget(button, 1)
+            self._action_stack.addWidget(box)
+
+        def step_extra(index: int, widget: QWidget) -> None:
+            self._step_extras[index] = widget
+            self._extras_layout.addWidget(widget)
+
+        def option_groups(body: QVBoxLayout, columns, boxes: dict) -> None:
+            """Option groups in two equal columns, on Anomaly's step and
+            GAMMA's alike, so their columns line up between the two."""
+            row = reflow.row(32)
+            for groups in columns:
+                column = QWidget()
+                column.setObjectName("panelTransparent")
+                column_layout = QVBoxLayout(column)
+                column_layout.setContentsMargins(0, 0, 0, 0)
+                column_layout.setSpacing(10)
+                for title, keys in groups:
+                    group = QGroupBox(tr(title))
+                    layout = QVBoxLayout(group)
+                    layout.setSpacing(6)
+                    layout.setContentsMargins(0, 0, 0, 0)  # borderless: line up with the fields
+                    for key in keys:
+                        layout.addWidget(boxes[key])
+                    column_layout.addWidget(group)
+                column_layout.addStretch(1)
+                row.addWidget(column, 1)
+            body.addLayout(row)
+
+        # -- Step 1: installation directory --
+        body = step_page(
+            tr("<span style='color:{arg};'>Step 1.</span> Choose where to install Anomaly and GAMMA.", arg=ACCENT.name()),
         )
-
-        dd_grid.addWidget(
-            info_label(
-                tr("<span style='color:{arg};'>Step 1.</span> Choose where to install Anomaly and GAMMA.", arg=ACCENT.name())
-            ),
-            1, 0,
-        )
-        dd_grid.addWidget(
-            info_label(
-                tr("<span style='color:{arg};'>Step 2.</span> Install the Windows runtimes the game needs.", arg=ACCENT.name())
-            ),
-            1, 2,
-        )
-
         self.root_card_edit, self.root_card_row = (
             self._make_folder_row(
                 tr("Installation directory:"),
                 self._browse_install_root,
             )
         )
-        dd_grid.addLayout(self.root_card_row, 2, 0)
-        self.wt_prefix_label = info_label("", wrap=False)
-        self.wt_prefix_label.setObjectName("dim")
-        dd_grid.addWidget(self.wt_prefix_label, 2, 2)
-
+        body.addLayout(self.root_card_row)
+        body.addWidget(info_label(tr(
+            "Pick an empty folder on a drive with about 150 GB free. Create folders makes anomaly, gamma and cache folders inside it and saves them to your profile."
+        )))
+        self.storage_group = QGroupBox(tr("Storage usage"))
+        storage_layout = QVBoxLayout(self.storage_group)
+        storage_layout.setContentsMargins(0, 0, 0, 0)  # borderless, like the option groups
+        storage_layout.setSpacing(8)
+        body.addWidget(self.storage_group)
+        # What Create folders sets up, and whether the drive has room.
+        self.folder_tiles = step_tiles({
+            "anomaly": _CheckTile(tr("Anomaly folder")),
+            "gamma": _CheckTile(tr("GAMMA folder")),
+            "cache": _CheckTile(tr("Cache folder")),
+            "space": _CheckTile(tr("Free space")),
+        })
+        self.folder_tiles["space"].setToolTip(
+            tr("About 150 GB for Anomaly, GAMMA and the download cache together. With Minimal, about 100 GB.")
+        )
         self.create_folders_button = QPushButton(tr("Create folders"))
         self.create_folders_button.setObjectName("primary")
         self.create_folders_button.clicked.connect(self._create_install_folders)
-        dd_grid.addWidget(self.create_folders_button, 3, 0)
+        step_action(self.create_folders_button)
 
+        # -- Step 2: dependencies --
+        self.wt_status = InstallStatusRow("", ok=None, pending_text="Checking")
+        body = step_page(
+            tr("<span style='color:{arg};'>Step 2.</span> Install the Windows runtimes the game needs.", arg=ACCENT.name()),
+            self.wt_status,
+        )
+        # One row per runtime and tool the check covers, ticked once it is
+        # there - grouped in columns like the Anomaly and GAMMA options.
+        self._wt_verbs: dict[str, bool] | None = None
+        self.deps_rows = {key: _DependencyRow(key) for _title, keys in _DEPENDENCY_GROUPS for key in keys}
+        columns = ((_DEPENDENCY_GROUPS[0],), _DEPENDENCY_GROUPS[1:])
+        option_groups(body, columns, self.deps_rows)
+        self.deps_tiles = step_tiles({
+            "runtimes": _CheckTile(tr("Runtimes")),
+            "prefix": _CheckTile(tr("Wine prefix")),
+            "runner": _CheckTile(tr("Runner")),
+            "space": _CheckTile(tr("Free space")),
+        })
         self.winetricks_button = QPushButton(tr("Install Dependencies"))
         self.winetricks_button.setObjectName("primary")
         self.winetricks_button.setToolTip(
             tr("Installs required Windows runtime components (VC++, DirectX, etc.) into the Wine prefix.")
         )
         self.winetricks_button.clicked.connect(self._start_winetricks)
-        dd_grid.addWidget(self.winetricks_button, 3, 2)
-
+        step_action(self.winetricks_button)
         self.wt_progress = ProgressArea(show_table=False, show_log=True, log_max_height=180)
         # No Idle/percent bar for Dependencies - the status label and log
         # below it already say what's happening; nothing in ProgressArea
@@ -1136,122 +1462,72 @@ class InstallPage(QWidget):
         # Console toggle below - right-aligned per request.
         self.wt_progress.status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.wt_progress.cancel_button.clicked.connect(self._cancel_winetricks)
-        dd_grid.addWidget(self.wt_progress, 4, 0, 1, 3)
-        # Anomaly and GAMMA merged into one card, side by side in a grid
-        # instead of two separately-bordered cards of very different
-        # heights (which left a large empty gap under the shorter
-        # Anomaly column). Grid rows are shared across both columns, so
-        # the status row, header, info text, button and progress area
-        # all line up at the same height in both columns regardless of
-        # how much content sits in between (the "main content" cell,
-        # row 3, is the only one that can differ in height between the
-        # two columns - everything below it still lines back up).
-        self.anomaly_gamma_card, ag_layout = make_card()
-        root.addWidget(self.anomaly_gamma_card)
-        grid = reflow.divided(QGridLayout())
-        grid.setHorizontalSpacing(32)
-        grid.setVerticalSpacing(10)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 0)
-        grid.setColumnStretch(2, 1)
-        ag_layout.addLayout(grid)
+        step_extra(1, self.wt_progress)
 
-        # Vertical divider between the two columns - ends after the
-        # install buttons (row 7), stopping above the shared progress
-        # console (row 8), which spans the full card width on its own.
-        # Styled via #installDivider in themes.py (a plain background
-        # color, not the native QFrame bevel) so it follows the active
-        # theme's border color instead of a fixed OS palette look.
-        divider = QFrame()
-        divider.setObjectName("installDivider")
-        divider.setFrameShape(QFrame.Shape.NoFrame)
-        divider.setFixedWidth(1)
-        grid.addWidget(divider, 0, 1, 8, 1)
-        # Keeps the divider centred: _reflow_gamma_options drops the
-        # GAMMA options to one column when two don't fit in half the card.
-        self.anomaly_gamma_card.installEventFilter(self)
-
+        # -- Step 3: STALKER Anomaly. The first two options are GUI-level
+        # orchestration, not CLI arguments - see _start_anomaly_install/
+        # _on_anomaly_finished. The mirror one is the CLI's
+        # --use-anomaly-mirror. --
         self.anomaly_status = InstallStatusRow("")
-        self.gamma_status = InstallStatusRow("")
-        grid.addLayout(
-            make_header_row("STALKER Anomaly", self.anomaly_status), 0, 0
+        body = step_page(
+            tr("<span style='color:{arg};'>Step 3.</span> Download and install STALKER Anomaly 1.5.3.", arg=ACCENT.name()),
+            self.anomaly_status,
         )
-        grid.addLayout(
-            make_header_row("GAMMA Modpack", self.gamma_status), 0, 2
-        )
-
-        grid.addWidget(
-            info_label(
-                tr("<span style='color:{arg};'>Step 3.</span> Download and install STALKER Anomaly 1.5.3.", arg=ACCENT.name())
-            ),
-            1, 0,
-        )
-        grid.addWidget(
-            info_label(
-                tr("<span style='color:{arg};'>Step 4.</span> Download and install GAMMA and all its mods.", arg=ACCENT.name())
-            ),
-            1, 2,
-        )
-
-        # -- "Anomaly folder" / "GAMMA folder" - aligned on the same row. --
         self.anomaly_edit, self.anomaly_folder_row = (
             self._make_folder_row(tr("Anomaly folder:"), self._browse_anomaly)
         )
-        grid.addLayout(self.anomaly_folder_row, 2, 0)
-        self.gamma_edit, self.gamma_folder_row = (
-            self._make_folder_row(tr("GAMMA folder:"), self._browse_gamma)
-        )
-        grid.addLayout(self.gamma_folder_row, 2, 2)
-
-        # -- "Install options" (Anomaly) / "Install options" (GAMMA) -
-        # same row, same size (QGridLayout stretches same-row
-        # Preferred-policy widgets to the shared row height when nothing
-        # else occupies that row). The first two checkboxes are GUI-level
-        # orchestration, not CLI arguments - see
-        # _start_anomaly_install/_on_anomaly_finished. The mirror one is
-        # the CLI's --use-anomaly-mirror. --
-        anomaly_opts_group = QGroupBox(tr("Install options"))
-        anomaly_opts_layout = QVBoxLayout()
-        anomaly_opts_layout.setSpacing(6)
-        anomaly_opts_layout.setContentsMargins(0, 8, 0, 0)  # borderless: line up with the folder row
+        body.addLayout(self.anomaly_folder_row)
         self.anomaly_checkboxes = {}
         for key, label, tooltip in _ANOMALY_CHECKBOXES:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.anomaly_checkboxes[key] = cb
-            anomaly_opts_layout.addWidget(cb)
-        anomaly_opts_group.setLayout(anomaly_opts_layout)
-        grid.addWidget(anomaly_opts_group, 3, 0)
+        option_groups(body, _ANOMALY_OPTION_GROUPS, self.anomaly_checkboxes)
+        # Says why Install Anomaly is greyed out while Offline is ticked.
+        self.anomaly_offline_note = info_label(tr(_ANOMALY_OFFLINE_NOTE))
+        self.anomaly_offline_note.hide()
+        body.addWidget(self.anomaly_offline_note)
+        # GAMMA's options live on step 4; when Anomaly chains into GAMMA,
+        # say here which of them that install will use.
+        self.gamma_chain_note = info_label("")
+        body.addWidget(self.gamma_chain_note)
+        self.anomaly_tiles = step_tiles({
+            "version": _CheckTile(tr("Version")),
+            "folder": _CheckTile(tr("Anomaly folder")),
+            "download": _CheckTile(tr("Download")),
+            "space": _CheckTile(tr("Free space")),
+        })
+        self.anomaly_button = QPushButton(tr("Install Anomaly"))
+        self.anomaly_button.setObjectName("primary")
+        # Wrapped: clicked() passes a bool that would land in skip_confirm.
+        self.anomaly_button.clicked.connect(self._on_anomaly_button_clicked)
+        step_action(self.anomaly_button)
 
-        opts_group = QGroupBox(tr("Install options"))
-        # Two columns of three: one long list read as a wall of boxes.
-        opts_layout = QGridLayout()
-        opts_layout.setVerticalSpacing(6)
-        opts_layout.setHorizontalSpacing(16)
-        opts_layout.setContentsMargins(0, 8, 0, 0)  # borderless: line up with the folder row
+        # -- Step 4: GAMMA modpack --
+        self.gamma_status = InstallStatusRow("")
+        body = step_page(
+            tr("<span style='color:{arg};'>Step 4.</span> Download and install GAMMA and all its mods.", arg=ACCENT.name()),
+            self.gamma_status,
+        )
+        self.gamma_edit, self.gamma_folder_row = (
+            self._make_folder_row(tr("GAMMA folder:"), self._browse_gamma)
+        )
+        self.cache_edit, self.cache_folder_row = (
+            self._make_folder_row(tr("Cache folder:"), self._browse_cache)
+        )
+        # Side by side, one row like Anomaly's single folder.
+        folders = reflow.row(24)
+        folders.addLayout(self.gamma_folder_row, 1)
+        folders.addLayout(self.cache_folder_row, 1)
+        body.addLayout(folders)
         self.checkboxes = {}
         for key, label, tooltip in _CHECKBOXES:
             cb = QCheckBox(tr(label))
             cb.setToolTip(tr(tooltip))
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
             self.checkboxes[key] = cb
-        opts_group.setLayout(opts_layout)
-        self._opts_layout = opts_layout
-        self._opts_columns = 0
-        self._ag_grid = grid
-        self._reflow_gamma_options()
-        grid.addWidget(opts_group, 3, 2)
-
-        # Cache folder selector is GAMMA-only, so it gets its own row
-        # (column 0 stays empty here) rather than being bundled into a
-        # cell that has to stay comparable in height with the Anomaly
-        # side. No section title above it - "Cache folder:" on the row
-        # itself already says what it is.
-        self.cache_edit, self.cache_folder_row = (
-            self._make_folder_row(tr("Cache folder:"), self._browse_cache)
-        )
-        grid.addLayout(self.cache_folder_row, 5, 2)
+        option_groups(body, _GAMMA_OPTION_GROUPS, self.checkboxes)
 
         # Offline install: the two list files, shown only while ticked.
         # Checkbox states to put back when Offline is unticked again.
@@ -1286,17 +1562,18 @@ class InstallPage(QWidget):
         offline_layout.addWidget(guide, 3, 0, 1, 2)
         offline_layout.setColumnStretch(1, 1)
         self.offline_box.setVisible(False)
-        grid.addWidget(self.offline_box, 6, 2)
+        body.addWidget(self.offline_box)
         self.checkboxes["offline"].toggled.connect(self._on_offline_toggled)
         self.checkboxes["offline"].toggled.connect(lambda _on: self._update_button_states())
-
-        # -- Install buttons, aligned on the same row --
-        self.anomaly_button = QPushButton(tr("Install Anomaly"))
-        self.anomaly_button.setObjectName("primary")
-        # Wrapped: clicked() passes a bool that would land in skip_confirm.
-        self.anomaly_button.clicked.connect(lambda: self._start_anomaly_install())
-        grid.addWidget(self.anomaly_button, 7, 0)
-
+        self.gamma_tiles = step_tiles({
+            "mods": _CheckTile(tr("Mods")),
+            "folder": _CheckTile(tr("GAMMA folder")),
+            "cache": _CheckTile(tr("Download cache")),
+            "space": _CheckTile(tr("Free space")),
+        })
+        # The Download tile follows these as they are ticked.
+        for cb in (self.checkboxes["offline"], self.anomaly_checkboxes["anomaly_mirror"]):
+            cb.toggled.connect(lambda _on: self._refresh_install_tiles())
         self.install_button = QPushButton(tr("Install GAMMA"))
         self.install_button.setObjectName("primary")
         self.install_button.setToolTip(
@@ -1304,19 +1581,9 @@ class InstallPage(QWidget):
         )
         # Wrapped: clicked() passes a bool that would land in skip_confirm.
         self.install_button.clicked.connect(lambda: self._start_full_install())
-        grid.addWidget(self.install_button, 7, 2)
+        step_action(self.install_button)
 
-        # -- Shared progress console for both Anomaly and GAMMA installs,
-        # spanning the full card width right under the two buttons -
-        # there is only ever one install running at a time, so one wide
-        # console (with the Addon/Operation/Percent table) is clearer
-        # than two separate bars, and avoids the empty space a lone
-        # Anomaly-only bar left underneath.
-        self.full_progress = ProgressArea(show_log=False)
-        self.full_progress.cancel_button.clicked.connect(self._cancel_full_install)
-        grid.addWidget(self.full_progress, 8, 0, 1, 3)
-        self.verify_card, v_layout = make_card()
-        root.addWidget(self.verify_card)
+        # -- Step 5: verify integrity --
         # Text, then the dot; both named verifyPill so the level colours
         # in themes.py tint them together.
         self.verify_pill = QLabel()
@@ -1330,20 +1597,39 @@ class InstallPage(QWidget):
         pill_row.setSpacing(6)
         pill_row.addWidget(self.verify_pill)
         pill_row.addWidget(self.verify_dot)
-        v_layout.addLayout(make_header_row("Verify Integrity", pill_box))
-        v_layout.addWidget(
-            info_label(
-                tr("<span style='color:{arg};'>Step 5.</span> Find and repair missing or changed game files. Your saves and settings are left alone.", arg=ACCENT.name())
-            )
+        body = step_page(
+            tr("<span style='color:{arg};'>Step 5.</span> Find and repair missing or changed game files. Your saves and settings are left alone.", arg=ACCENT.name()),
+            pill_box,
         )
-        tiles = reflow.divided(QGridLayout())
-        tiles.setSpacing(10)
-        self.verify_tiles = {
+        self.verify_maintenance_label = QLabel(
+            tr("Verify Integrity is currently under maintenance")
+        )
+        self.verify_maintenance_label.setStyleSheet(
+            f"color: {STATUS_RED.name()}; font-weight: bold;"
+        )
+        self.verify_maintenance_label.setVisible(VERIFY_INTEGRITY_DISABLED)
+        body.addWidget(self.verify_maintenance_label)
+        self.verify_checkboxes = {}
+        for key, label, tooltip in _VERIFY_CHECKBOXES:
+            cb = QCheckBox(tr(label))
+            cb.setToolTip(tr(tooltip))
+            cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
+            self.verify_checkboxes[key] = cb
+        self.verify_checkboxes["check_mods"].setEnabled(False)
+        # The two Automatic ones are standing preferences, so they're saved.
+        saved = gui_settings.load_gui_settings()
+        for key in ("repair_prompt", "verify_after_gamma"):
+            setting = "verify_" + key.removeprefix("verify_")
+            cb = self.verify_checkboxes[key]
+            cb.setChecked(bool(saved.get(setting, False)))
+            cb.toggled.connect(lambda on, s=setting: gui_settings.save_gui_settings(**{s: on}))
+        option_groups(body, _VERIFY_OPTION_GROUPS, self.verify_checkboxes)
+        self.verify_tiles = step_tiles({
             "anomaly": _CheckTile(tr("Anomaly files")),
             "mods": _CheckTile(tr("GAMMA mods")),
             "md5": _CheckTile(tr("Mod file changes")),
             "cache": _CheckTile(tr("Download cache")),
-        }
+        })
         self.verify_tiles["anomaly"].setToolTip(
             tr("Every Anomaly file is compared with Anomaly's own list of original checksums.")
         )
@@ -1356,23 +1642,6 @@ class InstallPage(QWidget):
         self.verify_tiles["cache"].setToolTip(
             tr("Checks downloaded archives against GAMMA's list. Only affects future installs, never the game.")
         )
-        for index, tile in enumerate(self.verify_tiles.values()):
-            if index:
-                divider = QFrame()
-                divider.setObjectName("vDivider")
-                divider.setFixedWidth(1)
-                tiles.addWidget(divider, 0, index * 2 - 1)
-            tiles.addWidget(tile, 0, index * 2)
-            tiles.setColumnStretch(index * 2, 1)
-        v_layout.addLayout(tiles)
-        self.verify_maintenance_label = QLabel(
-            tr("Verify Integrity is currently under maintenance")
-        )
-        self.verify_maintenance_label.setStyleSheet(
-            f"color: {STATUS_RED.name()}; font-weight: bold;"
-        )
-        self.verify_maintenance_label.setVisible(VERIFY_INTEGRITY_DISABLED)
-        v_layout.addWidget(self.verify_maintenance_label)
         self.verify_button = QPushButton(tr("Verify Integrity"))
         self.verify_button.setObjectName("primary")
         self.verify_button.clicked.connect(self._start_verify)
@@ -1383,10 +1652,7 @@ class InstallPage(QWidget):
         )
         self.repair_button.clicked.connect(self._on_repair_clicked)
         self.repair_button.hide()
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.verify_button, 1)
-        buttons.addWidget(self.repair_button, 1)
-        v_layout.addLayout(buttons)
+        step_action(self.verify_button, self.repair_button)
         # No status line: the bar's text already names the step.
         self.verify_progress = ProgressArea(
             show_table=False, show_log=True, log_max_height=180, show_status=False
@@ -1396,15 +1662,76 @@ class InstallPage(QWidget):
         self.verify_progress.cancel_button.clicked.connect(self._cancel_verify)
         # The tiles and pill already say "not checked"; an empty Idle bar adds nothing.
         self.verify_progress.bar.hide()
-        v_layout.addWidget(self.verify_progress)
+        verify_extra = QWidget()
+        verify_extra.setObjectName("panelTransparent")
+        extra_layout = QVBoxLayout(verify_extra)
+        extra_layout.setContentsMargins(0, 0, 0, 0)
+        extra_layout.addWidget(self.verify_progress)
         self.verify_findings = QVBoxLayout()
         self.verify_findings.setSpacing(6)
-        v_layout.addLayout(self.verify_findings)
-        # Spare window height goes below the last card, not inside the
-        # cards - the console grows the card only when it is shown.
+        extra_layout.addLayout(self.verify_findings)
+        step_extra(4, verify_extra)
+
+        # -- Shared progress console for both Anomaly and GAMMA installs,
+        # under steps 3 and 4 - there is only ever one install running at
+        # a time, so one console (with the Addon/Operation/Percent table)
+        # is clearer than two separate bars. --
+        self.full_progress = ProgressArea(show_log=False)
+        self.full_progress.cancel_button.clicked.connect(self._cancel_full_install)
+        fade_layout.addWidget(self.full_progress)
+
+        # -- Back / Next, under every step --
+        step_nav = QHBoxLayout()
+        self.step_back_button = QPushButton(tr("Back"))
+        self.step_next_button = QPushButton(tr("Next"))
+        for button, delta in ((self.step_back_button, -1), (self.step_next_button, 1)):
+            button.setObjectName("secondary")
+            button.setProperty("compact", True)
+            button.clicked.connect(lambda _checked=False, d=delta: self._go_to_step(self._step + d))
+        # In Next's place on the last step: everything is done, go play.
+        self.step_play_button = QPushButton(tr("Play"))
+        self.step_play_button.setObjectName("secondary")
+        self.step_play_button.setProperty("compact", True)
+        self.step_play_button.clicked.connect(self._open_play_page)
+        step_nav.addWidget(self.step_back_button)
+        step_nav.addStretch(1)
+        step_nav.addWidget(self.step_next_button)
+        step_nav.addWidget(self.step_play_button)
+        w_layout.addLayout(step_nav)
+        # Step changes fade out and back in (see _go_to_step).
+        self._fade_effect = QGraphicsOpacityEffect(self._fade_box)
+        self._fade_effect.setOpacity(1.0)
+        # Off between fades: a live effect renders the whole box offscreen
+        # on every repaint inside it.
+        self._fade_effect.setEnabled(False)
+        self._fade_box.setGraphicsEffect(self._fade_effect)
+        self._fade_target: int | None = None
+        # 0 -> 1 fades out, the step switches at 1, 1 -> 2 fades back in.
+        self._fade = QVariantAnimation(self)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(2.0)
+        self._fade.setDuration(_STEP_FADE_MS)
+        self._fade.valueChanged.connect(self._on_fade_value)
+        self._fade.finished.connect(self._on_fade_finished)
+        self.anomaly_status.changed.connect(lambda state, text: self._steps[2].set_status(state, text))
+        self.gamma_status.changed.connect(lambda state, text: self._steps[3].set_status(state, text))
+        self.wt_status.changed.connect(lambda state, text: self._steps[1].set_status(state, text))
+        self.wt_status.changed.connect(lambda _state, _text: self._refresh_deps_tiles())
+        for cb in (*self.checkboxes.values(), self.anomaly_checkboxes["auto_continue_gamma"]):
+            cb.toggled.connect(lambda _on: self._update_chain_note())
+        self._update_chain_note()
+        self._steps[1].set_status("pending", tr("Checking"))
+        # Spare window height goes below the card, not inside it - the
+        # console grows the card only when it is shown.
         root.addStretch(1)
         self._pending_repair: tuple | None = None
         self.refresh()
+        self._show_step(0)
+        QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+        # The snapshot age counts up while the page stays open.
+        self._age_timer = QTimer(self)
+        self._age_timer.timeout.connect(lambda: self.isVisible() and self._refresh_verify_age())
+        self._age_timer.start(60_000)
 
     def enable_winetricks_status(self):
         self._winetricks_status_enabled = True
@@ -1437,7 +1764,7 @@ class InstallPage(QWidget):
                     self.full_progress.bar.setFormat(tr("Not installed"))
                 self._show_saved_verify_result()
         self._update_install_status()
-        self.wt_prefix_label.setText(tr("Prefix: {arg}", arg=self._wt_prefix()))
+        self._refresh_deps_tiles()
         self._refresh_winetricks_status()
         self._update_button_states()
 
@@ -1451,6 +1778,245 @@ class InstallPage(QWidget):
         # must flip to Installed as GAMMA's flips to Installing.
         if operation in ("anomaly", "gamma", None):
             self._update_install_status()
+        # A running install opens its step; any change re-checks whether
+        # the shared progress console is shown.
+        if operation in ("anomaly", "gamma"):
+            self._show_step(2 if operation == "anomaly" else 3)
+        else:
+            self._show_step(self._step)
+
+    def showEvent(self, event) -> None:
+        """Opening the Install tab starts at step 1, Folder - or at the
+        step with something running (its progress and Cancel live there).
+        Not when the window is merely restored (a spontaneous show)."""
+        super().showEvent(event)
+        if not event.spontaneous():
+            op = getattr(self.window, "install_operation", None)
+            step = {"dependencies": 1, "anomaly": 2, "gamma": 3}.get(op, 0)
+            if self.verify_pill.property("level") == "running":  # a check or repair
+                step = 4
+            self._show_step(step)
+
+    def _show_step(self, index: int) -> None:
+        """Show one step's page on the Install card and mark it on the track."""
+        index = max(0, min(index, len(self._steps) - 1))
+        self._step = index
+        for i, step in enumerate(self._steps):
+            step.set_selected(i == index)
+        self._page_stack.setCurrentIndex(index)
+        self._action_stack.setCurrentIndex(index)
+        for i, extra in enumerate(self._step_extras):
+            if extra is not None:
+                extra.setVisible(i == index)
+        self._refresh_wt_extra()
+        op = getattr(self.window, "install_operation", None)
+        # Only while Anomaly or GAMMA is installing: the step's status pill
+        # already says Installed / Not installed the rest of the time.
+        self.full_progress.setVisible(op in ("anomaly", "gamma"))
+        # Nowhere to go before the first step or after the last: no button.
+        self.step_back_button.setVisible(index > 0)
+        self.step_next_button.setVisible(index < len(self._steps) - 1)
+        self.step_play_button.setVisible(index == len(self._steps) - 1)
+
+    def _go_to_step(self, index: int) -> None:
+        """A click on the track or Back/Next: fade the step out and the new
+        one in, or switch straight away with Animations off."""
+        index = max(0, min(index, len(self._steps) - 1))
+        for i, step in enumerate(self._steps):
+            step.set_selected(i == index)  # the track answers the click at once
+        if index == self._step and self._fade_target is None:
+            return
+        if not gui_settings.animations_enabled() or not self.isVisible():
+            self._fade.stop()
+            self._on_fade_finished()
+            self._show_step(index)
+            return
+        self._fade_target = index
+        if self._fade.state() != QVariantAnimation.State.Running:
+            self._fade_effect.setEnabled(True)
+            self._fade.start()
+
+    def _on_fade_value(self, value: float) -> None:
+        if value >= 1.0 and self._fade_target is not None:
+            self._show_step(self._fade_target)
+            self._fade_target = None
+        self._fade_effect.setOpacity(abs(1.0 - value))
+
+    def _on_fade_finished(self) -> None:
+        if self._fade_target is not None:  # a click landed after the switch
+            self._show_step(self._fade_target)
+            self._fade_target = None
+        self._fade_effect.setOpacity(1.0)
+        self._fade_effect.setEnabled(False)
+
+    def _open_play_page(self) -> None:
+        from .main_window import _TAB_INDEX  # deferred: avoids an import cycle
+
+        self.window.tabs.setCurrentIndex(_TAB_INDEX["play"])
+
+    def _update_chain_note(self) -> None:
+        """Step 3's line naming the step 4 options the chained GAMMA install uses."""
+        picked = [cb.text() for cb in self.checkboxes.values() if cb.isChecked()]
+        self.gamma_chain_note.setText(
+            tr("GAMMA installs right after, with these options from step 4: {options}.", options=", ".join(picked))
+            if picked
+            else tr("GAMMA installs right after, with no options ticked on step 4.")
+        )
+        self.gamma_chain_note.setVisible(self.anomaly_checkboxes["auto_continue_gamma"].isChecked())
+
+    def _refresh_folder_tiles(self, profile) -> None:
+        """Step 1's tiles: each install folder, and free space on its drive.
+
+        A picked Installation directory that differs from the saved folders
+        is previewed: the folders Create folders would make there."""
+        paths = {}
+        parent = None
+        if profile is not None:
+            paths = {"anomaly": profile.anomaly, "gamma": profile.gamma, "cache": profile.cache}
+            # Show the base folder the three were made in, if they share one.
+            parents = {str(Path(p).expanduser().parent) for p in paths.values() if p}
+            if len(parents) == 1 and all(paths.values()):
+                parent = parents.pop()
+                if not self.root_card_edit.text():
+                    self.root_card_edit.setText(parent)
+        root = self.root_card_edit.text().strip()
+        preview = bool(root) and str(Path(root).expanduser()) != parent
+        if preview:
+            paths = {key: str(Path(root).expanduser() / key) for key in ("anomaly", "gamma", "cache")}
+        for key in ("anomaly", "gamma", "cache"):
+            path = paths.get(key, "")
+            if not path:
+                self.folder_tiles[key].set_state("idle", "-", tr("Not set"))
+            elif Path(path).expanduser().is_dir():
+                self.folder_tiles[key].set_state("ok", tr("Ready"), path)
+            elif preview:
+                self.folder_tiles[key].set_state("info", tr("Not created"), path)
+            else:
+                self.folder_tiles[key].set_state("warn", tr("Missing"), path)
+        self._refresh_storage(paths, preview)
+        free = free_space_bytes(paths["gamma"]) if paths.get("gamma") else None
+        if free is None:
+            self.folder_tiles["space"].set_state("idle", "-", tr("Choose a folder first"))
+            return
+        # Room for a fresh install; an installed GAMMA already has its room.
+        roomy = free >= _INSTALL_SPACE_BYTES or (
+            profile is not None and gamma_installed(paths["gamma"], profile.mo2_profile)
+        )
+        self.folder_tiles["space"].set_state(
+            "ok" if roomy else "warn", human_size(free), tr("free on this drive, about 150 GB needed")
+        )
+
+    def _refresh_storage(self, paths: dict, preview: bool) -> None:
+        """Step 1's Storage usage: what the install folders take, as the
+        Dashboard last measured them (no folder walk here), and the drive's
+        free space - the Dashboard's own bar, legend and meter."""
+        layout = self.storage_group.layout()
+        clear_layout(layout)
+        stored = gui_settings.load_gui_settings().get("storage_sizes") or {}
+        key = [paths.get(k, "") for k in ("anomaly", "gamma", "cache")]
+        sizes = stored.get("sizes") if stored.get("key") == key and not preview else None
+        if isinstance(sizes, dict) and sizes:
+            segments = [(value, _SEGMENT_TOKENS.get(name, "storage_c")) for name, value in sizes.items()]
+            layout.addWidget(_SegmentedBar(segments))
+            legend = reflow.mark_row(QHBoxLayout())
+            legend.setSpacing(18)
+            for (name, value), (_value, token) in zip(sizes.items(), segments, strict=True):
+                item = QHBoxLayout()
+                item.setSpacing(6)
+                item.addWidget(_Swatch(token), 0, Qt.AlignmentFlag.AlignVCenter)
+                item.addWidget(QLabel(tr("{key}: {arg}", key=name, arg=human_size(value))))
+                legend.addLayout(item)
+            legend.addStretch(1)
+            layout.addLayout(legend)
+        usage = disk_usage_bytes(paths["gamma"]) if paths.get("gamma") else None
+        if usage is None or usage[0] <= 0:
+            self.storage_group.setVisible(bool(sizes))
+            return
+        self.storage_group.show()
+        total, free = usage
+        used = round(100 * (total - free) / total)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(tr("Free on drive: {free} of {total}", free=human_size(free), total=human_size(total))))
+        row.addStretch(1)
+        percent = QLabel(tr("{percent}% used", percent=used))
+        percent.setObjectName("dim")
+        row.addWidget(percent)
+        layout.addLayout(row)
+        meter = QProgressBar()
+        meter.setTextVisible(False)
+        meter.setRange(0, 100)
+        meter.setValue(used)
+        meter.setObjectName("storageMeterLow" if free < _INSTALL_SPACE_BYTES else "storageMeter")
+        layout.addWidget(meter)
+
+    def _refresh_install_tiles(self) -> None:
+        """The Anomaly and GAMMA steps' tiles: what is installed where, the
+        download the next install uses, and room on each drive."""
+        profile = self.window.settings.active_profile
+        if profile is None:
+            for tile in (*self.anomaly_tiles.values(), *self.gamma_tiles.values()):
+                tile.set_state("idle", "-", tr("Not set"))
+            return
+        anomaly = anomaly_installed(profile.anomaly)
+        self.anomaly_tiles["version"].set_state(
+            "ok" if anomaly else "idle", "1.5.3", tr("STALKER Anomaly")
+        )
+        if self.checkboxes["offline"].isChecked():
+            download = ("Offline", "Unpacked from the download cache")
+        elif self.anomaly_checkboxes["anomaly_mirror"].isChecked():
+            download = ("Mirror", "Faster, falls back to ModDB")
+        else:
+            download = ("ModDB", "Straight from ModDB")
+        self.anomaly_tiles["download"].set_state("ok", tr(download[0]), tr(download[1]))
+        counts = count_active_mods(profile.gamma, profile.mo2_profile)
+        if counts is None:
+            self.gamma_tiles["mods"].set_state("idle", "-", tr("Not installed"))
+        else:
+            self.gamma_tiles["mods"].set_state(
+                "ok", str(counts[0]), tr("of {total} mods enabled", total=counts[1])
+            )
+        archives = count_cached_archives(profile.cache)
+        self.gamma_tiles["cache"].set_state(
+            "ok" if archives else "idle", str(archives), tr("archives ready to reuse")
+        )
+        for tiles, path in ((self.anomaly_tiles, profile.anomaly), (self.gamma_tiles, profile.gamma)):
+            _folder_tile(tiles["folder"], path)
+            _space_tile(tiles["space"], path)
+
+    def _refresh_deps_tiles(self) -> None:
+        """Step 2's tiles and verb chips, from the last dependency check."""
+        verbs = self._wt_verbs
+        if self._wt_installed is True and verbs is None:
+            verbs = dict.fromkeys((*WINETRICKS_VERBS, "umu"), True)  # paused while the game runs
+        if verbs:
+            done = sum(1 for ok in verbs.values() if ok)
+            self.deps_tiles["runtimes"].set_state(
+                "ok" if done == len(verbs) else "warn",
+                f"{done}/{len(verbs)}",
+                tr("Windows runtimes in the prefix"),
+            )
+        else:
+            self.deps_tiles["runtimes"].set_state("idle", "-", self.wt_status._status.text())
+        for key, row in self.deps_rows.items():
+            found = verbs.get(key) if verbs else None
+            row.set_state("idle" if found is None else "ok" if found else "problem")
+        # System Wine is only checked, and needed, when umu-run is missing.
+        self.deps_rows["wine"].setVisible(bool(verbs) and "wine" in verbs)
+        prefix = self._wt_prefix()
+        _space_tile(self.deps_tiles["space"], prefix)
+        if prefix and Path(prefix).is_dir():
+            self.deps_tiles["prefix"].set_state("ok", tr("Ready"), prefix)
+        else:
+            self.deps_tiles["prefix"].set_state("warn", tr("Missing"), prefix or tr("Not set"))
+        try:
+            runner = configured_runner()
+        except LaunchError as exc:
+            self.deps_tiles["runner"].set_state("warn", tr("Missing"), str(exc))
+        else:
+            # A tick like its neighbours: an "i" badge read as clickable.
+            self.deps_tiles["runner"].set_state(
+                "ok", runner.label, tr("Runs the game and installs these runtimes")
+            )
 
     def _update_button_states(self):
         busy = self.window.install_busy
@@ -1496,14 +2062,15 @@ class InstallPage(QWidget):
         # `anomaly install` has no offline mode; the offline full install
         # unpacks Anomaly from the cache together with GAMMA.
         self.anomaly_button.setText(
-            tr("Retry Anomaly") if self._anomaly_failed else tr("Install Anomaly")
+            tr("Retry Anomaly") if self._anomaly_failed
+            else tr("Reinstall Anomaly") if anomaly
+            else tr("Install Anomaly")
         )
-        self.anomaly_button.setEnabled((not anomaly or self._anomaly_failed) and not offline)
-        self.anomaly_button.setToolTip(
-            tr("Offline install unpacks Anomaly from the cache together with GAMMA. Use the install button on the right.")
-            if offline and not anomaly
-            else ""
-        )
+        # A reinstall reuses the archive already in the cache, so Offline
+        # only blocks a first install.
+        self.anomaly_button.setEnabled(anomaly or not offline)
+        self.anomaly_button.setToolTip(tr(_ANOMALY_OFFLINE_NOTE) if offline and not anomaly else "")
+        self.anomaly_offline_note.setVisible(offline and not anomaly)
         # Stays available once installed, as Reinstall: it is the only way
         # to re-unpack mods or apply "Re-download GitHub addons".
         self.install_button.setEnabled(True)
@@ -1529,6 +2096,12 @@ class InstallPage(QWidget):
 
     def _update_install_status(self):
         profile = self.window.settings.active_profile
+        if profile is not None and all((profile.anomaly, profile.gamma, profile.cache)):
+            self._steps[0].set_status("ok", tr("Selected"))
+        else:
+            self._steps[0].set_status("missing", tr("Not set"))
+        self._refresh_folder_tiles(profile)
+        self._refresh_install_tiles()
         if profile is None:
             self.anomaly_status.set_state(None)
             self.gamma_status.set_state(None)
@@ -1560,7 +2133,21 @@ class InstallPage(QWidget):
             self.full_progress._toggle_table()
 
     def _browse_install_root(self):
-        self._pick_folder(self.root_card_edit, tr("Select install root directory"))
+        if self._pick_folder(self.root_card_edit, tr("Select install root directory")):
+            self._refresh_folder_tiles(self.window.settings.active_profile)
+
+    def _on_app_state_changed(self, state) -> None:
+        """Back in COMMANDER (say from a file manager): re-check the folders,
+        free space, install states and Wine prefix, which only take a few
+        file lookups, and the runtimes while the Dependencies step is open."""
+        if state == Qt.ApplicationState.ApplicationActive and self.isVisible():
+            self._update_install_status()
+            self._refresh_deps_tiles()
+            self._refresh_verify_age()
+            # The runtimes check runs winetricks in the background: only
+            # while its step is open.
+            if self._step == 1:
+                self._refresh_winetricks_status()
 
     def _create_install_folders(self):
         """Create the anomaly/gamma/cache folders under the chosen install root.
@@ -1618,41 +2205,6 @@ class InstallPage(QWidget):
                 tr("Cache: {path}", path=str(folders["Cache folder"])),
             ),
         )
-
-    def eventFilter(self, obj, event):
-        if obj is self.anomaly_gamma_card and event.type() == QEvent.Type.Resize:
-            self._reflow_gamma_options()
-        return super().eventFilter(obj, event)
-
-    def _reflow_gamma_options(self):
-        """GAMMA install options in two columns of three when they fit in
-        half the Anomaly/GAMMA card, else one column - two columns made
-        the GAMMA side wider and pushed the divider off centre."""
-        boxes = list(self.checkboxes.values())
-        rows = (len(boxes) + 1) // 2
-        layout = self._opts_layout
-        two_wide = (
-            max(cb.sizeHint().width() for cb in boxes[:rows])
-            + layout.horizontalSpacing()
-            + max(cb.sizeHint().width() for cb in boxes[rows:])
-        )
-        # Card width, not the grid's: on the card's Resize event the
-        # grid geometry is still the old one.
-        card = self.anomaly_gamma_card
-        margins = card.layout().contentsMargins()
-        inner = card.width() - margins.left() - margins.right()
-        half = (inner - 2 * self._ag_grid.horizontalSpacing() - 1) // 2
-        if reflow.is_stacked(self._ag_grid):  # GAMMA under Anomaly: all of it
-            half = inner
-        columns = 2 if half >= two_wide else 1
-        if columns == self._opts_columns:
-            return
-        self._opts_columns = columns
-        rows = len(boxes) if columns == 1 else rows
-        for cb in boxes:
-            layout.removeWidget(cb)
-        for index, cb in enumerate(boxes):
-            layout.addWidget(cb, index % rows, index // rows)
 
     def _make_folder_row(self, label_text, on_browse, placeholder="Click to choose a folder"):
         edit = _PathEdit()
@@ -2194,8 +2746,12 @@ class InstallPage(QWidget):
         self.window.set_install_busy(False)
         self._update_button_states()
         if not cancelled and cli_ok(rc, output, ""):
-            # Setup is done; the next thing to do is play.
-            self.window.set_page("play")
+            if self.verify_checkboxes["verify_after_gamma"].isChecked():
+                self._show_step(4)
+                QTimer.singleShot(0, self._start_verify)
+            else:
+                # Setup is done; the next thing to do is play.
+                self.window.set_page("play")
 
     def _save_resume_state(self) -> None:
         profile = self.window.settings.active_profile
@@ -2277,6 +2833,89 @@ class InstallPage(QWidget):
         self.full_progress.status_message(tr("Cancelling installation"))
         runner.cancel()
 
+    def _on_anomaly_button_clicked(self) -> None:
+        profile = self.window.settings.active_profile
+        if profile is not None and not self._anomaly_failed and anomaly_installed(profile.anomaly):
+            self._start_anomaly_reinstall()
+        else:
+            self._start_anomaly_install()
+
+    def _start_anomaly_reinstall(self) -> None:
+        """Unpack Anomaly again over the install, then reinstall GAMMA.
+
+        `anomaly install` puts stock Anomaly back over GAMMA's own files in
+        the Anomaly folder (its engine exes among them), so GAMMA has to go
+        back on top, as Verify's repair does. The archive has no saves or
+        user.ltx, so those are only touched when the user unticks Keep.
+        """
+        if self.window.install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            return
+        if game_running():
+            QMessageBox.information(self, tr("Close the game first"), tr("Anomaly can't be reinstalled while the game is running."))
+            return
+        profile = self.window.settings.active_profile
+        with_gamma = gamma_installed(profile.gamma, profile.mo2_profile)
+        if not confirm_singleplayer(self, profile, tr("reinstalling Anomaly")):
+            return
+        options = QWidget()
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(0, 0, 0, 0)
+        keep_saves = QCheckBox(tr("Keep saves"))
+        keep_saves.setChecked(True)
+        keep_settings = QCheckBox(tr("Keep user.ltx and MCM settings"))
+        keep_settings.setChecked(True)
+        keep_settings.setToolTip(
+            tr("Keep your game options, keybindings and MCM settings during the reinstall.")
+        )
+        options_layout.addWidget(keep_saves)
+        options_layout.addWidget(keep_settings)
+        points = [tr("The Anomaly archive in the download cache is reused if it is still valid.")]
+        if with_gamma:
+            points.append(tr("GAMMA is reinstalled right after, so its own files go back on top of Anomaly."))
+        points.append(tr("Files you added to the Anomaly folder yourself stay. For a clean install, use Fresh Reset on the Utilities page."))
+        answer = QMessageBox.question(
+            self,
+            tr("Reinstall Anomaly?"),
+            tr("COMMANDER unpacks STALKER Anomaly 1.5.3 again over your install."),
+            (QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No),
+            points=tuple(points),
+            extra=options,
+            info=tr("A backup of your saves, user.ltx and MCM settings is made first."),
+            labels={QMessageBox.StandardButton.Yes: tr("Reinstall now"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # install_busy may have flipped True while the dialog was open.
+        if self.window.install_busy:
+            QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            return
+        message, ok = prepare_anomaly_reinstall(
+            profile,
+            keep_saves=keep_saves.isChecked(),
+            keep_settings=keep_settings.isChecked(),
+            with_gamma=with_gamma,
+        )
+        if not ok:
+            QMessageBox.warning(self, tr("Anomaly wasn't reinstalled"), message)
+            return
+        if message:
+            self.window.statusBar().showMessage(message, 8000)
+        self._auto_chain = with_gamma
+        self._auto_cancelled = False
+        self._chain_preserve = keep_settings.isChecked() if with_gamma else None
+        self._verify_anomaly_after_install = self._wants_anomaly_only_check()
+        self._start_anomaly_install(skip_confirm=True, respect_options=False)
+
+    def _wants_anomaly_only_check(self) -> bool:
+        """"Check Anomaly files after install", unless Anomaly goes straight
+        on to GAMMA and the full check after GAMMA covers it anyway.
+        Call after _auto_chain is set."""
+        if not self.anomaly_checkboxes["verify_after_install"].isChecked():
+            return False
+        boxes = getattr(self, "verify_checkboxes", None)
+        return not (self._auto_chain and boxes and boxes["verify_after_gamma"].isChecked())
+
     def _start_anomaly_install(self, skip_confirm=False, respect_options=True):
         if self._anomaly_runner is not None and self._anomaly_runner.is_running():
             return
@@ -2336,9 +2975,7 @@ class InstallPage(QWidget):
             # own chaining) - respect the Anomaly card's own checkboxes.
             self._auto_chain = self.anomaly_checkboxes["auto_continue_gamma"].isChecked()
             self._auto_cancelled = False
-            self._verify_anomaly_after_install = self.anomaly_checkboxes[
-                "verify_after_install"
-            ].isChecked()
+            self._verify_anomaly_after_install = self._wants_anomaly_only_check()
         self._anomaly_failed = False
         self._anomaly_failure = None
         self.window.set_install_busy(True, "anomaly")
@@ -2421,7 +3058,7 @@ class InstallPage(QWidget):
     def _start_post_anomaly_verify(self):
         """Optional extra step: re-run `anomaly check` right after a
 
-        successful Anomaly install (see the "Verify files after install"
+        successful Anomaly install (see the "Check Anomaly files after install"
         checkbox) - a lightweight nicety, not a replacement for the full
         Verify Integrity pipeline.
         """
@@ -2525,8 +3162,16 @@ class InstallPage(QWidget):
             self.full_progress.status_message(
                 tr("Anomaly installed. Starting GAMMA install")
             )
-            self._start_full_install(skip_confirm=True)
+            preserve = getattr(self, "_chain_preserve", None)
+            self._chain_preserve = None
+            if preserve is None:
+                self._start_full_install(skip_confirm=True)
+            else:
+                self._start_full_install(
+                    skip_confirm=True, preserve_user=preserve, preserve_mcm=preserve
+                )
             return
+        self._chain_preserve = None
         # Only for a run that's actually done (not chaining into GAMMA,
         # where _on_full_finished's own notification covers the eventual
         # outcome instead) and not cancelled - the user already knows -
@@ -2619,6 +3264,9 @@ class InstallPage(QWidget):
         self._repo_restored = []
         self._anomaly_recheck_done = False
         self._pending_repair = None
+        # Read here, on the GUI thread: the GAMMA check runs on a worker.
+        self._anomaly_skipped = not self.verify_checkboxes["check_anomaly"].isChecked()
+        self._cache_skipped = not self.verify_checkboxes["check_cache"].isChecked()
         self.repair_button.hide()
         clear_layout(self.verify_findings)
         self.verify_tiles["anomaly"].set_state("running", "0", tr("files checked"))
@@ -2633,6 +3281,11 @@ class InstallPage(QWidget):
         self.verify_progress.bar.show()
         # Verify cannot pause (no runner is bound), so hide the inert Pause button.
         self.verify_progress.pause_button.hide()
+        if self._anomaly_skipped:
+            self.verify_progress.log.append_line("Anomaly check skipped.")
+            self._update_verify_tiles()
+            self._start_gamma_verify()
+            return
         self._verify_phase_busy(tr("Checking Anomaly files"))
         self.verify_progress.log.append_line("== Anomaly integrity check ==")
         runner = CommandRunner(cli_command(["anomaly", "check"]), parent=self)
@@ -2782,7 +3435,9 @@ class InstallPage(QWidget):
         records = fetch_modpack_records(profile.mod_pack_maker_url)
         expected = expected_archive_md5s(records)
         cache_result = (
-            verify_cache_archives(
+            None
+            if getattr(self, "_cache_skipped", False)
+            else verify_cache_archives(
                 profile.cache,
                 expected,
                 on_progress=lambda done, total, name: report(
@@ -3269,7 +3924,11 @@ class InstallPage(QWidget):
             )
         profile = self.window.settings.active_profile
         findings = build_findings(
-            anomaly_checked=self._anomaly_checked or self._verify_anomaly_ok,
+            anomaly_checked=(
+                self._anomaly_checked
+                or self._verify_anomaly_ok
+                or getattr(self, "_anomaly_skipped", False)
+            ),
             extra=extra,
             anomaly_problem_lines=self._anomaly_problem_lines,
             anomaly_root=profile.anomaly if profile is not None else "",
@@ -3315,6 +3974,9 @@ class InstallPage(QWidget):
         self._finish_verify(
             ok=verdict != "attention", message=message, summary=summary, verdict=verdict
         )
+        if self._pending_repair is not None and self.verify_checkboxes["repair_prompt"].isChecked():
+            # After _finish_verify: the repair refuses to start while busy.
+            QTimer.singleShot(0, self._on_repair_clicked)
 
     def _start_gamma_repair_deletion(self) -> None:
         self.verify_progress.cancel_button.show()
@@ -3816,6 +4478,7 @@ class InstallPage(QWidget):
         for widget in (self.verify_pill, self.verify_dot):
             widget.setProperty("level", level)
         _repolish(self.verify_pill, self.verify_dot)
+        self._steps[4].set_status(_VERIFY_STEP_STATES.get(level, "pending"), text)
 
     def _settle_running_tiles(self) -> None:
         """A run that stopped early leaves no tile spinning."""
@@ -3834,7 +4497,9 @@ class InstallPage(QWidget):
         counts = self._verify_counts
         checked = self._anomaly_checked or self._verify_anomaly_ok
         bad = counts["CORRUPT"] + counts["NOT FOUND"]
-        if not checked:
+        if getattr(self, "_anomaly_skipped", False):
+            tiles["anomaly"].set_state("idle", "-", tr("Skipped"))
+        elif not checked:
             tiles["anomaly"].set_state("problem", "-", tr("Couldn't be checked"))
         elif bad:
             tiles["anomaly"].set_state("problem", f"{bad:,}", tr("files need repair"))
@@ -3884,7 +4549,9 @@ class InstallPage(QWidget):
                     tr("files unchanged since the last check ({size})", size=format_size(scan.bytes_scanned)),
                 )
         cache = self._cache_archive_result
-        if cache is None:
+        if getattr(self, "_cache_skipped", False):
+            tiles["cache"].set_state("idle", "-", tr("Skipped"))
+        elif cache is None:
             if presence is not None:
                 tiles["cache"].set_state("info", "-", tr("GAMMA's list unavailable"))
         elif not cache.cancelled:
@@ -3953,6 +4620,10 @@ class InstallPage(QWidget):
             except TypeError:
                 continue
         self._render_findings(findings)
+        self._set_saved_verify_pill(entry)
+
+    def _set_saved_verify_pill(self, entry: dict) -> None:
+        """The pill for a saved check: its verdict and how long ago it ran."""
         verdict = entry.get("verdict")
         label = {
             "healthy": tr("Healthy"),
@@ -3967,6 +4638,18 @@ class InstallPage(QWidget):
         except (TypeError, ValueError):
             age = ""
         self._set_verify_pill(verdict, f"{label} · {age}" if age else label)
+
+    def _refresh_verify_age(self) -> None:
+        """Re-count the pill's "3 h ago" while it shows a finished check,
+        without re-drawing the tiles and findings under it."""
+        level = self.verify_pill.property("level")
+        profile = self.window.settings.active_profile
+        if level not in ("healthy", "snapshot", "attention") or profile is None:
+            return
+        saved = gui_settings.load_gui_settings().get(_VERIFY_LAST_KEY)
+        entry = saved.get(profile.gamma) if isinstance(saved, dict) else None
+        if isinstance(entry, dict) and entry.get("verdict") == level:
+            self._set_saved_verify_pill(entry)
 
     def _cancel_verify(self):
         running = self._verify_runner is not None and self._verify_runner.is_running()
@@ -4020,6 +4703,7 @@ class InstallPage(QWidget):
         self._wt_installed = True
         self.wt_status.set_state(True)
         self.wt_progress.status_label.setText(text)
+        self._refresh_wt_extra()
         self.wt_status.set_status_tooltip(winetricks_tooltip(paused))
         self._update_button_states()
 
@@ -4054,6 +4738,7 @@ class InstallPage(QWidget):
             # The game started while the check was in flight; the result is stale.
             self._paused_status()
             return
+        self._wt_verbs = dict(status)
         installed = sum(1 for ok in status.values() if ok)
         total = len(status)
         # total == 0 means the check found no verbs at all (lookup failure),
@@ -4206,6 +4891,17 @@ class InstallPage(QWidget):
         self.wt_progress.log_toggle.setVisible(visible)
         if not visible and self.wt_progress.log.isVisible():
             self.wt_progress._toggle_log()
+        self._refresh_wt_extra()
+
+    def _refresh_wt_extra(self) -> None:
+        """Hide the Dependencies console row while it has nothing to show,
+        so Back/Next sit where they do on the other steps."""
+        if getattr(self, "_step", None) != 1:
+            return
+        self.wt_progress.setVisible(
+            bool(self.wt_progress.status_label.text())
+            or not self.wt_progress.log_toggle.isHidden()
+        )
 
     def _wt_status_failed(self, detail: str) -> None:
         """Reset the dependency status row after a stage aborted mid-install."""

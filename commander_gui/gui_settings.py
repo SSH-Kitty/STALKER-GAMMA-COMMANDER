@@ -96,6 +96,8 @@ _DEFAULTS = {
     "pending_settings_restore": {},  # profile -> pre-reset backup to restore after the GAMMA reinstall (game_backup)
     "offline_modpack_list": "",  # modpack_maker_list.txt for an offline install (desktop and Deck)
     "offline_mod_list": "",  # modlist.txt for an offline install (desktop and Deck)
+    "verify_repair_prompt": False,  # Install page Verify step: open the repair list when a check finds problems
+    "verify_after_gamma": False,  # Install page Verify step: run Verify Integrity after a GAMMA install
 }
 
 _cache: dict | None = None

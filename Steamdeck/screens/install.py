@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
 from commander_gui import gui_settings, modded_exes
 from commander_gui.cli_runner import cli_command, cli_resume_args
@@ -26,6 +26,7 @@ from commander_gui.dependencies import check_all_dependencies
 from commander_gui.game_backup import (
     apply_pending_settings_restore,
     backup_settings_before,
+    prepare_anomaly_reinstall,
 )
 from commander_gui.gui_settings import configured_wine_prefix
 from commander_gui.i18n import tr
@@ -78,6 +79,7 @@ from ..scale import px
 from ..welcome import open_url
 from ..widgets import (
     DeckCard,
+    DeckOverlay,
     DeckPicker,
     DeckProgress,
     DeckRow,
@@ -337,19 +339,18 @@ class InstallScreen(DeckScreen):
     def _update_buttons(self) -> None:
         idle = not self.window.install_busy and self._runner is None
         has_profile = self.profile() is not None
-        # Disabled once installed, matching desktop's own anomaly_button -
-        # there's nothing a second "Install Anomaly" click should do.
         # `anomaly install` has no offline mode: the offline full install
-        # unpacks Anomaly from the cache along with GAMMA.
+        # unpacks Anomaly from the cache along with GAMMA. A reinstall reuses
+        # the archive already in the cache, so Offline only blocks a first
+        # install - matching desktop's own anomaly_button.
         self.anomaly_button.setEnabled(
-            idle
-            and has_profile
-            and (not self._anomaly_installed or getattr(self, "_anomaly_failed", False))
-            and not self.offline_row.is_checked()
+            idle and has_profile and (self._anomaly_installed or not self.offline_row.is_checked())
         )
         # A failed run can leave a folder that looks installed but isn't.
         self.anomaly_button.setText(
-            tr("Retry Anomaly") if getattr(self, "_anomaly_failed", False) else tr("Install Anomaly")
+            tr("Retry Anomaly") if getattr(self, "_anomaly_failed", False)
+            else tr("Reinstall Anomaly") if self._anomaly_installed
+            else tr("Install Anomaly")
         )
         self.install_button.setEnabled(idle and has_profile)
         self.deps_button.setEnabled(idle and has_profile)
@@ -466,6 +467,9 @@ class InstallScreen(DeckScreen):
         if game_running(force=True):
             self.window.notify(tr("Close the game first"))
             return
+        if self._anomaly_installed and not getattr(self, "_anomaly_failed", False):
+            self._confirm_anomaly_reinstall(profile)
+            return
 
         message = tr("Download and install STALKER Anomaly?")
         free = free_space_bytes(profile.anomaly or profile.gamma)
@@ -482,6 +486,65 @@ class InstallScreen(DeckScreen):
             ),
             confirm_text=tr("Install"),
         )
+
+    def _confirm_anomaly_reinstall(self, profile) -> None:
+        """Desktop's Reinstall Anomaly: unpack Anomaly again, then GAMMA
+        on top, since `anomaly install` puts stock files back over GAMMA's
+        own (its engine exes among them)."""
+        with_gamma = self._gamma_installed
+        lines = [
+            tr("COMMANDER unpacks STALKER Anomaly 1.5.3 again over your install."),
+            tr("The Anomaly archive in the download cache is reused if it is still valid."),
+        ]
+        if with_gamma:
+            lines.append(tr("GAMMA is reinstalled right after, so its own files go back on top of Anomaly."))
+        lines.append(tr("Files you added to the Anomaly folder yourself stay. For a clean install, use Fresh Reset on the Utilities page."))
+        lines.append(tr("A backup of your saves, user.ltx and MCM settings is made first."))
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(deck_label("\n\n".join(lines) + battery_warning(), role="body", wrap=True))
+        keep_saves = DeckToggleRow(tr("Keep saves"), True)
+        keep_settings = DeckToggleRow(tr("Keep user.ltx and MCM settings"), True)
+        layout.addWidget(keep_saves)
+        layout.addWidget(keep_settings)
+
+        def _start() -> None:
+            self.window.dismiss_overlay()
+            confirm_singleplayer(
+                self.window, profile, tr("reinstalling Anomaly"),
+                lambda: self._confirmed(lambda: self._start_anomaly_reinstall(
+                    keep_saves.is_checked(), keep_settings.is_checked(), with_gamma
+                )),
+            )
+
+        self.window.show_overlay(
+            DeckOverlay(
+                tr("Reinstall Anomaly?"),
+                body,
+                [
+                    (tr("Reinstall now"), _start, "primary"),
+                    (tr("Cancel"), self.window.dismiss_overlay, "normal"),
+                ],
+                default_index=1,
+            )
+        )
+
+    def _start_anomaly_reinstall(self, keep_saves: bool, keep_settings: bool, with_gamma: bool) -> None:
+        profile = self.profile()
+        if profile is None:
+            return
+        message, ok = prepare_anomaly_reinstall(
+            profile, keep_saves=keep_saves, keep_settings=keep_settings, with_gamma=with_gamma
+        )
+        if message:
+            self.window.notify(message, 6000)
+        if not ok:
+            return
+        if with_gamma:
+            # _on_finished starts GAMMA with these once Anomaly is in.
+            self._chain_preserve = keep_settings
+        self._start_anomaly_install()
 
     def _start_anomaly_install(self) -> None:
         profile = self.profile()
@@ -832,6 +895,14 @@ class InstallScreen(DeckScreen):
                     invalidate_baseline(profile.gamma)
                 restore_note = apply_pending_settings_restore(profile)
         self._operation = None
+
+        chain_preserve, self._chain_preserve = getattr(self, "_chain_preserve", None), None
+        if chain_preserve is not None and self._last_operation == "anomaly" and ok and not cancelled:
+            self._finish_run()
+            self.preserve_user_row.set_checked(chain_preserve)
+            self.preserve_mcm_row.set_checked(chain_preserve)
+            self._start_install()
+            return
 
         operation = self._finished_operation_title()
         self._finish_run()

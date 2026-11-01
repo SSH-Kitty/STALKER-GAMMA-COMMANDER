@@ -694,6 +694,34 @@ class RegressionTests(unittest.TestCase):
                     return Mock()
 
             page = InstallPage(FakeWindow())
+            # The step track opens on step 1, follows each step's status,
+            # and a running install opens its step.
+            self.assertEqual(page._step, 0)
+            self.assertEqual(page._steps[2].state, "missing")
+            # Every winetricks verb has a row on the Dependencies step.
+            from commander_gui.winetricks import WINETRICKS_VERBS
+
+            self.assertLessEqual(set(WINETRICKS_VERBS), set(page.deps_rows))
+            # Step 1 previews a newly picked Installation directory.
+            self.assertEqual(page.folder_tiles["anomaly"].state, "warn")
+            page.root_card_edit.setText(str(Path(tmp) / "new"))
+            (Path(tmp) / "new" / "anomaly").mkdir(parents=True)
+            page._refresh_folder_tiles(profile)
+            self.assertEqual(page.folder_tiles["anomaly"].state, "ok")
+            self.assertEqual(page.folder_tiles["gamma"].value.text(), "Not created")
+            # The Verify pill's "N min ago" is re-counted from the saved check.
+            from commander_gui.ui import install_page as ip
+
+            saved = {ip._VERIFY_LAST_KEY: {profile.gamma: {"verdict": "snapshot", "time": time.time() - 600}}}
+            page._set_verify_pill("snapshot", "Snapshot saved · just now")
+            with patch.object(ip.gui_settings, "load_gui_settings", return_value=saved):
+                page._refresh_verify_age()
+            self.assertEqual(page.verify_pill.text(), "Snapshot saved · 10 min ago")
+            page.on_install_activity_changed("gamma")
+            self.assertEqual(page._step, 3)
+            # Step 3 names the step 4 options a chained GAMMA install uses.
+            self.assertFalse(page.gamma_chain_note.isHidden())
+            self.assertIn("Auto-retry", page.gamma_chain_note.text())
             page.checkboxes["minimal"].setChecked(True)
             page.checkboxes["offline"].setChecked(True)
             self.assertFalse(page.checkboxes["minimal"].isChecked())
@@ -706,7 +734,10 @@ class RegressionTests(unittest.TestCase):
             self.assertFalse(auto.isChecked())
             self.assertFalse(auto.isEnabled())
             self.assertFalse(page.anomaly_button.isEnabled())
+            self.assertFalse(page.anomaly_offline_note.isHidden())
             page.checkboxes["offline"].setChecked(False)
+            self.assertTrue(page.anomaly_offline_note.isHidden())
+            self.assertIn("Minimal", page.gamma_chain_note.text())
             self.assertEqual(page.install_button.text(), "Install GAMMA")
             # The options switched off for offline come back as they were.
             self.assertTrue(auto.isChecked())
@@ -3952,7 +3983,7 @@ class RegressionTests(unittest.TestCase):
             page.window.set_install_busy.assert_called_with(False)
 
     def test_verify_after_install_checkbox_runs_a_second_anomaly_check(self):
-        """Regression test: the "Verify files after install" checkbox
+        """Regression test: the "Check Anomaly files after install" checkbox
 
         must run a second `anomaly check` CommandRunner after a
         successful install, before the sequence is considered finished.
@@ -4078,6 +4109,64 @@ class RegressionTests(unittest.TestCase):
                 page._on_anomaly_finished(0, "Anomaly install complete!")
             mock_start_full.assert_called_once_with(skip_confirm=True)
             mock_notify.assert_not_called()
+
+    def test_verify_with_anomaly_unticked_skips_its_check_and_finding(self):
+        """Unticking "Anomaly files" on the Verify step must not run
+        `anomaly check`, and must not report Anomaly as unchecked."""
+        from commander_gui.integrity import build_findings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            page._verify_runner = None
+            page.verify_checkboxes = {
+                "check_anomaly": Mock(isChecked=Mock(return_value=False)),
+                "check_cache": Mock(isChecked=Mock(return_value=True)),
+            }
+            page.verify_tiles = {key: Mock() for key in ("anomaly", "mods", "md5", "cache")}
+            for name in ("repair_button", "verify_findings", "verify_progress", "verify_button"):
+                setattr(page, name, Mock())
+            with (
+                patch("commander_gui.ui.install_page.game_running", return_value=False),
+                patch("commander_gui.ui.install_page.clear_layout"),
+                patch("commander_gui.ui.install_page.CommandRunner") as runner,
+                patch.object(page, "_set_verify_pill"),
+                patch.object(page, "_set_verify_console"),
+                patch.object(page, "_start_gamma_verify") as start_gamma,
+            ):
+                page._start_verify()
+            runner.assert_not_called()
+            start_gamma.assert_called_once_with()
+            page.verify_tiles["anomaly"].set_state.assert_called_with("idle", "-", "Skipped")
+            findings = build_findings(anomaly_checked=True)
+            self.assertFalse(any(f.level == "problem" for f in findings))
+
+    def test_anomaly_only_check_skipped_when_full_check_follows_gamma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            on = Mock(isChecked=Mock(return_value=True))
+            page.anomaly_checkboxes = {"verify_after_install": on}
+            page.verify_checkboxes = {"verify_after_gamma": on}
+            page._auto_chain = True
+            self.assertFalse(page._wants_anomaly_only_check())
+            page._auto_chain = False
+            self.assertTrue(page._wants_anomaly_only_check())
+            page.verify_checkboxes = {"verify_after_gamma": Mock(isChecked=Mock(return_value=False))}
+            page._auto_chain = True
+            self.assertTrue(page._wants_anomaly_only_check())
+
+    def test_anomaly_reinstall_chain_hands_keep_settings_to_gamma(self):
+        """Reinstall Anomaly's "Keep user.ltx and MCM settings" choice must
+        reach the GAMMA reinstall it chains into, and be used only once."""
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._make_bare_install_page(tmp)
+            page._auto_chain = True
+            page._chain_preserve = False
+            with patch.object(page, "_start_full_install") as mock_start_full:
+                page._finish_anomaly_sequence(cancelled=False, install_ok=True)
+            mock_start_full.assert_called_once_with(
+                skip_confirm=True, preserve_user=False, preserve_mcm=False
+            )
+            self.assertIsNone(page._chain_preserve)
 
     def test_reset_auto_chain_ignores_the_anomaly_checkboxes(self):
         """Regression test: GAMMA Reset's own auto-chain

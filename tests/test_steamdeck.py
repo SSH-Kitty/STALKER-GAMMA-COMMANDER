@@ -2095,6 +2095,25 @@ class DeckOverhaulTests(DeckWindowFixture):
         self.assertEqual(gui_settings.load_gui_settings().get("gamma_install_resume"), {})
         self.assertFalse(self.window.install_busy)
 
+    def test_anomaly_reinstall_chains_into_gamma_with_keep_settings(self):
+        """Reinstall Anomaly must put GAMMA back on top, with the pop-up's
+        "Keep user.ltx and MCM settings" choice, and only once."""
+        install = self.goto("install")
+        install.preserve_user_row.set_checked(True)
+        install.preserve_mcm_row.set_checked(True)
+        with (
+            patch("Steamdeck.screens.install.cli_command", return_value=["stub"]),
+            patch("Steamdeck.screens.install.CommandRunner"),
+        ):
+            install._start_anomaly_reinstall(True, False, True)
+            install._runner = None
+            with patch.object(install, "_start_install") as start_gamma:
+                install._on_finished(0, "")
+        start_gamma.assert_called_once_with()
+        self.assertFalse(install.preserve_user_row.is_checked())
+        self.assertFalse(install.preserve_mcm_row.is_checked())
+        self.assertIsNone(install._chain_preserve)
+
     def test_force_stop_kills_the_launch_and_records_playtime(self):
         import time
 

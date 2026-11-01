@@ -477,6 +477,37 @@ QPushButton#winClose:pressed {
 #updatePage QFrame#installDivider {
     background-color: $border;
 }
+/* Install card's step track: the picked step is marked by its accent name
+   and the rounded underline _WizardStep paints, like the main nav bar. */
+#installPage QPushButton#wizardStep {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0;
+    text-align: left;
+}
+/* Hover: the Dashboard's Installation status rows' soft tile. */
+#installPage QPushButton#wizardStep:hover {
+    background-color: $input;
+    border-color: $border;
+}
+#installPage QLabel#wizardStepName {
+    background: transparent;
+    color: $text;
+    font-weight: bold;
+}
+#installPage QLabel#wizardStepName[selected="true"] {
+    color: $accent_strong;
+}
+#installPage QLabel#wizardStepStatus {
+    background: transparent;
+    color: $text_dim;
+    font-size: 12px;
+}
+#installPage QLabel#wizardStepStatus[state="ok"] { color: $status_ok; }
+#installPage QLabel#wizardStepStatus[state="busy"],
+#installPage QLabel#wizardStepStatus[state="warn"] { color: $warn; }
+#installPage QLabel#wizardStepStatus[state="bad"] { color: $danger_text; }
 QFrame#rowDivider {
     background-color: $border;
 }

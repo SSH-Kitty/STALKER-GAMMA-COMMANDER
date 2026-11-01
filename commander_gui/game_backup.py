@@ -47,6 +47,7 @@ REASON_LABELS = {
     "update": "Before GAMMA update",
     "repair": "Before Verify & Repair",
     "reinstall": "Before GAMMA reinstall",
+    "anomaly-reinstall": "Before Anomaly reinstall",
 }
 #: Automatic backups kept per profile *and per reason* (manual ones are
 #: never removed). Per reason, so frequent settings-only backups (before
@@ -522,6 +523,35 @@ def backup_before_wipe(
         settings=True,
         report=report,
     )
+
+
+def prepare_anomaly_reinstall(
+    profile, *, keep_saves: bool, keep_settings: bool, with_gamma: bool
+) -> tuple[str | None, bool]:
+    """Back up, then clear what the user chose not to keep, before Reinstall
+    Anomaly. The Anomaly archive has no saves or user.ltx, so the reinstall
+    itself never touches them; MCM is reset by GAMMA's reinstall afterwards.
+
+    Returns ``(message, ok)``: ``ok`` False means stop - nothing was
+    deleted. A message with ``ok`` True is a failed backup worth showing.
+    """
+    try:
+        create_backup(
+            profile.profile_name, profile.anomaly, profile.gamma, reason="anomaly-reinstall"
+        )
+    except (BackupError, OSError) as exc:
+        if not (keep_saves and keep_settings):
+            return tr("Nothing was deleted, because the backup couldn't be made.\n\n{error}", error=exc), False
+        return tr("Settings backup failed: {error}", error=exc), True
+    try:
+        if not keep_saves:
+            shutil.rmtree(saves_dir(profile.anomaly), ignore_errors=True)
+        if not keep_settings and not with_gamma:
+            # With GAMMA, its reinstall without "preserve" resets these.
+            user_ltx_path(profile.anomaly).unlink(missing_ok=True)
+    except OSError as exc:
+        return str(exc), False
+    return None, True
 
 
 def backup_settings_before(profile, reason: str, report: Report = lambda _line: None) -> str | None:
