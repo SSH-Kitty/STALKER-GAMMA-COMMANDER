@@ -22,28 +22,28 @@ from .deck_launch import in_game_mode
 #: the text added to the launch options, tooltip), ...)).
 GROUPS = (
     ("Display", (
-        ("Image effects", "ENABLE_VKBASALT=1", "Sharpening, anti-aliasing and colour looks (vkBasalt). Choose the look in Settings > Graphics."),
-        ("FSR upscaling", "WINE_FULLSCREEN_FSR=1", "Sharpen and upscale with AMD FSR when the game runs below your screen's resolution. Proton-GE only."),
-        ("Gamescope", "gamescope -f --", "Run the game fullscreen inside Gamescope. Helps with resolution and alt-tab problems."),
-        ("OpenGL", "PROTON_USE_WINED3D=1", "Use OpenGL instead of Vulkan (DXVK). Try it if the game won't start or looks broken on an older GPU."),
+        ("Image effects", "ENABLE_VKBASALT=1", "Sharpening, anti-aliasing and colour looks (vkBasalt)."),
+        ("FSR upscaling", "WINE_FULLSCREEN_FSR=1", "AMD FSR upscaling below your screen's resolution. Proton-GE only."),
+        ("Gamescope", "gamescope -f --", "Run fullscreen inside Gamescope. Helps with resolution and alt-tab."),
+        ("OpenGL", "PROTON_USE_WINED3D=1", "Use OpenGL instead of Vulkan. Try it if the game won't start."),
     )),
     ("Fixes", (
         ("No Esync", "PROTON_NO_ESYNC=1", "Turn off Esync. Can help if the game stutters or hangs."),
         ("No Fsync", "PROTON_NO_FSYNC=1", "Turn off Fsync. Can help if the game stutters or hangs."),
         ("Fix audio crackle", "PULSE_LATENCY_MSEC=60", "Bigger sound buffer. Fixes crackling or stuttering audio."),
-        ("No Steam overlay", "LD_PRELOAD=", "Keep the Steam overlay out of the game when COMMANDER was started from Steam. Can fix stutter. Co-op keeps the overlay for Steam invites."),
+        ("No Steam overlay", "LD_PRELOAD=", "Keep the Steam overlay out of the game. Can fix stutter."),
     )),
     ("Performance", (
-        ("NTSync", "PROTON_USE_NTSYNC=1", "Let the Linux kernel handle Windows sync (NTSync). Can raise FPS and smooth stutter. Needs Linux 6.14 or newer and GE-Proton 10-9 or newer. System Check shows if your system has it."),
+        ("NTSync", "PROTON_USE_NTSYNC=1", "Kernel Windows sync (NTSync). Can raise FPS. Needs Linux 6.14+ and GE-Proton 10-9+."),
     )),
     ("Overlay and logs", (
-        ("Performance overlay", "mangohud", "Show FPS, frame times and temperatures over the game (MangoHud). Choose what it shows in Settings > Graphics."),
+        ("Performance overlay", "mangohud", "Show FPS, frame times and temperatures over the game (MangoHud)."),
         ("FPS counter", "DXVK_HUD=fps", "Show DXVK's small FPS counter in the corner."),
         ("Proton log", "PROTON_LOG=1", "Write a Proton log file to your home folder. Useful for crash reports."),
-        ("Quiet Wine logs", "WINEDEBUG=-all", "Turn off Wine's debug messages. Slightly less CPU work. Switches Proton log off, since it would leave the log empty."),
+        ("Quiet Wine logs", "WINEDEBUG=-all", "Turn off Wine's debug messages. Slightly less CPU work."),
     )),
     ("Game", (
-        ("Debug mode", "-dbg", "Start Anomaly in debug mode, as the Anomaly launcher's Debug mode box does. Works with every renderer, DX11 included."),
+        ("Debug mode", "-dbg", "Start Anomaly in debug mode, like the Anomaly launcher's box."),
     )),
 )
 

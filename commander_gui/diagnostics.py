@@ -291,6 +291,42 @@ def collect_diagnostics() -> str:
     return "\n".join(sections)
 
 
+def _gpu_names() -> str:
+    try:
+        output = subprocess.run(
+            ["vulkaninfo", "--summary"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    names = re.findall(r"^\s*deviceName\s*=\s*(.+?)\s*$", output, re.MULTILINE)
+    return ", ".join(dict.fromkeys(names)) or "unknown"
+
+
+def debug_summary() -> str:
+    """The short version and hardware block the status bar's version copies,
+    for pasting into a bug report."""
+    from .gui_settings import configured_runner
+
+    try:
+        proton = configured_runner().label
+    except Exception:  # no runner found is still worth reporting
+        proton = "none"
+    cli = _cli_version()
+    cpu = _first_line("/proc/cpuinfo", "model name").lstrip(": ") or platform.machine()
+    return "\n".join((
+        f"COMMANDER:v{__version_label__}",
+        f"CLI:v{cli}" if re.fullmatch(r"[\d.]+", cli) else f"CLI:{cli}",
+        f"Proton:{proton}",
+        f"GPU:{_gpu_names()}",
+        f"CPU:{cpu}",
+    ))
+
+
 def export_diagnostics(path: Path) -> None:
     # Atomic; no .lock dotfile beside a file saved wherever the user chose.
     write_bytes(path, collect_diagnostics().encode("utf-8"), lock=False)

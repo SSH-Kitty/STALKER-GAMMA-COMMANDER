@@ -106,6 +106,7 @@ from ..winetricks import (
 from . import reflow
 from .common import (
     ACCENT,
+    OK_GREEN,
     STATUS_RED,
     BackgroundTask,
     CommandRunner,
@@ -182,12 +183,12 @@ _CHECKBOXES = [
         (
             "redownload_github",
             "Re-download GitHub addons (get latest)",
-            "Fetch the newest code for every GitHub addon. Unchecked reuses cached copies (faster).",
+            "Get the newest code for every GitHub addon. Off reuses cached copies.",
         ),
         (
             "offline",
             "Offline install (cache only)",
-            "Install from a cache you already extracted into the cache folder. Nothing is downloaded.",
+            "Install from a cache already in the cache folder. Nothing is downloaded.",
         ),
     )
 ]
@@ -223,7 +224,7 @@ _ANOMALY_CHECKBOXES = [
     (
         "anomaly_mirror",
         "Faster Anomaly download (mirror)",
-        "Download Anomaly from the GAMMA installer author's mirror instead of ModDB. It unpacks about 9 times faster but needs about 5 GB of free memory while unpacking. If the mirror fails, ModDB is used.",
+        "Faster download from the GAMMA installer author's mirror. Needs 5 GB free RAM.",
     ),
 ]
 
@@ -241,12 +242,12 @@ _VERIFY_CHECKBOXES = [
     (
         "check_cache",
         "Download cache",
-        "Check downloaded archives against GAMMA's list. When skipped, a repair downloads broken mods again instead of reusing the cache.",
+        "Check cached archives so Repair can reuse them.",
     ),
     (
         "repair_prompt",
         "Show the repair list right away",
-        "When problems are found, show what Repair would fix without clicking Repair now first.",
+        "Show what Repair would fix when problems are found.",
     ),
     (
         "verify_after_gamma",
@@ -277,7 +278,7 @@ _VERIFY_OPTION_GROUPS = (
 )
 
 #: Shown on the Anomaly step while Offline install is ticked on the GAMMA step.
-_ANOMALY_OFFLINE_NOTE = "Offline install is on. Anomaly is unpacked from the cache together with GAMMA in step 4."
+_ANOMALY_OFFLINE_NOTE = "Offline install is on. Anomaly unpacks from the cache in step 4."
 
 #: What the dependency check covers, as (group title, keys): the
 #: winetricks verbs, then the tools that run the installers. The first
@@ -608,7 +609,7 @@ class _InstallChoice(QFrame):
         self.tag.setObjectName("installChoiceTag")
         head.addWidget(self.tag)
         layout.addLayout(head)
-        layout.addWidget(info_label(intro))
+        layout.addWidget(_lead_label(intro))
         layout.addWidget(_ChoiceIcon(kind), 0, Qt.AlignmentFlag.AlignHCenter)
         cells = []
         for value, name, caption in tiles:
@@ -870,11 +871,20 @@ class _CheckTile(QFrame):
         return [self.state, self.value.text(), self.caption.text()]
 
 
+def _lead_label(template: str) -> QLabel:
+    """An intro line whose first words (the ``{arg}`` span) are green in
+    every theme. Rich text keeps the colour it was given, so
+    InstallPage.on_theme_changed fills it in again."""
+    label = info_label(template.replace("{arg}", OK_GREEN.name()))
+    label.setProperty("leadTemplate", template)
+    return label
+
+
 def _step_intro(text: str, status: QWidget | None = None) -> QHBoxLayout:
     """A step page's opening line ("Step 1. ..."), with the step's status
     badge, if any, at its right; the step track already names the step."""
     row = QHBoxLayout()
-    row.addWidget(info_label(text), 1)
+    row.addWidget(_lead_label(text), 1)
     if status is not None:
         row.addWidget(status, 0, Qt.AlignmentFlag.AlignTop)
     return row
@@ -1420,7 +1430,7 @@ class InstallPage(QWidget):
             "auto",
             tr("Automatic install"),
             tr("Recommended"),
-            tr("<span style='color:{arg};'>Hands-off.</span> Pick a folder and COMMANDER installs Anomaly and GAMMA for you.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Hands-off.</span> Pick a folder and COMMANDER installs Anomaly and GAMMA for you."),
             (
                 (tr("Folder"), tr("You choose"), tr("everything else is automatic")),
                 (tr("New installs"), tr("Best for"), tr("first time on this PC")),
@@ -1432,7 +1442,7 @@ class InstallPage(QWidget):
             "manual",
             tr("Manual install"),
             "",
-            tr("<span style='color:{arg};'>Step by step.</span> Go through each step yourself and choose every option.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Step by step.</span> Go through each step yourself and choose every option."),
             (
                 (tr("Everything"), tr("You choose"), tr("folders, options and each step")),
                 (tr("Any install"), tr("Best for"), tr("reinstall, update or repair")),
@@ -1473,7 +1483,7 @@ class InstallPage(QWidget):
         # Offline: the same install from an extracted cache archive. Above
         # the hints it swaps, so it stays put when clicked.
         self.auto_offline = QCheckBox(tr("Offline install (cache only)"))
-        self.auto_offline.setToolTip(tr("Install from a cache you already extracted into the cache folder. Nothing is downloaded."))
+        self.auto_offline.setToolTip(tr("Install from a cache already in the cache folder. Nothing is downloaded."))
         setup_layout.addWidget(self.auto_offline)
         setup_layout.addWidget(auto_folder_hint)
         self.auto_offline_box = QWidget()
@@ -1632,7 +1642,7 @@ class InstallPage(QWidget):
 
         # -- Step 1: installation directory --
         body = step_page(
-            tr("<span style='color:{arg};'>Step 1.</span> Choose where to install Anomaly and GAMMA.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Step 1.</span> Choose where to install Anomaly and GAMMA."),
         )
         self.root_card_edit, self.root_card_row = (
             self._make_folder_row(
@@ -1657,7 +1667,7 @@ class InstallPage(QWidget):
             "space": _CheckTile(tr("Free space")),
         })
         self.folder_tiles["space"].setToolTip(
-            tr("About 150 GB for Anomaly, GAMMA and the download cache together. With Minimal, about 100 GB.")
+            tr("About 150 GB in total, or about 100 GB with Minimal.")
         )
         self.create_folders_button = QPushButton(tr("Create folders"))
         self.create_folders_button.setObjectName("primary")
@@ -1667,7 +1677,7 @@ class InstallPage(QWidget):
         # -- Step 2: dependencies --
         self.wt_status = InstallStatusRow("", ok=None, pending_text="Checking")
         body = step_page(
-            tr("<span style='color:{arg};'>Step 2.</span> Install the Windows runtimes the game needs.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Step 2.</span> Install the Windows runtimes the game needs."),
             self.wt_status,
         )
         # One row per runtime and tool the check covers, ticked once it is
@@ -1685,7 +1695,7 @@ class InstallPage(QWidget):
         self.winetricks_button = QPushButton(tr("Install Dependencies"))
         self.winetricks_button.setObjectName("primary")
         self.winetricks_button.setToolTip(
-            tr("Installs required Windows runtime components (VC++, DirectX, etc.) into the Wine prefix.")
+            tr("Installs Windows runtimes (VC++, DirectX) into the Wine prefix.")
         )
         self.winetricks_button.clicked.connect(self._start_winetricks)
         step_action(self.winetricks_button)
@@ -1707,7 +1717,7 @@ class InstallPage(QWidget):
         # --use-anomaly-mirror. --
         self.anomaly_status = InstallStatusRow("")
         body = step_page(
-            tr("<span style='color:{arg};'>Step 3.</span> Download and install STALKER Anomaly 1.5.3.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Step 3.</span> Download and install STALKER Anomaly 1.5.3."),
             self.anomaly_status,
         )
         self.anomaly_edit, self.anomaly_folder_row = (
@@ -1744,7 +1754,7 @@ class InstallPage(QWidget):
         # -- Step 4: GAMMA modpack --
         self.gamma_status = InstallStatusRow("")
         body = step_page(
-            tr("<span style='color:{arg};'>Step 4.</span> Download and install GAMMA and all its mods.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Step 4.</span> Download and install GAMMA and all its mods."),
             self.gamma_status,
         )
         self.gamma_edit, self.gamma_folder_row = (
@@ -1835,7 +1845,7 @@ class InstallPage(QWidget):
         pill_row.addWidget(self.verify_pill)
         pill_row.addWidget(self.verify_dot)
         body = step_page(
-            tr("<span style='color:{arg};'>Step 5.</span> Find and repair missing or changed game files. Your saves and settings are left alone.", arg=ACCENT.name()),
+            tr("<span style='color:{arg};'>Step 5.</span> Find and repair missing or changed game files. Your saves and settings are left alone."),
             pill_box,
         )
         self.verify_maintenance_label = QLabel(
@@ -1871,13 +1881,13 @@ class InstallPage(QWidget):
             tr("Every Anomaly file is compared with Anomaly's own list of original checksums.")
         )
         self.verify_tiles["mods"].setToolTip(
-            tr("Every enabled mod in your Mod Organizer profile must have a folder with files in it.")
+            tr("Every enabled mod must have a folder with files in it.")
         )
         self.verify_tiles["md5"].setToolTip(
-            tr("Finds mod files changed since the last check. The first check after an install or mod change only records them.")
+            tr("Finds mod files changed since the last check.")
         )
         self.verify_tiles["cache"].setToolTip(
-            tr("Checks downloaded archives against GAMMA's list. Only affects future installs, never the game.")
+            tr("Checks cached archives against GAMMA's list. Never touches the game.")
         )
         self.verify_button = QPushButton(tr("Verify Integrity"))
         self.verify_button.setObjectName("primary")
@@ -1995,6 +2005,12 @@ class InstallPage(QWidget):
         self._space_timer = QTimer(self)
         self._space_timer.timeout.connect(self._refresh_live_space)
         self._space_timer.start(2_000)
+
+    def on_theme_changed(self) -> None:
+        for label in self.findChildren(QLabel):
+            template = label.property("leadTemplate")
+            if template:
+                label.setText(template.replace("{arg}", OK_GREEN.name()))
 
     def enable_winetricks_status(self):
         self._winetricks_status_enabled = True
@@ -2527,12 +2543,11 @@ class InstallPage(QWidget):
         )
         if resumable:
             label = tr(_RESUME_BUTTON_LABEL)
-            tooltip = tr("Resume the GAMMA install where it stopped. Mods that are already installed are skipped.")
+            tooltip = tr("Resume the install where it stopped. Installed mods are skipped.")
         elif reinstall:
             label = tr("Reinstall GAMMA offline") if self._offline_lists() else tr("Reinstall GAMMA")
             tooltip = tr(
-                "Unpack every GAMMA mod again over your install. Fixes broken "
-                "mods, and gets the latest GitHub addons if that option is ticked."
+                "Unpack every GAMMA mod again over your install to fix broken mods."
             )
         else:
             label = tr("Install GAMMA offline") if self._offline_lists() else tr("Install GAMMA")

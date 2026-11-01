@@ -247,7 +247,7 @@ TOPICS: list[dict] = [
                 "How long and how big",
                 [
                     ("table", [
-                        ("Disk space", "About 150 GB for Anomaly, GAMMA and the download cache together. With Minimal, about 100 GB."),
+                        ("Disk space", "About 150 GB in total, or about 100 GB with Minimal."),
                         ("Time", "Mostly depends on your connection and on moddb's download servers. A few hours is normal."),
                         ("Download threads", "How many files download at once (Dashboard or Profiles): 4 is safe, 6 is balanced (the default), 8 is fast. Lower it if downloads keep failing."),
                     ]),

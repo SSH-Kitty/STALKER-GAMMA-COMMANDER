@@ -1072,7 +1072,7 @@ class PlayPage(QWidget):
         )
         if incomplete:
             tip = tr(
-                "The last GAMMA install attempt failed - resume it on the Install page before playing."
+                "The last install failed. Resume it on the Install page first."
             )
             self.launch_button.setToolTip(tip)
             self.open_mo2_button.setToolTip(tip)

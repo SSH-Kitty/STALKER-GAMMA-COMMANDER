@@ -1092,7 +1092,7 @@ class SettingsPage(QWidget):
         for button in (self._plugin_delete_downloads, self._plugin_open_folder):
             button.setToolTip(tr("Mods the ModDB browser downloaded. Safe to delete once they're installed."))
         self._plugin_from_file = _action(tr("From a file"))
-        self._plugin_from_file.setToolTip(tr("Install a plugin .tar.xz you already downloaded from COMMANDER's GitHub releases."))
+        self._plugin_from_file.setToolTip(tr("Install a plugin .tar.xz from COMMANDER's GitHub releases."))
         self._plugin_from_file.clicked.connect(self._install_plugin_file)
         self._plugin_install = _action("")
         self._plugin_install.clicked.connect(self._moddb.install)
@@ -1140,7 +1140,7 @@ class SettingsPage(QWidget):
             self._plugin_status.setText(tr("Not installed"))
         elif outdated:
             self._plugin_status.setText(tr("Update needed"))
-            self._plugin_status.setToolTip(tr("An update is needed before it can open, for security fixes or to match this COMMANDER."))
+            self._plugin_status.setToolTip(tr("Needs an update before it can open."))
         elif moddb.running:
             self._plugin_status.setText(tr("Running"))
         else:

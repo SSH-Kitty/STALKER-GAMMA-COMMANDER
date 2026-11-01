@@ -1239,6 +1239,20 @@ QPushButton#githubLink:hover, QPushButton#discordLink:hover {
     color: $link_hover;
     background: transparent;
 }
+/* Status bar version: plain text that copies debug info, with the
+   Installation status rows' hover tile. */
+QPushButton#statusVersion {
+    font-size: 12px;
+    padding: 1px 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: $text;
+}
+QPushButton#statusVersion:hover, QPushButton#statusVersion:pressed {
+    background-color: $input;
+    border-color: $border;
+}
 QPushButton#commanderUpdateStatus {
     padding: 0 4px;
     border: none;
@@ -1276,8 +1290,14 @@ QMessageBox, QFileDialog, QDialog#messageDialog, QDialog#popupWindow {
 QDialog#messageDialog, QDialog#popupWindow {
     border: 1px solid $border_strong;
 }
+/* Themed fully: left to the desktop, the background came from the
+   system theme and could clash with the theme's text color. */
 QToolTip {
-    color: $text_info;
+    background-color: $card;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: 4px;
+    padding: 4px 6px;
 }
 QRadioButton {
     background: transparent;

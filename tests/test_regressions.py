@@ -6875,7 +6875,7 @@ class ModCounterTests(unittest.TestCase):
             self.assertFalse(page.launch_button.isEnabled())
             self.assertFalse(page.open_mo2_button.isEnabled())
             self.assertFalse(page.direct_button.isEnabled())
-            self.assertIn("resume it", page.launch_button.toolTip())
+            self.assertIn("Resume it", page.launch_button.toolTip())
 
     def _make_stubbed_play_page(self, tmp):
         """A real PlayPage whose preview can be refreshed without a real

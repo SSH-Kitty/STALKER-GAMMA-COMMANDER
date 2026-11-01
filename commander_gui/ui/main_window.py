@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__, __version_label__, gui_settings
+from ..diagnostics import debug_summary
 from ..i18n import LANGUAGE_INFO, active_language, set_active_language
 from ..self_update import (
     commander_appimage_path,
@@ -899,6 +900,14 @@ class MainWindow(QMainWindow):
             "QComboBox::drop-down { border: none; width: 16px; }"
         )
 
+        # Clicking the version copies a short version and hardware block
+        # for bug reports.
+        self._status_version_button = QPushButton()
+        self._status_version_button.setObjectName("statusVersion")
+        self._status_version_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._status_version_button.clicked.connect(self._copy_debug_summary)
+        self.statusBar().addWidget(self._status_version_button)
+
         self._status_info_label = QLabel()
         self._status_info_label.setStyleSheet(_STATUS_LABEL_STYLE)
         self.statusBar().addWidget(self._status_info_label)
@@ -1389,9 +1398,10 @@ class MainWindow(QMainWindow):
         tr()-wrapped text needs this explicit refresh to pick up a language
         change instead of getting it "for free" via reconstruction.
         """
+        self._status_version_button.setText(f"v{__version_label__}")
+        self._status_version_button.setToolTip(tr("Copy version info for bug reports"))
         self._status_info_label.setText(
-            f"v{__version_label__}   |   "
-            + tr("Active profile: {name}", name=self._active_name())
+            "|   " + tr("Active profile: {name}", name=self._active_name())
         )
         self._status_language_label.setText(f"   |   {tr('Language:')}")
         self._status_theme_label.setText(f"   |   {tr('Theme:')}")
@@ -1423,7 +1433,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_status_update_area", None) is None:  # not built yet
             return
         groups = (
-            (self._status_info_label,),
+            (self._status_version_button, self._status_info_label),
             (self._status_language_label, self._status_language_combo),
             (self._status_theme_label, self._status_theme_combo),
             (self._status_font_label, self._status_font_combo, self._status_fontsize_combo),
@@ -1441,6 +1451,19 @@ class MainWindow(QMainWindow):
             fits = fits and need <= self.width()
             for widget in group:
                 widget.setVisible(fits)
+
+    def _copy_debug_summary(self) -> None:
+        # vulkaninfo and the CLI can each take a moment, so off the GUI thread.
+        button = self._status_version_button
+        task = BackgroundTask(debug_summary, parent=self)
+
+        def copied(text: str) -> None:
+            QGuiApplication.clipboard().setText(text)
+            button.setText(tr("Copied!"))
+            QTimer.singleShot(1500, button, self._refresh_status_bar)
+
+        task.result.connect(copied)
+        task.start()
 
     def _on_status_language(self, *_args) -> None:
         code = self._status_language_combo.currentData()

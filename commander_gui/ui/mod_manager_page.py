@@ -939,7 +939,7 @@ class ModManagerPage(QWidget):
         self.install_button.clicked.connect(self._install_mod)
         self.moddb_button = QPushButton(tr("Get mods from ModDB"))
         self.moddb_button.setToolTip(
-            tr("Browse ModDB and install what you download. Needs the ModDB browser plugin from Settings > Plugins.")
+            tr("Browse ModDB and install mods. Needs the ModDB plugin.")
         )
         self.moddb_button.clicked.connect(lambda: moddb_controller(self.window).open())
         toolbar.addWidget(reflow.group(self.install_button, self.moddb_button))

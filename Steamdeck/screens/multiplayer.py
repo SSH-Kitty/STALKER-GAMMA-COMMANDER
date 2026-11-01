@@ -482,7 +482,7 @@ class MultiplayerScreen(DeckScreen):
         heading = deck_label(tr("Experimental"), role="section")
         layout.addWidget(heading)
         layout.addWidget(self._toggle("xrr_skip_mod_check", tr("Skip mod check")))
-        layout.addWidget(_caption(tr("Lets friends join with different mods. This can cause desyncs or crashes and isn't supported by xrRazom.")))
+        layout.addWidget(_caption(tr("Lets friends join with different mods. Can cause desyncs or crashes.")))
         layout.addWidget(_caption(tr("Only the host's rules count. They apply to everyone.")))
 
         layout.addWidget(deck_label(tr("Invite a friend"), role="section"))

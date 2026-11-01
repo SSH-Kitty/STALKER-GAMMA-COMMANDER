@@ -619,7 +619,7 @@ class MultiplayerPage(QWidget):
             ("Spacewar", coop.SPACEWAR_APPID, tr("Valve's free Steamworks test app: nothing to buy. Steam shows you as playing Spacewar.")),
         )
         port = self._spin("xrr_host_lan_port", 1024, 65535)
-        port.setToolTip(tr("Only for LAN sessions. To play over the internet, forward this UDP port on your router."))
+        port.setToolTip(tr("LAN only. For internet play, forward this UDP port on your router."))
         port.setFixedWidth(160)
         # One column per choice, each with its own hint under it; stat
         # tiles on the right.
@@ -825,7 +825,7 @@ class MultiplayerPage(QWidget):
         experimental = section_label(tr("Experimental"), level=3)
         experimental.setObjectName("warn")
         box.addWidget(experimental)
-        danger = self._check("xrr_skip_mod_check", tr("Skip mod check"), tr("Lets friends join with different mods. This can cause desyncs or crashes and isn't supported by xrRazom."))
+        danger = self._check("xrr_skip_mod_check", tr("Skip mod check"), tr("Lets friends join with different mods. Can cause desyncs or crashes."))
         danger.setObjectName("warn")
         box.addWidget(danger)
         box.addStretch(1)
@@ -995,7 +995,7 @@ class MultiplayerPage(QWidget):
         combat.addStretch(1)
 
         travel.addWidget(section_label(tr("Travel"), level=3))
-        sync = self._check("xrr_sync_teleport", tr("Sync quest teleports"), tr("When a quest teleports the host, nearby players come along. Not used in vanilla Anomaly."))
+        sync = self._check("xrr_sync_teleport", tr("Sync quest teleports"), tr("Nearby players follow the host on quest teleports."))
         travel.addWidget(sync)
         radius = self._spin("xrr_teleport_radius", 0, 200, " m", 5)
         radius.setToolTip(tr("0 brings everyone on the same map."))
@@ -1274,7 +1274,7 @@ class MultiplayerPage(QWidget):
         custom = self._status != coop.NOT_INSTALLED and not release.get("version")
         self.version_stat.set(release.get("version") or (tr("Custom") if custom else "?"))
         self.version_stat.setToolTip(
-            tr("A build without a version number, such as a test build. Everyone playing together needs the same one.")
+            tr("A build without a version number. Everyone must use the same one.")
             if custom else tr("Everyone playing together needs this version.")
         )
         zip_name = coop.installed_zip(profile.anomaly, profile.gamma) if state else ""
