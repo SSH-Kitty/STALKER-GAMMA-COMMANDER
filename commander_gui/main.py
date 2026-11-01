@@ -403,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     load_bundled_font()
 
     _gui = gui_settings.load_gui_settings()
-    theme = _gui.get("theme") or "gamma"
+    theme = _gui.get("theme") or "black"
     try:
         font_size = int(_gui.get("font_size") or 13)
     except (TypeError, ValueError):

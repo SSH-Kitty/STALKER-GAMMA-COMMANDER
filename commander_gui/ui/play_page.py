@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -122,13 +121,11 @@ from .common import (
     make_header_row,
     mo2_pids,
     mo2_running,
-    normalize_path,
     notice,
     notify_desktop,
     pick_shortcuts_vdf,
     play_click_sound,
     populate_runner_combo,
-    save_profile_dirs,
     section_label,
     set_hover_grow_text,
     steam_running,
@@ -139,7 +136,7 @@ from .common import (
 from .dialogs import MessageBox as QMessageBox
 from .frame_gen_card import FrameGenCard
 from .game_splash import is_launcher
-from .install_page import _PathEdit, _resume_state_matches
+from .install_page import _resume_state_matches
 from .multiplayer_page import confirm_player_name, refuse_launch
 
 
@@ -459,7 +456,6 @@ class PlayPage(QWidget):
         self._discord_started_at: float | None = None
         self._discord_last_attempt = 0.0
         self._discord_task: BackgroundTask | None = None
-        self._persisting = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -666,27 +662,6 @@ class PlayPage(QWidget):
         cards_row.addWidget(self._frame_gen, 2)
         root.addLayout(cards_row)
 
-        # -- folders card -----------------------------------------------------
-        # Click a folder box to pick a new folder, as on the Install page.
-        folders_card, folders_layout = make_card()
-        folders_layout.setSpacing(10)
-        folders_layout.addWidget(section_label(tr("Folders"), level=2))
-        folders_grid = QGridLayout()
-        folders_grid.setHorizontalSpacing(12)
-        folders_grid.setVerticalSpacing(8)
-        folders_grid.setColumnStretch(1, 1)
-        folders_layout.addLayout(folders_grid)
-        self.anomaly_edit = self._folder_row(
-            folders_grid, 0, tr("Anomaly folder:"), tr("Select Anomaly install folder")
-        )
-        self.gamma_edit = self._folder_row(
-            folders_grid, 1, tr("GAMMA folder:"), tr("Select GAMMA install folder")
-        )
-        self.cache_edit = self._folder_row(
-            folders_grid, 2, tr("Cache folder:"), tr("Select cache folder")
-        )
-        root.addWidget(folders_card)
-
         # _refresh_preview_inner() still writes the resolved launch command
         # into this (setPlainText/setStyleSheet) as part of deciding
         # whether launch_button/open_mo2_button/direct_button should be
@@ -798,7 +773,6 @@ class PlayPage(QWidget):
         self.window.refresh_settings()
         self._reload_runners()
         self._reload_targets()
-        self._load_folders()
         self._update_playtime_label()
         self.gamemode_check.blockSignals(True)
         self.gamemode_check.setChecked(
@@ -806,31 +780,6 @@ class PlayPage(QWidget):
         )
         self.gamemode_check.blockSignals(False)
         self._refresh_preview()
-
-    # ---------------------------------------------------------------- folders
-    def _load_folders(self) -> None:
-        profile = self.window.settings.active_profile
-        if profile is None:
-            return
-        self.anomaly_edit.setText(profile.anomaly)
-        self.gamma_edit.setText(profile.gamma)
-        self.cache_edit.setText(profile.cache)
-
-    def _folder_row(self, grid: QGridLayout, row: int, label: str, title: str) -> _PathEdit:
-        edit = _PathEdit()
-        edit.setPlaceholderText(tr("Click to choose a folder"))
-        edit.setToolTip(tr("Click to choose a folder"))
-        edit.clicked.connect(lambda: self._pick_folder(edit, title))
-        grid.addWidget(QLabel(label), row, 0)
-        grid.addWidget(edit, row, 1)
-        return edit
-
-    def _pick_folder(self, edit: QLineEdit, title: str) -> None:
-        start = edit.text() if Path(edit.text()).is_dir() else str(Path.home())
-        folder = QFileDialog.getExistingDirectory(self, title, start)
-        if folder:
-            edit.setText(folder)
-            self._persist_dirs()
 
     # --------------------------------------------------------- launch options
     def _toggle_launch_option(self, option: str, on: bool) -> None:
@@ -844,52 +793,6 @@ class PlayPage(QWidget):
             toggle.blockSignals(True)
             toggle.setChecked(launch_options.is_on(text, option))
             toggle.blockSignals(False)
-
-    def _persist_dirs(self) -> None:
-        if self._persisting:
-            return
-        self._persisting = True
-        try:
-            if self.window.install_busy or mo2_running():
-                QMessageBox.warning(
-                    self,
-                    tr("Please wait"),
-                    tr("An install or the game is running, so folder changes can't be saved right now. Try again when it's done."),
-                )
-                self._load_folders()
-                return
-            self.window.refresh_settings()
-            profile = self.window.settings.active_profile
-            if profile is None:
-                return
-            anomaly = normalize_path(self.anomaly_edit.text())
-            gamma = normalize_path(self.gamma_edit.text())
-            cache = normalize_path(self.cache_edit.text())
-            self.anomaly_edit.setText(anomaly)
-            self.gamma_edit.setText(gamma)
-            self.cache_edit.setText(cache)
-            if (
-                anomaly == profile.anomaly
-                and gamma == profile.gamma
-                and cache == profile.cache
-            ):
-                return
-            try:
-                save_profile_dirs(self.window.settings, profile, anomaly, gamma, cache)
-            except OSError as exc:
-                QMessageBox.warning(
-                    self, tr("Couldn't save the profile"), tr("COMMANDER couldn't write its settings file (settings.json).\n\n{exc}", exc=exc)
-                )
-                self._load_folders()
-                return
-            self.window.statusBar().showMessage(
-                tr("Folders updated: {anomaly} | {gamma} | {cache}", anomaly=anomaly, gamma=gamma, cache=cache),
-                6000,
-            )
-            self._reload_targets()
-            self._refresh_preview()
-        finally:
-            self._persisting = False
 
     # ---------------------------------------------------------------- actions
     def _selected_target(self) -> str | None:

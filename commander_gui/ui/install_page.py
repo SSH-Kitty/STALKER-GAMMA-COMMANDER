@@ -21,6 +21,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
@@ -47,6 +48,7 @@ from ..game_backup import (
     backup_settings_before,
     prepare_anomaly_reinstall,
 )
+from ..game_installs import find_install, fix_windows_paths, is_gamma, mo2_profile_for, windows_paths
 from ..gui_settings import configured_runner, configured_wine_prefix
 from ..integrity import (
     MANIFEST_FILENAME,
@@ -127,6 +129,7 @@ from .common import (
     info_label,
     make_card,
     make_header_row,
+    mo2_running,
     normalize_path,
     notify_desktop,
     paused_dependency_status,
@@ -140,7 +143,7 @@ from .common import (
 )
 from .dashboard import _SEGMENT_TOKENS, _SegmentedBar, _Swatch
 from .dialogs import MessageBox as QMessageBox
-from .dialogs import ProgressDialog
+from .dialogs import ProgressDialog, add_close_button, style_window
 from .multiplayer_page import confirm_singleplayer
 
 #: tr() msgid shared between the Install button's own label and the failure
@@ -549,20 +552,24 @@ class _PathEdit(QLineEdit):
 
 class _ChoiceIcon(QWidget):
     """The big line icon on an Automatic / Manual choice, drawn in the
-    accent like the tiles' state badges: a download into a tray, or three
-    sliders."""
+    accent like the tiles' state badges: a download into a tray, three
+    sliders, a window copied into a folder, or two folders swapping."""
 
-    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+    def __init__(self, kind: str, size: int = 110, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.kind = kind
-        self.setFixedSize(110, 110)
+        self.setFixedSize(size, size)
 
     def paintEvent(self, _event) -> None:
         ink = token_color("accent_strong", "#8fe45c")
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setPen(QPen(ink, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            # Drawn on a 110 px grid, scaled to the icon's size; the lines
+            # keep the big icons' thickness.
+            grid = 110 / self.width()
+            painter.scale(1 / grid, 1 / grid)
+            painter.setPen(QPen(ink, 4 * grid, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             if self.kind == "auto":
                 painter.drawLine(QPointF(55, 14), QPointF(55, 66))
@@ -575,9 +582,36 @@ class _ChoiceIcon(QWidget):
                 tray.lineTo(94, 92)
                 tray.lineTo(94, 66)
                 painter.drawPath(tray)
-                painter.setPen(QPen(ink, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.setPen(QPen(ink, 3 * grid, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 painter.drawLine(QPointF(86, 10), QPointF(86, 26))
                 painter.drawLine(QPointF(78, 18), QPointF(94, 18))
+            elif self.kind == "windows":
+                painter.drawRoundedRect(QRectF(10, 12, 60, 44), 4, 4)
+                painter.drawLine(QPointF(10, 25), QPointF(70, 25))
+                painter.drawPath(_folder_path(48, 66, 52, 34))
+                arrow = QPainterPath(QPointF(28, 62))
+                arrow.lineTo(28, 86)
+                arrow.lineTo(40, 86)
+                painter.drawPath(arrow)
+                head = QPainterPath(QPointF(34, 79))
+                head.lineTo(41, 86)
+                head.lineTo(34, 93)
+                painter.drawPath(head)
+            elif self.kind == "switch":
+                painter.drawPath(_folder_path(8, 42, 36, 28))
+                painter.drawPath(_folder_path(66, 42, 36, 28))
+                for start, ctrl, end, tip in (
+                    ((26, 34), (55, 2), (84, 34), (84, 26)),
+                    ((84, 78), (55, 108), (26, 78), (26, 86)),
+                ):
+                    arc = QPainterPath(QPointF(*start))
+                    arc.quadTo(QPointF(*ctrl), QPointF(*end))
+                    painter.drawPath(arc)
+                    side = 7 if tip[1] < end[1] else -7
+                    head = QPainterPath(QPointF(end[0] - 7, end[1] - side))
+                    head.lineTo(*end)
+                    head.lineTo(end[0] + 7, end[1] - side)
+                    painter.drawPath(head)
             else:
                 for x, knob in ((26, 66), (55, 34), (84, 56)):
                     painter.drawLine(QPointF(x, 14), QPointF(x, knob - 9))
@@ -587,13 +621,25 @@ class _ChoiceIcon(QWidget):
             painter.end()
 
 
+def _folder_path(x: float, y: float, w: float, h: float) -> QPainterPath:
+    """A folder outline with its tab on the top left."""
+    path = QPainterPath(QPointF(x, y))
+    path.lineTo(x + w * 0.38, y)
+    path.lineTo(x + w * 0.5, y + h * 0.22)
+    path.lineTo(x + w, y + h * 0.22)
+    path.lineTo(x + w, y + h)
+    path.lineTo(x, y + h)
+    path.closeSubpath()
+    return path
+
+
 class _InstallChoice(QFrame):
     """One half of the Automatic / Manual card: title, intro, icon and
     tiles, all one click target (or Enter/Space with keyboard focus)."""
 
     clicked = Signal()
 
-    def __init__(self, kind: str, title: str, tag: str, intro: str, tiles, parent: QWidget | None = None) -> None:
+    def __init__(self, kind: str, title: str, tag: str, intro: str, tiles, parent: QWidget | None = None, *, icon_size: int = 110) -> None:
         super().__init__(parent)
         self.setObjectName("installChoice")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -610,13 +656,13 @@ class _InstallChoice(QFrame):
         head.addWidget(self.tag)
         layout.addLayout(head)
         layout.addWidget(_lead_label(intro))
-        layout.addWidget(_ChoiceIcon(kind), 0, Qt.AlignmentFlag.AlignHCenter)
-        cells = []
+        layout.addWidget(_ChoiceIcon(kind, icon_size), 0, Qt.AlignmentFlag.AlignHCenter)
+        self.tiles = []
         for value, name, caption in tiles:
             tile = _CheckTile(name)
             tile.set_state("ok", value, caption)
-            cells.append(tile)
-        layout.addLayout(_tile_row(cells))
+            self.tiles.append(tile)
+        layout.addLayout(_tile_row(self.tiles))
         layout.addStretch(1)
         for child in self.findChildren(QWidget):
             child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -1458,6 +1504,46 @@ class InstallPage(QWidget):
         choices.addWidget(self._manual_choice, 1)
         chooser_layout.addLayout(choices)
 
+        # Under it, for installs already on disk: fix one copied from
+        # Windows, or switch which one the game uses.
+        self._installs_card, installs_layout = make_card()
+        root.addWidget(self._installs_card)
+        installs_row = QHBoxLayout()
+        installs_row.setSpacing(16)
+        self._windows_choice = _InstallChoice(
+            "windows",
+            tr("Open a Windows install"),
+            "",
+            tr("<span style='color:{arg};'>Moved from Windows?</span> Pick the copied GAMMA folder and COMMANDER fixes it for Linux."),
+            (
+                (tr("Folder"), tr("You choose"), tr("the copied GAMMA folder")),
+                (tr("Moved installs"), tr("Best for"), tr("set up on a Windows PC")),
+                (tr("Kept"), tr("Settings"), tr("saves, mods and MCM stay")),
+            ),
+            icon_size=64,
+        )
+        self._windows_choice.clicked.connect(self._open_windows_install)
+        self._switch_choice = _InstallChoice(
+            "switch",
+            tr("Switch install"),
+            "",
+            tr("<span style='color:{arg};'>One click.</span> Swap between GAMMA installs in different folders."),
+            (
+                (tr("Install"), tr("You choose"), ""),
+                (tr("Several installs"), tr("Best for"), tr("GAMMA in more than one folder")),
+                (tr("Kept"), tr("Settings"), tr("runner and launch options stay")),
+            ),
+            icon_size=64,
+        )
+        self._switch_choice.clicked.connect(self._open_install_switcher)
+        installs_divider = QFrame()
+        installs_divider.setObjectName("vDivider")
+        installs_divider.setFixedWidth(1)
+        installs_row.addWidget(self._windows_choice, 1)
+        installs_row.addWidget(installs_divider)
+        installs_row.addWidget(self._switch_choice, 1)
+        installs_layout.addLayout(installs_row)
+
         self._auto_card, auto_layout = make_card()
         root.addWidget(self._auto_card)
         auto_layout.setSpacing(14)
@@ -2102,7 +2188,9 @@ class InstallPage(QWidget):
         Manual step card at ``step``."""
         if view == "chooser":
             self._refresh_auto_choice()
+            self._refresh_switch_choice()
         self._chooser_card.setVisible(view == "chooser")
+        self._installs_card.setVisible(view == "chooser")
         self._auto_card.setVisible(view == "auto")
         self._wizard_card.setVisible(view == "manual")
         if view == "manual":
@@ -2115,6 +2203,185 @@ class InstallPage(QWidget):
             self.enable_winetricks_status()
             self._update_button_states()
             self._place_progress()
+
+    # ------------------------------------------------- installs on disk
+    def _known_installs(self) -> list[tuple[str, str, str]]:
+        """Installs added to the switcher, the one in use first."""
+        installs = [tuple(i) for i in gui_settings.load_gui_settings().get("game_installs") or []]
+        profile = self.window.settings.active_profile
+        if profile is not None and is_gamma(Path(profile.gamma).expanduser()):
+            current = (profile.anomaly, profile.gamma, profile.cache)
+            installs = [current, *(i for i in installs if i != current)]
+        return installs
+
+    @staticmethod
+    def _install_root(install: tuple[str, str, str]) -> str:
+        return os.path.commonpath([install[0], install[1]])
+
+    def _refresh_switch_choice(self) -> None:
+        installs = self._known_installs()
+        profile = self.window.settings.active_profile
+        self._switch_choice.tiles[0].set_state(
+            "ok", tr("Install"), tr("{count} saved in COMMANDER", count=len(installs))
+        )
+        # The tag names the install in use, as Automatic's names its mode.
+        tag = self._switch_choice.tag
+        if installs and profile is not None and installs[0][1] == profile.gamma:
+            root = self._install_root(installs[0])
+            tag.setText(tr("Playing: {name}", name=Path(root).name or root))
+            tag.setToolTip(root)
+        else:
+            tag.setText("")
+            tag.setToolTip("")
+
+    def _use_install(self, install: tuple[str, str, str], info: str = "") -> bool:
+        """Point the active profile at *install*, remember it and say so."""
+        if self.window.install_busy or mo2_running():
+            QMessageBox.warning(
+                self,
+                tr("Please wait"),
+                tr("An install or the game is running, so folder changes can't be saved right now. Try again when it's done."),
+            )
+            return False
+        self.window.refresh_settings()
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return False
+        # Each install keeps the MO2 profile it was last played with.
+        old_mo2 = profile.mo2_profile
+        remembered = gui_settings.load_gui_settings().get("install_mo2_profiles")
+        remembered = {**(remembered if isinstance(remembered, dict) else {}), profile.gamma: old_mo2}
+        profile.mo2_profile = mo2_profile_for(install[1], remembered.get(install[1], old_mo2))
+        try:
+            save_profile_dirs(self.window.settings, profile, *install)
+        except OSError as exc:
+            profile.mo2_profile = old_mo2
+            QMessageBox.warning(
+                self, tr("Couldn't save the profile"), tr("COMMANDER couldn't write its settings file (settings.json).\n\n{exc}", exc=exc)
+            )
+            return False
+        installs = [list(i) for i in self._known_installs()]
+        gui_settings.save_gui_settings(game_installs=installs, install_mo2_profiles=remembered)
+        self.window.refresh_settings()
+        self.refresh()
+        self._refresh_switch_choice()
+        folder = self._install_root(install)
+        done = tr("The game now runs from {name}.", name=Path(folder).name or folder)
+        self.window.statusBar().showMessage(done, 6000)
+        QMessageBox.information(
+            self,
+            tr("Install switched"),
+            done,
+            points=(
+                tr("Folder: {folder}", folder=folder),
+                tr("Mod Organizer profile: {name}", name=profile.mo2_profile),
+            ),
+            info=" ".join(filter(None, (info, tr("Your runner and launch options stay the same.")))),
+        )
+        return True
+
+    def _pick_install(self, title: str) -> tuple[str, str, str] | None:
+        """Ask for a folder and find an install in it."""
+        folder = QFileDialog.getExistingDirectory(self, title, str(Path.home()))
+        if not folder:
+            return None
+        install = find_install(folder)
+        if install is None:
+            QMessageBox.warning(
+                self,
+                tr("No GAMMA install found"),
+                tr("Pick the folder that holds both the Anomaly folder and the GAMMA folder (the one with ModOrganizer.exe)."),
+            )
+        return install
+
+    def _fix_for_linux(self, install: tuple[str, str, str]) -> bool:
+        """Fix Windows paths in *install*'s ModOrganizer.ini, after asking."""
+        if not windows_paths(install[1]):
+            return True
+        answer = QMessageBox.question(
+            self,
+            tr("Fix this install for Linux?"),
+            tr("This GAMMA install was set up on Windows. COMMANDER changes its paths so it runs here, then plays from it."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            points=(
+                tr("Only ModOrganizer.ini changes. Mods, saves and settings stay as they are."),
+                tr("The old file is kept as ModOrganizer.ini.windows.bak."),
+            ),
+            labels={QMessageBox.StandardButton.Yes: tr("Fix and play"), QMessageBox.StandardButton.No: tr("Cancel")},
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        try:
+            left = fix_windows_paths(install[0], install[1])
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Couldn't fix the install"), tr("ModOrganizer.ini could not be updated: {exc}", exc=exc))
+            return False
+        if left:
+            QMessageBox.information(
+                self,
+                tr("Some paths point outside the install"),
+                tr("These are on another Windows drive, so they were left as they are. Change them in Mod Organizer if you need them."),
+                points=tuple(left),
+            )
+        return True
+
+    def _open_windows_install(self) -> None:
+        install = self._pick_install(tr("Select the GAMMA install copied from Windows"))
+        if install is None:
+            return
+        info = "" if windows_paths(install[1]) else tr("This install has no Windows paths left, so it already works on Linux.")
+        if self._fix_for_linux(install):
+            self._use_install(install, info)
+
+    def _open_install_switcher(self) -> None:
+        installs = self._known_installs()
+        profile = self.window.settings.active_profile
+        dialog = QDialog(self)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+        layout.addWidget(info_label(tr("Pick the install to play. Only the folders change, your runner and launch options stay.")))
+        chosen: list = []
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setColumnStretch(0, 1)
+        for row, install in enumerate(installs):
+            active = profile is not None and install[1] == profile.gamma
+            path = QLabel(self._install_root(install))
+            path.setToolTip("\n".join(install))
+            grid.addWidget(path, row, 0)
+            use = QPushButton(tr("Playing") if active else tr("Play this"))
+            use.setObjectName("primary")
+            use.setEnabled(not active and Path(install[1]).is_dir())
+            use.clicked.connect(lambda _c=False, i=install: (chosen.append(("use", i)), dialog.accept()))
+            grid.addWidget(use, row, 1)
+            remove = QPushButton(tr("Remove"))
+            remove.setToolTip(tr("Remove from this list. No files are deleted."))
+            remove.setEnabled(not active)
+            remove.clicked.connect(lambda _c=False, i=install: (chosen.append(("remove", i)), dialog.accept()))
+            grid.addWidget(remove, row, 2)
+        layout.addLayout(grid)
+        add = QPushButton(tr("Add install"))
+        add.clicked.connect(lambda: (chosen.append(("add", None)), dialog.accept()))
+        layout.addWidget(add, 0, Qt.AlignmentFlag.AlignLeft)
+        add_close_button(dialog, layout)
+        style_window(dialog, tr("Switch install"), resizable=False)
+        dialog.setMinimumWidth(640)
+        if not dialog.exec() or not chosen:
+            return
+        action, install = chosen[0]
+        if action == "remove":
+            gui_settings.save_gui_settings(game_installs=[list(i) for i in installs if i != install])
+            self._refresh_switch_choice()
+        elif action == "add":
+            install = self._pick_install(tr("Select a folder with a GAMMA install"))
+            if install is not None and install not in installs:
+                gui_settings.save_gui_settings(game_installs=[*map(list, installs), list(install)])
+                self._refresh_switch_choice()
+        else:
+            if self._fix_for_linux(install):
+                self._use_install(install)
+            return
+        self._open_install_switcher()
 
     def _place_progress(self) -> None:
         """Put the install progress panel where the install is watched:
@@ -2310,7 +2577,10 @@ class InstallPage(QWidget):
         self._page_stack.setCurrentIndex(index)
         self._action_stack.setCurrentIndex(index)
         for i, extra in enumerate(self._step_extras):
-            if extra is not None:
+            # The Dependencies console is _refresh_wt_extra's: showing it
+            # here first, to hide it again there, left its gap on screen
+            # for a frame or two.
+            if extra is not None and extra is not self.wt_progress:
                 extra.setVisible(i == index)
         self._refresh_wt_extra()
         self._place_progress()
@@ -5231,8 +5501,8 @@ class InstallPage(QWidget):
         if game_running():
             self._paused_status()
             return
-        self._wt_installed = None
-        self._update_button_states()
+        # A re-check keeps the last result on screen until the new one is
+        # in; blanking it greyed the button out for a moment on every visit.
         self._wt_checking = True
         task = BackgroundTask(
             check_winetricks_full_status, self._wt_prefix(), parent=self
@@ -5413,11 +5683,12 @@ class InstallPage(QWidget):
     def _refresh_wt_extra(self) -> None:
         """Hide the Dependencies console row while it has nothing to show,
         so Back/Next sit where they do on the other steps."""
-        if getattr(self, "_step", None) != 1:
-            return
         self.wt_progress.setVisible(
-            bool(self.wt_progress.status_label.text())
-            or not self.wt_progress.log_toggle.isHidden()
+            getattr(self, "_step", None) == 1
+            and (
+                bool(self.wt_progress.status_label.text())
+                or not self.wt_progress.log_toggle.isHidden()
+            )
         )
 
     def _wt_status_failed(self, detail: str) -> None:

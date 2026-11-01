@@ -63,13 +63,17 @@ from .common import (
     discord_presence_state,
     make_card,
     game_running,
+    mo2_running,
+    normalize_path,
     open_in_file_manager,
     pick_shortcuts_vdf,
     populate_runner_combo,
+    save_profile_dirs,
     steam_running,
     tr,
 )
 from .dashboard import _card_title
+from .install_page import _PathEdit
 from .dialogs import MessageBox as QMessageBox
 from .moddb_plugin import controller as moddb_controller
 from .multiplayer_page import (
@@ -782,7 +786,91 @@ class SettingsPage(QWidget):
             ),
         )
         layout.addWidget(display)
+
+        folders, box = _card(
+            tr("Folders"),
+            tr("Click a box to pick a folder. To swap between GAMMA installs, use Install > Switch install."),
+        )
+        self._persisting = False
+        self.anomaly_edit = self._folder_edit(tr("Select Anomaly install folder"))
+        self.gamma_edit = self._folder_edit(tr("Select GAMMA install folder"))
+        self.cache_edit = self._folder_edit(tr("Select cache folder"))
+        _rows(
+            box,
+            _setting_row(tr("Anomaly folder"), "", self.anomaly_edit),
+            _setting_row(tr("GAMMA folder"), "", self.gamma_edit),
+            _setting_row(tr("Cache folder"), "", self.cache_edit),
+        )
+        layout.addWidget(folders)
         return page
+
+    # ---------------------------------------------------------------- folders
+    def _load_folders(self) -> None:
+        profile = self.window.settings.active_profile
+        if profile is None:
+            return
+        self.anomaly_edit.setText(profile.anomaly)
+        self.gamma_edit.setText(profile.gamma)
+        self.cache_edit.setText(profile.cache)
+
+    def _folder_edit(self, title: str) -> _PathEdit:
+        edit = _PathEdit()
+        edit.setMinimumWidth(520)
+        edit.setPlaceholderText(tr("Click to choose a folder"))
+        edit.setToolTip(tr("Click to choose a folder"))
+        edit.clicked.connect(lambda: self._pick_folder(edit, title))
+        return edit
+
+    def _pick_folder(self, edit: QLineEdit, title: str) -> None:
+        start = edit.text() if Path(edit.text()).is_dir() else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, title, start)
+        if folder:
+            edit.setText(folder)
+            self._persist_dirs()
+
+    def _persist_dirs(self) -> None:
+        if self._persisting:
+            return
+        self._persisting = True
+        try:
+            if self.window.install_busy or mo2_running():
+                QMessageBox.warning(
+                    self,
+                    tr("Please wait"),
+                    tr("An install or the game is running, so folder changes can't be saved right now. Try again when it's done."),
+                )
+                self._load_folders()
+                return
+            self.window.refresh_settings()
+            profile = self.window.settings.active_profile
+            if profile is None:
+                return
+            anomaly = normalize_path(self.anomaly_edit.text())
+            gamma = normalize_path(self.gamma_edit.text())
+            cache = normalize_path(self.cache_edit.text())
+            self.anomaly_edit.setText(anomaly)
+            self.gamma_edit.setText(gamma)
+            self.cache_edit.setText(cache)
+            if (
+                anomaly == profile.anomaly
+                and gamma == profile.gamma
+                and cache == profile.cache
+            ):
+                return
+            try:
+                save_profile_dirs(self.window.settings, profile, anomaly, gamma, cache)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self, tr("Couldn't save the profile"), tr("COMMANDER couldn't write its settings file (settings.json).\n\n{exc}", exc=exc)
+                )
+                self._load_folders()
+                return
+            self.window.statusBar().showMessage(
+                tr("Folders updated: {anomaly} | {gamma} | {cache}", anomaly=anomaly, gamma=gamma, cache=cache),
+                6000,
+            )
+        finally:
+            self._persisting = False
 
     def _graphics_tab(self) -> QWidget:
         page, layout = _panel()
@@ -1723,6 +1811,7 @@ class SettingsPage(QWidget):
 
     def refresh(self) -> None:
         state = gui_settings.load_gui_settings()
+        self._load_folders()
         self._render_plugins()
         self._render_graphics()
 
@@ -1840,7 +1929,7 @@ class SettingsPage(QWidget):
             self._discord_advanced_button.setChecked(True)
         self._check_discord()
 
-        current = state.get("theme") or "gamma"
+        current = state.get("theme") or "black"
         for key, radio in self._radios.items():
             radio.blockSignals(True)
             radio.setChecked(key == current)

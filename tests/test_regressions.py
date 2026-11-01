@@ -2582,7 +2582,7 @@ class RegressionTests(unittest.TestCase):
             with patch.object(gui_settings, "gui_settings_path", return_value=path):
                 state = gui_settings.load_gui_settings()
             self.assertEqual(state["font_size"], 13)
-            self.assertEqual(state["theme"], "gamma")
+            self.assertEqual(state["theme"], "black")
             self.assertEqual(state["prefixes"], {})
 
     def test_gui_settings_rejects_non_finite_playtime_values(self):
@@ -3845,10 +3845,10 @@ class RegressionTests(unittest.TestCase):
 
         terminate.assert_not_called()
 
-    def test_play_page_persist_dirs_expands_tilde(self):
-        from commander_gui.ui.play_page import PlayPage
+    def test_settings_page_persist_dirs_expands_tilde(self):
+        from commander_gui.ui.settings_page import SettingsPage
 
-        page = PlayPage.__new__(PlayPage)
+        page = SettingsPage.__new__(SettingsPage)
         page._persisting = False
         page.window = Mock()
         page.window.install_busy = False
@@ -3858,27 +3858,24 @@ class RegressionTests(unittest.TestCase):
         page.anomaly_edit = Mock(text=Mock(return_value="~/anomaly"))
         page.gamma_edit = Mock(text=Mock(return_value="~/gamma"))
         page.cache_edit = Mock(text=Mock(return_value="~/cache"))
-        page._reload_targets = Mock()
-        page._refresh_preview = Mock()
-        page._update_cache_info = Mock()
 
-        with patch("commander_gui.ui.play_page.mo2_running", return_value=False):
+        with patch("commander_gui.ui.settings_page.mo2_running", return_value=False):
             page._persist_dirs()
 
         self.assertNotIn("~", profile.anomaly)
         self.assertTrue(Path(profile.anomaly).is_absolute())
         page.anomaly_edit.setText.assert_called_with(profile.anomaly)
 
-    def test_play_page_persist_dirs_refuses_while_busy(self):
-        from commander_gui.ui.play_page import PlayPage
+    def test_settings_page_persist_dirs_refuses_while_busy(self):
+        from commander_gui.ui.settings_page import SettingsPage
 
-        page = PlayPage.__new__(PlayPage)
+        page = SettingsPage.__new__(SettingsPage)
         page._persisting = False
         page.window = Mock()
         page.window.install_busy = True
         page._load_folders = Mock()
 
-        with patch("commander_gui.ui.play_page.QMessageBox.warning") as warning:
+        with patch("commander_gui.ui.settings_page.QMessageBox.warning") as warning:
             page._persist_dirs()
 
         warning.assert_called_once()

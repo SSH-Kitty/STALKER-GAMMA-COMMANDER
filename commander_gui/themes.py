@@ -21,7 +21,7 @@ THEME_INFO: list[tuple[str, str, str, tuple[str, str, str]]] = [
     (
         "gamma",
         "GAMMA",
-        "The default look: deep green-black with a radiation-green glow.",
+        "The original look: deep green-black with a radiation-green glow.",
         ("#0d130c", "#9fe96f", "#e2ead8"),
     ),
     (

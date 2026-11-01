@@ -1801,7 +1801,7 @@ class MainWindow(QMainWindow):
 
     def _apply_style(self) -> None:
         state = gui_settings.load_gui_settings()
-        name = state.get("theme") or "gamma"
+        name = state.get("theme") or "black"
         font_size = int(state.get("font_size") or 13)
         font_family = state.get("font_family") or "Exo 2"
         set_active_theme(name)

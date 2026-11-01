@@ -923,7 +923,7 @@ def _main() -> int:
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[2] / "cli" / "stalker-gamma.png")))
     load_bundled_font()
     state = gui_settings.load_gui_settings()
-    theme = state.get("theme") or "gamma"
+    theme = state.get("theme") or "black"
     try:
         font_size = int(state.get("font_size") or 13)
     except (TypeError, ValueError):

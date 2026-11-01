@@ -316,7 +316,7 @@ class DeckWindow(QMainWindow):
     def apply_style(self) -> None:
         """Apply the Deck stylesheet and palette for the saved theme."""
         state = gui_settings.load_gui_settings()
-        theme = state.get("theme") or "gamma"
+        theme = state.get("theme") or "black"
         set_active_theme(theme)
         app = QApplication.instance()
         if app is None:

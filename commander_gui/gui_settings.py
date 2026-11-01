@@ -41,7 +41,7 @@ _DEFAULTS = {
     "wine_prefix": "",  # WINEPREFIX (Wine) or STEAM_COMPAT_DATA_PATH (Proton)
     "prefixes": {},  # per-runner prefix, keyed by the runner data value
     "target": "",  # last selected launch target title
-    "theme": "gamma",  # key into themes.THEMES
+    "theme": "black",  # key into themes.THEMES; first launch opens in GAMMA Black
     "language": "en",  # key into i18n.LANGUAGE_INFO
     "start_page": "dashboard",  # nav page shown on launch (key into main_window.NAV_ITEMS)
     "font_size": 13,  # base UI font size in px; scales every QSS font
@@ -161,7 +161,7 @@ def load_gui_settings() -> dict:
         if not isinstance(data.get(key), str):
             data[key] = _DEFAULTS[key]
     if not isinstance(data.get("theme"), str) or data["theme"] not in _allowed_themes:
-        data["theme"] = "gamma"
+        data["theme"] = "black"
     if not isinstance(data.get("language"), str) or data["language"] not in _allowed_languages:
         data["language"] = "en"
     # A hand-edited or corrupted settings file can hold any JSON type here,

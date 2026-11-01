@@ -244,7 +244,7 @@ class SettingsScreen(DeckScreen):
 
     def refresh(self) -> None:
         state = gui_settings.load_gui_settings()
-        theme = state.get("theme") or "gamma"
+        theme = state.get("theme") or "black"
         self.theme_row.set_value(
             next((label for key, label, _d, _s in THEME_INFO if key == theme), theme)
         )
@@ -369,7 +369,7 @@ class SettingsScreen(DeckScreen):
             self.window.gamepad.rumble(strength=0.55, length_ms=300)
 
     def _pick_theme(self) -> None:
-        current = gui_settings.load_gui_settings().get("theme") or "gamma"
+        current = gui_settings.load_gui_settings().get("theme") or "black"
         picker = DeckPicker(
             "",
             [(label, key) for key, label, _d, _s in THEME_INFO],

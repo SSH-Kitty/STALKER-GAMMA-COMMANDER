@@ -51,7 +51,7 @@ def load_saved_theme() -> str:
         value = json.loads(config_path().read_text(encoding="utf-8")).get("theme")
     except (OSError, ValueError, AttributeError):
         value = None
-    return value if value in dict(THEME_INFO) else "gamma"
+    return value if value in dict(THEME_INFO) else "black"
 
 
 def load_saved_font_size() -> int:
