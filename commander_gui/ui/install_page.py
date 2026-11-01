@@ -49,11 +49,13 @@ from ..game_backup import (
     prepare_anomaly_reinstall,
 )
 from ..game_installs import (
+    copy_install,
     find_install,
     fix_windows_paths,
     is_gamma,
     mo2_profile_for,
     needs_fix,
+    windows_drive_folder,
     windows_paths,
 )
 from ..gui_settings import configured_runner, configured_wine_prefix
@@ -127,6 +129,7 @@ from .common import (
     clear_layout,
     count_active_mods,
     count_cached_archives,
+    dir_size,
     disk_usage_bytes,
     display_state,
     free_space_bytes,
@@ -144,6 +147,7 @@ from .common import (
     tr,
     use_stock_mo2_profile_if_missing,
     warn_wine_unsafe_folder,
+    windows_drive_ok,
     wine_unsafe_folder,
     winetricks_tooltip,
 )
@@ -2421,8 +2425,89 @@ class InstallPage(QWidget):
         if install is None:
             return
         info = "" if windows_paths(install[1]) else tr("This install has no Windows paths left, so it already works on Linux.")
+        self._play_install(install, info)
+
+    def _play_install(self, install: tuple[str, str, str], info: str = "") -> None:
+        """Fix *install* for Linux and play from it, after offering to copy
+        it off a Windows drive first."""
+        if windows_drive_folder(install[0], install[1]):
+            answer = QMessageBox.question(
+                self,
+                tr("Copy GAMMA to your Linux drive?"),
+                tr("This install is on a Windows drive (NTFS). GAMMA can run slow, fail to save or not start from there."),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+                points=(
+                    tr("COMMANDER copies the Anomaly and GAMMA folders to a folder you pick."),
+                    tr("The copy on the Windows drive stays as it is."),
+                ),
+                labels={
+                    QMessageBox.StandardButton.Yes: tr("Copy to Linux drive"),
+                    QMessageBox.StandardButton.No: tr("Use it anyway"),
+                },
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._copy_to_linux(install)
+                return
+            if answer != QMessageBox.StandardButton.No:
+                return
         if self._fix_for_linux(install):
             self._use_install(install, info)
+
+    def _copy_to_linux(self, install: tuple[str, str, str]) -> None:
+        games = Path.home() / "Games"
+        try:
+            games.mkdir(exist_ok=True)
+        except OSError:
+            games = Path.home()
+        target = QFileDialog.getExistingDirectory(self, tr("Pick a folder on your Linux drive"), str(games))
+        if not target:
+            return
+        if windows_drive_folder(target):
+            QMessageBox.warning(self, tr("This folder is on a Windows drive"), tr("Pick a folder on your Linux drive."), info=target)
+            self._copy_to_linux(install)
+            return
+        taken = [str(Path(target) / Path(p).name) for p in install[:2] if (Path(target) / Path(p).name).exists()]
+        if taken:
+            QMessageBox.warning(
+                self,
+                tr("This folder already has a GAMMA install"),
+                tr("Pick an empty folder, so nothing in it gets overwritten."),
+                points=tuple(taken),
+            )
+            self._copy_to_linux(install)
+            return
+        progress = ProgressDialog(tr("Copying GAMMA"), tr("Checking the size"), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+
+        def work(report):
+            total = dir_size(install[0], max_entries=None) + dir_size(install[1], max_entries=None)
+            free = free_space_bytes(target)
+            if free is not None and free < total:
+                raise OSError(tr("It needs {need}, but only {free} is free there.", need=human_size(total), free=human_size(free)))
+            return copy_install(install, target, total, lambda done, all_: report(f"{done} {all_}"), task.cancel_event.is_set)
+
+        def on_line(line: str) -> None:
+            done, total = (int(n) for n in line.split())
+            progress.setValue(done * 100 // max(total, 1))
+            progress.setLabelText(f"{human_size(done)} / {human_size(total)}")
+
+        def on_result(copy) -> None:
+            progress.close()
+            self._play_install(tuple(copy))
+
+        def on_error(message: str) -> None:
+            progress.close()
+            if not task.cancel_event.is_set():
+                QMessageBox.warning(self, tr("Couldn't copy GAMMA"), message, info=tr("The partial copy was deleted."))
+
+        task = StreamTask(work, parent=self)
+        task.line.connect(on_line)
+        task.result.connect(on_result)
+        task.error.connect(on_error)
+        progress.canceled.connect(task.cancel)
+        progress.show()
+        task.start()
 
     def _open_install_switcher(self) -> None:
         installs = self._known_installs()
@@ -2472,8 +2557,8 @@ class InstallPage(QWidget):
                 self._save_installs([*installs, install])
                 self._refresh_switch_choice()
         else:
-            if not self._folders_locked() and self._fix_for_linux(install):
-                self._use_install(install)
+            if not self._folders_locked():
+                self._play_install(install)
             return
         self._open_install_switcher()
 
@@ -3083,6 +3168,8 @@ class InstallPage(QWidget):
         if bad := wine_unsafe_folder(str(base)):
             warn_wine_unsafe_folder(self, bad)
             return False
+        if not windows_drive_ok(self, str(base)):
+            return False
         folders = {
             "Anomaly folder": base / "anomaly",
             "GAMMA folder": base / "gamma",
@@ -3267,6 +3354,9 @@ class InstallPage(QWidget):
         # Not the cache: only the CLI reads it, never Wine.
         if bad := wine_unsafe_folder(anomaly, gamma):
             warn_wine_unsafe_folder(self, bad)
+            self.refresh()
+            return False
+        if not windows_drive_ok(self, anomaly, gamma):
             self.refresh()
             return False
         if (

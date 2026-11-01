@@ -4,10 +4,13 @@ from pathlib import Path
 from unittest import mock
 
 from commander_gui.game_installs import (
+    CopyCancelled,
+    copy_install,
     find_install,
     fix_windows_paths,
     mo2_profile_for,
     needs_fix,
+    windows_drive_folder,
     windows_paths,
 )
 
@@ -96,3 +99,66 @@ class GameInstallsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MOUNTINFO = (
+    "22 1 259:2 / / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw\n"
+    "40 22 259:3 / /run/media/me/Windows\\040C rw shared:2 - fuseblk /dev/nvme0n1p3 rw\n"
+    "41 40 259:4 / /run/media/me/Windows\\040C/linux rw shared:3 - ext4 /dev/sda1 rw\n"
+)
+
+
+class WindowsDriveTest(unittest.TestCase):
+    def test_finds_folders_on_a_windows_drive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = Path(tmp) / "mountinfo"
+            info.write_text(MOUNTINFO)
+            on_ntfs = "/run/media/me/Windows C/Games/GAMMA"
+            self.assertEqual(windows_drive_folder("/home/me/GAMMA", on_ntfs, mountinfo=str(info)), on_ntfs)
+            # A Linux drive mounted inside the Windows one is not Windows.
+            self.assertIsNone(windows_drive_folder("/run/media/me/Windows C/linux/GAMMA", mountinfo=str(info)))
+            self.assertIsNone(windows_drive_folder("/run/media/me/Windows CC", mountinfo=str(info)))
+            self.assertIsNone(windows_drive_folder(on_ntfs, mountinfo=str(Path(tmp) / "missing")))
+
+
+class CopyInstallTest(unittest.TestCase):
+    def _install(self, root: Path) -> tuple[str, str, str]:
+        (root / "Anomaly" / "bin").mkdir(parents=True)
+        (root / "Anomaly" / "bin" / "AnomalyDX11.exe").write_bytes(b"x" * 10)
+        gamma = root / "GAMMA"
+        (gamma / "downloads").mkdir(parents=True)
+        (gamma / "downloads" / "mod.7z").write_bytes(b"y" * 20)
+        (gamma / "ModOrganizer.ini").write_text(
+            f"gamePath=@ByteArray(Z:\\\\{str(root / 'Anomaly')[1:].replace('/', chr(92) * 2)})\n"
+            f"base_directory=Z:{gamma}\n"
+            "download_directory=C:/Games/GAMMA/downloads\n"
+        )
+        return str(root / "Anomaly"), str(gamma), str(gamma / "downloads")
+
+    def test_copies_and_points_linux_paths_at_the_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            install = self._install(Path(tmp) / "win")
+            seen = []
+            anomaly, gamma, cache = copy_install(install, Path(tmp) / "linux", 30, lambda d, t: seen.append(d), lambda: False)
+            self.assertEqual(Path(cache), Path(gamma) / "downloads")
+            self.assertEqual((Path(cache) / "mod.7z").read_bytes(), b"y" * 20)
+            self.assertTrue((Path(anomaly) / "bin" / "AnomalyDX11.exe").is_file())
+            ini = (Path(gamma) / "ModOrganizer.ini").read_text()
+            self.assertIn(f"base_directory=Z:{gamma}\n", ini)
+            self.assertIn("Z:\\\\" + anomaly[1:].replace("/", "\\\\") + ")", ini)
+            self.assertNotIn("/win/", ini.replace("\\\\", "/"))
+            # Windows paths stay for fix_windows_paths.
+            self.assertIn("C:/Games/GAMMA/downloads", ini)
+            self.assertTrue(seen)
+
+    def test_cancel_leaves_nothing_and_existing_folders_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            install = self._install(Path(tmp) / "win")
+            target = Path(tmp) / "linux"
+            with self.assertRaises(CopyCancelled):
+                copy_install(install, target, 30, lambda d, t: None, lambda: True)
+            self.assertEqual(list(target.iterdir()), [])
+            (target / "GAMMA").mkdir()
+            with self.assertRaises(FileExistsError):
+                copy_install(install, target, 30, lambda d, t: None, lambda: False)
+            self.assertEqual(list((target / "GAMMA").iterdir()), [])

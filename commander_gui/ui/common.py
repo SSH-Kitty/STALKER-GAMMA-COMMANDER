@@ -159,6 +159,26 @@ def warn_wine_unsafe_folder(parent, folder: str) -> None:
     )
 
 
+def windows_drive_ok(parent, *paths: str) -> bool:
+    """True unless one of *paths* is on a Windows drive and the user picks
+    another folder instead of using it anyway."""
+    from ..game_installs import windows_drive_folder
+
+    folder = windows_drive_folder(*paths)
+    if folder is None:
+        return True
+    answer = QMessageBox.warning(
+        parent,
+        tr("This folder is on a Windows drive"),
+        tr("GAMMA can run slow, fail to save or not start from a Windows drive (NTFS). Pick a folder on your Linux drive instead."),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+        info=folder,
+        labels={QMessageBox.StandardButton.Yes: tr("Use it anyway"), QMessageBox.StandardButton.No: tr("Pick another folder")},
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
+
 def count_cached_archives(cache_path: str) -> int:
     """Count .zip archives in *cache_path*."""
     if not cache_path:

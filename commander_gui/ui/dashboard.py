@@ -330,12 +330,31 @@ def _add_divided(
     divider.setObjectName("vDivider")
     divider.setFixedWidth(1)
     grid.addWidget(divider, 0, 2, 2, 1)
-    grid.addLayout(left, 1, 0)
-    grid.addLayout(right, 1, 4)
+    # Each side spans its stretch column, so its own stretch can push
+    # columns out to the divider. The sides' size hints are ignored and
+    # columns 0 and 4 hold the natural widths instead, so the divider sits
+    # midway as if the sides kept their natural width. The margins match
+    # the install rows: text ends 24 px from the divider and card edge.
+    boxes = []
+    for side, column, margins in ((left, 0, (0, 0, 16, 0)), (right, 4, (16, 0, 8, 0))):
+        box = QWidget()
+        box.setObjectName("panelTransparent")
+        box.setLayout(side)
+        side.setContentsMargins(*margins)
+        box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        grid.addWidget(box, 1, min(column, 3), 1, 2)
+        boxes.append((box, side, column, margins))
     grid.setColumnStretch(1, 1)
     grid.setColumnStretch(3, 1)
     grid.setRowStretch(1, 1)
     layout.addLayout(grid)
+    # Measured once in the card, where the labels have their themed font.
+    for box, side, column, margins in boxes:
+        for child in box.findChildren(QWidget):
+            child.ensurePolished()
+        natural = side.sizeHint().width()
+        box.setMinimumWidth(natural)
+        grid.setColumnMinimumWidth(column, natural - margins[0] - margins[2])
 
 
 def _holder(layout) -> QWidget:
@@ -1452,10 +1471,15 @@ class DashboardPage(QWidget):
         rows = QGridLayout()
         rows.setHorizontalSpacing(16)
         rows.setVerticalSpacing(8)
+        # Spare width goes after the version, so the states line up at the
+        # divider like the Installed column on the card to the left.
+        rows.setColumnStretch(1, 1)
         # History on the right, past a divider.
         history = QGridLayout()
         history.setHorizontalSpacing(16)
         history.setVerticalSpacing(8)
+        # Names start at the divider, times end at the card edge.
+        history.setColumnStretch(0, 1)
 
         def add_row(name: str, value: str, state: str | None = None, ok=None, action=None, rows=rows):
             """One line: dim name | value | coloured dot + state | button."""
@@ -1480,7 +1504,6 @@ class DashboardPage(QWidget):
                 else:
                     label.setObjectName("dim")
                 cell.addWidget(label)
-                cell.addStretch(1)
                 rows.addLayout(cell, row, 2)
             if action is not None:
                 text, slot = action

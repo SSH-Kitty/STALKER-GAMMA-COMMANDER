@@ -78,6 +78,7 @@ from .common import (
     tint,
     tr,
     warn_wine_unsafe_folder,
+    windows_drive_ok,
     wine_unsafe_folder,
 )
 from .dashboard import _card_title
@@ -862,6 +863,9 @@ class SettingsPage(QWidget):
             self.cache_edit.setText(cache)
             if bad := wine_unsafe_folder(anomaly, gamma):
                 warn_wine_unsafe_folder(self, bad)
+                self._load_folders()
+                return
+            if not windows_drive_ok(self, anomaly, gamma):
                 self._load_folders()
                 return
             if (
