@@ -1543,6 +1543,24 @@ class ModManagerPage(QWidget):
         self._populating = False
         self._apply_filter()
 
+    def on_theme_changed(self) -> None:
+        # Row colours are set in code from the theme in use then, so a Live
+        # theme turning dusk would keep the day's dark text on dark glass.
+        self._populating = True
+        card_bg = token_color("card", "#141b15")
+        accent = QColor(ACCENT.name())
+        enabled, disabled = QColor(ITEM_GREEN.name()), QColor(STATUS_GREY.name())
+        for i in range(self.tree.topLevelItemCount()):
+            header = self.tree.topLevelItem(i)
+            header.setForeground(0, accent)
+            header.setBackground(0, card_bg)
+            header.setBackground(1, card_bg)
+            for j in range(header.childCount()):
+                item = header.child(j)
+                checked = item.checkState(0) == Qt.CheckState.Checked
+                item.setForeground(0, enabled if checked else disabled)
+        self._populating = False
+
     def reveal_mod(self, name: str) -> None:
         """Select and scroll to ``name`` once the list next loads.
 
