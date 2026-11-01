@@ -149,10 +149,17 @@ def _int(value: str | None) -> int:
         return 0
 
 
-def _parse_condition(node: ET.Element | None) -> FomodCondition | None:
+#: Real FOMODs nest conditions a few levels deep. A deeper one is broken or
+#: hostile, and would hit Python's recursion limit here and in holds().
+_MAX_CONDITION_DEPTH = 32
+
+
+def _parse_condition(node: ET.Element | None, depth: int = 0) -> FomodCondition | None:
     """A ``<dependencies>``-shaped node (also ``<visible>``), or None."""
     if node is None:
         return None
+    if depth > _MAX_CONDITION_DEPTH:
+        raise ModInstallError("Could not read FOMOD configuration: conditions are nested too deeply")
     flags: list[tuple[str, str]] = []
     files: list[tuple[str, str]] = []
     children: list[FomodCondition] = []
@@ -166,7 +173,7 @@ def _parse_condition(node: ET.Element | None) -> FomodCondition | None:
                 (child.attrib.get("file", "").strip(), child.attrib.get("state", "").strip())
             )
         elif child.tag == "dependencies":
-            nested = _parse_condition(child)
+            nested = _parse_condition(child, depth + 1)
             if nested is not None:
                 children.append(nested)
         # gameDependency / fommDependency: version checks for other games'

@@ -123,6 +123,18 @@ _APPIMAGE_ONLY_VARS = ("APPDIR", "APPIMAGE", "ARGV0", "OWD", "PYTHONNOUSERSITE")
 _APPIMAGE_PATH_VARS = ("PYTHONPATH", "PYTHONHOME", "SSL_CERT_FILE", "SSL_CERT_DIR")
 
 
+def spawn_reaped(command, **kwargs):
+    """``subprocess.Popen`` for a helper COMMANDER doesn't wait on (an
+    opener, Steam, notify-send): a thread waits for it instead, so an exited
+    one is reaped rather than left a zombie until COMMANDER quits."""
+    import subprocess
+    import threading
+
+    process = subprocess.Popen(command, **kwargs)
+    threading.Thread(target=process.wait, daemon=True).start()
+    return process
+
+
 def child_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """``base`` (default: this process's environment) minus AppImage internals.
 

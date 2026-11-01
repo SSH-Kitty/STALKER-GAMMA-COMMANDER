@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from commander_gui.steam_shortcuts import (
     COOP_SHORTCUT_NAME,
@@ -342,7 +342,7 @@ class RestartSteamTests(unittest.TestCase):
             ),
             patch(
                 "commander_gui.steam_shortcuts.subprocess.Popen",
-                side_effect=lambda *a, **k: order.append(("popen", a[0])),
+                side_effect=lambda *a, **k: order.append(("popen", a[0])) or Mock(),
             ),
             patch(
                 "commander_gui.steam_shortcuts._wait_for_steam_to_exit",

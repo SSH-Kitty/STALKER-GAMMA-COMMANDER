@@ -206,7 +206,7 @@ def load_gui_settings() -> dict:
         "settings",
     }:
         data["deck_start_screen"] = "play"
-    if data.get("deck_overlay_shortcut") not in {"l4r4", "l5r5", "l4l5", "r4r5", "off"}:
+    if data.get("deck_overlay_shortcut") not in ("l4r4", "l5r5", "l4l5", "r4r5", "off"):
         data["deck_overlay_shortcut"] = "l4r4"
     try:
         font_size = int(data.get("font_size", 13))
@@ -264,7 +264,7 @@ def load_gui_settings() -> dict:
     # Same hardcoded key set as start_page; the dashboard is the way back
     # to everything else, so it can never be hidden.
     data["hidden_nav_tabs"] = (
-        sorted({k for k in hidden if k in _HIDEABLE_NAV_TABS})
+        sorted({k for k in hidden if isinstance(k, str) and k in _HIDEABLE_NAV_TABS})
         if isinstance(hidden, list)
         else []
     )

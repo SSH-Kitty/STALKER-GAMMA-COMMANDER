@@ -760,6 +760,9 @@ class SystemCheckPage(QWidget):
             self._pending_result = result
             self._settling = True
             delay_ms = int((self._min_check_seconds - elapsed) * 1000)
+            if getattr(self, "_pending_timer", None) is not None:
+                self._pending_timer.stop()
+                self._pending_timer.deleteLater()
             self._pending_timer = QTimer(self)
             self._pending_timer.setSingleShot(True)
             self._pending_timer.timeout.connect(self._apply_checks)

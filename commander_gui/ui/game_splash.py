@@ -96,15 +96,34 @@ def is_launcher(binary: str) -> bool:
     return Path(binary.replace("\\", "/")).name.lower().startswith("anomalylauncher")
 
 
+#: Bytes of each log already searched, per (log, since): polled once a
+#: second while the game loads, a GAMMA log runs to megabytes, so only what
+#: was added since the last look is read.
+_scanned: dict[tuple[Path, float], int] = {}
+
+
 def engine_started(log_dirs: list[Path], since: float) -> Path | None:
     """The log written after ``since`` that holds one of MARKERS, if any."""
+    overlap = max(len(marker) for marker in MARKERS)
     for folder in log_dirs:
         for log in folder.glob("*.log"):
             try:
-                if log.stat().st_mtime >= since:
-                    text = log.read_bytes()
-                    if any(marker in text for marker in MARKERS):
-                        return log
+                stat = log.stat()
+                if stat.st_mtime < since:
+                    continue
+                key = (log, since)
+                start = _scanned.get(key, 0)
+                if start > stat.st_size:  # rewritten from the start
+                    start = 0
+                offset = max(0, start - overlap)  # a marker split across reads
+                with open(log, "rb") as handle:
+                    handle.seek(offset)
+                    text = handle.read()
+                _scanned[key] = offset + len(text)
+                if len(_scanned) > 64:
+                    _scanned.pop(next(iter(_scanned)))
+                if any(marker in text for marker in MARKERS):
+                    return log
             except OSError:
                 continue
     return None

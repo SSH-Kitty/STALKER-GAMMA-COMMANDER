@@ -30,6 +30,7 @@ import subprocess
 from pathlib import Path
 from threading import Event
 
+from . import atomic
 from .coop import _swap_dir
 from .mod_install import ModInstallError
 from .modlist import read_lines, save_lines
@@ -197,7 +198,7 @@ def install(
         _merge(src / "Anomaly", anomaly, keep_existing=False)
     clean_appdata(anomaly / "appdata")
     if old_modlist is not None:
-        (profile_dir / "modlist.txt.before-update").write_bytes(old_modlist)
+        atomic.write_bytes(profile_dir / "modlist.txt.before-update", old_modlist)
     # Newest copy first, so it wins: "<KEPT_MCM> 3" over "<KEPT_MCM> 2" over "<KEPT_MCM>".
     kept = sorted(
         (p.name for p in (gamma / "mods").iterdir() if p.name.startswith(KEPT_MCM)),
@@ -205,7 +206,7 @@ def install(
     )
     if kept:
         _place_kept_mcm(profile_dir / "modlist.txt", kept)
-    (profile_dir / _STATE).write_text(json.dumps({"mcm_sha256": _mcm_hash(gamma)}))
+    atomic.write_text(profile_dir / _STATE, json.dumps({"mcm_sha256": _mcm_hash(gamma)}))
 
 
 def clean_appdata(appdata: Path) -> None:
@@ -264,7 +265,7 @@ def _restore_atmos(appdata: Path, cache: Path) -> bool:
                 data = subprocess.run(
                     [*base, "show", f"HEAD:{name}"], capture_output=True, timeout=60, env=env, check=True,
                 ).stdout
-                (appdata / filename).write_bytes(data)
+                atomic.write_bytes(appdata / filename, data)
     except (OSError, subprocess.SubprocessError):
         return False
     return True

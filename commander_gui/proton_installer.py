@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import __version__, network
+from . import __version__, atomic, network
 from .network import read_response_bytes
 
 _GITHUB_API = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases"
@@ -234,6 +234,8 @@ def install_proton(
     # Downloaded next to where it installs, not into the system temp dir:
     # /tmp is often a RAM-backed tmpfs too small for a ~500 MB archive, and
     # the free-space check below is made against install_dir.
+    atomic.remove_stale(install_dir, ".proton-download-*")
+    atomic.remove_stale(install_dir, ".proton-staging-*")
     with tempfile.TemporaryDirectory(prefix=".proton-download-", dir=install_dir) as tmp:
         tmp_path = Path(tmp)
         tar_name = tar_url.rsplit("/", 1)[-1]

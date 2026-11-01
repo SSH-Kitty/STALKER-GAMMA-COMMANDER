@@ -8,9 +8,9 @@ colors so dialogs, menus and scrollbars match the active theme.
 
 from __future__ import annotations
 
+import os
 import re
 import string
-import tempfile
 import time
 from pathlib import Path
 
@@ -113,7 +113,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 def build_stylesheet(
     name: str, font_size: int | None = None, font_family: str | None = None
 ) -> str:
-    tokens = {"status_ok": "#7dc963", **(THEMES.get(resolve_theme(name)) or THEMES["gamma"])}
+    tokens = {
+        # Same defaults as common.py's WARN / OK_GREEN / STATUS_GREY.
+        "status_ok": "#7dc963",
+        "status_warn": "#d9a04c",
+        "status_grey": "#7f8f78",
+        **(THEMES.get(resolve_theme(name)) or THEMES["gamma"]),
+    }
     if font_size is None:
         font_size = int(tokens["font_size"].rstrip("px"))
     qss = _TEMPLATE.safe_substitute(tokens)
@@ -133,13 +139,20 @@ def build_stylesheet(
 def _combo_arrow(color: str) -> str:
     # QSS only takes image files, so write one chevron per theme colour.
     hex_color = parse_color(color, "#888888").name()
-    path = Path(tempfile.gettempdir()) / f"commander-combo-arrow-{hex_color[1:]}.svg"
-    if not path.exists():
-        path.write_text(
-            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
-            f'<path d="M1 1l4 4 4-4" fill="none" stroke="{hex_color}" stroke-width="1.6" '
-            'stroke-linecap="round" stroke-linejoin="round"/></svg>'
-        )
+    # The user's own cache, not the shared /tmp: there another account could
+    # plant the file (or a symlink) first.
+    folder = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "stalker-gamma-commander"
+    path = folder / f"combo-arrow-{hex_color[1:]}.svg"
+    if not path.is_file():
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
+                f'<path d="M1 1l4 4 4-4" fill="none" stroke="{hex_color}" stroke-width="1.6" '
+                'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            )
+        except OSError:
+            return ""  # no arrow, Qt draws its own
     return path.as_posix()
 
 
@@ -666,6 +679,11 @@ QProgressBar#achievementMeter::chunk {
 #warn {
     color: $warn;
 }
+/* common.tint(): a status colour set from code that follows the theme. */
+*[tint="ok"], #statValue[tint="ok"] { color: $status_ok; }
+*[tint="warn"], #statValue[tint="warn"] { color: $status_warn; }
+*[tint="grey"], #statValue[tint="grey"] { color: $status_grey; }
+*[tint="accent"], #statValue[tint="accent"] { color: $accent_strong; }
 #mono {
     font-family: "DejaVu Sans Mono", monospace;
     font-size: 12px;

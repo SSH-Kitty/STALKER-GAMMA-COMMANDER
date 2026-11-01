@@ -63,9 +63,15 @@ _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 
 
 def _valid_source_url(value: str) -> bool:
-    """An http(s) URL with a host - no file://, no bare paths."""
+    """An https URL with a host - no file://, no bare paths, and plain http
+    only to this machine (a shared bundle's mod sources over http could be
+    swapped on the way)."""
+    from .network import is_loopback_host
+
     parts = urllib.parse.urlsplit(value.strip())
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    if not parts.netloc:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and is_loopback_host(parts.hostname))
 
 
 def _valid_branch(value: str) -> bool:

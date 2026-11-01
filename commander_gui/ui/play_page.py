@@ -992,7 +992,7 @@ class PlayPage(QWidget):
         self._build_chips(ok=True, runner=runner)
         target = self._selected_target()
         exe = next((e for e in self.executables if e.title == target), Mo2Executable())
-        self.target_path.setText(exe.binary or "No executable set for this target")
+        self.target_path.setText(exe.binary or tr("No executable set for this target"))
 
     def _build_chips(self, *, ok: bool, runner=None) -> None:
         clear_layout(self.chips_row)
@@ -1010,7 +1010,7 @@ class PlayPage(QWidget):
             if proton_path:
                 proton_version = Path(proton_path).name.removeprefix("GE-Proton").removesuffix("-x86_64")
         proton_text = (
-            f"Proton-GE: {proton_version}" if proton_version else "Proton-GE: none"
+            f"Proton-GE: {proton_version}" if proton_version else tr("Proton-GE: none")
         )
         chips.append((proton_text, bool(proton_version)))
         # GameMode (only if installed AND enabled in Settings)
@@ -1140,6 +1140,8 @@ class PlayPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Quit game"), QMessageBox.StandardButton.No: tr("Keep playing")},
         )
         if reply == QMessageBox.StandardButton.Yes:
+            # A session ended here still counts as played time.
+            self._record_playtime()
             self._abort_launch(tr("Game closed by user."), error=False)  # the user's choice, not a fault
             self._launch_status_clear_timer.start(5000)
 
@@ -1377,8 +1379,9 @@ class PlayPage(QWidget):
         self._coop_shortcut_task = BackgroundTask(
             setup_coop_shortcut, vdf_path, restart=restart, parent=self, **fields
         )
+        # Quit Game while Steam restarts aborts the launch: no tracking then.
         self._coop_shortcut_task.result.connect(
-            lambda _r: self._track_steam_session(snapshot)
+            lambda _r: self._track_steam_session(snapshot) if self._launching else None
         )
         self._coop_shortcut_task.error.connect(self._coop_shortcut_failed)
         self._coop_shortcut_task.start()
@@ -1640,6 +1643,8 @@ class PlayPage(QWidget):
     def _start_launch_timer(self, label: str, command: list[str], log_path: Path | None) -> None:
         # Use a repeating timer to detect fast failures without delaying recovery,
         # so buttons are re-enabled as soon as possible regardless of timing.
+        # An older one left running could never be stopped again.
+        self._stop_launch_timer()
         self._launch_timer = QTimer(self)
         self._launch_timer.setInterval(250)
         self._launch_timer.timeout.connect(
@@ -1905,6 +1910,7 @@ class PlayPage(QWidget):
     def _cancel_crash_poll(self) -> None:
         if self._crash_poll_timer is not None:
             self._crash_poll_timer.stop()
+            self._crash_poll_timer.deleteLater()
             self._crash_poll_timer = None
 
     def _check_for_crash(self) -> None:
@@ -2577,6 +2583,9 @@ class PlayPage(QWidget):
         self.shortcut_button.setEnabled(not launching)
         # Launch options only apply at launch: no editing them mid-game.
         self._options_card.setEnabled(not launching)
+        # Each pick writes ModOrganizer.ini, which MO2 overwrites on exit.
+        self.runner_combo.setEnabled(not launching)
+        self.target_combo.setEnabled(not launching)
         self._options_card.setToolTip(tr("Close the game to change launch options.") if launching else "")
         self.launch_state_changed.emit(launching)
 

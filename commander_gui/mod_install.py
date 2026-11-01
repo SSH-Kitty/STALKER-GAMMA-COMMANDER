@@ -185,6 +185,24 @@ def _validate_archive_entries(archiver: Path, archive: Path) -> None:
             raise ModInstallError("Archive contains a path-traversal entry")
 
 
+def _check_room(archiver: Path, archive: Path, folder: Path) -> None:
+    """Refuse an archive that unpacks to more than the drive has free: a
+    small archive can expand to hundreds of GB, and on a Deck that drive is
+    often the home one Steam itself needs."""
+    from .romeo import unpacked_size  # deferred: romeo imports this module
+
+    size = unpacked_size(archiver, archive)
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return
+    if size is not None and size > free:
+        raise ModInstallError(
+            f"Not enough free space: the archive unpacks to {size // 1024**2:,} MB, "
+            f"{free // 1024**2:,} MB is free"
+        )
+
+
 def extract_archive(
     archive: Path,
     staging: Path,
@@ -200,6 +218,7 @@ def extract_archive(
     _validate_archive_entries(archiver, archive)
     if cancel_event is not None and cancel_event.is_set():
         raise ModInstallError("Mod installation cancelled")
+    _check_room(archiver, archive, staging.parent)
     staging.mkdir(parents=True, exist_ok=False)
     command = [str(archiver), "x", f"-o{staging}", "-y", "-p", "-bsp1", "--", str(archive)]
     try:
@@ -482,6 +501,7 @@ def make_staging_dir(gamma_dir: str | Path | None) -> Path:
     written.
     """
     try:
+        atomic.remove_stale(gamma_dir, ".gamma-mod-install-*")
         return Path(tempfile.mkdtemp(prefix=".gamma-mod-install-", dir=gamma_dir))
     except OSError:
         return Path(tempfile.mkdtemp(prefix="gamma-mod-install-"))

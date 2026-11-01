@@ -17,7 +17,7 @@ from typing import ClassVar
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -48,7 +48,14 @@ from ..game_backup import (
     backup_settings_before,
     prepare_anomaly_reinstall,
 )
-from ..game_installs import find_install, fix_windows_paths, is_gamma, mo2_profile_for, windows_paths
+from ..game_installs import (
+    find_install,
+    fix_windows_paths,
+    is_gamma,
+    mo2_profile_for,
+    needs_fix,
+    windows_paths,
+)
 from ..gui_settings import configured_runner, configured_wine_prefix
 from ..integrity import (
     MANIFEST_FILENAME,
@@ -73,7 +80,7 @@ from ..integrity import (
     verify_gamma,
     write_baseline,
 )
-from ..keep_state import capture, discard, restore
+from ..keep_state import KeptState, capture, discard, restore
 from ..launcher import LaunchError
 from ..modlist import modlist_path_for
 from ..parsers import ProgressEvent, parse_progress_line, strip_ansi
@@ -129,7 +136,6 @@ from .common import (
     info_label,
     make_card,
     make_header_row,
-    mo2_running,
     normalize_path,
     notify_desktop,
     paused_dependency_status,
@@ -458,6 +464,11 @@ _VERIFY_PHASE = {
 _PRESENCE_RE = re.compile(r"Checking GAMMA mod (\d+)/(\d+)")
 _MD5_RE = re.compile(r"MD5 hashing (\d+)/(\d+)")
 _CACHE_RE = re.compile(r"Checking cached archive (\d+)/(\d+)")
+#: Worker lines that carry a name, so tr() can't look them up whole.
+_NAMED_LINES = (
+    (re.compile(r"^Setting aside (?P<name>.+)$"), "Setting aside {name}"),
+    (re.compile(r"^Could not set aside (?P<name>[^:]+): (?P<exc>.+)$"), "Could not set aside {name}: {exc}"),
+)
 
 
 def _anomaly_tally(counts: dict[str, int]) -> str:
@@ -1071,13 +1082,11 @@ def _resume_state_matches(state: object, profile) -> bool:
     """
     if not isinstance(state, dict):
         return False
+    # Resolved: the same folder may be saved as /home/... and /var/home/...
     return all(
-        state.get(key) == getattr(profile, attr)
-        for key, attr in (
-            ("anomaly", "anomaly"),
-            ("gamma", "gamma"),
-            ("cache", "cache"),
-        )
+        isinstance(state.get(key), str)
+        and normalize_path(state[key]) == normalize_path(getattr(profile, key))
+        for key in ("anomaly", "gamma", "cache")
     )
 
 
@@ -1126,7 +1135,7 @@ def _note_md5_redownload(tracked: set[str], event: ProgressEvent) -> str | None:
         return None
     if event.operation == "Download" and event.name in tracked:
         tracked.discard(event.name)
-        return "Cached archive failed verification - re-downloading."
+        return tr("Cached archive failed verification - re-downloading.")
     if event.operation in ("Extract", "Expand") and event.name in tracked:
         tracked.discard(event.name)
     return None
@@ -2108,6 +2117,16 @@ class InstallPage(QWidget):
         if profile is not None:
             state = gui_settings.load_gui_settings().get("gamma_install_resume")
             self._resume_state = state if _resume_state_matches(state, profile) else None
+            if (
+                self._resume_state is not None
+                and not self.window.install_busy
+                and getattr(self, "_resume_options_shown", None) != self._resume_state
+                and isinstance(self._resume_state.get("options"), dict)
+            ):
+                # Once per stopped run (after a restart the boxes are back
+                # at their defaults): Resume continues with its own options.
+                self._resume_options_shown = dict(self._resume_state)
+                self._apply_install_options(self._resume_state["options"])
             self.anomaly_edit.setText(profile.anomaly)
             self.gamma_edit.setText(profile.gamma)
             self.cache_edit.setText(profile.cache)
@@ -2204,29 +2223,65 @@ class InstallPage(QWidget):
             self._update_button_states()
             self._place_progress()
 
+    def _kept_matches(self, profile, kept=None) -> bool:
+        """*kept* (default: the held one) was captured from *profile*'s
+        install, or nothing is held."""
+        kept = getattr(self, "_kept", None) if kept is None else kept
+        if kept is None:
+            return True
+        if kept.anomaly is None:  # holds nothing tied to a folder
+            return True
+        if profile is None:
+            return False
+        return normalize_path(str(kept.anomaly)) == normalize_path(profile.anomaly)
+
+    def _discard_kept(self) -> None:
+        """Forget the held kept state. Its files stay on disk (and its saved
+        copy in the Anomaly folder) for a resume of that install later."""
+        self._kept = None
+
     # ------------------------------------------------- installs on disk
+    @staticmethod
+    def _install_key(install) -> tuple[str, str, str]:
+        """*install*'s folders resolved, so the same install typed or picked
+        two ways (``~``, a symlinked /home) compares equal."""
+        return tuple(normalize_path(str(path)) for path in install)
+
     def _known_installs(self) -> list[tuple[str, str, str]]:
         """Installs added to the switcher, the one in use first."""
-        installs = [tuple(i) for i in gui_settings.load_gui_settings().get("game_installs") or []]
+        stored = gui_settings.load_gui_settings().get("game_installs")
+        installs: list[tuple[str, str, str]] = []
+        for item in stored if isinstance(stored, list) else []:
+            # A hand-edited entry that isn't three folder names is dropped.
+            if isinstance(item, list) and len(item) == 3 and all(isinstance(x, str) and x for x in item):
+                key = self._install_key(item)
+                if key not in installs:
+                    installs.append(key)
         profile = self.window.settings.active_profile
         if profile is not None and is_gamma(Path(profile.gamma).expanduser()):
-            current = (profile.anomaly, profile.gamma, profile.cache)
+            current = self._install_key((profile.anomaly, profile.gamma, profile.cache))
             installs = [current, *(i for i in installs if i != current)]
         return installs
 
+    def _is_current_install(self, install) -> bool:
+        profile = self.window.settings.active_profile
+        return profile is not None and normalize_path(install[1]) == normalize_path(profile.gamma)
+
     @staticmethod
     def _install_root(install: tuple[str, str, str]) -> str:
-        return os.path.commonpath([install[0], install[1]])
+        try:
+            return os.path.commonpath([normalize_path(install[0]), normalize_path(install[1])])
+        except ValueError:  # an empty folder
+            return str(Path(install[1]).expanduser().parent)
 
     def _refresh_switch_choice(self) -> None:
         installs = self._known_installs()
-        profile = self.window.settings.active_profile
         self._switch_choice.tiles[0].set_state(
             "ok", tr("Install"), tr("{count} saved in COMMANDER", count=len(installs))
         )
         # The tag names the install in use, as Automatic's names its mode.
         tag = self._switch_choice.tag
-        if installs and profile is not None and installs[0][1] == profile.gamma:
+        if installs and self._is_current_install(installs[0]):
             root = self._install_root(installs[0])
             tag.setText(tr("Playing: {name}", name=Path(root).name or root))
             tag.setToolTip(root)
@@ -2234,24 +2289,46 @@ class InstallPage(QWidget):
             tag.setText("")
             tag.setToolTip("")
 
-    def _use_install(self, install: tuple[str, str, str], info: str = "") -> bool:
-        """Point the active profile at *install*, remember it and say so."""
-        if self.window.install_busy or mo2_running():
+    def _folders_locked(self) -> bool:
+        """Say so and return True while the install's folders are in use."""
+        if self.window.install_busy or game_running(force=True):
             QMessageBox.warning(
                 self,
                 tr("Please wait"),
                 tr("An install or the game is running, so folder changes can't be saved right now. Try again when it's done."),
             )
+            return True
+        return False
+
+    def _save_installs(self, installs) -> bool:
+        try:
+            gui_settings.save_gui_settings(game_installs=[list(i) for i in installs])
+        except OSError as exc:
+            self.window.statusBar().showMessage(tr("Couldn't save the install list: {exc}", exc=exc), 8000)
+            return False
+        return True
+
+    def _use_install(self, install: tuple[str, str, str], info: str = "") -> bool:
+        """Point the active profile at *install*, remember it and say so."""
+        if self._folders_locked():
             return False
         self.window.refresh_settings()
         profile = self.window.settings.active_profile
         if profile is None:
             return False
+        # Taken before the switch: the install in use is only added to the
+        # list in memory, and would be lost once the profile points away.
+        known = self._known_installs()
         # Each install keeps the MO2 profile it was last played with.
         old_mo2 = profile.mo2_profile
         remembered = gui_settings.load_gui_settings().get("install_mo2_profiles")
-        remembered = {**(remembered if isinstance(remembered, dict) else {}), profile.gamma: old_mo2}
-        profile.mo2_profile = mo2_profile_for(install[1], remembered.get(install[1], old_mo2))
+        remembered = {
+            normalize_path(k): v
+            for k, v in (remembered if isinstance(remembered, dict) else {}).items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
+        remembered[normalize_path(profile.gamma)] = old_mo2
+        profile.mo2_profile = mo2_profile_for(install[1], remembered.get(normalize_path(install[1]), old_mo2))
         try:
             save_profile_dirs(self.window.settings, profile, *install)
         except OSError as exc:
@@ -2260,8 +2337,15 @@ class InstallPage(QWidget):
                 self, tr("Couldn't save the profile"), tr("COMMANDER couldn't write its settings file (settings.json).\n\n{exc}", exc=exc)
             )
             return False
-        installs = [list(i) for i in self._known_installs()]
-        gui_settings.save_gui_settings(game_installs=installs, install_mo2_profiles=remembered)
+        # Kept exes and modlist belong to the install they came from.
+        self._discard_kept()
+        installs = [self._install_key(install), *(i for i in known if i != self._install_key(install))]
+        try:
+            gui_settings.save_gui_settings(
+                game_installs=[list(i) for i in installs], install_mo2_profiles=remembered
+            )
+        except OSError as exc:
+            self.window.statusBar().showMessage(tr("Couldn't save the install list: {exc}", exc=exc), 8000)
         self.window.refresh_settings()
         self.refresh()
         self._refresh_switch_choice()
@@ -2292,11 +2376,15 @@ class InstallPage(QWidget):
                 tr("No GAMMA install found"),
                 tr("Pick the folder that holds both the Anomaly folder and the GAMMA folder (the one with ModOrganizer.exe)."),
             )
-        return install
+            return None
+        return self._install_key(install)
 
     def _fix_for_linux(self, install: tuple[str, str, str]) -> bool:
-        """Fix Windows paths in *install*'s ModOrganizer.ini, after asking."""
-        if not windows_paths(install[1]):
+        """Fix Windows paths in *install*'s ModOrganizer.ini, after asking.
+
+        Only asks while there is something to fix: paths on other Windows
+        drives are left alone on purpose, so they never count."""
+        if not needs_fix(install[0], install[1]):
             return True
         answer = QMessageBox.question(
             self,
@@ -2326,6 +2414,9 @@ class InstallPage(QWidget):
         return True
 
     def _open_windows_install(self) -> None:
+        # Checked first: fixing the ini under a running MO2 gets overwritten.
+        if self._folders_locked():
+            return
         install = self._pick_install(tr("Select the GAMMA install copied from Windows"))
         if install is None:
             return
@@ -2335,7 +2426,6 @@ class InstallPage(QWidget):
 
     def _open_install_switcher(self) -> None:
         installs = self._known_installs()
-        profile = self.window.settings.active_profile
         dialog = QDialog(self)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(10)
@@ -2345,8 +2435,10 @@ class InstallPage(QWidget):
         grid.setHorizontalSpacing(10)
         grid.setColumnStretch(0, 1)
         for row, install in enumerate(installs):
-            active = profile is not None and install[1] == profile.gamma
-            path = QLabel(self._install_root(install))
+            active = self._is_current_install(install)
+            root = self._install_root(install)
+            # Elided, so a deep folder can't widen the window past the screen.
+            path = QLabel(QFontMetrics(dialog.font()).elidedText(root, Qt.TextElideMode.ElideMiddle, 420))
             path.setToolTip("\n".join(install))
             grid.addWidget(path, row, 0)
             use = QPushButton(tr("Playing") if active else tr("Play this"))
@@ -2366,19 +2458,21 @@ class InstallPage(QWidget):
         add_close_button(dialog, layout)
         style_window(dialog, tr("Switch install"), resizable=False)
         dialog.setMinimumWidth(640)
-        if not dialog.exec() or not chosen:
+        accepted = dialog.exec()
+        dialog.deleteLater()
+        if not accepted or not chosen:
             return
         action, install = chosen[0]
         if action == "remove":
-            gui_settings.save_gui_settings(game_installs=[list(i) for i in installs if i != install])
+            self._save_installs([i for i in installs if i != install])
             self._refresh_switch_choice()
         elif action == "add":
             install = self._pick_install(tr("Select a folder with a GAMMA install"))
             if install is not None and install not in installs:
-                gui_settings.save_gui_settings(game_installs=[*map(list, installs), list(install)])
+                self._save_installs([*installs, install])
                 self._refresh_switch_choice()
         else:
-            if self._fix_for_linux(install):
+            if not self._folders_locked() and self._fix_for_linux(install):
                 self._use_install(install)
             return
         self._open_install_switcher()
@@ -2493,11 +2587,28 @@ class InstallPage(QWidget):
         for key, cb in boxes.items():
             cb.setChecked(key in _DEFAULT_CHECKED_OPTIONS)
 
+    def _install_options(self) -> dict[str, bool]:
+        return {
+            f"{group}:{key}": cb.isChecked()
+            for group, boxes in (("gamma", self.checkboxes), ("anomaly", self.anomaly_checkboxes))
+            for key, cb in boxes.items()
+        }
+
+    def _apply_install_options(self, options: dict) -> None:
+        """Tick the boxes as *options* (from ``_install_options()``) says.
+        Offline first, since turning it off puts back the boxes it cleared."""
+        groups = {"gamma": self.checkboxes, "anomaly": self.anomaly_checkboxes}
+        for name in sorted(options, key=lambda n: n != "gamma:offline"):
+            group, _, key = name.partition(":")
+            cb = groups.get(group, {}).get(key)
+            if cb is not None and isinstance(options[name], bool):
+                cb.setChecked(options[name])
+
     def _start_automatic_install(self) -> None:
         """Automatic: make the folders, then the dependencies, Anomaly and
         GAMMA one after another with the default options. Each runs only
         if it isn't installed yet."""
-        if self.window.install_busy:
+        if self.window.install_busy or self._deps_checking:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
         self._refresh_auto_choice()
@@ -2546,7 +2657,19 @@ class InstallPage(QWidget):
         self.root_card_edit.setText(root)
         if not self._create_install_folders(quiet=True):
             return
-        self._reset_install_options()
+        saved = (self._resume_state or {}).get("options")
+        if isinstance(saved, dict):
+            # A resume finishes the stopped run with that run's own options:
+            # the defaults would replace keybindings and MCM settings the
+            # user chose to keep.
+            self._apply_install_options(saved)
+        else:
+            self._reset_install_options()
+            if self._resume_state is not None and self._gamma_already_installed():
+                # A stopped reinstall from before options were saved: keep
+                # the user's settings rather than guess they wanted them reset.
+                for key in ("preserve_user", "preserve_mcm"):
+                    self.checkboxes[key].setChecked(True)
         # Ticked after the reset: it switches off the download-only options
         # and fills in the two list files found beside the cache.
         self.checkboxes["offline"].setChecked(offline)
@@ -2649,8 +2772,16 @@ class InstallPage(QWidget):
             parents = {str(Path(p).expanduser().parent) for p in paths.values() if p}
             if len(parents) == 1 and all(paths.values()):
                 parent = parents.pop()
-                if not self.root_card_edit.text():
-                    self.root_card_edit.setText(parent)
+            folders = (profile.anomaly, profile.gamma, profile.cache)
+            if getattr(self, "_seen_folders", None) != folders:
+                # The folders changed elsewhere (Switch install, Settings >
+                # Game): a root picked for the old ones would quietly point
+                # the profile back there on Create folders or Automatic.
+                self._seen_folders = folders
+                self.root_card_edit.setText(parent or "")
+                self.auto_root_edit.setText(parent or "")
+            elif parent and not self.root_card_edit.text():
+                self.root_card_edit.setText(parent)
         root = self.root_card_edit.text().strip()
         preview = bool(root) and str(Path(root).expanduser()) != parent
         if preview:
@@ -2683,10 +2814,17 @@ class InstallPage(QWidget):
         Dashboard last measured them (no folder walk here), and the drive's
         free space - the Dashboard's own bar, legend and meter."""
         layout = self.storage_group.layout()
-        clear_layout(layout)
         stored = gui_settings.load_gui_settings().get("storage_sizes") or {}
         key = [paths.get(k, "") for k in ("anomaly", "gamma", "cache")]
         sizes = stored.get("sizes") if stored.get("key") == key and not preview else None
+        usage = disk_usage_bytes(paths["gamma"]) if paths.get("gamma") else None
+        # Rebuilt only when something shown changed (free space to 100 MB):
+        # this runs on every refocus, and rebuilding made the panel flicker.
+        shown = (repr(sizes), key, usage and (usage[0], usage[1] // 10**8))
+        if shown == getattr(self, "_storage_shown", None):
+            return
+        self._storage_shown = shown
+        clear_layout(layout)
         if isinstance(sizes, dict) and sizes:
             segments = [(value, _SEGMENT_TOKENS.get(name, "storage_c")) for name, value in sizes.items()]
             layout.addWidget(_SegmentedBar(segments))
@@ -2700,7 +2838,6 @@ class InstallPage(QWidget):
                 legend.addLayout(item)
             legend.addStretch(1)
             layout.addLayout(legend)
-        usage = disk_usage_bytes(paths["gamma"]) if paths.get("gamma") else None
         if usage is None or usage[0] <= 0:
             self.storage_group.setVisible(bool(sizes))
             return
@@ -3297,15 +3434,37 @@ class InstallPage(QWidget):
             backup_error = backup_settings_before(profile, "reinstall")
         # Kept across failed and resumed attempts: a run that failed midway
         # may already have replaced the modlist, so capturing again on
-        # resume would save the stock list instead of the user's.
+        # resume would save the stock list instead of the user's. After a
+        # restart capture(resume=True) reads back what the stopped run saved.
         # An abandoned failed install leaves the exe copy in the Anomaly
-        # folder until the next capture() clears it.
-        if getattr(self, "_kept", None) is None and gamma_installed(
-            profile.gamma, profile.mo2_profile
-        ):
-            self._kept = capture(
-                profile, keep_exes=self.checkboxes["keep_engine_exes"].isChecked()
-            )
+        # folder until the next fresh capture() clears it.
+        if not self._kept_matches(profile):
+            self._discard_kept()
+        if getattr(self, "_kept", None) is None and gamma_installed(profile.gamma, profile.mo2_profile):
+            keep_exes = self.checkboxes["keep_engine_exes"].isChecked()
+            resume = self._resume_state is not None
+            if keep_exes:
+                # The exe copies are hundreds of MB: made off the GUI thread,
+                # with the install lock held, then this starts over with the
+                # kept state in hand (as an auto-retry: no second backup).
+                self.window.set_install_busy(True, "gamma")
+                self.install_button.setEnabled(False)
+                self.anomaly_button.setEnabled(False)
+                self.window.statusBar().showMessage(tr("Keeping your engine executables"))
+                self._pending_backup_error = backup_error
+                task = BackgroundTask(capture, profile, keep_exes=True, resume=resume, parent=self)
+                task.result.connect(
+                    lambda kept: self._on_kept_captured(kept, preserve_user, preserve_mcm)
+                )
+                task.error.connect(
+                    lambda _error: self._on_kept_captured(None, preserve_user, preserve_mcm)
+                )
+                self._capture_task = task
+                task.start()
+                return
+            self._kept = capture(profile, keep_exes=False, resume=resume)
+        backup_error = backup_error or getattr(self, "_pending_backup_error", None)
+        self._pending_backup_error = None
         self.window.set_install_busy(True, "gamma")
         self.full_progress.reset()
         if backup_error:
@@ -3376,6 +3535,19 @@ class InstallPage(QWidget):
         self.full_progress.set_runner(self._runner)
         self.full_progress.on_started()
         self._runner.start()
+
+    def _on_kept_captured(self, kept, preserve_user, preserve_mcm) -> None:
+        self._capture_task = None
+        self.window.statusBar().clearMessage()
+        # capture() never raises; an error here means nothing was kept, and
+        # the install still goes ahead (an empty state restores nothing).
+        self._kept = kept if kept is not None else KeptState()
+        self._start_full_install(
+            skip_confirm=True,
+            preserve_user=preserve_user,
+            preserve_mcm=preserve_mcm,
+            _is_auto_retry=True,
+        )
 
     def _on_full_install_line(self, line):
         """Forward a full-install progress line and surface MD5 redownloads.
@@ -3488,12 +3660,16 @@ class InstallPage(QWidget):
             # Reset/GAMMA Reset) legitimately (re)writes every file under
             # gamma/mods - Verify Integrity's MD5 baseline must not
             # compare fresh files against a stale pre-install snapshot.
+            profile = self.window.settings.active_profile
             kept, self._kept = getattr(self, "_kept", None), None
-            if kept is not None:
+            # Only into the install it came from: the folders may have been
+            # switched since a failed attempt captured it.
+            if kept is not None and self._kept_matches(profile, kept):
                 notes = restore(kept)
                 if notes:
                     self.window.statusBar().showMessage(" ".join(notes), 8000)
-            profile = self.window.settings.active_profile
+            elif kept is not None:
+                discard(kept)
             if profile is not None:
                 invalidate_baseline(profile.gamma)
                 note = apply_pending_settings_restore(profile)
@@ -3529,7 +3705,9 @@ class InstallPage(QWidget):
         self._update_button_states()
         if not cancelled and cli_ok(rc, output, ""):
             if self.verify_checkboxes["verify_after_gamma"].isChecked():
-                self._show_step(4)
+                # The view too: after Automatic the wizard card is hidden,
+                # and the check would run out of sight.
+                self._show_view("manual", 4)
                 QTimer.singleShot(0, self._start_verify)
             else:
                 # Setup is done; the next thing to do is play.
@@ -3545,6 +3723,7 @@ class InstallPage(QWidget):
             "gamma": profile.gamma,
             "cache": profile.cache,
             "auto": getattr(self, "_auto_active", False),
+            "options": self._install_options(),
         }
         self._write_resume_state(self._resume_state)
 
@@ -3673,21 +3852,47 @@ class InstallPage(QWidget):
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
             return
-        message, ok = prepare_anomaly_reinstall(
+        keep = keep_settings.isChecked()
+        # The backup zips every save, often hundreds of MB: off the GUI
+        # thread, with the install lock held so nothing starts meanwhile.
+        self.window.set_install_busy(True, "anomaly")
+        self.window.statusBar().showMessage(tr("Backing up your saves and settings"))
+        task = BackgroundTask(
+            prepare_anomaly_reinstall,
             profile,
             keep_saves=keep_saves.isChecked(),
-            keep_settings=keep_settings.isChecked(),
+            keep_settings=keep,
             with_gamma=with_gamma,
+            parent=self,
         )
+        task.result.connect(lambda result: self._on_anomaly_reinstall_ready(result, with_gamma, keep))
+        task.error.connect(lambda error: self._on_anomaly_reinstall_ready((error, False), with_gamma, keep))
+        self._reinstall_prep_task = task
+        task.start()
+
+    def _on_anomaly_reinstall_ready(self, result, with_gamma: bool, keep: bool) -> None:
+        self._reinstall_prep_task = None
+        message, ok = result
+        self.window.statusBar().clearMessage()
         if not ok:
+            self.window.set_install_busy(False)
             QMessageBox.warning(self, tr("Anomaly wasn't reinstalled"), message)
             return
         if message:
             self.window.statusBar().showMessage(message, 8000)
         self._auto_chain = with_gamma
         self._auto_cancelled = False
-        self._chain_preserve = keep_settings.isChecked() if with_gamma else None
+        self._chain_preserve = keep if with_gamma else None
         self._verify_anomaly_after_install = self._wants_anomaly_only_check()
+        if with_gamma:
+            # Marked now: closing COMMANDER or cancelling while Anomaly
+            # unpacks leaves vanilla engine files under a GAMMA that still
+            # looks installed. Resume puts GAMMA back on top, keeping (or
+            # not) the settings as chosen here.
+            self._save_resume_state()
+            options = self._resume_state["options"]
+            options["gamma:preserve_user"] = options["gamma:preserve_mcm"] = keep
+            self._write_resume_state(self._resume_state)
         self._start_anomaly_install(skip_confirm=True, respect_options=False)
 
     def _wants_anomaly_only_check(self) -> bool:
@@ -3899,8 +4104,12 @@ class InstallPage(QWidget):
             return
         self._finish_anomaly_sequence(cancelled, verified or cancelled)
 
-    def _offer_anomaly_retry(self, chain: bool) -> None:
-        """Anomaly is broken: GAMMA was not started - offer a retry."""
+    def _offer_anomaly_retry(self, chain: bool, preserve: bool | None = None) -> None:
+        """Anomaly is broken: GAMMA was not started - offer a retry.
+
+        The retry runs with the failed run's own chain and keep-settings
+        choice (a Reinstall Anomaly sets both itself, not from the step's
+        boxes)."""
         failure, self._anomaly_failure = self._anomaly_failure, None
         if failure is not None:
             summary, detail = _install_failure_message(
@@ -3925,7 +4134,11 @@ class InstallPage(QWidget):
         box.setDefaultButton(retry)
         box.exec()
         if box.clickedButton() is retry:
-            self._start_anomaly_install(skip_confirm=True)
+            self._auto_chain = chain
+            self._chain_preserve = preserve if chain else None
+            self._auto_cancelled = False
+            self._verify_anomaly_after_install = self._wants_anomaly_only_check()
+            self._start_anomaly_install(skip_confirm=True, respect_options=False)
 
     def _finish_anomaly_sequence(self, cancelled: bool, install_ok: bool) -> None:
         """Deliver the final outcome of an Anomaly install (and its
@@ -3934,6 +4147,7 @@ class InstallPage(QWidget):
         "Continue to GAMMA install automatically" checkbox armed it.
         """
         chain = self._auto_chain
+        preserve_choice = getattr(self, "_chain_preserve", None)
         # The chain is single-shot: clear it on every outcome so a failed
         # anomaly install cannot leave it armed for a later manual run.
         self._auto_chain = False
@@ -3975,7 +4189,7 @@ class InstallPage(QWidget):
         # Refreshes the badge and button labels through on_busy_changed().
         self.window.set_install_busy(False)
         if self._anomaly_failed:
-            self._offer_anomaly_retry(chain)
+            self._offer_anomaly_retry(chain, preserve_choice)
 
     def _show_error_popup(
         self, title: str, rc: int, output: str, *, resume_hint: str | None = None
@@ -4197,8 +4411,15 @@ class InstallPage(QWidget):
             ),
             official_mods=official,
         )
-        report("Reading GAMMA's own files from the download cache")
-        repo_files, unreadable_repos = gamma_repo_files(profile.gamma, repo_branches(profile))
+        # A Stop before the MD5 scan skips the slow reads in between; the
+        # scan and cache check below see the same flag and end at once.
+        def stopped() -> bool:
+            return self._scan_cancel is not None and self._scan_cancel.is_set()
+
+        repo_files, unreadable_repos = {}, []
+        if not stopped():
+            report("Reading GAMMA's own files from the download cache")
+            repo_files, unreadable_repos = gamma_repo_files(profile.gamma, repo_branches(profile))
         report("Starting full MD5 scan of mod files")
         scan = scan_mods_md5(
             profile.gamma,
@@ -4214,8 +4435,10 @@ class InstallPage(QWidget):
             None if scan.cancelled else compare_repo_files(repo_files, scan, unreadable_repos)
         )
         plan = None
-        report("Checking GAMMA download cache")
-        records = fetch_modpack_records(profile.mod_pack_maker_url)
+        records = {}
+        if not stopped():
+            report("Checking GAMMA download cache")
+            records = fetch_modpack_records(profile.mod_pack_maker_url)
         expected = expected_archive_md5s(records)
         cache_result = (
             None
@@ -4252,7 +4475,12 @@ class InstallPage(QWidget):
         # The worker reports fixed English lines (matched by the patterns
         # below, and kept in the log as they are): translated only here,
         # for the status line.
-        self.verify_progress.status_message(tr(text))
+        for pattern, msgid in _NAMED_LINES:
+            if named := pattern.match(text):
+                self.verify_progress.status_message(tr(msgid, **named.groupdict()))
+                break
+        else:
+            self.verify_progress.status_message(tr(text))
         for pattern, (start, end), tile, caption in (
             (_PRESENCE_RE, _VERIFY_PHASE["presence"], "mods", tr("mods checked")),
             (_MD5_RE, _VERIFY_PHASE["md5"], "md5", tr("files fingerprinted")),
@@ -4706,6 +4934,18 @@ class InstallPage(QWidget):
                 )
             )
         profile = self.window.settings.active_profile
+        nothing_checked = getattr(self, "_anomaly_skipped", False) and self._gamma_skipped
+        if nothing_checked:
+            # Not "No problems found": no file was looked at.
+            extra.append(
+                Finding(
+                    "problem",
+                    tr("Nothing was checked"),
+                    tr("Anomaly files were unticked and GAMMA isn't installed. Tick Anomaly files, then check again."),
+                    [],
+                    0,
+                )
+            )
         findings = build_findings(
             anomaly_checked=(
                 self._anomaly_checked
@@ -4720,7 +4960,7 @@ class InstallPage(QWidget):
             cache=self._cache_archive_result,
             plan=self._repair_plan,
             official_missing=self._official_missing,
-            gamma_skipped=self._gamma_skipped,
+            gamma_skipped=self._gamma_skipped and not nothing_checked,
             repo=self._repo_check,
         )
         verdict = overall_verdict(findings, self._scan)
@@ -4829,11 +5069,13 @@ class InstallPage(QWidget):
                         None if folder in reuse else self._repair_records.get(folder),
                     )
                 )
-            except (OSError, ValueError) as exc:
+            except Exception as exc:  # noqa: BLE001
                 # Keep going: one stubborn folder (e.g. a symlinked mods/
                 # folder tripping the path-escape guard, which raises
                 # ValueError rather than OSError) must not abort the whole
-                # repair or lose track of what was already set aside.
+                # repair or lose track of what was already set aside. Any
+                # exception: one escaping this loop loses the list, and the
+                # next repair's purge would delete what it had moved.
                 failed.append(f"{folder}: {exc}")
                 report(f"Could not set aside {folder}: {exc}")
         if failed:
@@ -4938,13 +5180,29 @@ class InstallPage(QWidget):
         # and putting them back would undo exactly what this run restores.
         self._repair_kept = None
         if profile is not None:
-            self._repair_kept = capture(
-                profile,
-                keep_exes=self.checkboxes["keep_engine_exes"].isChecked()
-                and not self._anomaly_recheck_done,
+            keep_exes = (
+                self.checkboxes["keep_engine_exes"].isChecked()
+                and not self._anomaly_recheck_done
             )
+            # Off the GUI thread: the exe copies are hundreds of MB. Still
+            # inside Verify's busy lock, so nothing else starts meanwhile.
+            task = BackgroundTask(capture, profile, keep_exes=keep_exes, parent=self)
+            task.result.connect(self._run_repair_installer)
+            task.error.connect(lambda _error: self._run_repair_installer(KeptState()))
+            self._verify_task = task
+            task.start()
+            return
+        self._run_repair_installer(None)
+
+    def _run_repair_installer(self, kept) -> None:
+        self._repair_kept = kept
+        if kept is not None:
             # modlist.txt is handled exactly (order included) above.
-            self._repair_kept.modlist = None
+            kept.modlist = None
+        if self._scan_cancel is not None and self._scan_cancel.is_set():
+            # Stopped while the exes were being copied.
+            self._restore_after_repair_cancel()
+            return
         # Preservation flags are mandatory: a repair must never touch
         # user.ltx or MCM settings.
         args = _repair_install_args()
@@ -5022,9 +5280,17 @@ class InstallPage(QWidget):
             return
         # The installer succeeded, but that alone doesn't prove each mod
         # was reinstalled: keep the new copy where one exists and put the
-        # old one back where it doesn't (see settle_quarantine).
-        settled = settle_quarantine(self._quarantine_records)
-        self._quarantine_records = []
+        # old one back where it doesn't (see settle_quarantine). Off the GUI
+        # thread: the old copies can be thousands of files.
+        records, self._quarantine_records = self._quarantine_records, []
+        self.verify_progress.status_message(tr("Tidying up"))
+        task = BackgroundTask(settle_quarantine, records, parent=self)
+        task.result.connect(self._on_quarantine_settled)
+        task.error.connect(lambda error: self._finish_verify(ok=False, message=error, summary=tr("Repair failed")))
+        self._verify_task = task
+        task.start()
+
+    def _on_quarantine_settled(self, settled) -> None:
         self._repaired_folders = [*self._repaired_folders, *settled.reinstalled]
         self._repair_quarantined_count = len(self._repaired_folders)
         for line in settled.failures:
@@ -5054,8 +5320,14 @@ class InstallPage(QWidget):
         # Leftovers from an older, interrupted run can go now - but never
         # while something just failed to move back: that copy may be the
         # only one left.
-        if not any("->" in line for line in settled.failures):
-            purge_quarantine(self.window.settings.active_profile.gamma)
+        profile = self.window.settings.active_profile
+        if profile is not None and not any("->" in line for line in settled.failures):
+            task = BackgroundTask(purge_quarantine, profile.gamma, parent=self)
+            task.result.connect(lambda _r: self._start_post_scan())
+            task.error.connect(lambda _e: self._start_post_scan())
+            self._verify_task = task
+            task.start()
+            return
         self._start_post_scan()
 
     def _on_repair_install_cancelled(self):
@@ -5374,7 +5646,7 @@ class InstallPage(QWidget):
         profile = self.window.settings.active_profile
         pending = self._pending_repair
         if pending is not None and (
-            profile is None or pending[2] != (profile.anomaly, profile.gamma, profile.cache)
+            profile is None or pending[3] != (profile.anomaly, profile.gamma, profile.cache)
         ):
             self._pending_repair = None
         self.repair_button.setVisible(self._pending_repair is not None)
@@ -5555,17 +5827,19 @@ class InstallPage(QWidget):
         """``then_install``: Automatic - no confirm pop-up, and Anomaly and
         GAMMA start once the dependencies are in."""
         self._winetricks_status_enabled = True
-        self._wt_then_install = then_install
         if self._wt_runner is not None and self._wt_runner.is_running():
             return
+        if self._deps_checking:
+            return
+        self._wt_then_install = then_install
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            self._deps_stopped()
             return
         if game_running(force=True):
             # The game holds the Wine prefix; winetricks must not touch it.
             self._warn_game_open()
-            return
-        if self._deps_checking:
+            self._deps_stopped()
             return
         self._deps_checking = True
         # check_all_dependencies() chains several subprocess lookups (umu,
@@ -5585,8 +5859,18 @@ class InstallPage(QWidget):
             tr("Mod Organizer 2 or the game is still open. Close both, then try again."),
         )
 
+    def _deps_stopped(self) -> None:
+        """The dependencies didn't start: an Automatic install waiting on
+        them stops too, or the page keeps reopening on its card and the
+        next Manual install is saved as Automatic."""
+        if self._wt_then_install:
+            self._wt_then_install = False
+            self._auto_active = False
+            self._update_button_states()
+
     def _on_dependencies_check_error(self, message: str) -> None:
         self._deps_checking = False
+        self._deps_stopped()
         QMessageBox.warning(
             self, tr("Couldn't check the dependencies"), message
         )
@@ -5597,9 +5881,11 @@ class InstallPage(QWidget):
         # the background.
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            self._deps_stopped()
             return
         if game_running(force=True):
             self._warn_game_open()
+            self._deps_stopped()
             return
         if errors:
             QMessageBox.warning(
@@ -5609,6 +5895,7 @@ class InstallPage(QWidget):
                 points=tuple(errors),
                 note=tr("Install them, then try again."),
             )
+            self._deps_stopped()
             return
         prefix = self._wt_prefix()
         need_winetricks = not winetricks_binary()
@@ -5639,11 +5926,13 @@ class InstallPage(QWidget):
                 labels={QMessageBox.StandardButton.Yes: tr("Reinstall now") if self._wt_force else tr("Install now"), QMessageBox.StandardButton.No: tr("Cancel")},
             )
             if answer != QMessageBox.StandardButton.Yes:
+                self._deps_stopped()
                 return
         # install_busy/mo2 state may have changed while the dialog was open;
         # winetricks must never touch a prefix the game is holding.
         if self.window.install_busy:
             QMessageBox.information(self, tr("Please wait"), tr("Another install is still running. Wait for it to finish, then try again."))
+            self._deps_stopped()
             return
         if game_running(force=True):
             QMessageBox.information(
@@ -5651,6 +5940,7 @@ class InstallPage(QWidget):
                 tr("Close the game first"),
                 tr("Mod Organizer or the game was opened while this window was open. Close it, then install the dependencies again."),
             )
+            self._deps_stopped()
             return
         if need_winetricks:
             self._wt_stage = "winetricks"
@@ -5708,7 +5998,7 @@ class InstallPage(QWidget):
         if self._wt_stage == "winetricks":
             command = winetricks_tool_install_command()
             if not command:
-                msg = "winetricks could not be installed (curl is not available)."
+                msg = tr("winetricks could not be installed (curl is not available).")
                 self.wt_progress.on_finished(1, msg)
                 self._wt_runner = None
                 self._wt_status_failed(msg)
@@ -5722,7 +6012,7 @@ class InstallPage(QWidget):
         elif self._wt_stage == "umu":
             command = umu_install_command()
             if not command:
-                msg = "umu-run could not be installed (curl is not available)."
+                msg = tr("umu-run could not be installed (curl is not available).")
                 self.wt_progress.on_finished(1, msg)
                 self._wt_runner = None
                 self._wt_status_failed(msg)
@@ -5747,7 +6037,7 @@ class InstallPage(QWidget):
                 command, env = [], {}
                 failure = str(exc)
             else:
-                failure = (
+                failure = tr(
                     "Winetricks could not be run with the selected runner - "
                     "install umu-run (or select a runner that provides Wine) "
                     "and try again."
@@ -5880,6 +6170,9 @@ class InstallPage(QWidget):
             labels={QMessageBox.StandardButton.Yes: tr("Stop"), QMessageBox.StandardButton.No: tr("Keep installing")},
         )
         if answer != QMessageBox.StandardButton.Yes:
+            # The dialog's Cancel disabled itself and says "Stopping".
+            if self._wt_dialog is not None:
+                self._wt_dialog.resume()
             return
         # The install may have finished while the dialog was open, clearing
         # self._wt_runner - re-check before touching it, or this crashes.

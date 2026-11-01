@@ -1,8 +1,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from commander_gui.game_installs import find_install, fix_windows_paths, mo2_profile_for
+from commander_gui.game_installs import (
+    find_install,
+    fix_windows_paths,
+    mo2_profile_for,
+    needs_fix,
+    windows_paths,
+)
 
 WINDOWS_INI = (
     "[General]\n"
@@ -46,6 +53,37 @@ class GameInstallsTest(unittest.TestCase):
             self.assertIn("download_directory=" + z_gamma.replace("/", "\\\\") + "\\\\downloads", text)
             self.assertIn("base_directory=" + z_gamma + "\n", text)
             self.assertTrue((gamma / "ModOrganizer.ini.windows.bak").is_file())
+
+    def test_folder_names_ending_in_a_paren_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Anomaly (1)" / "bin").mkdir(parents=True)
+            (root / "Anomaly (1)" / "bin" / "AnomalyDX11.exe").touch()
+            gamma = root / "GAMMA (copy)"
+            gamma.mkdir()
+            (gamma / "ModOrganizer.exe").touch()
+            (gamma / "ModOrganizer.ini").write_text(
+                "gamePath=@ByteArray(C:\\\\Games\\\\Anomaly (1))\n"
+                "base_directory=C:/Games/GAMMA (copy)\n"
+                "screenshot_directory=D:/Pictures\n"
+            )
+            anomaly, gamma_dir, _cache = find_install(root)
+            self.assertTrue(needs_fix(anomaly, gamma_dir))
+            self.assertEqual(windows_paths(gamma_dir)[0], "C:/Games/Anomaly (1)")
+            left = fix_windows_paths(anomaly, gamma_dir)
+            text = (gamma / "ModOrganizer.ini").read_text()
+            self.assertEqual(left, ["D:/Pictures"])
+            self.assertIn("gamePath=@ByteArray(" + ("Z:" + anomaly).replace("/", "\\\\") + ")\n", text)
+            self.assertIn("base_directory=Z:" + gamma_dir + "\n", text)
+            # Only the other drive is left, which is never fixed: no new ask.
+            self.assertFalse(needs_fix(anomaly, gamma_dir))
+
+    def test_unreadable_folder_finds_nothing(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(Path, "iterdir", side_effect=PermissionError),
+        ):
+            self.assertIsNone(find_install(tmp))
 
     def test_mo2_profile_falls_back_to_one_the_install_has(self):
         with tempfile.TemporaryDirectory() as tmp:

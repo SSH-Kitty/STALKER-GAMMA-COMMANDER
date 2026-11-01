@@ -776,11 +776,16 @@ def _toggle_command() -> str:
 
 def _read_reply() -> None:
     """A line from the panel: the options text its Frame generation tab set."""
+    # Unbuffered pipe: a second line stays in the pipe and wakes the
+    # notifier again, instead of waiting unseen in Python's buffer.
     line = _process.stdout.readline()
     if not line:  # it quit
         _reader.setEnabled(False)
     elif line.startswith(b"options ") and _set_options:
-        _set_options(json.loads(line[8:]))
+        try:
+            _set_options(json.loads(line[8:]))
+        except ValueError:
+            pass
 
 
 def _send(command: str) -> bool:
@@ -818,15 +823,26 @@ def _start(*, shown: bool) -> None:
     if env.get("WAYLAND_DISPLAY") and env.get("DISPLAY"):
         env["QT_QPA_PLATFORM"] = "xcb"
     # Its stdin closing (COMMANDER quit) ends it.
-    _process = subprocess.Popen(
-        [sys.executable, "-m", __name__, *([_toggle_command()] if shown else ["--hidden"])],
-        cwd=Path(__file__).resolve().parents[2],
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        _process = subprocess.Popen(
+            [sys.executable, "-m", __name__, *([_toggle_command()] if shown else ["--hidden"])],
+            cwd=Path(__file__).resolve().parents[2],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except OSError as exc:
+        from .. import applog
+
+        _process = None
+        applog.get_logger().warning("graphics overlay: could not start the panel: %s", exc)
+        return
     _send(options)
+    if _reader is not None:
+        _reader.setEnabled(False)
+        _reader.deleteLater()
     _reader = QSocketNotifier(_process.stdout.fileno(), QSocketNotifier.Type.Read)
     _reader.activated.connect(_read_reply)
 
@@ -900,6 +916,10 @@ def stop_key() -> None:
     if _running():
         _reader.setEnabled(False)
         _process.terminate()
+        try:
+            _process.wait(0.3)
+        except subprocess.TimeoutExpired:
+            pass
     if _grab is not None:
         _grab.close()
         _grab = None

@@ -10,6 +10,7 @@ against the official archive checksum) and re-extracts just those mods.
 
 from __future__ import annotations
 
+import http.client
 import re
 import shutil
 import time
@@ -134,7 +135,7 @@ def fetch_modpack_records(url: str, timeout: float = 20) -> dict[str, ModPackRec
             text = read_response_bytes(resp, 32 * 1024 * 1024).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return {}
     return parse_modpack_records(text)
 

@@ -32,6 +32,10 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
 urllib.request.install_opener(urllib.request.build_opener(_SafeRedirect))
 
 
+def is_loopback_host(host: str | None) -> bool:
+    return (host or "").lower() in ("localhost", "127.0.0.1", "::1")
+
+
 def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
     """``urllib.request.urlopen`` restricted to http(s).
 
@@ -47,9 +51,15 @@ def urlopen(url_or_request: str | urllib.request.Request, *, timeout: float):
         if isinstance(url_or_request, urllib.request.Request)
         else url_or_request
     )
-    scheme = urllib.parse.urlsplit(full_url).scheme.lower()
+    parts = urllib.parse.urlsplit(full_url)
+    scheme = parts.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise ValueError(f"Refusing to open a non-http(s) URL: {full_url!r}")
+    # Plain http only to this machine: the modpack list carries download
+    # links and their checksums, so anyone on the network path could swap
+    # them for their own.
+    if scheme == "http" and not is_loopback_host(parts.hostname):
+        raise ValueError(f"Refusing a plain-http URL, use https: {full_url!r}")
     try:
         return urllib.request.urlopen(url_or_request, timeout=timeout)  # nosec B310 - scheme checked above
     except (urllib.error.URLError, OSError) as exc:

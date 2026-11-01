@@ -41,7 +41,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import atomic
-from .config import child_environment
+from .config import child_environment, spawn_reaped
 
 #: A parsed entry: (key, type_byte, value). value is a list[Entry] for a map
 #: (type 0x00), a str for a string (0x01), or an int for an int32 (0x02).
@@ -72,14 +72,15 @@ def _parse_entries(buf: bytes, pos: int) -> tuple[list[Entry], int]:
         type_byte = buf[pos]
         pos += 1
         end = buf.index(b"\x00", pos)
-        key = buf[pos:end].decode("utf-8", errors="replace")
+        # surrogateescape: another program's non-UTF-8 bytes go back unchanged.
+        key = buf[pos:end].decode("utf-8", errors="surrogateescape")
         pos = end + 1
         if type_byte == _TYPE_MAP:
             value, pos = _parse_entries(buf, pos)
             pos += 1  # the 0x08 that closed this nested map
         elif type_byte == _TYPE_STRING:
             end = buf.index(b"\x00", pos)
-            value = buf[pos:end].decode("utf-8", errors="replace")
+            value = buf[pos:end].decode("utf-8", errors="surrogateescape")
             pos = end + 1
         elif type_byte == _TYPE_INT32:
             raw = buf[pos : pos + 4]
@@ -99,12 +100,12 @@ def _serialize_entries(entries: list[Entry]) -> bytes:
     out = bytearray()
     for key, type_byte, value in entries:
         out.append(type_byte)
-        out += key.encode("utf-8") + b"\x00"
+        out += key.encode("utf-8", errors="surrogateescape") + b"\x00"
         if type_byte == _TYPE_MAP:
             out += _serialize_entries(value)
             out.append(_TYPE_END)
         elif type_byte == _TYPE_STRING:
-            out += str(value).encode("utf-8") + b"\x00"
+            out += str(value).encode("utf-8", errors="surrogateescape") + b"\x00"
         elif type_byte == _TYPE_INT32:
             out += int(value).to_bytes(4, "little", signed=True)
         else:
@@ -539,7 +540,7 @@ def restart_steam(
         # shortcut, not to be left with Steam closed. The failure still
         # reaches the caller once it has been restarted - without the
         # relaunch args, which were meant for what was just written.
-        subprocess.Popen(
+        spawn_reaped(
             [*launch_cmd, *(relaunch_args if written else ())],
             env=child_environment(),
             start_new_session=True,
@@ -1008,7 +1009,7 @@ def open_in_steam(steam_root: Path, url: str) -> None:
     """Hand ``url`` (``steam://...``) to the Steam client matching this
     install - native or Flatpak - starting Steam first if it is closed.
     Raises OSError if Steam could not be started."""
-    subprocess.Popen(
+    spawn_reaped(
         [*steam_launch_command(steam_root), url],
         env=child_environment(),
         start_new_session=True,

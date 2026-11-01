@@ -102,8 +102,8 @@ from commander_gui.ui.utilities_page import (
     _save_moved_profile,
 )
 from commander_gui.updates import (
-    diff_records,
     _version_from_patchnotes_or_readme,
+    diff_records,
     local_modpack_records,
     remote_version,
 )
@@ -117,6 +117,21 @@ from commander_gui.winetricks import (
 
 #: The first bytes of a real type-2 AppImage: ELF magic, then "AI\\x02" at 8.
 _FAKE_APPIMAGE_HEADER = b"\x7fELF\x02\x01\x01\x00AI\x02\x00\x00\x00\x00\x00"
+
+class InlineTask:
+    """BackgroundTask stand-in that runs its callable at start()."""
+
+    def __init__(self, fn, *args, parent=None, **kwargs):
+        self._call = lambda: fn(*args, **kwargs)
+        self._slots = []
+        self.result = Mock(connect=self._slots.append)
+        self.error = Mock()
+
+    def start(self):
+        value = self._call()
+        for slot in self._slots:
+            slot(value)
+
 
 class AssistantLauncherTests(unittest.TestCase):
     def test_bundled_assistant_command_uses_payload_python(self):
@@ -2998,6 +3013,7 @@ class RegressionTests(unittest.TestCase):
             _deps_checking=False,
         )
         page._warn_game_open = lambda: InstallPage._warn_game_open(page)
+        page._deps_stopped = lambda: InstallPage._deps_stopped(page)
         with (
             patch("commander_gui.ui.install_page.game_running", return_value=True),
             patch("commander_gui.ui.install_page.QMessageBox.warning") as warned,
@@ -3052,6 +3068,7 @@ class RegressionTests(unittest.TestCase):
         finally:
             child.kill()
             child.wait()
+        time.sleep(0.25)  # past the shared scan's 0.2 s
         self.assertNotIn(child.pid, exe_pids(marker))
 
     def test_install_archive_honours_cancel_during_the_move_phase(self):
@@ -3859,7 +3876,7 @@ class RegressionTests(unittest.TestCase):
         page.gamma_edit = Mock(text=Mock(return_value="~/gamma"))
         page.cache_edit = Mock(text=Mock(return_value="~/cache"))
 
-        with patch("commander_gui.ui.settings_page.mo2_running", return_value=False):
+        with patch("commander_gui.ui.settings_page.game_running", return_value=False):
             page._persist_dirs()
 
         self.assertNotIn("~", profile.anomaly)
@@ -6250,7 +6267,6 @@ class ModCounterTests(unittest.TestCase):
     def test_game_running_sees_a_game_started_without_mo2(self):
         """Play Anomaly runs the game with no Mod Organizer: the profile
         switch guard must still see it."""
-        from types import SimpleNamespace
 
         from commander_gui.ui import common
 
@@ -11022,13 +11038,16 @@ class UserModsTrackerTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 check_commander_update("1.2.9-unstable")
 
-    def test_network_urlopen_allows_http_and_https(self):
+    def test_network_urlopen_allows_https_and_local_http_only(self):
         with patch("commander_gui.network.urllib.request.urlopen") as urlopen:
             network.urlopen("https://example.com/x", timeout=1)
             network.urlopen(
-                urllib.request.Request("http://example.com/x"), timeout=1
+                urllib.request.Request("http://localhost:8000/x"), timeout=1
             )
         self.assertEqual(urlopen.call_count, 2)
+        # Plain http elsewhere: the modpack list could be swapped on the way.
+        with self.assertRaises(ValueError):
+            network.urlopen(urllib.request.Request("http://example.com/x"), timeout=1)
 
     def test_remote_version_returns_none_for_oversized_response(self):
         profile = CliProfile()
@@ -12957,6 +12976,7 @@ class UserModsTrackerTests(unittest.TestCase):
                     return_value=SettleResult(reinstalled=["a", "b"]),
                 ) as mock_settle,
                 patch.object(page, "_start_post_scan"),
+                patch("commander_gui.ui.install_page.BackgroundTask", InlineTask),
             ):
                 page._on_repair_install_finished(0, "Repair finished cleanly.")
             mock_settle.assert_called_once_with(["record-a", "record-b"])

@@ -24,6 +24,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -1545,6 +1546,10 @@ def launch_detached(
             )
             if registry is not None:
                 registry.register(process)
+            else:
+                # Nobody waits on it otherwise: reaped once it exits, not
+                # left a zombie until COMMANDER quits.
+                threading.Thread(target=process.wait, daemon=True).start()
             return process
         except OSError as exc:
             raise LaunchError(f"Failed to start {command[0]!r}: {exc}") from exc

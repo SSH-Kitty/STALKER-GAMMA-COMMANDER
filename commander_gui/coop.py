@@ -94,8 +94,9 @@ def load_state(anomaly) -> dict | None:
         state = json.loads(_state_file(anomaly).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    # A hand-edited file holding a list or a string is no state at all.
-    return state if isinstance(state, dict) else None
+    # A hand-edited file holding a list or a string is no state at all, and
+    # one without its file list can't be switched or checked.
+    return state if isinstance(state, dict) and isinstance(state.get("files"), dict) else None
 
 
 def install_kind(anomaly) -> str:
@@ -305,6 +306,7 @@ def install(zip_path: str | Path, anomaly, gamma, mo2_profile, progress=None, ki
         raise CoopError("Pick a GAMMA folder first.")
     root = state_dir(anomaly)
     root.mkdir(parents=True, exist_ok=True)
+    atomic.remove_stale(root, ".coop-*")
     staging = Path(tempfile.mkdtemp(prefix=".coop-", dir=root))
     try:
         files: dict[str, str] = {}
@@ -468,6 +470,11 @@ def switch_to_coop(anomaly, gamma, mo2_profile) -> None:
                 originals.discard(rel)
             _copy_atomic(root / "files" / rel, target)
             done.append(rel)
+            # Saved per file: after a crash midway, the next switch must see
+            # which files are already co-op copies, or it backs those up
+            # over the real originals.
+            state["originals"] = sorted(originals)
+            _save_state(anomaly, state)
     except BaseException:
         _restore(anomaly, root, done, originals)
         raise

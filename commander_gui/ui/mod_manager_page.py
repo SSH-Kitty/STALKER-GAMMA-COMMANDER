@@ -103,12 +103,21 @@ from ..modlist import (
     timestamped_backup_path,
     unflip,
 )
-from ..romeo import EXES_NEEDED, KEPT_MCM, MCM_MOD, find_romeo, is_romeo_profile, mcm_changed, old_mods, unpacked_size
+from ..romeo import (
+    EXES_NEEDED,
+    KEPT_MCM,
+    MCM_MOD,
+    find_romeo,
+    is_romeo_profile,
+    mcm_changed,
+    old_mods,
+    unpacked_size,
+)
 from ..romeo import install as install_romeo
 from ..themes import token_color
 from ..updates import local_modpack_records
-from .about_page import _copy_button
 from . import reflow
+from .about_page import _copy_button
 from .common import (
     ACCENT,
     ITEM_GREEN,
@@ -121,6 +130,7 @@ from .common import (
     make_card,
     mo2_running,
     section_label,
+    tint,
     tr,
 )
 from .dialogs import InputDialog as QInputDialog
@@ -197,7 +207,7 @@ class DragTree(QTreeWidget):
         self._drop_indicator = QFrame(self.viewport())
         self._drop_indicator.setFrameShape(QFrame.Shape.HLine)
         self._drop_indicator.setLineWidth(2)
-        self._drop_indicator.setStyleSheet(f"color: {ACCENT.name()};")
+        tint(self._drop_indicator, ACCENT)
         self._drop_indicator.hide()
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -1231,7 +1241,8 @@ class ModManagerPage(QWidget):
         if self._profiles_loading:
             return
         self._profiles_loading = True
-        self.count_label.setText(tr("Loading MO2 profiles"))
+        if not self.tree.topLevelItemCount():  # else the count stays meanwhile
+            self.count_label.setText(tr("Loading MO2 profiles"))
         task = BackgroundTask(_query_mo2_profiles, parent=self)
         task.result.connect(
             lambda result, task=task, generation=generation: self._on_profiles_loaded(
@@ -1313,7 +1324,7 @@ class ModManagerPage(QWidget):
             )
             self.tree.clear()
             return
-        self._load_mods()
+        self._load_mods(reuse=True)
 
     def _on_profiles_error(
         self, message: str, task: BackgroundTask, generation: int
@@ -1329,13 +1340,32 @@ class ModManagerPage(QWidget):
         self.count_label.setText(tr("Could not list MO2 profiles: {message}", message=message))
         self.tree.clear()
 
-    def _load_mods(self) -> None:
+    def _load_mods(self, *, reuse: bool = False) -> None:
+        """Read the profile's modlist.txt into the tree.
+
+        *reuse* (a page visit): an unchanged list keeps the tree as it is,
+        so coming back doesn't flash ~1000 rows and lose the scroll spot.
+        """
         mo2_profile = self.profile_combo.currentText()
         if not mo2_profile:
             return
         try:
             path = self._modlist_path(mo2_profile)
-            self._lines = read_lines(path)
+            lines = read_lines(path)
+            # The tree is built from modlist.txt (MO2's categories are its
+            # separators) and the nicknames, nothing else.
+            shown = (path, lines, self._nicknames())
+            if (
+                reuse
+                and not getattr(self, "_load_failed", True)
+                and shown == getattr(self, "_shown", None)
+                and self.tree.topLevelItemCount()
+            ):
+                self._update_count()
+                self._update_guard()
+                return
+            self._lines = lines
+            self._shown = shown
             self.backup_status.setText(self._backup_status_text(path))
             self._restore_missing_user_categories()
             self._populate_tree()

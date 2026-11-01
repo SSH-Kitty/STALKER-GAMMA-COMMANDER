@@ -52,7 +52,13 @@ from ..steam_shortcuts import (
     ShortcutsFileError,
     add_to_steam,
 )
-from ..themes import LIVE_THEMES, LIVE_TIME_CHOICES, THEME_INFO, active_theme, active_theme_tokens
+from ..themes import (
+    LIVE_THEMES,
+    LIVE_TIME_CHOICES,
+    THEME_INFO,
+    active_theme,
+    active_theme_tokens,
+)
 from ..updates import is_unstable_version, newer_unstable_tag
 from . import graphics_window, reflow
 from .common import (
@@ -61,20 +67,22 @@ from .common import (
     BackgroundTask,
     NoWheelComboBox,
     discord_presence_state,
-    make_card,
     game_running,
-    mo2_running,
+    make_card,
     normalize_path,
     open_in_file_manager,
     pick_shortcuts_vdf,
     populate_runner_combo,
     save_profile_dirs,
     steam_running,
+    tint,
     tr,
+    warn_wine_unsafe_folder,
+    wine_unsafe_folder,
 )
 from .dashboard import _card_title
-from .install_page import _PathEdit
 from .dialogs import MessageBox as QMessageBox
+from .install_page import _PathEdit
 from .moddb_plugin import controller as moddb_controller
 from .multiplayer_page import (
     _columns,
@@ -833,7 +841,8 @@ class SettingsPage(QWidget):
             return
         self._persisting = True
         try:
-            if self.window.install_busy or mo2_running():
+            # game_running: a game started without MO2 holds the folders too.
+            if self.window.install_busy or game_running(force=True):
                 QMessageBox.warning(
                     self,
                     tr("Please wait"),
@@ -851,6 +860,10 @@ class SettingsPage(QWidget):
             self.anomaly_edit.setText(anomaly)
             self.gamma_edit.setText(gamma)
             self.cache_edit.setText(cache)
+            if bad := wine_unsafe_folder(anomaly, gamma):
+                warn_wine_unsafe_folder(self, bad)
+                self._load_folders()
+                return
             if (
                 anomaly == profile.anomaly
                 and gamma == profile.gamma
@@ -1342,9 +1355,7 @@ class SettingsPage(QWidget):
         unstable = is_unstable_version(__version__)
         kind = tr("Unstable") if unstable else tr("Stable")
         self._build_label.setText(kind)
-        self._build_label.setStyleSheet(
-            f"color: {(WARN if unstable else OK_GREEN).name()}; font-weight: bold;"
-        )
+        tint(self._build_label, WARN if unstable else OK_GREEN)
         appimage = commander_appimage_path() is not None
         if unstable:
             self._switch_build_button.setText(tr("Go back to the stable build"))
@@ -1568,9 +1579,8 @@ class SettingsPage(QWidget):
                 WARN,
             )
         self._discord_status_label.setText(text)
-        self._discord_status_label.setStyleSheet(
-            f"color: {color.name()}; font-weight: bold;" if color else ""
-        )
+        self._discord_status_label.setStyleSheet("font-weight: bold;" if color else "")
+        tint(self._discord_status_label, color)
         self._discord_test_button.setEnabled(bool(connected))
 
     def _check_discord(self) -> None:
@@ -1618,7 +1628,8 @@ class SettingsPage(QWidget):
             return
         self._discord_test_rpc = rpc
         self._discord_test_button.setText(tr("Showing on Discord"))
-        QTimer.singleShot(15_000, self._end_discord_test)
+        # With a context: a language switch deletes this page meanwhile.
+        QTimer.singleShot(15_000, self, self._end_discord_test)
 
     def _end_discord_test(self) -> None:
         stop_presence(self._discord_test_rpc)
@@ -1697,10 +1708,33 @@ class SettingsPage(QWidget):
                 ],
                 cwd,
             )
-            launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
-            self._apply_display_scale_button.setText(tr("Applied"))
+            proc = launch_detached(command, env, cwd, log_path=logs_dir() / "launcher.log")
         except (LaunchError, OSError) as exc:
             QMessageBox.warning(self, tr("Couldn't change the display scale"), str(exc))
+            return
+        # "Applied" once reg.exe says so: starting the prefix can take a
+        # while, and a failure used to read as done.
+        button = self._apply_display_scale_button
+        button.setEnabled(False)
+        waited = [0]
+
+        def check() -> None:
+            code = proc.poll()
+            waited[0] += 1
+            if code is None and waited[0] < 120:  # up to a minute
+                QTimer.singleShot(500, button, check)
+                return
+            button.setEnabled(True)
+            if code == 0:
+                button.setText(tr("Applied"))
+            else:
+                QMessageBox.warning(
+                    self,
+                    tr("Couldn't change the display scale"),
+                    tr("Wine didn't take the change. The launcher log has the details."),
+                )
+
+        QTimer.singleShot(500, button, check)
 
     def _on_title_bar_toggled(self, on: bool) -> None:
         gui_settings.save_gui_settings(custom_title_bar=on)
@@ -1927,7 +1961,11 @@ class SettingsPage(QWidget):
         self._discord_client_id_edit.blockSignals(False)
         if custom_id:
             self._discord_advanced_button.setChecked(True)
-        self._check_discord()
+        # Once per page: probing on every visit made the status jump to
+        # "Looking for Discord" and back. Check re-probes on demand.
+        if not getattr(self, "_discord_probed", False):
+            self._discord_probed = True
+            self._check_discord()
 
         current = state.get("theme") or "black"
         for key, radio in self._radios.items():

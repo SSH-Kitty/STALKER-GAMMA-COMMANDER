@@ -153,7 +153,7 @@ def installed_version(gamma_dir: str | None) -> str | None:
         text = Path(gamma_dir, "version.txt").read_text(
             encoding="utf-8-sig", errors="replace"
         )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     version = text.strip()
     return version or None
@@ -210,7 +210,7 @@ def remote_version(profile) -> str | None:
                 .decode("utf-8-sig", errors="replace")
                 .strip()
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     return version or None
 
@@ -230,7 +230,7 @@ def fetch_latest_patchnotes(profile) -> str | None:
             text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     return text or None
 
@@ -328,7 +328,7 @@ def _version_from_patchnotes_or_readme(profile, patchnotes: str | None) -> str |
             text = read_response_bytes(resp, _MAX_MARKDOWN_BYTES).decode(
                 "utf-8", errors="replace"
             )
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         return None
     return _version_from_text(text)
 
@@ -848,7 +848,7 @@ def check_updates(profile) -> UpdateStatus:
                     "utf-8", errors="replace"
                 )
                 remote = parse_modpack_records(remote_text)
-        except (OSError, ValueError, UnicodeError) as exc:
+        except (OSError, ValueError, UnicodeError, http.client.HTTPException) as exc:
             status.error = tr("Could not reach the official mod list: {exc}", exc=exc)
             list_failed = True
     else:

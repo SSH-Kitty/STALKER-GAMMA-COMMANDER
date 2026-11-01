@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,16 +64,18 @@ from .common import (
     ProgressArea,
     clear_layout,
     free_space_bytes,
+    game_running,
     human_size,
     info_label,
     install_hover_grow_text,
     make_card,
-    game_running,
     notice,
     notify_desktop,
+    open_web_links,
     play_click_sound,
     section_label,
     set_hover_grow_text,
+    tint,
     tr,
 )
 from .dashboard import _TITLE_ROW_H, _card_title
@@ -167,7 +170,8 @@ class _Release(QFrame):
         # A browser, not a label: long notes scroll inside their tile instead
         # of stretching the page, and paragraphs get room between them.
         self.body = QTextBrowser()
-        self.body.setOpenExternalLinks(True)
+        # Notes come from the profile's repo URL: only http(s) links open.
+        open_web_links(self.body)
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.body.setStyleSheet("background: transparent; border: none;")
         self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -490,10 +494,21 @@ class UpdatePage(QWidget):
             # Exes COMMANDER installed: a GAMMA update must not swap them back.
             self.keep_exes_cb.setChecked(True)
         self.exes_card.refresh()
-        self._check()
+        # Checked again on a visit only after a while, or for another
+        # profile: each check is a fetch, and the card flashed "Checking".
+        key = (
+            (profile.profile_name, profile.anomaly, profile.gamma, profile.cache)
+            if profile is not None
+            else None
+        )
+        last = getattr(self, "_auto_checked", None)
+        if last is None or last[1] != key or time.monotonic() - last[0] > 600:
+            self._auto_checked = (time.monotonic(), key)
+            self._check()
 
     def on_busy_changed(self, _busy: bool) -> None:
         """Global install lock changed; re-evaluate this page's controls."""
+        self._auto_checked = None  # an install or update changes the result
         self._update_button_states()
         self.exes_card.refresh()
 
@@ -593,7 +608,8 @@ class UpdatePage(QWidget):
         modlist_path = modlist_path_for(profile.gamma, profile.mo2_profile)
         if modlist_path is None:
             return
-        if game_running():
+        # Forced: modlist.txt is about to be overwritten.
+        if game_running(force=True):
             QMessageBox.warning(
                 self,
                 tr("Close the game first"),
@@ -697,11 +713,18 @@ class UpdatePage(QWidget):
         free = free_space_bytes(profile.cache or profile.gamma) if profile else None
         low = free is not None and free < _LOW_DISK_SPACE_WARNING_BYTES
         self.space_stat.set(human_size(free) if free is not None else "-")
-        self.space_stat.value.setStyleSheet(f"color: {WARN.name()};" if low else "")
+        tint(self.space_stat.value, WARN if low else None)
+
+    def on_theme_changed(self) -> None:
+        # Their colours are set in code, from the theme in use then.
+        if getattr(self.window.settings, "active_profile", None) is not None:
+            self._render_space()
+        self._render_diffs(list(getattr(self, "_diffs", [])), known=getattr(self, "_diffs_known", False))
 
     def _render_diffs(self, diffs: list[UpdateDiff], *, known: bool = True) -> None:
         """Table, filter, counts, tile and tab title: always kept in step."""
         self._diffs = diffs
+        self._diffs_known = known
         self.table.setRowCount(0)
         for diff in diffs:
             self._add_diff_row(diff)
@@ -730,9 +753,7 @@ class UpdatePage(QWidget):
         self.count_summary.setText("&nbsp;&nbsp;".join(parts))
         self.count_summary.setVisible(has_diffs and bool(parts))
         self.changes_stat.set(str(len(diffs)) if known or has_diffs else "-")
-        self.changes_stat.value.setStyleSheet(
-            f"color: {ACCENT.name()};" if has_diffs else ""
-        )
+        tint(self.changes_stat.value, ACCENT if has_diffs else None)
         self._set_tab_titles(self._new_count, len(diffs))
         self._apply_filter()
         if known and self._focus_changes:
@@ -979,7 +1000,7 @@ class UpdatePage(QWidget):
             self._snapshot_modlist_before_update()
         backup_error = backup_settings_before(profile, "update")
         if getattr(self, "_kept", None) is None:
-            self._kept = capture(profile, keep_exes=self.keep_exes_cb.isChecked())
+            self._kept = capture(profile, keep_exes=self.keep_exes_cb.isChecked(), resume=bool(resume))
 
         args = ["update", "apply", *resume]
         if self.minimal_cb.isChecked():

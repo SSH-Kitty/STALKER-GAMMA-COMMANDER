@@ -1067,25 +1067,39 @@ class MainWindow(QMainWindow):
         task.start()
 
     def _on_commander_update_check_failed(self, _message: str) -> None:
-        button = self._update_status_button
-        previous = getattr(self, "_update_status_handler", None)
-        if previous is not None:
-            try:
-                button.clicked.disconnect(previous)
-            except (RuntimeError, TypeError):
-                pass
-            self._update_status_handler = None
+        if getattr(self, "_commander_update_tag", None):
+            # A known update stays offered: one failed re-check (the network
+            # down for a moment) is no reason to hide it.
+            return
         self._commander_update_tag = None
-        button.setText(tr("Couldn't check for updates"))
-        button.setStyleSheet("border: none;")
-        button.setEnabled(False)
+        self._update_status = "failed"
+        self._render_update_status()
         self._commander_update_known = True
         self._commander_update_failed = True
         self._refresh_update_banner()
         self.commander_update_checked.emit()
 
     def _on_commander_update_status_checked(self, tag: object) -> None:
-        button = self._update_status_button
+        if tag and isinstance(tag, str):
+            self._commander_update_tag = tag
+            self._update_status = "update"
+            self.commander_update_found.emit(tag)
+            self._notify_commander_update(tag)
+        else:
+            self._commander_update_tag = None
+            self._update_status = "current"
+        self._render_update_status()
+        self._commander_update_known = True
+        self._commander_update_failed = False
+        self._refresh_update_banner()
+        self.commander_update_checked.emit()
+
+    def _render_update_status(self) -> None:
+        """The status bar's update button, from the last check. Again on a
+        language or theme change: its text and colour are set here, once."""
+        button = getattr(self, "_update_status_button", None)
+        if button is None:
+            return
         # The check can run again (switching the update channel in
         # Settings); drop the previous result's click handler first, or one
         # click would open the dialog once per check.
@@ -1096,10 +1110,10 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 pass
             self._update_status_handler = None
-        if tag and isinstance(tag, str):
-            self._commander_update_tag = tag
-            self.commander_update_found.emit(tag)
-            self._notify_commander_update(tag)
+        status = getattr(self, "_update_status", "checking")
+        tag = getattr(self, "_commander_update_tag", None)
+        button.setToolTip("")
+        if status == "update" and tag:
             button.setText(tr("Click here to update COMMANDER"))
             button.setStyleSheet(f"color: {WARN.name()}; border: none;")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1110,15 +1124,18 @@ class MainWindow(QMainWindow):
                 button.setToolTip(tr("Open the Releases page for {tag}", tag=tag))
             self._update_status_handler = lambda: self._start_commander_update(tag)
             button.clicked.connect(self._update_status_handler)
-        else:
-            self._commander_update_tag = None
+        elif status == "current":
             button.setText(tr("COMMANDER is up to date"))
             button.setStyleSheet(f"color: {OK_GREEN.name()}; border: none;")
             button.setEnabled(False)
-        self._commander_update_known = True
-        self._commander_update_failed = False
-        self._refresh_update_banner()
-        self.commander_update_checked.emit()
+        elif status == "failed":
+            button.setText(tr("Couldn't check for updates"))
+            button.setStyleSheet("border: none;")
+            button.setEnabled(False)
+        else:
+            button.setText(tr("Checking for updates"))
+            button.setStyleSheet(f"color: {STATUS_GREY.name()}; border: none;")
+            button.setEnabled(False)
 
     def _start_commander_update(self, tag: str) -> None:
         """The status bar's and the banner's Update button."""
@@ -1398,6 +1415,7 @@ class MainWindow(QMainWindow):
         tr()-wrapped text needs this explicit refresh to pick up a language
         change instead of getting it "for free" via reconstruction.
         """
+        self._render_update_status()
         self._status_version_button.setText(f"v{__version_label__}")
         self._status_version_button.setToolTip(tr("Copy version info for bug reports"))
         self._status_info_label.setText(
@@ -1454,15 +1472,24 @@ class MainWindow(QMainWindow):
 
     def _copy_debug_summary(self) -> None:
         # vulkaninfo and the CLI can each take a moment, so off the GUI thread.
+        if getattr(self, "_debug_summary_task", None) is not None:
+            return  # one at a time
         button = self._status_version_button
         task = BackgroundTask(debug_summary, parent=self)
+        self._debug_summary_task = task
 
         def copied(text: str) -> None:
+            self._debug_summary_task = None
             QGuiApplication.clipboard().setText(text)
             button.setText(tr("Copied!"))
             QTimer.singleShot(1500, button, self._refresh_status_bar)
 
+        def failed(error: str) -> None:
+            self._debug_summary_task = None
+            self.statusBar().showMessage(tr("Couldn't collect the debug info: {error}", error=error), 6000)
+
         task.result.connect(copied)
+        task.error.connect(failed)
         task.start()
 
     def _on_status_language(self, *_args) -> None:
@@ -1539,7 +1566,7 @@ class MainWindow(QMainWindow):
 
     def _active_name(self) -> str:
         profile = self.settings.active_profile
-        return profile.profile_name if profile else "(none)"
+        return profile.profile_name if profile else tr("(none)")
 
     def _on_stack_page_changed(self, _index: int) -> None:
         if not gui_settings.animations_enabled():
@@ -1767,6 +1794,7 @@ class MainWindow(QMainWindow):
             else NAV_ITEMS[self.tabs.currentIndex()][0]
         )
         was_settings_open = self._settings_open
+        self._flush_pending_edits()
 
         # Stop every in-flight background task (page refresh polls,
         # dependency checks, etc.) and suppress result delivery until the
@@ -1945,7 +1973,14 @@ class MainWindow(QMainWindow):
             if animation is not None:
                 animation.sync(visible)
 
+    def _flush_pending_edits(self) -> None:
+        """Save edits still waiting on a debounce timer (a profile note)."""
+        page = self._pages.get("profiles")
+        if page is not None and hasattr(page, "_flush_note"):
+            page._flush_note()
+
     def closeEvent(self, event) -> None:
+        self._flush_pending_edits()
         if self.install_busy:
             answer = QMessageBox.question(
                 self,
@@ -1981,7 +2016,11 @@ class MainWindow(QMainWindow):
         )
         enabled, total = counts if counts is not None else (0, 0)
         incomplete = False
-        if profile is not None:
+        # Not while that install runs: its marker is saved at the start, in
+        # case COMMANDER closes midway, and is no failure yet.
+        if profile is not None and not (
+            getattr(self, "install_busy", False) and getattr(self, "install_operation", None) in ("gamma", "anomaly")
+        ):
             resume_state = gui_settings.load_gui_settings().get("gamma_install_resume")
             incomplete = _resume_state_matches(resume_state, profile)
         if incomplete:

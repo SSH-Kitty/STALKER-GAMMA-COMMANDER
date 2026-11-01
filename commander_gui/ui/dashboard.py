@@ -62,6 +62,7 @@ from .common import (
     play_click_sound,
     populate_runner_combo,
     section_label,
+    tint,
     tr,
     winetricks_tooltip,
 )
@@ -115,6 +116,10 @@ def _short_path(text: str) -> str:
     if text == home or text.startswith(home + "/"):
         return "~" + text[len(home):]
     return text
+
+
+#: How long a GAMMA update check is shown again on a visit before a new one.
+_UPDATE_CHECK_TTL_S = 600
 
 
 class _ElidedLabel(QLabel):
@@ -582,8 +587,9 @@ class DashboardPage(QWidget):
         else:
             color, text = OK_GREEN, tr("Everything is installed")
         label.setText(text)
-        label.setStyleSheet(f"color: {color.name()}; font-weight: 600;")
-        self._install_headline_dot.setStyleSheet(f"color: {color.name()};")
+        label.setStyleSheet("font-weight: 600;")
+        tint(label, color)
+        tint(self._install_headline_dot, color)
 
     def _install_missing_dependencies(self) -> None:
         self.window.set_page("install")
@@ -1150,7 +1156,7 @@ class DashboardPage(QWidget):
         header.addWidget(_card_title(tr("Storage usage")))
         header.addStretch(1)
         total_label = QLabel(tr("Total: {arg}", arg=human_size(sum(sizes.values()))))
-        total_label.setStyleSheet(f"color: {OK_GREEN.name()};")
+        tint(total_label, OK_GREEN)
         header.addWidget(total_label)
         layout.addLayout(header)
         segments = [
@@ -1347,14 +1353,20 @@ class DashboardPage(QWidget):
             return
         if self._update_checking:
             return
-        self._update_checking = True
-        generation = self._refresh_generation
         profile_id = (
             profile.profile_name,
             profile.anomaly,
             profile.gamma,
             profile.cache,
         )
+        cached = getattr(self, "_update_cache", None)
+        if cached is not None and cached[1] == profile_id and time.monotonic() - cached[0] < _UPDATE_CHECK_TTL_S:
+            # Every visit used to fetch again and flash "Checking".
+            text, kind = status_summary(cached[2])
+            self._render_update_card(cached[2], text, kind)
+            return
+        self._update_checking = True
+        generation = self._refresh_generation
         self._render_update_card(
             None, tr("Checking the active GAMMA installation for updates"), "dim"
         )
@@ -1389,6 +1401,7 @@ class DashboardPage(QWidget):
             self._start_update_check()
             return
         self._update_checking = False
+        self._update_cache = (time.monotonic(), profile_id, status)
         text, kind = status_summary(status)
         self._render_update_card(status, text, kind)
 
@@ -1630,6 +1643,7 @@ class DashboardPage(QWidget):
         # them again on the next refresh instead of reusing the cached sizes.
         if not busy:
             self._size_cache_key = None
+            self._update_cache = None  # an update may have just been applied
         button = getattr(self, "_play_button", None)
         if button is None:
             return

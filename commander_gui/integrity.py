@@ -358,7 +358,11 @@ def _md5_and_blob(path: Path) -> tuple[str, int, str] | None:
 
 
 def _git_blob_id(data: bytes) -> str:
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+    # Header and data fed separately: concatenating them copied a large
+    # texture's whole blob a second time.
+    digest = hashlib.sha1(b"blob %d\0" % len(data), usedforsecurity=False)
+    digest.update(data)
+    return digest.hexdigest()
 
 
 def _hash_file(path: Path, git_blob: bool) -> tuple[str, int, str] | None:
@@ -1494,6 +1498,7 @@ def restore_repo_files(
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()  # reaped, not left a zombie
     _update_baseline(base / MANIFEST_FILENAME, new_digests)
     return result
 

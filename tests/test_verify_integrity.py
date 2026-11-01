@@ -19,6 +19,21 @@ from commander_gui.integrity import (
 from commander_gui.settings import CliProfile, CliSettings
 
 
+class InlineTask:
+    """BackgroundTask stand-in that runs its callable at start()."""
+
+    def __init__(self, fn, *args, parent=None, **kwargs):
+        self._call = lambda: fn(*args, **kwargs)
+        self._slots = []
+        self.result = Mock(connect=self._slots.append)
+        self.error = Mock()
+
+    def start(self):
+        value = self._call()
+        for slot in self._slots:
+            slot(value)
+
+
 def _levels(findings):
     return {finding.title: finding.level for finding in findings}
 
@@ -329,6 +344,7 @@ class VerifyPageTests(unittest.TestCase):
             with (
                 patch("commander_gui.ui.install_page.CommandRunner"),
                 patch("commander_gui.ui.install_page.capture") as capture,
+                patch("commander_gui.ui.install_page.BackgroundTask", InlineTask),
             ):
                 page._start_repair_install()
             capture.assert_called_once()
@@ -349,6 +365,7 @@ class VerifyPageTests(unittest.TestCase):
             with (
                 patch("commander_gui.ui.install_page.CommandRunner"),
                 patch("commander_gui.ui.install_page.capture") as capture,
+                patch("commander_gui.ui.install_page.BackgroundTask", InlineTask),
             ):
                 page._start_repair_install()
             self.assertFalse(capture.call_args.kwargs["keep_exes"])
@@ -379,7 +396,10 @@ class VerifyPageTests(unittest.TestCase):
             )
             (gamma / "q" / "A").mkdir(parents=True)
             (gamma / "q" / "A" / "f").write_text("old")
-            with patch("commander_gui.ui.install_page.CommandRunner") as runner:
+            with (
+                patch("commander_gui.ui.install_page.CommandRunner") as runner,
+                patch("commander_gui.ui.install_page.BackgroundTask", InlineTask),
+            ):
                 page._on_repair_quarantined([set_aside])
             self.assertIn("--resume", runner.call_args.args[0])
             self.assertTrue((gamma / "resume.txt").is_file())
@@ -389,6 +409,7 @@ class VerifyPageTests(unittest.TestCase):
                 patch("commander_gui.ui.install_page.cli_ok", return_value=True),
                 patch.object(page, "_restore_user_modlist"),
                 patch.object(page, "_start_gamma_repair_deletion") as again,
+                patch("commander_gui.ui.install_page.BackgroundTask", InlineTask),
             ):
                 page._on_repair_install_finished(0, "")
             again.assert_called_once()

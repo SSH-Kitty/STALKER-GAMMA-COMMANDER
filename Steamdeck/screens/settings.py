@@ -368,7 +368,17 @@ class SettingsScreen(DeckScreen):
         if on:
             self.window.gamepad.rumble(strength=0.55, length_ms=300)
 
+    def _game_holds_look(self) -> bool:
+        """The overlay read the look when the game started: changing it now
+        would leave the two different, as the desktop UI refuses too."""
+        if game_running() or self.window.session_active():
+            self.window.notify(tr("Close the game first"))
+            return True
+        return False
+
     def _pick_theme(self) -> None:
+        if self._game_holds_look():
+            return
         current = gui_settings.load_gui_settings().get("theme") or "black"
         picker = DeckPicker(
             "",
@@ -387,6 +397,8 @@ class SettingsScreen(DeckScreen):
         self.refresh()
 
     def _pick_live_time(self) -> None:
+        if self._game_holds_look():
+            return
         picker = DeckPicker(
             "",
             [(tr(label), value) for value, label in LIVE_TIME_CHOICES],

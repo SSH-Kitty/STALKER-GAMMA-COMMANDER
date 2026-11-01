@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import gui_settings
-from ..config import child_environment, is_secondary_instance
+from ..config import child_environment, is_secondary_instance, spawn_reaped
 from ..i18n import tr
 from ..integrity import format_size
 from ..modlist import count_mods, read_lines
@@ -96,6 +96,18 @@ ITEM_GREEN = _ThemeColor("status_item", "#e2ead8")
 #: "Check MD5" rows in the download table: secondary text, not a blue.
 TEAL = _ThemeColor("text_info")
 LIGHT_GREY = _ThemeColor("status_light", "#cfd9c6")
+
+_TINTS = {"status_ok": "ok", "status_warn": "warn", "status_grey": "grey", "accent_strong": "accent"}
+
+
+def tint(widget: QWidget, color: _ThemeColor | None) -> None:
+    """Colour *widget*'s text with *color* (OK_GREEN, WARN, STATUS_GREY or
+    ACCENT; None for the default) through the theme stylesheet. A colour
+    put in setStyleSheet() stays the theme's of that moment."""
+    widget.setProperty("tint", _TINTS[color._token] if color is not None else "")
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
 
 ANOMALY_MARKERS = ("AnomalyLauncher.exe", "fsgame.ltx")
 GAMMA_MARKERS = ("ModOrganizer.exe", "ModOrganizer.ini")
@@ -336,6 +348,49 @@ def mo2_pids() -> set[int]:
     return exe_pids("ModOrganizer.exe")
 
 
+_CMDLINES: tuple[float, dict[int, bytes]] = (0.0, {})
+
+
+def _proc_cmdlines() -> dict[int, bytes]:
+    """pid -> lower-cased command line of every other process.
+
+    Shared for 0.2 s: a watched launch asks for MO2's, the game's and the
+    launcher's PIDs on the same tick, and each scan reads every process.
+    """
+    global _CMDLINES
+    import time
+
+    now = time.monotonic()
+    if now - _CMDLINES[0] < 0.2:
+        return _CMDLINES[1]
+    own = os.getpid()
+    found: dict[int, bytes] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == own:
+            continue
+        # Raw os.open/os.read: a Python file object per process made
+        # this scan of every process take ~40% longer.
+        try:
+            fd = os.open(f"/proc/{entry}/cmdline", os.O_RDONLY)
+        except OSError:
+            continue  # exited meanwhile, or not ours to read
+        try:
+            chunks = []
+            while chunk := os.read(fd, 65536):
+                chunks.append(chunk)
+            found[int(entry)] = b"".join(chunks).replace(b"\0", b" ").lower()
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+    _CMDLINES = (now, found)
+    return found
+
+
 def exe_pids(exe_name: str) -> set[int]:
     """PIDs of processes whose command line contains ``exe_name``, uncached.
 
@@ -354,33 +409,7 @@ def exe_pids(exe_name: str) -> set[int]:
         # second while a launch is watched, and spawning pgrep each time
         # cost a fork+exec per tick (and up to a 2s stall on a busy system).
         needle = exe_name.lower().encode()
-        own = os.getpid()
-        pids: set[int] = set()
-        try:
-            entries = os.listdir(proc_root)
-        except OSError:
-            entries = []
-        for entry in entries:
-            if not entry.isdigit() or int(entry) == own:
-                continue
-            # Raw os.open/os.read: a Python file object per process made
-            # this scan of every process take ~40% longer.
-            try:
-                fd = os.open(f"/proc/{entry}/cmdline", os.O_RDONLY)
-            except OSError:
-                continue  # exited meanwhile, or not ours to read
-            try:
-                chunks = []
-                while chunk := os.read(fd, 65536):
-                    chunks.append(chunk)
-                cmdline = b"".join(chunks)
-            except OSError:
-                continue
-            finally:
-                os.close(fd)
-            if needle in cmdline.replace(b"\0", b" ").lower():
-                pids.add(int(entry))
-        return pids
+        return {pid for pid, cmdline in _proc_cmdlines().items() if needle in cmdline}
     exe = shutil.which("pgrep")
     if not exe:
         return set()
@@ -1802,7 +1831,7 @@ def open_url(url: str) -> bool:
                 continue
             command = [exe, url] if opener == "xdg-open" else [exe, "open", url]
             try:
-                subprocess.Popen(
+                spawn_reaped(
                     command,
                     env=child_environment(),
                     stdin=subprocess.DEVNULL,
@@ -1867,7 +1896,7 @@ def open_in_file_manager(path: str | Path) -> bool:
     try:
         # Like open_url(): the AppImage's Python and SSL paths point into a
         # mount that goes away when COMMANDER quits.
-        subprocess.Popen(
+        spawn_reaped(
             command,
             env=child_environment(),
             stdin=subprocess.DEVNULL,
@@ -1895,8 +1924,10 @@ def notify_desktop(title: str, message: str) -> None:
     if exe is None:
         return
     try:
-        subprocess.Popen(
+        spawn_reaped(
             [exe, "--app-name=STALKER COMMANDER", title, message],
+            # The host's libraries, not the AppImage's bundled ones.
+            env=child_environment(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

@@ -61,6 +61,7 @@ from commander_gui.themes import (
 from commander_gui.ui.common import (
     GAMMA_PROFILE,
     count_active_mods,
+    game_running,
     instance_window_title,
     notify_desktop,
     play_click_sound,
@@ -608,8 +609,12 @@ class DeckWindow(QMainWindow):
         self.update_mod_counter()
         self.update_hints()
         # Refresh after Qt has laid the new screen out, so anything sized
-        # from its own contents measures correctly.
-        QTimer.singleShot(0, page.refresh)
+        # from its own contents measures correctly - and only if it is still
+        # the screen shown: holding R1 passes screens faster than that, and
+        # each refresh starts CLI and network checks.
+        QTimer.singleShot(
+            0, page, lambda page=page: page is self.stack.currentWidget() and page.refresh()
+        )
         QTimer.singleShot(0, self._focus_new_page)
 
     def _focus_new_page(self) -> None:
@@ -825,10 +830,14 @@ class DeckWindow(QMainWindow):
     def update_clock(self) -> None:
         self.clock_label.setText(time.strftime("%H:%M"))
         # The Live themes move on to dawn, day, dusk and night with the clock.
+        # Not while the game runs: its overlay keeps the look it started with,
+        # so this catches up once it closes.
         phase = resolve_theme(active_theme())
-        if phase != getattr(self, "_painted_phase", phase):
+        if phase == getattr(self, "_painted_phase", phase):
+            self._painted_phase = phase
+        elif not (game_running() or self.session_active()):
             self.apply_style()
-        self._painted_phase = phase
+            self._painted_phase = phase
         state = battery_state()
         if state is None:
             self.battery_label.hide()

@@ -1264,7 +1264,10 @@ class MultiplayerPage(QWidget):
             except OSError:
                 self._status = coop.NOT_INSTALLED
         state = coop.load_state(profile.anomaly) if profile else None
-        self._appid = int((state or {}).get("appid", coop.COP_APPID))
+        try:
+            self._appid = int((state or {}).get("appid", coop.COP_APPID))
+        except (TypeError, ValueError):  # a hand-edited state file
+            self._appid = coop.COP_APPID
         text, level = _STATUS[self._status]
         self.status_pill.setText(tr(text))
         self.status_pill.setProperty("level", level)

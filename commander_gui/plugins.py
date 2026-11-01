@@ -33,7 +33,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from . import __version__, network
+from . import __version__, atomic, network
 from .atomic import write_text
 from .proton_installer import SHA512_RE, _safe_extract, host_arch, sha512_file
 from .repair import USER_AGENT
@@ -271,6 +271,8 @@ def download_and_install(
     root = data_root()
     root.mkdir(parents=True, exist_ok=True)
     # Next to the install, not /tmp: often a small RAM-backed tmpfs.
+    atomic.remove_stale(root, ".plugin-download-*")
+    atomic.remove_stale(root, ".plugin-staging-*")
     with tempfile.TemporaryDirectory(prefix=".plugin-download-", dir=root) as tmp:
         archive = Path(tmp) / asset_name()
         _download(url, archive, cancel_event, progress_cb)

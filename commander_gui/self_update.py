@@ -36,6 +36,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from . import atomic
 from .config import child_environment
 from .network import urlopen_with_retry as urlopen
 from .proton_installer import SHA512_RE, sha512_file
@@ -163,6 +164,7 @@ def download_commander_update(
                 raise CommanderSelfUpdateError(
                     "Not enough free disk space to download the update"
                 )
+            atomic.remove_stale(running_path.parent, f".{running_path.name}.*.update")
             try:
                 fd, tmp_name = tempfile.mkstemp(
                     dir=running_path.parent,

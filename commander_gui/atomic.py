@@ -17,6 +17,32 @@ except ImportError:  # pragma: no cover - Windows fallback
 _WRITE_LOCK = threading.RLock()
 
 
+def remove_stale(folder: str | Path, pattern: str, max_age_s: float = 86400) -> None:
+    """Delete *pattern* matches in *folder* older than *max_age_s*.
+
+    For the hidden temp files and folders a download or unpack leaves when
+    COMMANDER is killed partway (power loss, SIGKILL): no ``finally`` runs
+    then, and they can be gigabytes. A day old, so one still in use by
+    another COMMANDER window is never touched.
+    """
+    import shutil
+    import time
+
+    cutoff = time.time() - max_age_s
+    try:
+        stale = [p for p in Path(folder).glob(pattern) if p.lstat().st_mtime < cutoff]
+    except OSError:
+        return
+    for path in stale:
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def split_lines(text: str) -> list[str]:
     """``text.splitlines()`` for files that only break on \\n, \\r\\n or \\r.
 

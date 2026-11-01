@@ -15,24 +15,31 @@ Both commands rewrite things the user owns:
   appdata, which ROMEO's guide says must not be there.
 
 ``capture()`` runs before the CLI starts and ``restore()`` after it
-succeeds. On failure or cancel the caller just calls ``discard()``.
+succeeds. On failure or cancel the caller just calls ``discard()``, or keeps
+the state for a resume: it is also saved beside the copies in the Anomaly
+folder, so a resume after COMMANDER was closed still restores the user's own
+modlist and exes instead of capturing the stock ones the failed run wrote.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .atomic import write_text
+from .i18n import tr
 from .modded_exes import GAMEDATA_DB, after_gamma_update
 from .modlist import merge_after_update, modlist_path_for, read_lines, save_lines
 from .romeo import KEPT_MCM, MCM_MOD, clean_appdata
 
-
 #: Folder name prefix of the copies ``capture()`` keeps in the Anomaly folder.
 _KEEP_PREFIX = ".commander-keep-"
+#: The captured state, saved in the Anomaly folder for a resume.
+_STATE_FILE = ".commander-keep-state.json"
+_PATH_FIELDS = ("mods_dir", "modlist_path", "ini_path", "bin_dir", "exe_copy", "anomaly", "db_copy")
 
 
 @dataclass
@@ -102,11 +109,55 @@ def _is_path_key(key: str) -> bool:
     return "directory" in lowered or "path" in lowered
 
 
-def capture(profile, *, keep_exes: bool = False) -> KeptState:
-    """Snapshot what ``restore()`` puts back. Best-effort: never raises."""
+def _save(state: KeptState) -> None:
+    if state.anomaly is None:
+        return
+    data = asdict(state)
+    for key in _PATH_FIELDS:
+        data[key] = str(data[key]) if data[key] is not None else None
+    data["official"] = sorted(state.official)
+    try:
+        write_text(state.anomaly / _STATE_FILE, json.dumps(data))
+    except OSError:
+        pass
+
+
+def _load(anomaly: Path, gamma: str) -> KeptState | None:
+    """The state a stopped run saved for this install, if any."""
+    try:
+        data = json.loads((anomaly / _STATE_FILE).read_text(encoding="utf-8"))
+        state = KeptState(**{
+            key: Path(value) if key in _PATH_FIELDS and value else value
+            for key, value in data.items()
+            if key in KeptState.__dataclass_fields__
+        })
+        state.official = set(state.official or ())
+    except (OSError, ValueError, TypeError):
+        return None
+    if state.anomaly != anomaly or (gamma and state.ini_path and state.ini_path.parent != Path(gamma)):
+        return None
+    # A copy that is gone can't be put back.
+    if state.exe_copy is not None and not state.exe_copy.is_dir():
+        state.exe_copy = state.bin_dir = None
+    if state.db_copy is not None and not state.db_copy.is_dir():
+        state.db_copy = None
+    return state
+
+
+def capture(profile, *, keep_exes: bool = False, resume: bool = False) -> KeptState:
+    """Snapshot what ``restore()`` puts back. Best-effort: never raises.
+
+    With *resume*, the state saved by the run being resumed comes back
+    instead, when there is one for this install.
+    """
     from .launcher import mo2_selected_title
     from .updates import local_modpack_records
 
+    anomaly_dir = Path(getattr(profile, "anomaly", "") or "").expanduser()
+    if resume and getattr(profile, "anomaly", ""):
+        saved = _load(anomaly_dir, getattr(profile, "gamma", "") or "")
+        if saved is not None:
+            return saved
     state = KeptState()
     gamma = getattr(profile, "gamma", "") or ""
     mo2_profile = getattr(profile, "mo2_profile", "") or "G.A.M.M.A"
@@ -146,7 +197,8 @@ def capture(profile, *, keep_exes: bool = False) -> KeptState:
             # SteamOS and Arch, and these are hundreds of MB. A run that
             # was abandoned left its copies behind; they go now.
             for stale in state.anomaly.glob(f"{_KEEP_PREFIX}*"):
-                shutil.rmtree(stale, ignore_errors=True)
+                if stale.is_dir():
+                    shutil.rmtree(stale, ignore_errors=True)
         db = state.anomaly / "db" / "mods" / GAMEDATA_DB
         if keep_exes and db.is_file():
             try:
@@ -171,6 +223,7 @@ def capture(profile, *, keep_exes: bool = False) -> KeptState:
             else:
                 state.bin_dir = bin_dir
                 state.exe_copy = copy
+    _save(state)
     return state
 
 
@@ -191,14 +244,14 @@ def restore(state: KeptState) -> list[str]:
             )
             if merged != current:
                 save_lines(state.modlist_path, merged)
-                notes.append("Kept your own mods and enabled/disabled choices in modlist.txt.")
+                notes.append(tr("Kept your own mods and enabled/disabled choices in modlist.txt."))
         except (OSError, ValueError) as exc:
-            notes.append(f"Could not restore your modlist choices: {exc}")
+            notes.append(tr("Could not restore your modlist choices: {exc}", exc=exc))
     if state.ini_settings and state.ini_path is not None and state.ini_path.is_file():
         try:
             notes.extend(_restore_ini_settings(state.ini_path, state.ini_settings))
         except OSError as exc:
-            notes.append(f"Could not restore MO2 settings: {exc}")
+            notes.append(tr("Could not restore MO2 settings: {exc}", exc=exc))
     if (state.selected_exe or state.exe_arguments) and state.ini_path is not None:
         try:
             notes.extend(
@@ -207,14 +260,14 @@ def restore(state: KeptState) -> list[str]:
                 )
             )
         except OSError as exc:
-            notes.append(f"Could not restore your MO2 executable choice: {exc}")
+            notes.append(tr("Could not restore your MO2 executable choice: {exc}", exc=exc))
     if state.exe_copy is not None and state.bin_dir is not None:
         try:
             for path in state.exe_copy.iterdir():
                 shutil.copy2(path, state.bin_dir / path.name)
-            notes.append("Kept your current engine executables.")
+            notes.append(tr("Kept your current engine executables."))
         except OSError as exc:
-            notes.append(f"Could not restore your engine executables: {exc}")
+            notes.append(tr("Could not restore your engine executables: {exc}", exc=exc))
     if state.anomaly is not None:
         try:
             if state.db_copy is not None:
@@ -222,13 +275,13 @@ def restore(state: KeptState) -> list[str]:
                 shutil.copy2(state.db_copy / GAMEDATA_DB, state.anomaly / "db" / "mods" / GAMEDATA_DB)
             after_gamma_update(state.anomaly, state.keep_exes)
         except OSError as exc:
-            notes.append(f"Could not tidy up after keeping your modded exes: {exc}")
+            notes.append(tr("Could not tidy up after keeping your modded exes: {exc}", exc=exc))
         if state.romeo:
             try:
                 clean_appdata(state.anomaly / "appdata")
-                notes.append("Removed the Atmos files GAMMA copied back, as ROMEO needs.")
+                notes.append(tr("Removed the Atmos files GAMMA copied back, as ROMEO needs."))
             except OSError as exc:
-                notes.append(f"Could not remove the Atmos files ROMEO doesn't want: {exc}")
+                notes.append(tr("Could not remove the Atmos files ROMEO doesn't want: {exc}", exc=exc))
     discard(state)
     return notes
 
@@ -267,7 +320,7 @@ def _restore_ini_settings(ini: Path, old: dict[str, str]) -> list[str]:
     if not changed:
         return []
     write_text(ini, newline.join(out) + newline)
-    return ["Kept your Mod Organizer settings (theme and preferences)."]
+    return [tr("Kept your Mod Organizer settings (theme and preferences).")]
 
 
 def _restore_launch_choices(ini: Path, selected: str, arguments: dict[str, str]) -> list[str]:
@@ -281,7 +334,7 @@ def _restore_launch_choices(ini: Path, selected: str, arguments: dict[str, str])
         return []
     notes: list[str] = []
     if selected and set_mo2_selected_title(str(ini.parent), selected):
-        notes.append(f"Kept {selected} as your MO2 executable.")
+        notes.append(tr("Kept {selected} as your MO2 executable.", selected=selected))
     text = ini.read_text(encoding="utf-8", errors="surrogateescape")
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
@@ -308,11 +361,16 @@ def _restore_launch_choices(ini: Path, selected: str, arguments: dict[str, str])
         out.append(line)
     if changed:
         write_text(ini, newline.join(out) + newline)
-        notes.append("Kept your MO2 launch arguments.")
+        notes.append(tr("Kept your MO2 launch arguments."))
     return notes
 
 
 def discard(state: KeptState) -> None:
+    if state.anomaly is not None:
+        try:
+            (state.anomaly / _STATE_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
     if state.db_copy is not None:
         shutil.rmtree(state.db_copy, ignore_errors=True)
         state.db_copy = None

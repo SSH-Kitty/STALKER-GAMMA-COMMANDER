@@ -379,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
         join_app_scope()
         ensure_menu_entry()
     app.setStyle("Fusion")
+    # Before the lock: its pop-ups below are in the user's language too.
+    set_active_language(gui_settings.load_gui_settings().get("language") or "en")
 
     try:
         _INSTANCE_LOCK = _acquire_instance_lock()

@@ -51,7 +51,7 @@ def load_saved_theme() -> str:
         value = json.loads(config_path().read_text(encoding="utf-8")).get("theme")
     except (OSError, ValueError, AttributeError):
         value = None
-    return value if value in dict(THEME_INFO) else "black"
+    return value if isinstance(value, str) and value in dict(THEME_INFO) else "black"
 
 
 def load_saved_font_size() -> int:
@@ -90,6 +90,17 @@ def token(name: str) -> str:
 
 
 _FONT_SIZE_RE = re.compile(r"font-size:(\d+)px")
+#: COMMANDER's Settings > Font choices (commander_gui/themes.py).
+_FONT_FAMILIES = ("Exo 2", "Noto Sans", "DejaVu Sans", "Liberation Sans", "Inter")
+
+
+def load_saved_font_family() -> str:
+    """COMMANDER's font (Settings > Font), Exo 2 by default."""
+    try:
+        value = json.loads(config_path().read_text(encoding="utf-8")).get("font_family")
+    except (OSError, ValueError, AttributeError):
+        value = None
+    return value if isinstance(value, str) and value in _FONT_FAMILIES else "Exo 2"
 
 
 def _stylesheet() -> str:
@@ -103,7 +114,8 @@ def _stylesheet() -> str:
 
 def _base_stylesheet() -> str:
     t = _tokens()
-    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"Exo 2\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
+    family = load_saved_font_family()
+    return f"""QWidget {{ background:{t['bg']}; color:{t['text']}; font-family:\"{family}\",\"DejaVu Sans\",sans-serif; font-size:13px; }}
 QLabel {{ background:transparent; }} QWidget#topbar {{ background:{t['panel']}; border-bottom:1px solid {t['border']}; }}
 QWidget#quickActions, QWidget#wordmarkBlock {{ background:transparent; }} QPushButton {{ background:{t['card']}; color:{t['text']}; border:1px solid {t['border']}; border-radius:6px; padding:6px 14px; }}
 QPushButton:hover {{ border-color:{t['accent']}; }} QPushButton#primary {{ background:{t['accent']}; color:{t['bg']}; font-weight:600; border:none; }}

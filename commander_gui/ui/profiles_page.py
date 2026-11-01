@@ -278,26 +278,50 @@ def set_profile_color(name: str, key: str | None) -> None:
     save_gui_settings(profile_colors=colors)
 
 
+#: gui_settings tables keyed by profile name. user_created_categories also
+#: has "<profile>/<MO2 profile>" keys.
+_PROFILE_TABLES = (
+    "profile_notes", "profile_colors", "playtime_seconds", "last_played_ts",
+    "gamma_seen_version", "user_created_categories",
+)
+
+
+def _profile_keys(table: dict, name: str) -> list[str]:
+    return [k for k in table if k == name or k.startswith(name + "/")]
+
+
 def move_profile_extras(old_name: str, new_name: str) -> None:
-    """Carry a renamed profile's note and color tag over to its new name."""
+    """Carry a renamed profile's note, color tag, playtime and own
+    categories over to its new name."""
     state = load_gui_settings()
     changes = {}
-    for key in ("profile_notes", "profile_colors"):
-        table = dict(state.get(key, {}))
-        if old_name in table:
-            table[new_name] = table.pop(old_name)
+    for key in _PROFILE_TABLES:
+        table = state.get(key)
+        if not isinstance(table, dict):
+            continue
+        table = dict(table)
+        moved = _profile_keys(table, old_name)
+        for old in moved:
+            table[new_name + old[len(old_name):]] = table.pop(old)
+        if moved:
             changes[key] = table
     if changes:
         save_gui_settings(**changes)
 
 
 def forget_profile_extras(name: str) -> None:
-    """Drop a deleted profile's note and color tag."""
+    """Drop a deleted profile's note, color tag, playtime and categories."""
     state = load_gui_settings()
     changes = {}
-    for key in ("profile_notes", "profile_colors"):
-        table = dict(state.get(key, {}))
-        if table.pop(name, None) is not None:
+    for key in _PROFILE_TABLES:
+        table = state.get(key)
+        if not isinstance(table, dict):
+            continue
+        table = dict(table)
+        gone = _profile_keys(table, name)
+        for old in gone:
+            del table[old]
+        if gone:
             changes[key] = table
     if changes:
         save_gui_settings(**changes)

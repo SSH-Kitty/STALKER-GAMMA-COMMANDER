@@ -630,7 +630,7 @@ def apply_pending_settings_restore(profile) -> str | None:
     info = read_info(path)
     if info is None:
         drop_entry()
-        return f"Could not restore your user.ltx / MCM settings: backup not found ({path})."
+        return tr("Could not restore your user.ltx / MCM settings: backup not found ({path}).", path=path)
     try:
         count = restore_backup(
             info,
@@ -644,12 +644,12 @@ def apply_pending_settings_restore(profile) -> str | None:
     except (KeyError, zipfile.BadZipFile) as exc:
         # The backup itself is broken: retrying after the next install can't help.
         drop_entry()
-        return f"Could not restore your user.ltx / MCM settings: {exc}"
+        return tr("Could not restore your user.ltx / MCM settings: {exc}", exc=exc)
     except (BackupError, OSError) as exc:
         # Kept pending: a disk or permission problem may be gone next time.
-        return f"Could not restore your user.ltx / MCM settings: {exc}"
+        return tr("Could not restore your user.ltx / MCM settings: {exc}", exc=exc)
     drop_entry()
-    return f"Restored your user.ltx / MCM settings from before the reset ({count} file(s))."
+    return tr("Restored your user.ltx / MCM settings from before the reset ({count} file(s)).", count=count)
 
 
 def describe(info: BackupInfo) -> str:
